@@ -79,7 +79,7 @@ export default function ReportsPage() {
                 <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
                 <XAxis dataKey="name" tick={{ fontSize: 11 }} />
                 <YAxis tickFormatter={fmt} tick={{ fontSize: 11 }} />
-                <Tooltip formatter={(v: number) => [`$${v.toLocaleString()}`, "Income"]} />
+                <Tooltip formatter={(v) => [`$${Number(v).toLocaleString()}`, "Income"]} />
                 <Bar dataKey="income" fill="#3b82f6" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
@@ -117,7 +117,7 @@ export default function ReportsPage() {
               <BarChart data={BY_SUPPLIER} layout="vertical">
                 <XAxis type="number" tickFormatter={fmt} tick={{ fontSize: 11 }} />
                 <YAxis type="category" dataKey="name" tick={{ fontSize: 11 }} width={110} />
-                <Tooltip formatter={(v: number) => [`$${v.toLocaleString()}`, "Income"]} />
+                <Tooltip formatter={(v) => [`$${Number(v).toLocaleString()}`, "Income"]} />
                 <Bar dataKey="income" fill="#6366f1" radius={[0, 4, 4, 0]} />
               </BarChart>
             </ResponsiveContainer>
@@ -152,7 +152,7 @@ export default function ReportsPage() {
                 <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
                 <XAxis dataKey="route" tick={{ fontSize: 11 }} />
                 <YAxis tickFormatter={fmt} tick={{ fontSize: 11 }} />
-                <Tooltip formatter={(v: number) => [`$${v.toLocaleString()}`, "Income"]} />
+                <Tooltip formatter={(v) => [`$${Number(v).toLocaleString()}`, "Income"]} />
                 <Bar dataKey="income" fill="#8b5cf6" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
@@ -189,7 +189,7 @@ export default function ReportsPage() {
                 <Pie data={BY_CLASS} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={90} label={({ name, percent }) => `${name.split(" ")[0]} ${(percent * 100).toFixed(0)}%`}>
                   {BY_CLASS.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
                 </Pie>
-                <Tooltip formatter={(v: number) => `$${v.toLocaleString()}`} />
+                <Tooltip formatter={(v) => `$${Number(v).toLocaleString()}`} />
               </PieChart>
             </ResponsiveContainer>
           </div>

@@ -67,7 +67,7 @@ export default function SupplierComparisonPage() {
               <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
               <XAxis dataKey="month" tick={{ fontSize: 12 }} />
               <YAxis tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`} tick={{ fontSize: 12 }} />
-              <Tooltip formatter={(v: number) => `$${v.toLocaleString()}`} />
+              <Tooltip formatter={(v) => `$${Number(v).toLocaleString()}`} />
               <Legend wrapperStyle={{ fontSize: 11 }} />
               {SUPPLIERS.map((s, i) => (
                 <Bar key={s} dataKey={s} fill={COLORS[i]} radius={[2, 2, 0, 0]} />
