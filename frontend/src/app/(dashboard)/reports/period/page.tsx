@@ -72,7 +72,7 @@ export default function PeriodReportPage() {
           </div>
         </div>
         <ResponsiveContainer width="100%" height={260}>
-          <BarChart data={view === "monthly" ? MONTHLY : QUARTERLY} barSize={32}>
+          <BarChart data={(view === "monthly" ? MONTHLY : QUARTERLY) as any[]} barSize={32}>
             <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
             <XAxis dataKey={view === "monthly" ? "month" : "quarter"} tick={{ fontSize: 11 }} />
             <YAxis tick={{ fontSize: 11 }} />
