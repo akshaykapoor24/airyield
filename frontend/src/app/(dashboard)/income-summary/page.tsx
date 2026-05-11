@@ -60,7 +60,7 @@ export default function IncomeSummaryPage() {
             <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
             <XAxis dataKey="month" tick={{ fontSize: 12 }} />
             <YAxis tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`} tick={{ fontSize: 12 }} />
-            <Tooltip formatter={(v: number) => `$${v.toLocaleString()}`} />
+            <Tooltip formatter={(v) => `$${Number(v).toLocaleString()}`} />
             <Legend />
             <Bar dataKey="commission" name="Commission" stackId="a" fill="#3b82f6" />
             <Bar dataKey="override" name="Override" stackId="a" fill="#8b5cf6" />
