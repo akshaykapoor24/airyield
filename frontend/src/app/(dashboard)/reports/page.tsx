@@ -186,7 +186,7 @@ export default function ReportsPage() {
             <h2 className="text-sm font-semibold text-gray-900 mb-4">Income by Booking Class</h2>
             <ResponsiveContainer width="100%" height={260}>
               <PieChart>
-                <Pie data={BY_CLASS} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={90} label={({ name, percent }) => `${name.split(" ")[0]} ${(percent * 100).toFixed(0)}%`}>
+                <Pie data={BY_CLASS} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={90} label={({ name, percent }: { name?: string; percent?: number }) => `${(name ?? "").split(" ")[0]} ${((percent ?? 0) * 100).toFixed(0)}%`}>
                   {BY_CLASS.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
                 </Pie>
                 <Tooltip formatter={(v) => `$${Number(v).toLocaleString()}`} />
