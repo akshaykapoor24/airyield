@@ -20,7 +20,7 @@ export default function LoginPage() {
     if (!email || !password) { setError("Please enter email and password."); return; }
     setLoading(true);
     try {
-      const res = await fetch("http://localhost:8000/api/v1/auth/login", {
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1"}/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),
