@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
-import { Plus, Upload, Search, RefreshCw, Clock, X, CheckCircle, XCircle, AlertCircle, MinusCircle, User, Pencil, Save } from "lucide-react";
+import { Plus, Upload, Search, RefreshCw, Clock, X, CheckCircle, XCircle, AlertCircle, MinusCircle, User, Pencil, Save, Trash2 } from "lucide-react";
 import api from "@/lib/api";
 
 // ── section tabs ───────────────────────────────────────────────────────────
@@ -560,7 +560,11 @@ export default function DealsPage() {
   const [historyLoading,  setHistoryLoading]  = useState(false);
 
   // edit panel
-  const [editDeal,   setEditDeal]   = useState<DealRepositoryItem | null>(null);
+  const [editDeal,        setEditDeal]        = useState<DealRepositoryItem | null>(null);
+
+  // delete
+  const [deleteTarget,    setDeleteTarget]    = useState<DealRepositoryItem | null>(null);
+  const [deleteLoading,   setDeleteLoading]   = useState(false);
 
   // detail / edit popups (keyed by deal + incentive/incl name)
   const [incentivePopup, setIncentivePopup] = useState<{
@@ -620,9 +624,14 @@ export default function DealsPage() {
 
   const handleEditSave = useCallback(async (payload: Partial<EditFields>) => {
     if (!editDeal) return;
+    const wasRejected = editDeal.status === "rejected";
     await patchDeal(editDeal.id, editDeal.deal_type, payload);
+    if (wasRejected) {
+      await api.post(`/deals/repository/${editDeal.id}/resubmit?deal_type=${editDeal.deal_type}`);
+      await fetchDeals();
+    }
     setEditDeal(null);
-  }, [editDeal, patchDeal]);
+  }, [editDeal, patchDeal, fetchDeals]);
 
   const handleIncentiveSave = useCallback(async (updatedData: Record<string, string>) => {
     if (!incentivePopup) return;
@@ -639,6 +648,20 @@ export default function DealsPage() {
     const newInclExclData = { ...(deal.incl_excl_data ?? {}), [inclExclPopup.name]: updatedData };
     await patchDeal(inclExclPopup.dealId, inclExclPopup.dealType, { incl_excl_data: newInclExclData });
   }, [inclExclPopup, deals, patchDeal]);
+
+  const handleDeleteDeal = useCallback(async () => {
+    if (!deleteTarget) return;
+    setDeleteLoading(true);
+    try {
+      await api.delete(`/deals/repository/${deleteTarget.id}?deal_type=${deleteTarget.deal_type}`);
+      setDeals(prev => prev.filter(d => !(d.id === deleteTarget.id && d.deal_type === deleteTarget.deal_type)));
+      setDeleteTarget(null);
+    } catch {
+      // keep state; user can retry
+    } finally {
+      setDeleteLoading(false);
+    }
+  }, [deleteTarget]);
 
   // ── filtered ──────────────────────────────────────────────────────────
   const filtered = deals.filter(d => {
@@ -936,11 +959,25 @@ export default function DealsPage() {
                               <Clock className="w-3 h-3" /> History
                             </button>
                             <button
-                              onClick={() => d.status === "approved" && setEditDeal(d)}
-                              disabled={d.status !== "approved"}
-                              title={d.status !== "approved" ? "Only approved deals can be edited" : undefined}
+                              onClick={() => (d.status === "approved" || d.status === "rejected") && setEditDeal(d)}
+                              disabled={d.status !== "approved" && d.status !== "rejected"}
+                              title={
+                                d.status === "rejected" ? "Edit and resubmit for approval" :
+                                d.status !== "approved" ? "Only approved or rejected deals can be edited" :
+                                undefined
+                              }
                               className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium border border-blue-200 text-blue-600 hover:bg-blue-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent">
-                              <Pencil className="w-3 h-3" /> Edit
+                              {d.status === "rejected"
+                                ? <><RefreshCw className="w-3 h-3" /> Edit &amp; Resubmit</>
+                                : <><Pencil className="w-3 h-3" /> Edit</>
+                              }
+                            </button>
+                            <button
+                              onClick={() => d.status === "approved" && setDeleteTarget(d)}
+                              disabled={d.status !== "approved"}
+                              title={d.status !== "approved" ? "Only approved deals can be deleted" : undefined}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium border border-red-200 text-red-500 hover:bg-red-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent">
+                              <Trash2 className="w-3 h-3" /> Delete
                             </button>
                           </div>
                         </td>
@@ -1019,6 +1056,47 @@ export default function DealsPage() {
           onSave={handleInclExclSave}
           onClose={() => setInclExclPopup(null)}
         />
+      )}
+
+      {/* ── Delete Confirm Modal ─────────────────────────────────────────── */}
+      {deleteTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm mx-4 p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5 text-red-500" />
+              </div>
+              <div>
+                <h3 className="text-sm font-semibold text-gray-800">Delete Deal</h3>
+                <p className="text-xs text-gray-500 mt-0.5">This action cannot be undone.</p>
+              </div>
+            </div>
+            <p className="text-xs text-gray-600 mb-6">
+              Are you sure you want to delete deal{" "}
+              <span className="font-semibold text-gray-800">
+                {deleteTarget.airline_name || deleteTarget.deal_no || `#${deleteTarget.id}`}
+              </span>?
+            </p>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                onClick={() => setDeleteTarget(null)}
+                disabled={deleteLoading}
+                className="px-4 py-1.5 rounded-lg border border-gray-200 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors disabled:opacity-50">
+                Cancel
+              </button>
+              <button
+                onClick={handleDeleteDeal}
+                disabled={deleteLoading}
+                className="px-4 py-1.5 rounded-lg bg-red-500 text-white text-xs font-medium hover:bg-red-600 transition-colors disabled:opacity-50 flex items-center gap-1.5">
+                {deleteLoading ? (
+                  <><RefreshCw className="w-3 h-3 animate-spin" /> Deleting…</>
+                ) : (
+                  <><Trash2 className="w-3 h-3" /> Delete</>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

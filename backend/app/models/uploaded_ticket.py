@@ -60,6 +60,8 @@ class UploadedTicket(Base):
     net_amt:             Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
     cc:                  Mapped[str | None]   = mapped_column(String(20),  nullable=True)
     acc_code:            Mapped[str | None]   = mapped_column(String(100), nullable=True)
+    sold_to:             Mapped[str | None]   = mapped_column(String(20),  nullable=True)   # 'customer' | 'agency'
+    customer_name:       Mapped[str | None]   = mapped_column(String(300), nullable=True)
 
     # ── Derived / calculation columns ─────────────────────────────────────────
     airline_name:          Mapped[str | None]   = mapped_column(String(200), nullable=True)

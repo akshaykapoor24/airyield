@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, date
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -78,14 +78,28 @@ class ApprovalDecisionPayload(BaseModel):
 
 
 class ApprovalInboxItem(BaseModel):
-    id:           int             # DealApproval.id — used for approve/reject/bulk-approve routing
-    deal_id:      int             # actual deal ID in its table — used for history lookup
-    deal_type:    str             # 'upload' | 'airline' | 'b2b'
-    source_agent: str
-    airline_name: Optional[str]
-    airline_type: Optional[str]
-    status:       str
-    created_at:   datetime
+    id:              int             # DealApproval.id — used for approve/reject/bulk-approve routing
+    deal_id:         int             # actual deal ID in its table — used for history lookup
+    deal_type:       str             # 'upload' | 'airline' | 'b2b'
+    source_agent:    str
+    airline_name:    Optional[str]
+    airline_type:    Optional[str]
+    status:          str
+    created_at:      datetime
+    valid_from:      Optional[date] = None
+    valid_to:        Optional[date] = None
+    business_type:   Optional[str] = None
+    incentive_types: Optional[list[str]] = None
+    incentive_data:  Optional[dict] = None
+    incl_excl_types: Optional[list[str]] = None
+    incl_excl_data:  Optional[dict] = None
+    deal_maker_name: Optional[str] = None
+    contract_year:   Optional[str] = None
+    trigger_type:    Optional[str] = None
+    payout_type:     Optional[str] = None
+    entity_lcc:      Optional[str] = None
+    remark:          Optional[str] = None
+    deal_no:         Optional[str] = None
 
 
 class BulkApprovePayload(BaseModel):

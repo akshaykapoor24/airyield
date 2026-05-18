@@ -189,7 +189,7 @@ async def ai_extract_deals(
     file.file = _io.BytesIO(chunk)  # type: ignore[assignment]
     await file.seek(0)
 
-    result = await AIDealExtractionService.extract(file)
+    result = await AIDealExtractionService.extract(file, max_deals=15)
     deals = [AIDeal(**d) for d in result.get("deals", [])]
     return AIExtractResponse(
         deals=deals,
@@ -772,6 +772,114 @@ async def update_repository_deal(
     )
 
 
+# ── Delete a deal from the repository ────────────────────────────────────
+
+@router.delete("/repository/{deal_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_repository_deal(
+    deal_id: int,
+    deal_type: str = Query("airline", description="'upload' | 'airline' | 'b2b'"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Permanently delete any deal in the repository (upload / airline / b2b table)."""
+    if deal_type == "airline":
+        result = await db.execute(
+            select(AirlineDeal).where(
+                AirlineDeal.id == deal_id,
+                AirlineDeal.tenant_id == current_user.tenant_id,
+            )
+        )
+        deal = result.scalar_one_or_none()
+    elif deal_type == "b2b":
+        result = await db.execute(
+            select(B2BDeal).where(
+                B2BDeal.id == deal_id,
+                B2BDeal.tenant_id == current_user.tenant_id,
+            )
+        )
+        deal = result.scalar_one_or_none()
+    else:
+        result = await db.execute(
+            select(UploadedDeal).where(
+                UploadedDeal.id == deal_id,
+                UploadedDeal.tenant_id == current_user.tenant_id,
+            )
+        )
+        deal = result.scalar_one_or_none()
+
+    if not deal:
+        raise HTTPException(status_code=404, detail="Deal not found")
+    await db.delete(deal)
+    await db.commit()
+
+
+# ── Resubmit a rejected deal ──────────────────────────────────────────────
+
+@router.post("/repository/{deal_id}/resubmit")
+async def resubmit_deal(
+    deal_id: int,
+    deal_type: str = Query(..., description="'upload' | 'airline' | 'b2b'"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Resubmit a rejected deal for approval by resetting the approval workflow."""
+    if deal_type == "airline":
+        result = await db.execute(
+            select(AirlineDeal).where(
+                AirlineDeal.id == deal_id,
+                AirlineDeal.tenant_id == current_user.tenant_id,
+            )
+        )
+        deal = result.scalar_one_or_none()
+        rejected_status = ManualDealStatus.REJECTED
+        pending_status  = ManualDealStatus.PENDING_APPROVAL
+    elif deal_type == "b2b":
+        result = await db.execute(
+            select(B2BDeal).where(
+                B2BDeal.id == deal_id,
+                B2BDeal.tenant_id == current_user.tenant_id,
+            )
+        )
+        deal = result.scalar_one_or_none()
+        rejected_status = ManualDealStatus.REJECTED
+        pending_status  = ManualDealStatus.PENDING_APPROVAL
+    else:
+        result = await db.execute(
+            select(UploadedDeal).where(
+                UploadedDeal.id == deal_id,
+                UploadedDeal.tenant_id == current_user.tenant_id,
+            )
+        )
+        deal = result.scalar_one_or_none()
+        rejected_status = UploadedDealStatus.REJECTED
+        pending_status  = UploadedDealStatus.PENDING_APPROVAL
+
+    if not deal:
+        raise HTTPException(status_code=404, detail="Deal not found")
+    if deal.status != rejected_status:
+        raise HTTPException(status_code=400, detail="Deal is not in rejected status")
+    if deal.created_by_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Only the deal creator can resubmit")
+
+    # Delete existing DealApproval and its steps (unique constraint requires clean slate)
+    approval_result = await db.execute(
+        select(DealApproval)
+        .options(selectinload(DealApproval.steps))
+        .where(DealApproval.deal_type == deal_type, DealApproval.deal_id == deal_id)
+    )
+    existing_approval = approval_result.scalar_one_or_none()
+    if existing_approval:
+        for step in existing_approval.steps:
+            await db.delete(step)
+        await db.delete(existing_approval)
+        await db.flush()
+
+    deal.status = pending_status
+    await _seed_approval_for_deal(deal_id, current_user, db, deal_type=deal_type)
+    await db.commit()
+    return {"success": True, "message": "Deal resubmitted for approval"}
+
+
 # ── List uploaded deals ────────────────────────────────────────────────────
 
 @router.get("/uploads", response_model=list[UploadedDealSummary])
@@ -993,6 +1101,19 @@ async def approvals_inbox(
                 source_agent=deal.source_agent,
                 airline_name=deal.airline_name, airline_type=deal.airline_type,
                 status=status_str, created_at=deal.created_at,
+                valid_from=deal.valid_from, valid_to=deal.valid_to,
+                business_type=deal.business_type,
+                incentive_types=deal.incentive_types or [],
+                incentive_data=deal.incentive_data or {},
+                incl_excl_types=deal.incl_excl_types or [],
+                incl_excl_data=deal.incl_excl_data or {},
+                deal_maker_name=deal.deal_maker_name,
+                contract_year=deal.contract_year,
+                trigger_type=deal.trigger_type,
+                payout_type=deal.payout_type,
+                entity_lcc=deal.entity_lcc,
+                remark=deal.remark,
+                deal_no=f"AIR-{deal.id:04d}",
             ))
         elif approval.deal_type == "b2b":
             deal_b2b = b2b_map.get(approval.deal_id)
@@ -1003,6 +1124,19 @@ async def approvals_inbox(
                 source_agent=deal_b2b.source_agent,
                 airline_name=deal_b2b.airline_name, airline_type=deal_b2b.airline_type,
                 status=status_str, created_at=deal_b2b.created_at,
+                valid_from=deal_b2b.valid_from, valid_to=deal_b2b.valid_to,
+                business_type=deal_b2b.business_type,
+                incentive_types=deal_b2b.incentive_types or [],
+                incentive_data=deal_b2b.incentive_data or {},
+                incl_excl_types=deal_b2b.incl_excl_types or [],
+                incl_excl_data=deal_b2b.incl_excl_data or {},
+                deal_maker_name=deal_b2b.deal_maker_name,
+                contract_year=getattr(deal_b2b, "contract_year", None),
+                trigger_type=getattr(deal_b2b, "trigger_type", None),
+                payout_type=getattr(deal_b2b, "payout_type", None),
+                entity_lcc=deal_b2b.entity_lcc,
+                remark=deal_b2b.remark,
+                deal_no=f"B2B-{deal_b2b.id:04d}",
             ))
         else:
             deal_up = upload_map.get(approval.deal_id)
@@ -1013,6 +1147,19 @@ async def approvals_inbox(
                 source_agent=deal_up.source_agent,
                 airline_name=deal_up.airline_name, airline_type=deal_up.airline_type,
                 status=status_str, created_at=deal_up.created_at,
+                valid_from=deal_up.valid_from, valid_to=deal_up.valid_to,
+                business_type=deal_up.business_type,
+                incentive_types=deal_up.incentive_types or [],
+                incentive_data=deal_up.incentive_data or {},
+                incl_excl_types=deal_up.incl_excl_types or [],
+                incl_excl_data=deal_up.incl_excl_data or {},
+                deal_maker_name=deal_up.deal_maker_name,
+                contract_year=deal_up.contract_year,
+                trigger_type=deal_up.trigger_type,
+                payout_type=deal_up.payout_type,
+                entity_lcc=deal_up.entity_lcc,
+                remark=deal_up.remark,
+                deal_no=f"UPL-{deal_up.id:04d}",
             ))
 
     return items

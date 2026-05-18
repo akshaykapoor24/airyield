@@ -4,6 +4,7 @@ import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { ChevronDown, X, ArrowLeft } from "lucide-react";
 import api from "@/lib/api";
+import toast from "react-hot-toast";
 
 // ── static options ─────────────────────────────────────────────────────────
 const CONTRACT_YEARS   = ["Calendar year", "Financial year"];
@@ -565,8 +566,16 @@ export default function NewDealPage() {
   const [submitError, setSubmitError] = useState("");
 
   const handleSubmit = async () => {
-    if (!airlineType || !airlineName || !validFrom || !validTo) {
-      setSubmitError("Please fill in Airline Type, Airline Name, Valid From and Valid To.");
+    if(!airlineType) {
+      toast.error("Please select Airline Type.");
+      return;
+    }
+    if(!airlineName) {
+      toast.error("Please select Airline Name.");
+      return;
+    }
+    if(!validFrom) {
+      toast.error("Please enter Valid From date.");
       return;
     }
     setSubmitting(true);

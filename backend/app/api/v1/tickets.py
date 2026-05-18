@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import io
+import json
 import uuid
 from datetime import datetime, date
 from typing import Optional
 
 from dateutil import parser as dateutil_parser
-from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, status, Query
+from fastapi import APIRouter, Depends, Form, UploadFile, File, HTTPException, status, Query
+from fastapi.responses import StreamingResponse
+import pandas as pd
 from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,10 +26,11 @@ from app.schemas.uploaded_ticket import (
     UploadedTicketRead,
     RunCalculationResult,
     BatchRunCalculationResult,
+    UploadedTicketUpdate,
 )
 from pydantic import BaseModel
 from app.services.deal_matching import DealMatchingService
-from app.services.ticket_extraction import TicketExtractionService
+from app.services.ticket_extraction import TicketExtractionService, TEMPLATE_HEADERS
 
 router = APIRouter()
 
@@ -40,6 +45,24 @@ class DealMatchSummary(BaseModel):
     valid_to:             Optional[date]
     deal_maker_name:      Optional[str]
     is_best:              bool
+
+# ── Template download ──────────────────────────────────────────────────────
+
+@router.get("/template/download")
+async def download_ticket_template(
+    current_user: User = Depends(get_current_user),
+):
+    """Return a blank XLSX file with the expected column headers as a download."""
+    df = pd.DataFrame(columns=TEMPLATE_HEADERS)
+    buf = io.BytesIO()
+    df.to_excel(buf, index=False)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=ticket_template.xlsx"},
+    )
+
 
 # ── legacy endpoints (kept for backward compatibility) ─────────────────────
 
@@ -58,9 +81,14 @@ async def list_tickets_legacy(
 @router.post("/upload/extract", response_model=TicketExtractionPreview)
 async def extract_ticket_file(
     file: UploadFile = File(...),
+    column_mapping: Optional[str] = Form(None),
     current_user: User = Depends(get_current_user),
 ):
-    """Step 1 — Upload an XLS/XLSX file, parse it and return a preview for user review."""
+    """Step 1 — Upload an XLS/XLSX file, parse it and return a preview for user review.
+
+    column_mapping (optional form field): JSON string of {canonical: xls_col} pairs
+    provided by the user after reviewing the mapping UI.
+    """
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file provided.")
 
@@ -69,8 +97,15 @@ async def extract_ticket_file(
     if len(chunk) > max_mb * 1024 * 1024:
         raise HTTPException(status_code=413, detail=f"File exceeds {max_mb} MB limit.")
 
+    mapping_dict: Optional[dict[str, str]] = None
+    if column_mapping:
+        try:
+            mapping_dict = json.loads(column_mapping)
+        except (json.JSONDecodeError, TypeError):
+            raise HTTPException(status_code=400, detail="column_mapping must be a valid JSON string.")
+
     try:
-        result = await TicketExtractionService.extract(chunk, file.filename)
+        result = await TicketExtractionService.extract(chunk, file.filename, column_mapping=mapping_dict)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
@@ -79,6 +114,9 @@ async def extract_ticket_file(
         total_rows=result["total_rows"],
         rows=[TicketRow(**r) for r in result["rows"]],
         warnings=result.get("warnings", []),
+        xls_columns=result.get("xls_columns", []),
+        suggested_mapping=result.get("suggested_mapping", {}),
+        is_template_match=result.get("is_template_match", True),
     )
 
 
@@ -155,6 +193,8 @@ async def confirm_ticket_upload(
             net_amt=row.net_amt,
             cc=row.cc,
             acc_code=row.acc_code,
+            sold_to=row.sold_to,
+            customer_name=row.customer_name,
             airline_name=resolved_airline_name,
         )
         db.add(ticket)
@@ -362,6 +402,54 @@ async def run_all_calculation(
         unmatched=unmatched,
         errors=errors,
     )
+
+
+# ── Update ticket fields ──────────────────────────────────────────────────
+
+@router.patch("/uploads/{ticket_id}", response_model=UploadedTicketRead)
+async def update_uploaded_ticket(
+    ticket_id: int,
+    payload:   UploadedTicketUpdate,
+    db:        AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Update editable fields on an uploaded ticket."""
+    res = await db.execute(
+        select(UploadedTicket).where(
+            UploadedTicket.id == ticket_id,
+            UploadedTicket.tenant_id == current_user.tenant_id,
+        )
+    )
+    ticket = res.scalar_one_or_none()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        setattr(ticket, field, value)
+    await db.commit()
+    await db.refresh(ticket)
+    return ticket
+
+
+# ── Delete a ticket ───────────────────────────────────────────────────────
+
+@router.delete("/uploads/{ticket_id}", status_code=204)
+async def delete_uploaded_ticket(
+    ticket_id: int,
+    db:        AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Permanently delete an uploaded ticket."""
+    res = await db.execute(
+        select(UploadedTicket).where(
+            UploadedTicket.id == ticket_id,
+            UploadedTicket.tenant_id == current_user.tenant_id,
+        )
+    )
+    ticket = res.scalar_one_or_none()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    await db.delete(ticket)
+    await db.commit()
 
 
 # ── All matching deals for a ticket (on-demand, for popup) ────────────────

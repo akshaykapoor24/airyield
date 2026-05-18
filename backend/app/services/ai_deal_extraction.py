@@ -8,68 +8,132 @@ from fastapi import UploadFile
 
 SYSTEM_PROMPT = """
 You are an AI agent integrated into a Deals Management System.
-
 Your task is to process airline deal PDFs uploaded by users and convert them into structured deal data.
 
-## Step 1: Understand Create Deal Fields
+## Deal Fields
 
-Each deal consists of:
-
-### Airline Contract Details
-- airline_type → "GDS" or "LCC"
-- airline_name → Extract from PDF
-- contract_valid_from → Extract if available, else null (ISO date format YYYY-MM-DD)
-- contract_valid_to → Extract date (ISO date format YYYY-MM-DD)
-
-### Incentive Types (PLB ONLY)
-
-Each deal MUST have:
+Each deal object has:
+- airline_type  → "GDS" or "LCC"
+- airline_name  → full airline name from the document
+- contract_valid_from → null (caller supplies this; set to null always)
+- contract_valid_to   → ISO date "YYYY-MM-DD" extracted from the document, or null
 - incentive_types = ["PLB"]
+- incentive_data.PLB  → object with all PLB fields (see schema below)
+- remark → concise plain-text note (max 120 chars)
 
-PLB structure inside incentive_data.PLB:
-- validFrom → same as contract_valid_from
-- validTo → same as contract_valid_to
-- frequency → default "Yearly"
-- flightType → map: "OB/IB" → "Both", "Domestic" → "Domestic", "International" → "International", default "Both"
-- class → ONE of: "Economy", "Premium", "Business"
-- targetCalcCols → map: "B" → "Basic", "B+YQ" → "Basic + YQ", "B+YR" → "Basic + YR", "B+YQ+YR" → "Basic + YQ +YR"
-- payoutCalcCols → same as targetCalcCols
-- targetBased → null
-- incentiveNumPct → "Percentage"
-- incentiveAmtPct → numeric value (the percentage number, e.g. 2.0 for 2%)
-- cappedIncentive → null
+## PLB Field Schema
 
-### Remarks
-- Extract all conditions, exclusions, notes from PDF
-- Store as plain text in the remark field
+```
+PLB: {
+  validFrom:           null,               # always null — caller fills this
+  validTo:             "YYYY-MM-DD"|null,  # from document
+  frequency:           "Yearly",           # default; change only if document says otherwise
+  flightType:          "Both"|"International"|"Domestic",
+  class:               "Economy"|"Premium"|"Business",
+  targetCalcCols:      "Basic"|"Basic + YQ"|"Basic + YR"|"Basic + YQ +YR",
+  payoutCalcCols:      same as targetCalcCols,
+  targetBased:         null,               # null unless document specifies a target amount/segment
+  amountBasedType:     null,
+  baseTargetAmount:    null,
+  segmentBasedType:    null,
+  baseTargetSegments:  null,
+  incentiveNumPct:     "Percentage",       # always "Percentage" for PLB commissions
+  incentiveAmtPct:     <number>,           # the numeric % value, e.g. 2.0 for "2%"
+  cappedIncentive:     null
+}
+```
 
-## Step 2: CRITICAL SPLITTING RULE
+## PDF Format Recognition
 
-A SINGLE LINE IN PDF MAY CONTAIN MULTIPLE DEALS.
+You will receive text from one of these supplier PDF formats. Identify the format and parse accordingly.
 
-Example: "2.00% (B+YQ)  2.75% (B+YQ)  3.75% (B+YQ)"
-This MUST be split into 3 DIFFERENT DEALS:
-1. Economy → 2.00%
-2. Premium → 2.75%
-3. Business → 3.75%
+### Format A — Consolidator Commission Table (e.g. Akbar Travels)
+Column order: AIRLINE | Code | IATA | ECONOMY | PEY | BUS/FRST | REMARKS
+- ECONOMY column → class = "Economy"
+- PEY column     → class = "Premium"
+- BUS/FRST column → class = "Business"
+- Commission format: "1.5% BF" → incentiveAmtPct=1.5, targetCalcCols="Basic"
+- Commission format: "3% BF" → incentiveAmtPct=3.0, targetCalcCols="Basic"
+- Mixed variants: "1.25%-STD-(B+YQ), 1.5%(B+YQ)-FLEX+" → use FIRST value: 1.25%, B+YQ
+- Dash "-" or "NIL" in a column → skip that class (do NOT create a deal for it)
+- Validity: parse from REMARKS cell (e.g. "Travel Till 31 DEC 2026" → valid_to="2026-12-31")
+- flightType: derive from REMARKS if mentioned, else default "Both"
 
-The order of percentages maps to: Economy → Premium → Business
+### Format B — B2B Airline Deal Sheet (Cabin Type column)
+Column order: Airline Name | Airline Code | Cabin Type | Commission | Applicable on | Travel Validity | Remarks
+- Cabin Type "Eco" / "Economy"         → class = "Economy"
+- Cabin Type "Prem Eco" / "Premium"    → class = "Premium"
+- Cabin Type "Bizz/First" / "Business" → class = "Business"
+- Commission: "0.89%"  → incentiveAmtPct=0.89
+- "Applicable on" column → targetCalcCols and payoutCalcCols
+  - "Base Fare + YQ" → "Basic + YQ"
+  - "Base Fare + YR" → "Basic + YR"
+  - "Base Fare"      → "Basic"
+- Travel Validity: "31 Dec'2026" → valid_to="2026-12-31"; "Open" → null
+- Section header ":: Domestic Air ::"       → flightType="Domestic" for all rows below until next section
+- Section header ":: International Air ::"  → flightType="International" for all rows below
 
-DO NOT create multiple PLB rows in one deal.
-ALWAYS create separate deals per class.
+### Format C — Lords Deal Sheet (ECO / P.ECOM / BUS columns with VALID ON)
+Column order: AIRLINE | AIRLINE CODE | ECO | P.ECOM | BUS | VALID ON | VALIDITY | REMARKS
+- ECO column    → class = "Economy"
+- P.ECOM column → class = "Premium"
+- BUS column    → class = "Business"
+- Commission format: "2.00% (B+YQ)" → incentiveAmtPct=2.0; extract calc spec from parentheses
+- VALID ON column: "B+YQ" → targetCalcCols="Basic + YQ"; "B" → "Basic"
+  (VALID ON overrides any calc spec found in the commission cell)
+- VALIDITY column: parse date + flightType
+  - "OB/IB till 31 Mar 2026"           → valid_to="2026-03-31", flightType="Both"
+  - "OB 1Apr 26 / IB till 31 Mar 2027" → valid_to="2027-03-31", flightType="Both"
+- Dash "-" or missing value in ECO/P.ECOM/BUS → skip that class
 
-## Step 3: Edge Cases
+## Calculation Field Normalization
 
-1. Missing values: "0.75% - -" → Only create Economy deal (skip the dashes)
-2. Same values: "3% 3% 3%" → Create 3 separate deals
-3. Non-percentage values like "NET + SC 50" → Skip or set incentiveAmtPct to 0
-4. Validity formats:
-   - "Till further notice" → set valid_to = null
-   - "Travel till 31 Dec 2026" → extract as "2026-12-31"
+ALWAYS normalize these values (case-insensitive match):
+- "B" / "BF" / "Base Fare" / "Basic"   → "Basic"
+- "B+YQ" / "BF+YQ" / "Base Fare + YQ" → "Basic + YQ"
+- "B+YR" / "BF+YR" / "Base Fare + YR" → "Basic + YR"
+- "B+YQ+YR"                            → "Basic + YQ +YR"
 
-## Step 4: Output Format
+## Validity Date Normalization
 
-Return a JSON object with a "deals" array:
+- "OB/IB till 31 Mar 2026"             → "2026-03-31"
+- "Travel Till 31 DEC 2026"            → "2026-12-31"
+- "31 Dec'2026" / "31st Dec 2026"      → "2026-12-31"
+- "31st Mar'26" / "31 Mar 2026"        → "2026-03-31"
+- "IATA Commission valid for Sales till 31st Mar'26 only" → "2026-03-31"
+- "Open" / "Till Further Notice" / "till further notice" → null
+
+## Flight Type Normalization
+
+- "OB/IB"                  → "Both"
+- "International" / "INTL" → "International"
+- "Domestic" / "DOM"       → "Domestic"
+- Not specified             → "Both"
+
+## CRITICAL SPLITTING RULE
+
+Each airline row with multiple class columns MUST become SEPARATE deals — one per class.
+
+Example row: AIR INDIA | AI | NIL | 2.00%(B+YQ) | 2.75%(B+YQ) | 3.75%(B+YQ) | OB/IB | OB/IB till 31 Mar 2026
+→ Creates 3 deals:
+  Deal 1: airline_name="Air India", class="Economy",  incentiveAmtPct=2.00, targetCalcCols="Basic + YQ"
+  Deal 2: airline_name="Air India", class="Premium",  incentiveAmtPct=2.75, targetCalcCols="Basic + YQ"
+  Deal 3: airline_name="Air India", class="Business", incentiveAmtPct=3.75, targetCalcCols="Basic + YQ"
+
+Example row (dash = skip): AIR INDIA (S&T) | AI | 0.75%(B+YQ) | - | - | B+YQ | OB/IB till 31 Mar 2026
+→ Creates 1 deal: class="Economy", incentiveAmtPct=0.75
+
+## Edge Cases
+
+1. Same value across all classes: "3% 3% 3%" → 3 separate deals (Economy, Premium, Business)
+2. Non-percentage cell "NET + SC 50" or "NIL" → skip that class (set to 0 only if no other option)
+3. Commission cell "0.75% - -" → Economy=0.75%, skip Premium and Business
+4. Airline Code "(XO SALE)" annotations → ignore, use base airline code only
+5. Colored rows are still valid data — do not skip them
+
+## Output Format
+
+Return ONLY a valid JSON object — no markdown, no explanation:
 
 {
   "deals": [
@@ -88,13 +152,17 @@ Return a JSON object with a "deals" array:
           "class": "Economy",
           "targetCalcCols": "Basic + YQ",
           "payoutCalcCols": "Basic + YQ",
+          "targetBased": null,
+          "amountBasedType": null,
+          "baseTargetAmount": null,
+          "segmentBasedType": null,
+          "baseTargetSegments": null,
           "incentiveNumPct": "Percentage",
           "incentiveAmtPct": 2.0,
-          "targetBased": null,
           "cappedIncentive": null
         }
       },
-      "remark": "Lords issuance, OB/IB till 31 Mar 2026"
+      "remark": "Lords issuance. OB/IB till 31 Mar 2026. No PLB on code share."
     }
   ]
 }
@@ -103,18 +171,17 @@ Return a JSON object with a "deals" array:
 
 - Always prioritize accuracy over assumptions
 - Never merge multiple class deals into one
-- Always normalize calculation fields (B → Basic, B+YQ → Basic + YQ, etc.)
 - If data is missing → set null (do not guess)
-- Output must be valid JSON with a top-level "deals" array
+- Output MUST be complete and valid JSON with a top-level "deals" array
 - Return ONLY the JSON object, no markdown fences or extra text
-- Keep "remark" values concise — max 120 characters. Summarise key conditions only.
-- Output MUST be complete and valid JSON. Do not truncate mid-object.
+- Keep "remark" values concise — max 120 characters
+- Output MUST be complete and valid JSON. Do not truncate mid-object
 """
 
 
 class AIDealExtractionService:
     @staticmethod
-    async def extract(file: UploadFile) -> dict:
+    async def extract(file: UploadFile, max_deals: int = 15) -> dict:
         content = await file.read()
         await file.seek(0)
 
@@ -128,7 +195,7 @@ class AIDealExtractionService:
                 "warning": "Could not extract text from this file.",
             }
 
-        deals = await AIDealExtractionService._call_openai(pdf_text)
+        deals = await AIDealExtractionService._call_openai(pdf_text, max_deals=max_deals)
 
         return {
             "deals": deals,
@@ -217,20 +284,26 @@ class AIDealExtractionService:
             return []
 
     @staticmethod
-    async def _call_openai(pdf_text: str) -> list[dict]:
+    async def _call_openai(pdf_text: str, max_deals: int = 15) -> list[dict]:
         from openai import AsyncOpenAI
         from app.config import settings
 
         client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
 
-        # Limit input to avoid exceeding context window (keep ~8k chars for output budget)
-        truncated = pdf_text[:14000]
+        # Limit input — 6000 chars covers ~3 PDF pages (~15-20 airline rows)
+        truncated = pdf_text[:6000]
+
+        limit_instruction = (
+            f"\n\nIMPORTANT: Extract a MAXIMUM of {max_deals} deals. "
+            "Process rows from the top of the document only. "
+            f"Stop immediately once you have {max_deals} deals. Do not process further rows."
+        )
 
         response = await client.chat.completions.create(
             model="gpt-4o",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": f"Extract deals from this document text:\n\n{truncated}"},
+                {"role": "user", "content": f"Extract deals from this document text:{limit_instruction}\n\n{truncated}"},
             ],
             response_format={"type": "json_object"},
             temperature=0,

@@ -9,8 +9,9 @@ import {
   Plane, Building2, MapPin, Route, Tag, DollarSign,
   Calculator, Upload, ClipboardCheck, CheckSquare,
   AlertTriangle, Edit3, Users, Shield, GitMerge,
-  BookOpen, History, Sliders,
+  BookOpen, History, Sliders, LayoutGrid, Plus,
 } from "lucide-react";
+import { loadDashboards, type CustomDashboard } from "@/lib/customDashboards";
 import { cn } from "@/lib/utils";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { toggleSidebar } from "@/store/slices/uiSlice";
@@ -70,7 +71,7 @@ const TENANT_NAV: NavItem[] = [
       { label: "Suppliers", href: "/masters/suppliers", icon: Building2 },
       { label: "Airlines", href: "/masters/airlines", icon: Plane },
       { label: "Airports", href: "/masters/airports", icon: MapPin },
-      { label: "Routes", href: "/masters/routes", icon: Route },
+      // { label: "Routes", href: "/masters/routes", icon: Route },
       { label: "Classes / RBD", href: "/masters/classes", icon: Tag },
       { label: "Income Heads", href: "/masters/income-heads", icon: DollarSign },
       { label: "Calculation Rules", href: "/masters/calculation-rules", icon: Calculator },
@@ -107,7 +108,7 @@ const PLATFORM_NAV: NavItem[] = [
       { label: "Suppliers", href: "/masters/suppliers", icon: Building2 },
       { label: "Airlines", href: "/masters/airlines", icon: Plane },
       { label: "Airports", href: "/masters/airports", icon: MapPin },
-      { label: "Routes", href: "/masters/routes", icon: Route },
+      // { label: "Routes", href: "/masters/routes", icon: Route },
       { label: "Classes / RBD", href: "/masters/classes", icon: Tag },
       { label: "Income Heads", href: "/masters/income-heads", icon: DollarSign },
       { label: "Calculation Rules", href: "/masters/calculation-rules", icon: Calculator },
@@ -130,18 +131,37 @@ export default function Sidebar() {
   const platform = isPlatformAdmin(role);
   const navItems = platform ? PLATFORM_NAV : TENANT_NAV;
 
+  const [customDashboards, setCustomDashboards] = useState<CustomDashboard[]>([]);
+
+  useEffect(() => {
+    const refresh = () => setCustomDashboards(loadDashboards());
+    refresh();
+    window.addEventListener("storage", refresh);
+    return () => window.removeEventListener("storage", refresh);
+  }, [pathname]);
+
   const isActive = (href: string) =>
     href === "/" ? pathname === "/" : pathname === href || pathname.startsWith(href + "/");
 
-  const hasActiveChild = (item: NavItem) =>
-    item.children?.some((c) => isActive(c.href)) ?? false;
+  const isOnCustomDashboard = pathname.startsWith("/dashboard/");
 
-  const [expanded, setExpanded] = useState<string[]>(() =>
-    navItems.filter((n) => n.children && n.children.some((c) => isActive(c.href))).map((n) => n.label)
-  );
+  const hasActiveChild = (item: NavItem) => {
+    if (item.label === "Dashboards" && isOnCustomDashboard) return true;
+    return item.children?.some((c) => isActive(c.href)) ?? false;
+  };
+
+  const getExpandedFromPathname = () =>
+    navItems
+      .filter((n) => n.children && (
+        n.children.some((c) => isActive(c.href)) ||
+        (n.label === "Dashboards" && isOnCustomDashboard)
+      ))
+      .map((n) => n.label);
+
+  const [expanded, setExpanded] = useState<string[]>(getExpandedFromPathname);
 
   useEffect(() => {
-    setExpanded(navItems.filter((n) => n.children && n.children.some((c) => isActive(c.href))).map((n) => n.label));
+    setExpanded(getExpandedFromPathname());
   }, [pathname, platform]);
 
   const toggle = (label: string) =>
@@ -277,6 +297,44 @@ export default function Sidebar() {
                       </Link>
                     );
                   })}
+
+                  {/* Custom dashboards (Dashboards group only) */}
+                  {item.label === "Dashboards" && (
+                    <>
+                      {customDashboards.length > 0 && (
+                        <div className="pt-1.5 pb-0.5">
+                          <p className="text-[9px] uppercase font-bold text-blue-200/30 tracking-wider px-2.5 mb-1">Custom</p>
+                          {customDashboards.map((cd) => {
+                            const href = `/dashboard/${cd.id}`;
+                            const active = isActive(href);
+                            return (
+                              <Link
+                                key={cd.id}
+                                href={href}
+                                className={cn(
+                                  "flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all duration-150",
+                                  active
+                                    ? "bg-sky-500/20 text-sky-200"
+                                    : "text-blue-200/50 hover:bg-white/8 hover:text-white"
+                                )}
+                              >
+                                <LayoutGrid className={cn("w-3.5 h-3.5 shrink-0", active ? "text-sky-300" : "text-blue-200/50")} />
+                                <span className="truncate">{cd.name}</span>
+                                {active && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-sky-400 shrink-0" />}
+                              </Link>
+                            );
+                          })}
+                        </div>
+                      )}
+                      <Link
+                        href="/dashboard/new"
+                        className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[10px] font-medium text-blue-300/50 hover:text-blue-200 hover:bg-white/8 transition-all duration-150 mt-0.5 border border-dashed border-white/10 hover:border-white/20"
+                      >
+                        <Plus className="w-3 h-3 shrink-0" />
+                        <span>Create Dashboard</span>
+                      </Link>
+                    </>
+                  )}
                 </div>
               )}
             </div>

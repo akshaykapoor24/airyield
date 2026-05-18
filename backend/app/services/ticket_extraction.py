@@ -9,7 +9,7 @@ Expected XLS columns (case-insensitive, flexible header detection):
   SellTax, SellTax_YQ, Sale_YR, Sale_K3, REI_Sell, Seat_Selection, Excessbagage,
   Meals, RFD_SELL, CAN_Charge, Booking_Fee_Sell, CGST_Sell, SGST_Sell, IGST_Sell,
   Comm_Sell, ADM, Incentive_Sell, DIS_Sell, TDS_Sell, TotalAmt, PaidByCreditCard,
-  Net_AMT, CC, AccCode
+  Net_AMT, CC, AccCode, SoldTo, CustomerName, AirlineName
 """
 from __future__ import annotations
 
@@ -20,6 +20,22 @@ from typing import Any
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+# Canonical template headers — the exact column names in the downloadable template.
+# These all resolve through _ALIAS_TO_CANON so uploading the template gives 100% auto-match.
+TEMPLATE_HEADERS: list[str] = [
+    "BookingRef", "SegmentType", "InvoiceType", "InvoiceNo", "TicketDate",
+    "LastName", "FirstName", "Sector", "Class", "DepartureDateTime",
+    "GDS_PNR", "AirlinesCode", "TicketNumber", "SellFare", "SellTax",
+    "SellTax_YQ", "Sale_YR", "Sale_K3", "REI_Sell", "Seat_Selection",
+    "Excessbagage", "Meals", "RFD_SELL", "CAN_Charge", "Booking_Fee_Sell",
+    "CGST_Sell", "SGST_Sell", "IGST_Sell", "Comm_Sell", "ADM",
+    "Incentive_Sell", "DIS_Sell", "TDS_Sell", "TotalAmt", "PaidByCreditCard",
+    "Net_AMT", "CC", "AccCode", "SoldTo", "CustomerName", "AirlineName",
+]
+
+# Threshold: if at least this many canonical fields are found, treat as a template match.
+_TEMPLATE_MATCH_THRESHOLD = 30
 
 # Canonical column name → list of accepted header variants (lowercase, stripped)
 _COL_ALIASES: dict[str, list[str]] = {
@@ -62,6 +78,8 @@ _COL_ALIASES: dict[str, list[str]] = {
     "cc":                  ["cc"],
     "acc_code":            ["acccode", "acc_code"],
     "airline_name":        ["airlinename", "airline_name", "airline name", "airline"],
+    "sold_to":             ["soldto", "sold_to", "sold to", "soldtoparty"],
+    "customer_name":       ["customername", "customer_name", "customer name", "name", "clientname", "client name"],
 }
 
 # Build reverse map: lowercase_alias → canonical
@@ -118,7 +136,11 @@ def _build_col_map(df_columns: list[str]) -> dict[str, str]:
 class TicketExtractionService:
 
     @staticmethod
-    async def extract(file_bytes: bytes, file_name: str) -> dict:
+    async def extract(
+        file_bytes: bytes,
+        file_name: str,
+        column_mapping: dict[str, str] | None = None,
+    ) -> dict:
         """
         Parse XLS/XLSX bytes and return a preview dict:
         {
@@ -126,7 +148,13 @@ class TicketExtractionService:
             "total_rows": int,
             "rows": [TicketRow-compatible dicts],
             "warnings": [str],
+            "xls_columns": [str],          # raw headers from the XLS
+            "suggested_mapping": {str:str}, # canonical → xls_col
+            "is_template_match": bool,
         }
+
+        column_mapping (optional): {canonical: xls_col} dict provided by the user.
+        When supplied, it overrides auto-detection.
         """
         warnings: list[str] = []
         try:
@@ -137,12 +165,29 @@ class TicketExtractionService:
         # Drop fully-empty rows
         df = df.dropna(how="all")
 
-        if df.empty:
-            return {"file_name": file_name, "total_rows": 0, "rows": [], "warnings": ["File has no data rows."]}
+        xls_columns: list[str] = list(df.columns)
 
-        col_map = _build_col_map(list(df.columns))
+        if df.empty:
+            return {
+                "file_name": file_name, "total_rows": 0, "rows": [], "warnings": ["File has no data rows."],
+                "xls_columns": xls_columns, "suggested_mapping": {}, "is_template_match": False,
+            }
+
+        if column_mapping:
+            # User-provided mapping: {canonical: xls_col} — invert to {xls_col: canonical}
+            col_map: dict[str, str] = {}
+            for canon, xls_col in column_mapping.items():
+                if xls_col and xls_col in xls_columns:
+                    col_map[xls_col] = canon
+        else:
+            col_map = _build_col_map(xls_columns)
+
         if not col_map:
             warnings.append("No recognised columns found — check the header row matches the expected format.")
+
+        # suggested_mapping: canonical → xls_col (invert col_map)
+        suggested_mapping: dict[str, str] = {canon: xls_col for xls_col, canon in col_map.items()}
+        is_template_match: bool = len(col_map) >= _TEMPLATE_MATCH_THRESHOLD
 
         rows = []
         for i, (_, raw) in enumerate(df.iterrows()):
@@ -152,7 +197,10 @@ class TicketExtractionService:
                 if canon in NUMERIC_COLS:
                     row[canon] = _to_float(val)
                 else:
-                    row[canon] = _to_str(val)
+                    s = _to_str(val)
+                    if canon == "sold_to" and s:
+                        s = s.strip().lower()
+                    row[canon] = s
             rows.append(row)
 
         return {
@@ -160,4 +208,7 @@ class TicketExtractionService:
             "total_rows": len(rows),
             "rows": rows,
             "warnings": warnings,
+            "xls_columns": xls_columns,
+            "suggested_mapping": suggested_mapping,
+            "is_template_match": is_template_match,
         }

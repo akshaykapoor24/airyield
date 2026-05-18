@@ -4,8 +4,9 @@ import { useCallback, useState, useRef, useEffect } from "react";
 import {
   Upload, FileText, FileSpreadsheet, File, Check,
   ChevronRight, AlertTriangle, X, RefreshCw, Save,
-  Plus, Trash2, ChevronDown, ArrowRight, Info, Settings2,
+  Plus, Trash2, ChevronDown, ArrowRight, Info, Settings2, Search,
 } from "lucide-react";
+import * as XLSX from "xlsx";
 import api from "@/lib/api";
 import { useRouter } from "next/navigation";
 
@@ -49,11 +50,56 @@ const TARGET_BASED_OPTIONS = ["Amount Based","Segment Based"];
 
 const FIELD_OPTIONS: Record<string,string[]> = {
   frequency:FREQUENCY_OPTIONS, flightType:FLIGHT_TYPE_OPTIONS,
+  class:CLASS_OPTIONS,
   targetCalcCols:TARGET_CALC_OPTIONS, payoutCalcCols:PAYOUT_CALC_OPTIONS,
   targetBased:TARGET_BASED_OPTIONS,
   amountBasedType:["Fixed","Slab Based"], segmentBasedType:["Fixed","Slab Based"],
   incentiveNumPct:["Number","Percentage"],
 };
+
+const NORMALIZE_ALIASES: Record<string,string> = {
+  "yearly":"Yearly","yealy":"Yearly","annual":"Yearly","annually":"Yearly",
+  "half yearly":"Half Yearly","halfyearly":"Half Yearly","semi-annual":"Half Yearly","biannual":"Half Yearly","half-yearly":"Half Yearly",
+  "quarterly":"Quarterly","quarter":"Quarterly",
+  "international":"International","intl":"International","inter":"International",
+  "domestic":"Domestic","dom":"Domestic",
+  "both":"Both",
+  "economy":"Economy","eco":"Economy","econ":"Economy",
+  "premium":"Premium","prem":"Premium",
+  "business":"Business","biz":"Business","bus":"Business",
+  "all":"All",
+  "basic":"Basic",
+  "b+yq":"Basic + YQ","basic+yq":"Basic + YQ","basic + yq":"Basic + YQ",
+  "b+yq+yr":"Basic + YQ +YR","basic+yq+yr":"Basic + YQ +YR","basic + yq +yr":"Basic + YQ +YR",
+  "b+yr":"Basic + YR","basic+yr":"Basic + YR","basic + yr":"Basic + YR",
+  "amount based":"Amount Based","amount":"Amount Based",
+  "segment based":"Segment Based","segment":"Segment Based","segments":"Segment Based",
+  "percentage":"Percentage","pct":"Percentage","percent":"Percentage",
+  "number":"Number","num":"Number",
+  "fixed":"Fixed",
+  "slab based":"Slab Based","slab":"Slab Based",
+};
+
+function levenshtein(a:string,b:string):number{
+  const m=a.length,n=b.length;
+  const dp:number[][]=Array.from({length:m+1},(_,i)=>Array.from({length:n+1},(_,j)=>i===0?j:j===0?i:0));
+  for(let i=1;i<=m;i++)for(let j=1;j<=n;j++)dp[i][j]=a[i-1]===b[j-1]?dp[i-1][j-1]:1+Math.min(dp[i-1][j],dp[i][j-1],dp[i-1][j-1]);
+  return dp[m][n];
+}
+
+function normalizeSelectValue(raw:string,options:string[]):string{
+  if(!raw)return raw;
+  const trimmed=raw.trim();
+  if(options.includes(trimmed))return trimmed;
+  const lower=trimmed.toLowerCase();
+  const ci=options.find(o=>o.toLowerCase()===lower);
+  if(ci)return ci;
+  const alias=NORMALIZE_ALIASES[lower];
+  if(alias&&options.includes(alias))return alias;
+  let best=trimmed,bestDist=Infinity;
+  for(const opt of options){const d=levenshtein(lower,opt.toLowerCase());if(d<bestDist){bestDist=d;best=opt;}}
+  return bestDist<=Math.max(2,Math.floor(best.length*0.4))?best:trimmed;
+}
 
 type FieldConfig = {key:string;label:string;type:"date"|"select"|"search"|"number";condition?:{field:string;value:string}};
 
@@ -173,7 +219,10 @@ type AIDeal = {
       validFrom: string | null; validTo: string | null;
       frequency: string; flightType: string; class: string;
       targetCalcCols: string; payoutCalcCols: string;
-      incentiveNumPct: string; incentiveAmtPct: number; cappedIncentive: null;
+      targetBased: string | null;
+      amountBasedType: string | null; baseTargetAmount: number | null;
+      segmentBasedType: string | null; baseTargetSegments: number | null;
+      incentiveNumPct: string; incentiveAmtPct: number; cappedIncentive: number | null;
     };
   };
   remark: string;
@@ -195,15 +244,21 @@ function convertAIDealsToRows(deals: AIDeal[]): ReviewRow[] {
     if (deal.contract_valid_from)   extra["c__valid_from"]    = deal.contract_valid_from;
     if (deal.contract_valid_to)     extra["c__valid_to"]      = deal.contract_valid_to;
     if (plb) {
-      if (plb.validFrom)        extra["inc::PLB::validFrom"]       = plb.validFrom;
-      if (plb.validTo)          extra["inc::PLB::validTo"]         = plb.validTo;
-      if (plb.frequency)        extra["inc::PLB::frequency"]       = plb.frequency;
-      if (plb.flightType)       extra["inc::PLB::flightType"]      = plb.flightType;
-      if (plb.class)            extra["inc::PLB::class"]           = plb.class;
-      if (plb.targetCalcCols)   extra["inc::PLB::targetCalcCols"]  = plb.targetCalcCols;
-      if (plb.payoutCalcCols)   extra["inc::PLB::payoutCalcCols"]  = plb.payoutCalcCols;
-      if (plb.incentiveNumPct)  extra["inc::PLB::incentiveNumPct"] = plb.incentiveNumPct;
-      if (plb.incentiveAmtPct)  extra["inc::PLB::incentiveAmtPct"] = String(plb.incentiveAmtPct);
+      if (plb.validFrom)           extra["inc::PLB::validFrom"]          = plb.validFrom;
+      if (plb.validTo)             extra["inc::PLB::validTo"]            = plb.validTo;
+      if (plb.frequency)           extra["inc::PLB::frequency"]          = plb.frequency;
+      if (plb.flightType)          extra["inc::PLB::flightType"]         = plb.flightType;
+      if (plb.class)               extra["inc::PLB::class"]              = plb.class;
+      if (plb.targetCalcCols)      extra["inc::PLB::targetCalcCols"]     = plb.targetCalcCols;
+      if (plb.payoutCalcCols)      extra["inc::PLB::payoutCalcCols"]     = plb.payoutCalcCols;
+      if (plb.targetBased)         extra["inc::PLB::targetBased"]        = plb.targetBased;
+      if (plb.amountBasedType)     extra["inc::PLB::amountBasedType"]    = plb.amountBasedType;
+      if (plb.baseTargetAmount != null) extra["inc::PLB::baseTargetAmount"]  = String(plb.baseTargetAmount);
+      if (plb.segmentBasedType)    extra["inc::PLB::segmentBasedType"]   = plb.segmentBasedType;
+      if (plb.baseTargetSegments != null) extra["inc::PLB::baseTargetSegments"] = String(plb.baseTargetSegments);
+      if (plb.incentiveNumPct)     extra["inc::PLB::incentiveNumPct"]    = plb.incentiveNumPct;
+      if (plb.incentiveAmtPct)     extra["inc::PLB::incentiveAmtPct"]   = String(plb.incentiveAmtPct);
+      if (plb.cappedIncentive != null) extra["inc::PLB::cappedIncentive"] = String(plb.cappedIncentive);
     }
     return {
       row_order: idx,
@@ -463,23 +518,36 @@ function ColumnMappingStep({
 
   const applyAndContinue=()=>{
     const cellVal=(row:Record<string,string>,docCol:string)=>(row[docCol]??"").trim();
+    // Extract contract-level values from first data row (used as global fallback)
     const contract:Record<string,string>={};
     for(const col of contractCols){
       const dc=columnMap[col.key];
       if(dc){for(const row of rawRows){const v=cellVal(row,dc);if(v){contract[col.key]=v;break;}}}
     }
-    const rows:ReviewRow[] = preview.rows.map((r,i)=>{
+    // Use rawRows as primary row source so XLS uploads (where preview.rows may be empty) still work
+    const rowCount=Math.max(preview.rows.length,rawRows.length);
+    const rows:ReviewRow[]=Array.from({length:rowCount},(_,i)=>{
+      const base=preview.rows[i]??EMPTY_ROW();
+      const rawRow=rawRows[i];
       const extra:Record<string,string>={};
+      // Per-row contract column values extracted from rawRow
+      if(rawRow){
+        for(const col of contractCols){
+          const dc=columnMap[col.key];
+          if(dc){const v=cellVal(rawRow,dc);if(v)extra[col.key]=v;}
+        }
+      }
+      // Per-row incentive column values
       for(const inc of selectedIncentives){
         for(const f of INCENTIVE_FIELDS[inc]??[]){
           const colKey=`i__${inc}__${f.key}`;
           const dc=columnMap[colKey];
-          if(dc&&rawRows[i]){const v=cellVal(rawRows[i],dc);if(v)extra[`inc::${inc}::${f.key}`]=v;}
+          if(dc&&rawRow){let v=cellVal(rawRow,dc);if(v){const opts=FIELD_OPTIONS[f.key];if(opts)v=normalizeSelectValue(v,opts);extra[`inc::${inc}::${f.key}`]=v;}}
         }
       }
       const remDc=columnMap[REMARKS_COL.key];
-      const remVal=remDc&&rawRows[i]?cellVal(rawRows[i],remDc):r.remarks;
-      return{...r,row_order:i,remarks:remVal||r.remarks,extra};
+      const remVal=remDc&&rawRow?cellVal(rawRow,remDc):base.remarks;
+      return{...base,row_order:i,remarks:remVal||base.remarks,extra};
     });
     onConfirm(contract,rows);
   };
@@ -617,6 +685,14 @@ const CELL_PLACEHOLDER: Record<string, string> = {
 
 type ColGroup={label:string;color:string;cols:{key:string;label:string}[]};
 
+function getColMeta(key:string):{type:"date"|"select"|"number"|"text";options?:string[]}{
+  if(key==="c__valid_from"||key==="c__valid_to")return{type:"date"};
+  if(key==="c__entity_lcc")return{type:"select",options:ENTITIES};
+  if(CONTRACT_COL_OPTIONS[key])return{type:"select",options:CONTRACT_COL_OPTIONS[key]};
+  if(key.startsWith("inc::")){const fk=key.split("::")[2];const cfg=INC_FIELD_CELL[fk];if(cfg)return{type:cfg.type,options:cfg.options};}
+  return{type:"text"};
+}
+
 function buildColGroups(selectedIncentives:string[], dealType:string):ColGroup[]{
   const contractCols = getContractCols(dealType);
   const groups:ColGroup[]=[
@@ -639,6 +715,7 @@ function buildColGroups(selectedIncentives:string[], dealType:string):ColGroup[]
 function ReviewTable({
   rows, colGroups, onChange, onDelete, onAdd,
   rowInclExcl, inclExclPopup, setInclExclPopup, onToggleInclExclType,
+  filterText, selectedRows, onToggleRow, onToggleAllFiltered,
 }:{
   rows:ReviewRow[];
   colGroups:ColGroup[];
@@ -649,6 +726,10 @@ function ReviewTable({
   inclExclPopup:number|null;
   setInclExclPopup:(idx:number|null)=>void;
   onToggleInclExclType:(rowIdx:number,type:string)=>void;
+  filterText:string;
+  selectedRows:Set<number>;
+  onToggleRow:(idx:number)=>void;
+  onToggleAllFiltered:(filteredIndices:number[],allSelected:boolean)=>void;
 }){
   const allCols=colGroups.flatMap(g=>g.cols);
   const inp="w-full bg-transparent text-[11px] text-gray-800 focus:outline-none focus:bg-blue-50 rounded px-1 py-0.5 min-w-[80px]";
@@ -761,12 +842,33 @@ function ReviewTable({
     );
   };
 
+  // Filter rows by search text
+  const filteredIndices:number[]=rows.reduce<number[]>((acc,row,i)=>{
+    if(!filterText){acc.push(i);return acc;}
+    const haystack=[row.airline_name,row.remarks,row.validity_raw,...Object.values(row.extra)].join(" ").toLowerCase();
+    if(haystack.includes(filterText.toLowerCase()))acc.push(i);
+    return acc;
+  },[]);
+  const allFilteredSelected=filteredIndices.length>0&&filteredIndices.every(i=>selectedRows.has(i));
+  const someFilteredSelected=filteredIndices.some(i=>selectedRows.has(i));
+
   return(
     <div className="overflow-x-auto border border-gray-200 rounded-lg">
       <table className="w-full min-w-max border-collapse">
         <thead>
           <tr>
-            <th className="px-2 py-2 text-[10px] text-white font-semibold sticky left-0 z-10 whitespace-nowrap" style={{background:"#1e3a5f"}}>#</th>
+            {/* Select-all checkbox */}
+            <th className="px-2 py-2 sticky left-0 z-10" style={{background:"#1e3a5f"}}>
+              <input
+                type="checkbox"
+                checked={allFilteredSelected}
+                ref={el=>{if(el)el.indeterminate=!allFilteredSelected&&someFilteredSelected;}}
+                onChange={()=>onToggleAllFiltered(filteredIndices,allFilteredSelected)}
+                className="accent-blue-400 cursor-pointer"
+                title={allFilteredSelected?"Deselect all visible":"Select all visible"}
+              />
+            </th>
+            <th className="px-2 py-2 text-[10px] text-white font-semibold sticky left-9 z-10 whitespace-nowrap" style={{background:"#1e3a5f"}}>#</th>
             {colGroups.map(g=>(
               <th key={g.label} colSpan={g.cols.length} className="px-2 py-2 text-[10px] text-white font-bold uppercase tracking-wider text-center border-l border-white/20 whitespace-nowrap" style={{background:g.color}}>
                 {g.label}
@@ -776,6 +878,7 @@ function ReviewTable({
           </tr>
           <tr style={{background:"#2d4f7c"}}>
             <th className="px-2 py-1.5 sticky left-0 z-10" style={{background:"#2d4f7c"}}/>
+            <th className="px-2 py-1.5 sticky left-9 z-10" style={{background:"#2d4f7c"}}/>
             {allCols.map(c=>(
               <th key={c.key} className="px-2 py-1.5 text-left text-[10px] font-semibold text-white/80 whitespace-nowrap border-l border-white/10">{c.label}</th>
             ))}
@@ -783,17 +886,26 @@ function ReviewTable({
           </tr>
         </thead>
         <tbody>
-          {rows.length===0?(
-            <tr><td colSpan={allCols.length+2} className="px-4 py-10 text-center text-xs text-gray-400">No rows extracted. Add a row manually.</td></tr>
-          ):rows.map((row,idx)=>(
-            <tr key={idx} className="border-b border-gray-100 hover:bg-blue-50/20 group">
-              <td className="px-2 py-1.5 text-[10px] text-gray-400 sticky left-0 bg-white group-hover:bg-blue-50/20">{idx+1}</td>
-              {allCols.map(c=>renderCell(row,idx,c.key))}
-              <td className="px-2 py-1.5">
-                <button onClick={()=>onDelete(idx)} className="opacity-0 group-hover:opacity-100 p-1 hover:bg-red-50 rounded text-red-400"><Trash2 className="w-3.5 h-3.5"/></button>
-              </td>
-            </tr>
-          ))}
+          {filteredIndices.length===0?(
+            <tr><td colSpan={allCols.length+3} className="px-4 py-10 text-center text-xs text-gray-400">
+              {rows.length===0?"No rows extracted. Add a row manually.":"No rows match the filter."}
+            </td></tr>
+          ):filteredIndices.map(idx=>{
+            const row=rows[idx];
+            const isSelected=selectedRows.has(idx);
+            return(
+              <tr key={idx} className={`border-b border-gray-100 group ${isSelected?"bg-blue-50":"hover:bg-blue-50/20"}`}>
+                <td className={`px-2 py-1.5 sticky left-0 ${isSelected?"bg-blue-50":"bg-white group-hover:bg-blue-50/20"}`}>
+                  <input type="checkbox" checked={isSelected} onChange={()=>onToggleRow(idx)} className="accent-blue-500 cursor-pointer"/>
+                </td>
+                <td className={`px-2 py-1.5 text-[10px] text-gray-400 sticky left-9 ${isSelected?"bg-blue-50":"bg-white group-hover:bg-blue-50/20"}`}>{idx+1}</td>
+                {allCols.map(c=>renderCell(row,idx,c.key))}
+                <td className="px-2 py-1.5">
+                  <button onClick={()=>onDelete(idx)} className="opacity-0 group-hover:opacity-100 p-1 hover:bg-red-50 rounded text-red-400"><Trash2 className="w-3.5 h-3.5"/></button>
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
       <div className="px-4 py-2.5 border-t border-gray-100">
@@ -806,6 +918,32 @@ function ReviewTable({
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// XLS TEMPLATE GENERATOR
+// ═══════════════════════════════════════════════════════════════════════════════
+// Template uses CONTRACT_COLS_ALL labels exactly + full incentive labels (e.g. "Contract Valid from for PLB")
+// so that initColumnMap can auto-match them without case-insensitive collisions.
+function downloadXLSTemplate(incentiveTypes: string[]){
+  const contractHeaders = CONTRACT_COLS_ALL.map(c => c.label);
+  // Use FULL INCENTIVE_FIELDS labels (not stripped) to avoid collision with contract col labels
+  const incentiveHeaders = incentiveTypes.flatMap(inc =>
+    (INCENTIVE_FIELDS[inc]??[]).map(f => f.label)
+  );
+  const headers = [...contractHeaders, ...incentiveHeaders, REMARKS_COL.label];
+
+  const sampleRow = [
+    "GDS","Airline Name","Calendar year","B2C",
+    "2025-01-01","2025-12-31","Sales","Sales","ATB","",
+    ...incentiveTypes.flatMap(inc => (INCENTIVE_FIELDS[inc]??[]).map(() => "")),
+    "",
+  ];
+  const ws = XLSX.utils.aoa_to_sheet([headers, sampleRow]);
+  ws["!cols"] = headers.map(h => ({ wch: Math.max(h.length + 2, 14) }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Deal Template");
+  XLSX.writeFile(wb, "deal_template.xlsx");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // MAIN PAGE
 // ═══════════════════════════════════════════════════════════════════════════════
 export default function UploadDealPage(){
@@ -813,9 +951,10 @@ export default function UploadDealPage(){
   const [step,setStep]=useState<1|2|3|4>(1);
 
   // ── Step 1 state ────────────────────────────────────────────────────────────
-  const [dealType,     setDealType]     = useState("");           // "airline" | "b2b"
-  const [supplierName, setSupplierName] = useState("");
-  const [file,         setFile]         = useState<File|null>(null);
+  const [dealType,      setDealType]      = useState("");           // "airline" | "b2b"
+  const [supplierName,  setSupplierName]  = useState("");
+  const [validFromDate, setValidFromDate] = useState("");
+  const [file,          setFile]          = useState<File|null>(null);
   const [dragging,     setDragging]     = useState(false);
   const [uploading,    setUploading]    = useState(false);
   const [uploadError,  setUploadError]  = useState("");
@@ -829,13 +968,27 @@ export default function UploadDealPage(){
   const initColumnMap=(p:ExtractionPreview)=>{
     const docCols=p.doc_columns?.length?p.doc_columns:(p.rows[0]?Object.keys(p.rows[0]).filter(k=>k!=="row_order"):[]);
     const auto:Record<string,string>={};
+    // Auto-map contract columns by exact label match
+    for(const col of getContractCols(dealType)){
+      const match=docCols.find(dc=>dc.toLowerCase().trim()===col.label.toLowerCase());
+      if(match)auto[col.key]=match;
+    }
+    // Auto-map incentive columns — try stripped label first, then full original label
     for(const inc of selectedIncentives){
       for(const col of incentiveMapCols(inc)){
-        const match=docCols.find(dc=>dc.toLowerCase().trim()===col.label.toLowerCase());
+        const fullLabel=(INCENTIVE_FIELDS[inc]??[]).find(f=>`i__${inc}__${f.key}`===col.key)?.label??col.label;
+        const match=docCols.find(dc=>
+          dc.toLowerCase().trim()===col.label.toLowerCase()||
+          dc.toLowerCase().trim()===fullLabel.toLowerCase()
+        );
         if(match)auto[col.key]=match;
       }
     }
-    const remMatch=docCols.find(dc=>["remarks","remark","conditions"].includes(dc.toLowerCase().trim()));
+    // Remarks: try exact label, then common synonyms
+    const remMatch=docCols.find(dc=>
+      dc.toLowerCase().trim()===REMARKS_COL.label.toLowerCase()||
+      ["remark","conditions"].includes(dc.toLowerCase().trim())
+    );
     if(remMatch)auto[REMARKS_COL.key]=remMatch;
     setColumnMap(auto);
     setPreview(p);
@@ -853,6 +1006,10 @@ export default function UploadDealPage(){
   const [inclExclModal, setInclExclModal] = useState<{rowIdx:number;type:string}|null>(null);
   const [saving,        setSaving]        = useState(false);
   const [saveError,     setSaveError]     = useState("");
+  const [filterText,    setFilterText]    = useState("");
+  const [selectedRows,  setSelectedRows]  = useState<Set<number>>(new Set());
+  const [bulkColKey,    setBulkColKey]    = useState("");
+  const [bulkColValue,  setBulkColValue]  = useState("");
 
   const colGroups = buildColGroups(selectedIncentives, dealType);
 
@@ -905,6 +1062,24 @@ export default function UploadDealPage(){
   const handleDeleteRow=useCallback((idx:number)=>setRows(prev=>prev.filter((_,i)=>i!==idx)),[]);
   const handleAddRow=()=>setRows(prev=>[...prev,{...EMPTY_ROW(),row_order:prev.length}]);
 
+  // ── Filter + bulk edit helpers ─────────────────────────────────────────────
+  const handleToggleRow=useCallback((idx:number)=>{
+    setSelectedRows(prev=>{const next=new Set(prev);next.has(idx)?next.delete(idx):next.add(idx);return next;});
+  },[]);
+  const handleToggleAllFiltered=useCallback((filteredIndices:number[],allSelected:boolean)=>{
+    setSelectedRows(prev=>{const next=new Set(prev);if(allSelected)filteredIndices.forEach(i=>next.delete(i));else filteredIndices.forEach(i=>next.add(i));return next;});
+  },[]);
+  const handleBulkApply=()=>{
+    if(!bulkColKey||bulkColValue==="")return;
+    setRows(prev=>prev.map((r,i)=>{
+      if(!selectedRows.has(i))return r;
+      if(bulkColKey.startsWith("inc::")||bulkColKey.startsWith("ie::")||bulkColKey.startsWith("c__"))
+        return{...r,extra:{...r.extra,[bulkColKey]:bulkColValue}};
+      return{...r,[bulkColKey]:bulkColValue};
+    }));
+    setBulkColValue("");
+  };
+
   // ── Step 1 → 2/3: Extract ───────────────────────────────────────────────────
   const handleExtract=async()=>{
     if(!file){setUploadError("Please select a file.");return;}
@@ -915,10 +1090,17 @@ export default function UploadDealPage(){
       const form=new FormData();form.append("file",file);
       if(aiMode){
         const {data}=await api.post<AIExtractResponse>("/deals/upload/ai-extract",form,{headers:{"Content-Type":"multipart/form-data"}});
-        setRows(convertAIDealsToRows(data.deals));
+        const converted=convertAIDealsToRows(data.deals);
+        converted.forEach(r=>{
+          if(!r.extra["c__valid_from"] && validFromDate)     r.extra["c__valid_from"]          = validFromDate;
+          if(!r.extra["inc::PLB::validFrom"] && validFromDate) r.extra["inc::PLB::validFrom"]  = validFromDate;
+          if(!r.extra["c__business_type"] && dealType==="b2b") r.extra["c__business_type"]     = "B2B";
+        });
+        setRows(converted);
         setSelectedIncentives(["PLB"]);
         setAiFileName(data.file_name);
         setAiConfidence(data.confidence);
+        setFilterText("");setSelectedRows(new Set());setBulkColKey("");setBulkColValue("");
         setStep(3);
       }else{
         const {data}=await api.post<ExtractionPreview>("/deals/upload/extract",form,{headers:{"Content-Type":"multipart/form-data"}});
@@ -945,11 +1127,12 @@ export default function UploadDealPage(){
         ...contract,
         ...r.extra,
         c__airline_name: r.extra.c__airline_name || contract.c__airline_name || r.airline_name || "",
-        c__valid_from:   r.extra.c__valid_from   || contract.c__valid_from   || "",
+        c__valid_from:   r.extra.c__valid_from   || contract.c__valid_from   || validFromDate || "",
         c__valid_to:     r.extra.c__valid_to     || contract.c__valid_to     || "",
       },
     }));
     setRows(rowsWithContract);
+    setFilterText("");setSelectedRows(new Set());setBulkColKey("");setBulkColValue("");
     setStep(3);
   };
 
@@ -1034,7 +1217,7 @@ export default function UploadDealPage(){
       </p>
       <div className="flex gap-3 justify-center pt-2">
         <button onClick={()=>router.push("/deals")} className="bg-[#1e3a5f] text-white px-5 py-2 rounded-lg text-sm font-medium hover:bg-[#16304f]">View Deals</button>
-        <button onClick={()=>{setStep(1);setFile(null);setPreview(null);setRows([]);setDealType("");setSupplierName("");setColumnMap({});setSelectedIncentives([]);setRowInclExcl({});setAiMode(false);setAiFileName("");setAiConfidence(0);}}
+        <button onClick={()=>{setStep(1);setFile(null);setPreview(null);setRows([]);setDealType("");setSupplierName("");setValidFromDate("");setColumnMap({});setSelectedIncentives([]);setRowInclExcl({});setAiMode(false);setAiFileName("");setAiConfidence(0);}}
           className="border border-gray-200 text-gray-700 px-5 py-2 rounded-lg text-sm font-medium hover:bg-gray-50">Upload Another</button>
       </div>
     </div>
@@ -1098,6 +1281,16 @@ export default function UploadDealPage(){
                     {selectedIncentives.join(", ")} — column mapping in Step 2, editable in Step 3.
                   </p>
                 )}
+                <div>
+                  <label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">Valid From Date</label>
+                  <input
+                    type="date"
+                    value={validFromDate}
+                    onChange={e=>setValidFromDate(e.target.value)}
+                    className="w-full border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 text-gray-800"
+                  />
+                  {validFromDate&&<p className="text-[10px] text-blue-600 mt-1">Will pre-fill Contract Valid From in Review &amp; Edit.</p>}
+                </div>
               </div>
             </SectionCard>
           </div>
@@ -1107,17 +1300,26 @@ export default function UploadDealPage(){
             <div className="bg-white rounded-xl border border-gray-200 p-4 space-y-3">
               <div className="flex items-center justify-between">
                 <h2 className="text-xs font-semibold text-blue-600 uppercase tracking-wide">Deal File</h2>
-                <span className="text-[11px] text-gray-400">PDF · Excel · Word · Image</span>
+                <div className="flex items-center gap-3">
+                  <span className="text-[11px] text-gray-400">PDF · Excel · Word · Image</span>
+                  <button
+                    type="button"
+                    onClick={()=>downloadXLSTemplate(selectedIncentives)}
+                    className="flex items-center gap-1 text-[11px] text-blue-600 hover:text-blue-800 hover:underline font-medium"
+                  >
+                    <FileSpreadsheet className="w-3 h-3"/>Download XLS Template
+                  </button>
+                </div>
               </div>
               <div
                 onDragOver={e=>{e.preventDefault();setDragging(true);}}
                 onDragLeave={()=>setDragging(false)}
-                onDrop={e=>{e.preventDefault();setDragging(false);const f=e.dataTransfer.files[0];if(f)setFile(f);}}
+                onDrop={e=>{e.preventDefault();setDragging(false);const f=e.dataTransfer.files[0];if(f){setFile(f);if(/\.pdf$/i.test(f.name))setAiMode(true);else if(/\.xlsx?$/i.test(f.name))setAiMode(false);}}}
                 onClick={()=>fileRef.current?.click()}
                 className={`border-2 border-dashed rounded-xl flex flex-col items-center justify-center py-16 gap-3 cursor-pointer transition-all ${dragging?"border-[#1e3a5f] bg-blue-50/40":file?"border-green-400 bg-green-50/30":"border-gray-200 hover:border-blue-300 hover:bg-blue-50/20"}`}
               >
                 <input ref={fileRef} type="file" accept=".pdf,.xls,.xlsx,.doc,.docx,.png,.jpg,.jpeg" className="hidden"
-                  onChange={e=>{const f=e.target.files?.[0];if(f)setFile(f);}}/>
+                  onChange={e=>{const f=e.target.files?.[0];if(f){setFile(f);if(/\.pdf$/i.test(f.name))setAiMode(true);else if(/\.xlsx?$/i.test(f.name))setAiMode(false);}}}/>
                 {file?(
                   <div className="flex items-center gap-3 bg-white rounded-xl px-4 py-3 border border-gray-200 shadow-sm">
                     <FileIcon name={file.name}/>
@@ -1145,18 +1347,22 @@ export default function UploadDealPage(){
               )}
 
               {/* AI Mode toggle */}
-              <label className="flex items-center gap-2.5 cursor-pointer select-none py-1">
+              {(()=>{const isExcel=!!file?.name.match(/\.xlsx?$/i);return(
+              <label className={`flex items-center gap-2.5 select-none py-1 ${isExcel?"opacity-40 cursor-not-allowed":"cursor-pointer"}`}>
                 <div
-                  onClick={()=>setAiMode(m=>!m)}
-                  className={`relative w-10 h-5 rounded-full transition-colors duration-200 flex-shrink-0 ${aiMode?"bg-[#1e3a5f]":"bg-gray-200"}`}
+                  onClick={()=>{if(!isExcel)setAiMode(m=>!m);}}
+                  className={`relative w-10 h-5 rounded-full transition-colors duration-200 flex-shrink-0 ${aiMode&&!isExcel?"bg-[#1e3a5f]":"bg-gray-200"}`}
                 >
-                  <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform duration-200 ${aiMode?"translate-x-5":"translate-x-0"}`}/>
+                  <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform duration-200 ${aiMode&&!isExcel?"translate-x-5":"translate-x-0"}`}/>
                 </div>
                 <span className="text-xs font-medium text-gray-700">
                   Use AI Extraction
-                  <span className="ml-1.5 text-[11px] text-gray-400 font-normal">{aiMode?"Deals split by class, column mapping skipped":"Standard extraction with column mapping"}</span>
+                  <span className="ml-1.5 text-[11px] text-gray-400 font-normal">
+                    {isExcel?"Not available for Excel — use column mapping":"Standard extraction with column mapping"}
+                  </span>
                 </span>
               </label>
+              );})()}
 
               <button onClick={handleExtract} disabled={!file||!dealType||(dealType==="b2b"&&!supplierName)||uploading}
                 className="w-full bg-[#1e3a5f] text-white rounded-xl py-3 text-sm font-semibold hover:bg-[#16304f] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2">
@@ -1216,6 +1422,92 @@ export default function UploadDealPage(){
             {!aiMode&&preview?.warning&&<span className="flex items-center gap-1 text-[11px] text-amber-600"><AlertTriangle className="w-3.5 h-3.5"/>{preview.warning}</span>}
           </div>
 
+          {/* Filter + Bulk Edit Toolbar */}
+          <div className="bg-white rounded-xl border border-gray-200 px-4 py-2.5 space-y-2">
+            {/* Row 1: Filter */}
+            <div className="flex items-center gap-2">
+              <div className="relative flex-1">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none"/>
+                <input
+                  type="text"
+                  placeholder="Filter by airline, class, or any value…"
+                  value={filterText}
+                  onChange={e=>setFilterText(e.target.value)}
+                  className="w-full pl-8 pr-3 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400"
+                />
+              </div>
+              {filterText&&(
+                <>
+                  <span className="text-[11px] text-gray-400 whitespace-nowrap">
+                    {rows.filter(row=>{const h=[row.airline_name,row.remarks,row.validity_raw,...Object.values(row.extra)].join(" ").toLowerCase();return h.includes(filterText.toLowerCase());}).length} of {rows.length} rows
+                  </span>
+                  <button onClick={()=>setFilterText("")} title="Clear filter" className="p-1 hover:bg-gray-100 rounded-lg">
+                    <X className="w-3.5 h-3.5 text-gray-500"/>
+                  </button>
+                </>
+              )}
+            </div>
+            {/* Row 2: Bulk Edit (only when rows are selected) */}
+            {selectedRows.size>0&&(
+              <div className="flex items-center gap-2 flex-wrap border-t border-gray-100 pt-2">
+                <span className="inline-flex items-center gap-1 bg-blue-100 text-blue-700 text-[11px] font-semibold px-2.5 py-1 rounded-full whitespace-nowrap">
+                  ● {selectedRows.size} row{selectedRows.size!==1?"s":""} selected
+                </span>
+                <select
+                  value={bulkColKey}
+                  onChange={e=>{setBulkColKey(e.target.value);setBulkColValue("");}}
+                  className="border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400 text-gray-700"
+                >
+                  <option value="">Column to edit…</option>
+                  {colGroups.filter(g=>g.label!=="Incl / Excl").map(g=>(
+                    <optgroup key={g.label} label={g.label}>
+                      {g.cols.filter(c=>c.key!=="__incl_excl__").map(c=>(
+                        <option key={c.key} value={c.key}>{c.label}</option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+                {bulkColKey&&(()=>{
+                  const meta=getColMeta(bulkColKey);
+                  if(meta.type==="date")return(
+                    <input type="date" value={bulkColValue} onChange={e=>setBulkColValue(e.target.value)}
+                      className="border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400"/>
+                  );
+                  if(meta.type==="select"&&meta.options)return(
+                    <select value={bulkColValue} onChange={e=>setBulkColValue(e.target.value)}
+                      className="border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400 text-gray-700">
+                      <option value="">Choose value…</option>
+                      {meta.options.map(o=><option key={o} value={o}>{o}</option>)}
+                    </select>
+                  );
+                  if(meta.type==="number")return(
+                    <input type="number" value={bulkColValue} onChange={e=>setBulkColValue(e.target.value)}
+                      placeholder="Enter value…"
+                      className="border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400 w-28"/>
+                  );
+                  return(
+                    <input type="text" value={bulkColValue} onChange={e=>setBulkColValue(e.target.value)}
+                      placeholder="Enter value…"
+                      className="border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400 w-36"/>
+                  );
+                })()}
+                <button
+                  onClick={handleBulkApply}
+                  disabled={!bulkColKey||bulkColValue===""}
+                  className="px-3 py-1.5 bg-blue-600 text-white text-xs font-semibold rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+                >
+                  Apply to {selectedRows.size} row{selectedRows.size!==1?"s":""}
+                </button>
+                <button
+                  onClick={()=>setSelectedRows(new Set())}
+                  className="px-3 py-1.5 border border-gray-200 text-gray-600 text-xs font-medium rounded-lg hover:bg-gray-50 whitespace-nowrap"
+                >
+                  Deselect All
+                </button>
+              </div>
+            )}
+          </div>
+
           <div className="bg-white rounded-lg border border-gray-200">
             <div className="px-4 py-2.5 border-b border-gray-100 flex items-center gap-2">
               <h2 className="text-xs font-semibold text-blue-600 uppercase tracking-wide">Review &amp; Edit — All Data</h2>
@@ -1231,6 +1523,10 @@ export default function UploadDealPage(){
               inclExclPopup={inclExclPopup}
               setInclExclPopup={setInclExclPopup}
               onToggleInclExclType={handleToggleInclExclType}
+              filterText={filterText}
+              selectedRows={selectedRows}
+              onToggleRow={handleToggleRow}
+              onToggleAllFiltered={handleToggleAllFiltered}
             />
           </div>
 
