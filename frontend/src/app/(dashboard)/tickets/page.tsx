@@ -15,6 +15,9 @@ import {
   X,
   Save,
   AlertTriangle,
+  FileSearch,
+  ChevronDown,
+  ChevronRight,
 } from "lucide-react";
 import api from "@/lib/api";
 
@@ -100,6 +103,72 @@ type DealMatchSummary = {
   is_best: boolean;
 };
 
+type MatchStep = {
+  step: string;
+  passed: boolean;
+  ticket_value: string;
+  deal_value: string;
+  detail: string;
+};
+
+type IncentiveBreakdown = {
+  targetCalcCols: string;
+  sell_fare: number | null;
+  sell_tax_yq_added: boolean;
+  sell_tax_yq_value: number | null;
+  sale_yr_added: boolean;
+  sale_yr_value: number | null;
+  base_total: number | null;
+  incentiveAmtPct: string | number | null;
+  formula: string;
+  result: number | null;
+};
+
+type PLBDiagnostic = {
+  plb_key: string;
+  raw_plb: Record<string, unknown>;
+  steps: MatchStep[];
+  incentive_breakdown: IncentiveBreakdown | null;
+  plb_overall_match: boolean;
+};
+
+type DealDiagnosticItem = {
+  deal_id: number;
+  deal_type: string;
+  deal_name: string;
+  deal_no: string;
+  valid_from: string | null;
+  valid_to: string | null;
+  trigger_type: string | null;
+  deal_validity_step: MatchStep;
+  plbs: PLBDiagnostic[];
+  overall_match: boolean;
+  best_incentive: number | null;
+};
+
+type MatchDiagnosis = {
+  ticket_id: number;
+  raw_airline_code: string;
+  normalized_codes: string[];
+  airline_resolved: string | null;
+  airline_resolution_detail: string;
+  raw_departure: string | null;
+  raw_ticket_date: string | null;
+  travel_date: string | null;
+  travel_date_detail: string;
+  segment_type: string | null;
+  booking_class: string | null;
+  cabin_groups_resolved: string[];
+  cabin_resolution_detail: string;
+  invoice_type: string | null;
+  sell_fare: number | null;
+  sell_tax_yq: number | null;
+  sale_yr: number | null;
+  total_deals_checked: number;
+  matched_count: number;
+  deals: DealDiagnosticItem[];
+};
+
 function dealNo(type: string | null, id: number | null): string | null {
   if (!type || !id) return null;
   const prefix = type === "airline" ? "AIR" : type === "b2b" ? "B2B" : "UPL";
@@ -163,6 +232,233 @@ const NUM_HEADERS: Array<{ label: string; key: keyof UploadedTicket }> = [
   { label: "Net AMT", key: "net_amt" },
 ];
 
+// ── Diagnosis Modal ────────────────────────────────────────────────────────
+
+function StepRow({ step }: { step: MatchStep }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className={`rounded-lg border px-3 py-2 text-[11px] ${step.passed ? "border-green-100 bg-green-50/30" : "border-red-100 bg-red-50/30"}`}>
+      <div className="flex items-center gap-2 cursor-pointer" onClick={() => setOpen((o) => !o)}>
+        <span className={`text-[13px] font-bold ${step.passed ? "text-green-600" : "text-red-500"}`}>
+          {step.passed ? "✓" : "✗"}
+        </span>
+        <span className="font-semibold text-gray-700 w-32 shrink-0">{step.step}</span>
+        <span className="px-1.5 py-0.5 rounded bg-blue-50 border border-blue-100 text-blue-700 font-mono text-[10px] truncate max-w-[140px]" title={step.ticket_value}>
+          {step.ticket_value}
+        </span>
+        <span className="text-gray-300 text-[10px]">→</span>
+        <span className="px-1.5 py-0.5 rounded bg-gray-100 border border-gray-200 text-gray-600 font-mono text-[10px] truncate max-w-[140px]" title={step.deal_value}>
+          {step.deal_value}
+        </span>
+        <button className="ml-auto text-gray-400 hover:text-gray-600">
+          {open ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+        </button>
+      </div>
+      {open && (
+        <p className="mt-1.5 pl-5 text-[10px] text-gray-500 italic leading-relaxed">{step.detail}</p>
+      )}
+    </div>
+  );
+}
+
+function PLBBlock({ plb }: { plb: PLBDiagnostic }) {
+  const [rawOpen, setRawOpen] = useState(false);
+  const bk = plb.incentive_breakdown;
+  return (
+    <div className={`rounded-xl border p-3 mt-2 ${plb.plb_overall_match ? "border-green-300 bg-green-50/20" : "border-gray-200 bg-white"}`}>
+      <div className="flex items-center gap-2 mb-2">
+        <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded ${plb.plb_overall_match ? "bg-green-600 text-white" : "bg-gray-200 text-gray-500"}`}>
+          {plb.plb_key}
+        </span>
+        <span className={`text-[10px] font-semibold ${plb.plb_overall_match ? "text-green-700" : "text-gray-400"}`}>
+          {plb.plb_overall_match ? "All filters passed" : "One or more filters failed"}
+        </span>
+        <button
+          onClick={() => setRawOpen((o) => !o)}
+          className="ml-auto text-[9px] text-gray-400 hover:text-gray-600 border border-gray-200 rounded px-1.5 py-0.5"
+        >
+          {rawOpen ? "Hide raw PLB" : "View raw PLB JSON"}
+        </button>
+      </div>
+
+      {rawOpen && (
+        <pre className="text-[9px] bg-gray-900 text-green-300 rounded-lg p-2.5 overflow-x-auto mb-2 leading-relaxed">
+          {JSON.stringify(plb.raw_plb, null, 2)}
+        </pre>
+      )}
+
+      <div className="space-y-1.5">
+        {plb.steps.map((s, i) => <StepRow key={i} step={s} />)}
+      </div>
+
+      {/* Incentive breakdown — always shown */}
+      {bk && (
+        <div className={`mt-3 rounded-lg border px-3 py-2 text-[10px] ${plb.plb_overall_match ? "border-amber-200 bg-amber-50/40" : "border-gray-100 bg-gray-50/50"}`}>
+          <p className="font-bold text-gray-600 mb-1.5 uppercase tracking-wide text-[9px]">
+            Incentive Calculation {!plb.plb_overall_match && <span className="text-gray-400 font-normal">(hypothetical — filters did not pass)</span>}
+          </p>
+          <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-gray-500">
+            <span>targetCalcCols</span><span className="font-mono text-gray-800">{String(bk.targetCalcCols ?? "—")}</span>
+            <span>sell_fare</span><span className="font-mono text-gray-800">₹ {bk.sell_fare ?? "—"}</span>
+            {bk.sell_tax_yq_added && <><span>+ sell_tax_yq</span><span className="font-mono text-gray-800">₹ {bk.sell_tax_yq_value ?? 0}</span></>}
+            {bk.sale_yr_added && <><span>+ sale_yr</span><span className="font-mono text-gray-800">₹ {bk.sale_yr_value ?? 0}</span></>}
+            <span className="font-semibold text-gray-700">base total</span><span className="font-mono font-semibold text-gray-800">₹ {bk.base_total ?? "—"}</span>
+            <span>incentiveAmtPct</span><span className="font-mono text-gray-800">{bk.incentiveAmtPct ?? "—"}%</span>
+          </div>
+          <p className={`mt-1.5 font-mono font-bold text-sm ${plb.plb_overall_match ? "text-amber-700" : "text-gray-400"}`}>
+            {String(bk.formula ?? "—")}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DiagnosisModal({
+  ticket,
+  diagnosis,
+  onClose,
+}: {
+  ticket: UploadedTicket;
+  diagnosis: MatchDiagnosis;
+  onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] flex flex-col overflow-hidden">
+        {/* header */}
+        <div className="flex items-start justify-between px-5 py-4 border-b border-gray-100 bg-violet-50/40">
+          <div>
+            <div className="flex items-center gap-2">
+              <FileSearch className="w-4 h-4 text-violet-600" />
+              <h2 className="text-sm font-bold text-gray-900">Match Diagnosis</h2>
+            </div>
+            <p className="text-[11px] text-gray-500 mt-0.5">
+              Ticket {ticket.ticket_number ?? ticket.booking_ref} ·{" "}
+              <span className="font-semibold text-gray-700">{diagnosis.total_deals_checked}</span> deals checked ·{" "}
+              <span className={`font-semibold ${diagnosis.matched_count > 0 ? "text-green-700" : "text-red-500"}`}>
+                {diagnosis.matched_count} matched
+              </span>
+            </p>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-lg leading-none">×</button>
+        </div>
+
+        {/* scrollable body */}
+        <div className="overflow-y-auto flex-1 px-5 py-4 space-y-4">
+
+          {/* ── Ticket trace ── */}
+          <div className="rounded-xl border border-gray-200 p-3.5 bg-gray-50/50">
+            <p className="text-[9px] font-bold uppercase tracking-wide text-violet-600 mb-2">Ticket Trace</p>
+            <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-[11px]">
+              <TraceRow label="Airline Code (raw)" value={diagnosis.raw_airline_code || "—"} />
+              <TraceRow label="Normalized codes" value={diagnosis.normalized_codes.join(", ") || "—"} />
+              <TraceRow
+                label="Airline resolved"
+                value={diagnosis.airline_resolved ?? "NOT FOUND"}
+                ok={!!diagnosis.airline_resolved}
+              />
+            </div>
+            <p className="text-[10px] text-gray-400 italic mt-1">{diagnosis.airline_resolution_detail}</p>
+
+            <div className="border-t border-gray-100 my-2" />
+
+            <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-[11px]">
+              <TraceRow label="Raw departure" value={diagnosis.raw_departure ?? "—"} />
+              <TraceRow label="Raw ticket date" value={diagnosis.raw_ticket_date ?? "—"} />
+              <TraceRow
+                label="Travel date (parsed)"
+                value={diagnosis.travel_date ?? "PARSE FAILED"}
+                ok={!!diagnosis.travel_date}
+              />
+            </div>
+            <p className="text-[10px] text-gray-400 italic mt-1">{diagnosis.travel_date_detail}</p>
+
+            <div className="border-t border-gray-100 my-2" />
+
+            <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-[11px]">
+              <TraceRow label="Segment Type" value={diagnosis.segment_type ?? "—"} />
+              <TraceRow label="Invoice Type" value={diagnosis.invoice_type ?? "—"} />
+              <TraceRow label="Booking Class" value={diagnosis.booking_class ?? "—"} />
+              <TraceRow label="Cabin groups resolved" value={diagnosis.cabin_groups_resolved.join(", ") || "—"} />
+              <TraceRow label="Sell Fare" value={diagnosis.sell_fare != null ? `₹ ${diagnosis.sell_fare}` : "—"} />
+              <TraceRow label="Sell Tax YQ" value={diagnosis.sell_tax_yq != null ? `₹ ${diagnosis.sell_tax_yq}` : "—"} />
+              <TraceRow label="Sale YR" value={diagnosis.sale_yr != null ? `₹ ${diagnosis.sale_yr}` : "—"} />
+            </div>
+            <p className="text-[10px] text-gray-400 italic mt-1">{diagnosis.cabin_resolution_detail}</p>
+          </div>
+
+          {/* ── Deal list ── */}
+          {diagnosis.deals.length === 0 ? (
+            <div className="py-8 text-center text-xs text-gray-400">
+              {diagnosis.airline_resolved
+                ? "No approved deals found for this airline. Add or approve a deal first."
+                : "Airline code could not be resolved — no deals to diagnose."}
+            </div>
+          ) : (
+            diagnosis.deals.map((d) => (
+              <div
+                key={`${d.deal_type}-${d.deal_id}`}
+                className={`rounded-xl border p-4 ${d.overall_match ? "border-green-300 bg-green-50/30" : "border-gray-200 bg-white"}`}
+              >
+                {/* deal header */}
+                <div className="flex items-center flex-wrap gap-2 mb-3">
+                  {d.overall_match && (
+                    <span className="px-2 py-0.5 rounded-full text-[9px] font-bold uppercase bg-green-600 text-white">Matched</span>
+                  )}
+                  <span className="font-mono text-[10px] font-bold text-gray-600 bg-gray-100 px-1.5 py-0.5 rounded border border-gray-200">{d.deal_no}</span>
+                  <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase border ${d.deal_type === "b2b" ? "bg-violet-50 text-violet-600 border-violet-200" : "bg-sky-50 text-sky-600 border-sky-200"}`}>
+                    {d.deal_type}
+                  </span>
+                  <span className="text-[11px] font-semibold text-gray-800">{d.deal_name}</span>
+                  {d.valid_from && d.valid_to && (
+                    <span className="text-[10px] text-gray-400 ml-auto">
+                      {d.valid_from.slice(0, 10)} → {d.valid_to.slice(0, 10)}
+                    </span>
+                  )}
+                  {d.trigger_type && (
+                    <span className="text-[10px] text-gray-500">trigger: <span className="font-semibold">{d.trigger_type}</span></span>
+                  )}
+                </div>
+
+                {/* deal validity step */}
+                <StepRow step={d.deal_validity_step} />
+
+                {/* PLB entries */}
+                {d.plbs.map((plb, i) => <PLBBlock key={i} plb={plb} />)}
+
+                {d.overall_match && d.best_incentive != null && (
+                  <p className="mt-3 text-xs font-bold text-green-700">
+                    Best matched incentive: ₹ {d.best_incentive.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </p>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+
+        {/* footer */}
+        <div className="px-5 py-3 border-t border-gray-100 flex justify-end">
+          <button onClick={onClose} className="px-4 py-1.5 rounded-lg bg-gray-100 text-gray-700 text-xs font-semibold hover:bg-gray-200">
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TraceRow({ label, value, ok }: { label: string; value: string; ok?: boolean }) {
+  return (
+    <>
+      <span className="text-gray-400">{label}</span>
+      <span className={`font-mono font-semibold ${ok === false ? "text-red-500" : ok === true ? "text-green-700" : "text-gray-800"}`}>
+        {value}
+      </span>
+    </>
+  );
+}
+
 export default function TicketsPage() {
   const [tickets, setTickets] = useState<UploadedTicket[]>([]);
   const [loading, setLoading] = useState(true);
@@ -180,6 +476,10 @@ export default function TicketsPage() {
     deals: DealMatchSummary[];
   } | null>(null);
   const [dealsLoading, setDealsLoading] = useState(false);
+
+  // ── Diagnosis state ──────────────────────────────────────────────────────
+  const [diagModal, setDiagModal] = useState<{ ticket: UploadedTicket; diagnosis: MatchDiagnosis } | null>(null);
+  const [diagLoading, setDiagLoading] = useState<Record<number, boolean>>({});
 
   // ── Edit / Delete state ──────────────────────────────────────────────────
   const [editModal,       setEditModal]       = useState<UploadedTicket | null>(null);
@@ -287,6 +587,20 @@ export default function TicketsPage() {
       setDealsModal({ ticket, deals: [] });
     } finally {
       setDealsLoading(false);
+    }
+  }
+
+  async function openDiagModal(ticket: UploadedTicket) {
+    setDiagLoading((p) => ({ ...p, [ticket.id]: true }));
+    try {
+      const { data } = await api.get<MatchDiagnosis>(
+        `/tickets/uploads/${ticket.id}/match-diagnosis`,
+      );
+      setDiagModal({ ticket, diagnosis: data });
+    } catch {
+      // open with empty deals so the user sees the trace header at least
+    } finally {
+      setDiagLoading((p) => ({ ...p, [ticket.id]: false }));
     }
   }
 
@@ -826,6 +1140,18 @@ export default function TicketsPage() {
                               <Trash2 className="w-3 h-3" />
                             </button>
                             <button
+                              onClick={() => openDiagModal(t)}
+                              disabled={diagLoading[t.id]}
+                              title="Diagnose deal matching — see step-by-step why this ticket did or did not match"
+                              className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border text-[10px] font-semibold transition-colors border-violet-300 text-violet-600 hover:bg-violet-600 hover:text-white disabled:opacity-50"
+                            >
+                              {diagLoading[t.id] ? (
+                                <RefreshCw className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <FileSearch className="w-3 h-3" />
+                              )}
+                            </button>
+                            <button
                               onClick={() => runCalculation(t.id)}
                               disabled={isCalcLoading}
                               title="Match ticket against approved deals"
@@ -999,6 +1325,15 @@ export default function TicketsPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* ── Match Diagnosis Modal ────────────────────────────────────── */}
+      {diagModal && (
+        <DiagnosisModal
+          ticket={diagModal.ticket}
+          diagnosis={diagModal.diagnosis}
+          onClose={() => setDiagModal(null)}
+        />
       )}
 
       {/* ── Edit Ticket Modal ─────────────────────────────────────────── */}

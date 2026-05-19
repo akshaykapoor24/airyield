@@ -27,6 +27,7 @@ from app.schemas.uploaded_ticket import (
     RunCalculationResult,
     BatchRunCalculationResult,
     UploadedTicketUpdate,
+    MatchDiagnosisResponse,
 )
 from pydantic import BaseModel
 from app.services.deal_matching import DealMatchingService
@@ -117,6 +118,7 @@ async def extract_ticket_file(
         xls_columns=result.get("xls_columns", []),
         suggested_mapping=result.get("suggested_mapping", {}),
         is_template_match=result.get("is_template_match", True),
+        sample_row=result.get("sample_row", {}),
     )
 
 
@@ -520,3 +522,153 @@ async def get_all_matched_deals(
         )
         for m in all_matches
     ]
+
+
+# ── Match Diagnosis — deep step-by-step trace ─────────────────────────────
+
+@router.get("/uploads/{ticket_id}/match-diagnosis", response_model=MatchDiagnosisResponse)
+async def match_diagnosis(
+    ticket_id:    int,
+    db:           AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return a full step-by-step diagnostic showing why each candidate deal did or did not match."""
+    from app.services.deal_matching import _resolve_cabin_groups_with_detail
+
+    res = await db.execute(
+        select(UploadedTicket).where(
+            UploadedTicket.id == ticket_id,
+            UploadedTicket.tenant_id == current_user.tenant_id,
+        )
+    )
+    ticket = res.scalar_one_or_none()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+
+    raw_code = (ticket.airlines_code or "").strip()
+
+    # ── Airline resolution ────────────────────────────────────────────────
+    if not raw_code:
+        return MatchDiagnosisResponse(
+            ticket_id=ticket_id,
+            raw_airline_code="",
+            normalized_codes=[],
+            airline_resolved=None,
+            airline_resolution_detail="No airline code on ticket — cannot search for deals",
+            raw_departure=ticket.departure_datetime,
+            raw_ticket_date=ticket.ticket_date,
+            travel_date=None,
+            travel_date_detail="Not applicable — airline code missing",
+            segment_type=ticket.segment_type,
+            booking_class=ticket.booking_class,
+            cabin_groups_resolved=[],
+            cabin_resolution_detail="Not applicable — airline code missing",
+            invoice_type=ticket.invoice_type,
+            sell_fare=float(ticket.sell_fare) if ticket.sell_fare is not None else None,
+            sell_tax_yq=float(ticket.sell_tax_yq) if ticket.sell_tax_yq is not None else None,
+            sale_yr=float(ticket.sale_yr) if ticket.sale_yr is not None else None,
+            total_deals_checked=0,
+            matched_count=0,
+            deals=[],
+        )
+
+    code_variants = list({raw_code, raw_code.zfill(3)}) if raw_code.isdigit() else [raw_code]
+    airline_res = await db.execute(
+        select(Airline).where(
+            or_(
+                Airline.iata_code.in_(code_variants),
+                Airline.icao_code.in_(code_variants),
+            )
+        )
+    )
+    airline = airline_res.scalar_one_or_none()
+    if airline:
+        airline_name = airline.name
+        airline_detail = (
+            f"raw_code='{raw_code}'; checked IATA and ICAO in {code_variants}; "
+            f"found '{airline_name}' (IATA={airline.iata_code}, ICAO={airline.icao_code})"
+        )
+    else:
+        airline_name = None
+        airline_detail = (
+            f"raw_code='{raw_code}'; checked IATA and ICAO in {code_variants}; "
+            f"NOT FOUND in airline master — add this airline code to the master table"
+        )
+
+    # ── Travel date ───────────────────────────────────────────────────────
+    travel_date = _parse_travel_date(ticket.departure_datetime, ticket.ticket_date)
+    if travel_date:
+        src = ticket.departure_datetime if ticket.departure_datetime else ticket.ticket_date
+        date_detail = f"parsed from '{src}' → {travel_date}"
+    else:
+        date_detail = (
+            f"departure_datetime='{ticket.departure_datetime}', ticket_date='{ticket.ticket_date}'; "
+            f"could not parse either — fix the date format"
+        )
+
+    if not airline_name or not travel_date:
+        _, cabin_detail = await _resolve_cabin_groups_with_detail(db, airline_name or "", ticket.booking_class)
+        return MatchDiagnosisResponse(
+            ticket_id=ticket_id,
+            raw_airline_code=raw_code,
+            normalized_codes=code_variants,
+            airline_resolved=airline_name,
+            airline_resolution_detail=airline_detail,
+            raw_departure=ticket.departure_datetime,
+            raw_ticket_date=ticket.ticket_date,
+            travel_date=str(travel_date) if travel_date else None,
+            travel_date_detail=date_detail,
+            segment_type=ticket.segment_type,
+            booking_class=ticket.booking_class,
+            cabin_groups_resolved=[],
+            cabin_resolution_detail=cabin_detail,
+            invoice_type=ticket.invoice_type,
+            sell_fare=float(ticket.sell_fare) if ticket.sell_fare is not None else None,
+            sell_tax_yq=float(ticket.sell_tax_yq) if ticket.sell_tax_yq is not None else None,
+            sale_yr=float(ticket.sale_yr) if ticket.sale_yr is not None else None,
+            total_deals_checked=0,
+            matched_count=0,
+            deals=[],
+        )
+
+    # ── Cabin group resolution ────────────────────────────────────────────
+    cabin_groups, cabin_detail = await _resolve_cabin_groups_with_detail(
+        db, airline_name, ticket.booking_class
+    )
+
+    # ── Run diagnosis ─────────────────────────────────────────────────────
+    deals = await DealMatchingService.diagnose_match(
+        db=db,
+        airline_name=airline_name,
+        travel_date=travel_date,
+        tenant_id=current_user.tenant_id,
+        segment_type=ticket.segment_type,
+        booking_class=ticket.booking_class,
+        invoice_type=ticket.invoice_type,
+        sell_fare=float(ticket.sell_fare) if ticket.sell_fare is not None else None,
+        sell_tax_yq=float(ticket.sell_tax_yq) if ticket.sell_tax_yq is not None else None,
+        sale_yr=float(ticket.sale_yr) if ticket.sale_yr is not None else None,
+    )
+
+    return MatchDiagnosisResponse(
+        ticket_id=ticket_id,
+        raw_airline_code=raw_code,
+        normalized_codes=code_variants,
+        airline_resolved=airline_name,
+        airline_resolution_detail=airline_detail,
+        raw_departure=ticket.departure_datetime,
+        raw_ticket_date=ticket.ticket_date,
+        travel_date=str(travel_date),
+        travel_date_detail=date_detail,
+        segment_type=ticket.segment_type,
+        booking_class=ticket.booking_class,
+        cabin_groups_resolved=sorted(cabin_groups),
+        cabin_resolution_detail=cabin_detail,
+        invoice_type=ticket.invoice_type,
+        sell_fare=float(ticket.sell_fare) if ticket.sell_fare is not None else None,
+        sell_tax_yq=float(ticket.sell_tax_yq) if ticket.sell_tax_yq is not None else None,
+        sale_yr=float(ticket.sale_yr) if ticket.sale_yr is not None else None,
+        total_deals_checked=len(deals),
+        matched_count=sum(1 for d in deals if d.overall_match),
+        deals=deals,
+    )

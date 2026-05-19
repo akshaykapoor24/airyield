@@ -64,6 +64,7 @@ type ExtractionPreview = {
   xls_columns:       string[];
   suggested_mapping: Record<string, string>; // canonical → xls_col
   is_template_match: boolean;
+  sample_row:        Record<string, string>; // xls_col → first-row raw value
 };
 
 // ── Our canonical fields (in display order) ────────────────────────────────
@@ -628,6 +629,29 @@ export default function UploadTicketsPage() {
                         ))}
                       </select>
                       <ChevronDown className="w-3 h-3 text-gray-400 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    </div>
+
+                    {/* sample value from first XLS row */}
+                    <div className="w-36 shrink-0">
+                      {!isSkipped ? (
+                        (() => {
+                          const sample = preview.sample_row?.[mapped!];
+                          if (!sample) {
+                            return <span className="text-[10px] text-gray-300 italic">empty</span>;
+                          }
+                          const display = sample.length > 20 ? sample.slice(0, 18) + "…" : sample;
+                          return (
+                            <span
+                              title={sample}
+                              className="inline-block px-2 py-0.5 rounded bg-blue-50 border border-blue-100 text-[10px] font-mono text-blue-700 truncate max-w-full"
+                            >
+                              {display}
+                            </span>
+                          );
+                        })()
+                      ) : (
+                        <span className="text-[10px] text-gray-200">—</span>
+                      )}
                     </div>
 
                     {/* status badge */}

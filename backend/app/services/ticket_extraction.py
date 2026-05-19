@@ -189,6 +189,15 @@ class TicketExtractionService:
         suggested_mapping: dict[str, str] = {canon: xls_col for xls_col, canon in col_map.items()}
         is_template_match: bool = len(col_map) >= _TEMPLATE_MATCH_THRESHOLD
 
+        # Capture first-row raw values keyed by original XLS column name
+        sample_row: dict[str, str] = {}
+        if not df.empty:
+            first_raw = df.iloc[0]
+            for col in xls_columns:
+                val = first_raw.get(col)
+                s = str(val).strip() if val is not None else ""
+                sample_row[col] = "" if s in ("nan", "NaN", "-", "--", "N/A") else s
+
         rows = []
         for i, (_, raw) in enumerate(df.iterrows()):
             row: dict[str, Any] = {"row_order": i + 1}
@@ -211,4 +220,5 @@ class TicketExtractionService:
             "xls_columns": xls_columns,
             "suggested_mapping": suggested_mapping,
             "is_template_match": is_template_match,
+            "sample_row": sample_row,
         }

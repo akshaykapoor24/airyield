@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Optional
+from datetime import date, datetime
+from typing import Any, Optional
 from pydantic import BaseModel, ConfigDict
 
 
@@ -65,6 +65,7 @@ class TicketExtractionPreview(BaseModel):
     xls_columns:       list[str]       = []
     suggested_mapping: dict[str, str]  = {}   # canonical → xls_col
     is_template_match: bool            = True
+    sample_row:        dict[str, str]  = {}   # xls_col → first-row raw value (for mapping preview)
 
 
 class ConfirmTicketUploadPayload(BaseModel):
@@ -151,3 +152,58 @@ class UploadedTicketUpdate(BaseModel):
     customer_name:       Optional[str]   = None
 
     model_config = ConfigDict(extra="ignore")
+
+
+# ── Match Diagnosis schemas ────────────────────────────────────────────────
+
+class MatchStepResult(BaseModel):
+    step:         str            # "Deal Validity" | "Flight Type" | "Booking Class" | "Trigger Type" | "PLB Sub-Validity"
+    passed:       bool
+    ticket_value: str            # exact value from ticket
+    deal_value:   str            # exact value from deal / PLB
+    detail:       str            # full trace sentence
+
+
+class PLBDiagnostic(BaseModel):
+    plb_key:            str
+    raw_plb:            dict[str, Any]
+    steps:              list[MatchStepResult]
+    incentive_breakdown: Optional[dict[str, Any]]  # always computed even if steps failed
+    plb_overall_match:  bool
+
+
+class DealDiagnostic(BaseModel):
+    deal_id:           int
+    deal_type:         str            # "airline" | "b2b"
+    deal_name:         str
+    deal_no:           str            # e.g. "AIR-0014", "B2B-0001"
+    valid_from:        Optional[date]
+    valid_to:          Optional[date]
+    trigger_type:      Optional[str]  # airline deals only
+    deal_validity_step: MatchStepResult
+    plbs:              list[PLBDiagnostic]
+    overall_match:     bool
+    best_incentive:    Optional[float]
+
+
+class MatchDiagnosisResponse(BaseModel):
+    ticket_id:               int
+    raw_airline_code:        str
+    normalized_codes:        list[str]
+    airline_resolved:        Optional[str]
+    airline_resolution_detail: str
+    raw_departure:           Optional[str]
+    raw_ticket_date:         Optional[str]
+    travel_date:             Optional[str]
+    travel_date_detail:      str
+    segment_type:            Optional[str]
+    booking_class:           Optional[str]
+    cabin_groups_resolved:   list[str]
+    cabin_resolution_detail: str
+    invoice_type:            Optional[str]
+    sell_fare:               Optional[float]
+    sell_tax_yq:             Optional[float]
+    sale_yr:                 Optional[float]
+    total_deals_checked:     int
+    matched_count:           int
+    deals:                   list[DealDiagnostic]
