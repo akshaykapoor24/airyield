@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, func
 
-from app.models.airline_deal import AirlineDeal, ManualDealStatus
+from app.models.airline_deal import AirlineDeal, ManualDealStatus, DealLifecycleStatus
 from app.models.b2b_deal import B2BDeal
 from app.models.airline_class_master import AirlineClassMaster
 
@@ -199,8 +199,9 @@ class DealMatchingService:
         a_result = await db.execute(
             select(AirlineDeal).where(
                 and_(
-                    AirlineDeal.tenant_id == tenant_id,
-                    AirlineDeal.status    == ManualDealStatus.APPROVED,
+                    AirlineDeal.tenant_id             == tenant_id,
+                    AirlineDeal.status                == ManualDealStatus.APPROVED,
+                    AirlineDeal.deal_lifecycle_status == DealLifecycleStatus.ACTIVE,
                     func.lower(AirlineDeal.airline_name) == airline_lower,
                     AirlineDeal.valid_from.is_not(None),
                     AirlineDeal.valid_to.is_not(None),
@@ -222,8 +223,9 @@ class DealMatchingService:
         b_result = await db.execute(
             select(B2BDeal).where(
                 and_(
-                    B2BDeal.tenant_id == tenant_id,
-                    B2BDeal.status    == ManualDealStatus.APPROVED,
+                    B2BDeal.tenant_id             == tenant_id,
+                    B2BDeal.status                == ManualDealStatus.APPROVED,
+                    B2BDeal.deal_lifecycle_status == DealLifecycleStatus.ACTIVE,
                     func.lower(B2BDeal.airline_name) == airline_lower,
                     B2BDeal.valid_from.is_not(None),
                     B2BDeal.valid_to.is_not(None),
@@ -419,6 +421,9 @@ class DealMatchingService:
                     if v is not None and (best_incentive is None or v > best_incentive):
                         best_incentive = v
 
+            raw_lifecycle = getattr(deal, 'deal_lifecycle_status', None)
+            lifecycle_str = raw_lifecycle.value if hasattr(raw_lifecycle, 'value') else str(raw_lifecycle or 'active')
+
             return DealDiagnostic(
                 deal_id=deal.id,
                 deal_type=deal_type,
@@ -431,6 +436,7 @@ class DealMatchingService:
                 plbs=plb_diagnostics,
                 overall_match=overall,
                 best_incentive=best_incentive,
+                deal_lifecycle_status=lifecycle_str,
             )
 
         # ── Query airline_deals (no date filter) ──────────────────────────

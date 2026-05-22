@@ -17,6 +17,7 @@ type Airline = {
   icao_code: string | null;
   logo_url: string | null;
   is_active: boolean;
+  contract_year: "CY" | "FY" | null;
 };
 
 type BulkResult = { total: number; success: number; failed: number; errors: string[] };
@@ -26,6 +27,7 @@ type Approval = {
   name: string;
   iata_code: string;
   icao_code: string | null;
+  contract_year: "CY" | "FY" | null;
   status: "pending" | "approved" | "rejected";
   submitted_by: { id: number; full_name: string; email: string };
   submitted_at: string;
@@ -39,6 +41,7 @@ const emptyForm = {
   name: "",
   iata_code: "",
   icao_code: "",
+  contract_year: "",
 };
 
 function AddAirlineModal({
@@ -71,6 +74,7 @@ function AddAirlineModal({
         name: airline.name,
         iata_code: airline.iata_code,
         icao_code: airline.icao_code ?? "",
+        contract_year: airline.contract_year ?? "",
       });
     }
   };
@@ -90,6 +94,7 @@ function AddAirlineModal({
         name: form.name.trim(),
         iata_code: form.iata_code.trim().toUpperCase(),
         icao_code: form.icao_code.trim() || null,
+        contract_year: form.contract_year || null,
         request_type: requestType,
         target_id: targetId,
       });
@@ -247,6 +252,18 @@ function AddAirlineModal({
                 </div>
               </div>
 
+              <div>
+                <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">
+                  Contract Year
+                </label>
+                <select value={form.contract_year} onChange={e => set("contract_year", e.target.value)}
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-400 bg-gray-50">
+                  <option value="">— Select —</option>
+                  <option value="CY">CY — Calendar Year (ends Dec 31)</option>
+                  <option value="FY">FY — Financial Year (ends Mar 31)</option>
+                </select>
+              </div>
+
               {error && <p className="text-[11px] text-red-500">{error}</p>}
             </div>
           ) : (
@@ -348,6 +365,7 @@ function EditAirlineModal({
     name: airline.name,
     iata_code: airline.iata_code,
     icao_code: airline.icao_code ?? "",
+    contract_year: airline.contract_year ?? "",
     is_active: airline.is_active,
   });
   const [saving, setSaving] = useState(false);
@@ -365,6 +383,7 @@ function EditAirlineModal({
         name: form.name.trim(),
         iata_code: form.iata_code.trim().toUpperCase(),
         icao_code: String(form.icao_code).trim() || null,
+        contract_year: String(form.contract_year).trim() || null,
         is_active: form.is_active,
       });
       onSaved();
@@ -405,6 +424,15 @@ function EditAirlineModal({
                 maxLength={4}
                 className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm font-mono uppercase focus:outline-none focus:ring-2 focus:ring-sky-400 bg-gray-50" />
             </div>
+          </div>
+          <div>
+            <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Contract Year</label>
+            <select value={form.contract_year} onChange={e => set("contract_year", e.target.value)}
+              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-400 bg-gray-50">
+              <option value="">— Select —</option>
+              <option value="CY">CY — Calendar Year (ends Dec 31)</option>
+              <option value="FY">FY — Financial Year (ends Mar 31)</option>
+            </select>
           </div>
           <label className="flex items-center gap-2 text-sm text-gray-600">
             <input
@@ -477,9 +505,10 @@ function AirlineDiffModal({
   approval, current, loading, onClose,
 }: { approval: Approval; current: Airline | null; loading: boolean; onClose: () => void }) {
   const fields: { label: string; ak: keyof Approval; ck: keyof Airline }[] = [
-    { label: "Airline Name",       ak: "name",      ck: "name" },
-    { label: "Airline Code",       ak: "iata_code", ck: "iata_code" },
-    { label: "IATA Numeric Code",  ak: "icao_code", ck: "icao_code" },
+    { label: "Airline Name",       ak: "name",          ck: "name" },
+    { label: "Airline Code",       ak: "iata_code",     ck: "iata_code" },
+    { label: "IATA Numeric Code",  ak: "icao_code",     ck: "icao_code" },
+    { label: "Contract Year",      ak: "contract_year", ck: "contract_year" },
   ];
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
@@ -707,18 +736,18 @@ export default function AirlinesPage() {
           <table className="w-full">
             <thead>
               <tr style={{ background: "#1e4d8c" }}>
-                {["AIRLINE", "CODE", "IATA_NUMERIC_CODE", "STATUS", ...(isPlatformAdmin ? ["ACTIONS"] : [])].map(h => (
+                {["AIRLINE", "CODE", "IATA_NUMERIC_CODE", "CONTRACT YEAR", "STATUS", ...(isPlatformAdmin ? ["ACTIONS"] : [])].map(h => (
                   <th key={h} className="px-3 py-2.5 text-left text-[10px] font-semibold text-white uppercase tracking-wider whitespace-nowrap">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={isPlatformAdmin ? 5 : 4} className="px-4 py-12 text-center text-xs text-gray-400">
+                <tr><td colSpan={isPlatformAdmin ? 6 : 5} className="px-4 py-12 text-center text-xs text-gray-400">
                   <RefreshCw className="w-4 h-4 animate-spin mx-auto mb-2 text-gray-300" /> Loading airlines...
                 </td></tr>
               ) : airlines.length === 0 ? (
-                <tr><td colSpan={isPlatformAdmin ? 5 : 4} className="px-4 py-12 text-center text-xs text-gray-400">No airlines found.</td></tr>
+                <tr><td colSpan={isPlatformAdmin ? 6 : 5} className="px-4 py-12 text-center text-xs text-gray-400">No airlines found.</td></tr>
               ) : airlines.map((a, idx) => (
                 <tr key={a.id}
                   className={`border-b border-gray-50 hover:bg-sky-50/30 transition-colors group ${idx % 2 === 0 ? "bg-white" : "bg-gray-50/30"}`}>
@@ -727,6 +756,11 @@ export default function AirlinesPage() {
                     <span className="font-mono text-[11px] font-bold text-sky-600 bg-sky-50 px-2 py-0.5 rounded">{a.iata_code}</span>
                   </td>
                   <td className="px-3 py-2 text-[11px] font-mono text-gray-600">{a.icao_code ?? "—"}</td>
+                  <td className="px-3 py-2">
+                    {a.contract_year
+                      ? <span className="font-mono text-[11px] font-semibold px-2 py-0.5 rounded bg-indigo-50 text-indigo-600 border border-indigo-200">{a.contract_year}</span>
+                      : <span className="text-[11px] text-gray-300">—</span>}
+                  </td>
                   <td className="px-3 py-2">
                     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border ${
                       a.is_active ? "bg-green-50 text-green-700 border-green-200" : "bg-gray-50 text-gray-500 border-gray-200"
@@ -771,7 +805,7 @@ export default function AirlinesPage() {
             <table className="w-full">
               <thead>
                 <tr style={{ background: "#1e4d8c" }}>
-                  {["AIRLINE", "CODE", "IATA_NUMERIC_CODE", "REQUEST",
+                  {["AIRLINE", "CODE", "IATA_NUMERIC_CODE", "CONTRACT YEAR", "REQUEST",
                     ...(isPlatformAdmin ? ["SUBMITTED BY", "SUBMITTED AT", "ACTIONS"] : ["STATUS", "SUBMITTED AT", "REASON"])
                   ].map(h => (
                     <th key={h} className="px-3 py-2.5 text-left text-[10px] font-semibold text-white uppercase tracking-wider whitespace-nowrap">{h}</th>
@@ -780,7 +814,7 @@ export default function AirlinesPage() {
               </thead>
               <tbody>
                 {approvals.length === 0 ? (
-                  <tr><td colSpan={6} className="px-4 py-10 text-center text-xs text-gray-400">
+                  <tr><td colSpan={7} className="px-4 py-10 text-center text-xs text-gray-400">
                     {isPlatformAdmin ? "No pending approvals." : "You haven't submitted any airlines yet."}
                   </td></tr>
                 ) : approvals.map((a, idx) => (
@@ -791,6 +825,11 @@ export default function AirlinesPage() {
                       <span className="font-mono text-[11px] font-bold text-sky-600 bg-sky-50 px-2 py-0.5 rounded">{a.iata_code}</span>
                     </td>
                     <td className="px-3 py-2 text-[11px] font-mono text-gray-600">{a.icao_code ?? "—"}</td>
+                    <td className="px-3 py-2">
+                      {a.contract_year
+                        ? <span className="font-mono text-[11px] font-semibold px-2 py-0.5 rounded bg-indigo-50 text-indigo-600 border border-indigo-200">{a.contract_year}</span>
+                        : <span className="text-[11px] text-gray-300">—</span>}
+                    </td>
                     <td className="px-3 py-2"><RequestTypeBadge type={a.request_type} /></td>
                     {isPlatformAdmin ? (
                       <>

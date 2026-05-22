@@ -70,6 +70,7 @@ type UploadedTicket = {
   matched_deal_type: string | null;
   matched_deal_name: string | null;
   calculated_incentive: number | null;
+  ticket_status: string;
   created_at: string;
   created_by_id: number;
 };
@@ -144,6 +145,7 @@ type DealDiagnosticItem = {
   plbs: PLBDiagnostic[];
   overall_match: boolean;
   best_incentive: number | null;
+  deal_lifecycle_status: string | null;
 };
 
 type MatchDiagnosis = {
@@ -187,7 +189,27 @@ function txt(v: string | null | undefined) {
   return v ?? <span className="text-gray-300">—</span>;
 }
 
+function fmtDateTime(iso: string): string {
+  const d = new Date(iso);
+  return (
+    d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) +
+    " " +
+    d.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: false })
+  );
+}
+
 const PAGE_SIZE = 20;
+
+const TICKET_STATUS_STYLE: Record<string, string> = {
+  draft:      "bg-gray-100 text-gray-500 border-gray-200",
+  calculated: "bg-emerald-50 text-emerald-600 border-emerald-200",
+  reviewed:   "bg-blue-50 text-blue-600 border-blue-200",
+};
+const TICKET_STATUS_LABEL: Record<string, string> = {
+  draft:      "Draft",
+  calculated: "Calculated",
+  reviewed:   "Reviewed",
+};
 
 const TEXT_HEADERS: Array<{ label: string; key: keyof UploadedTicket }> = [
   { label: "Ticket #", key: "ticket_number" },
@@ -318,14 +340,42 @@ function DiagnosisModal({
   ticket,
   diagnosis,
   onClose,
+  onMarkReviewed,
 }: {
   ticket: UploadedTicket;
   diagnosis: MatchDiagnosis;
   onClose: () => void;
+  onMarkReviewed: () => Promise<void>;
 }) {
+  const [filter, setFilter] = useState<"all" | "matched" | "unmatched">("all");
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [reviewing, setReviewing] = useState(false);
+
+  const matchedDeals = diagnosis.deals.filter((d) => d.overall_match);
+  const unmatchedDeals = diagnosis.deals.filter((d) => !d.overall_match);
+
+  // Single best deal: matched deal with highest best_incentive
+  const bestDeal = matchedDeals.length > 0
+    ? matchedDeals.reduce((b, d) => (d.best_incentive ?? 0) > (b.best_incentive ?? 0) ? d : b)
+    : null;
+
+  const visibleDeals =
+    filter === "matched" ? matchedDeals :
+    filter === "unmatched" ? unmatchedDeals :
+    diagnosis.deals;
+
+  function toggleDeal(key: string) {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] flex flex-col overflow-hidden">
+
         {/* header */}
         <div className="flex items-start justify-between px-5 py-4 border-b border-gray-100 bg-violet-50/40">
           <div>
@@ -343,6 +393,33 @@ function DiagnosisModal({
           </div>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-lg leading-none">×</button>
         </div>
+
+        {/* filter tabs */}
+        {diagnosis.deals.length > 0 && (
+          <div className="px-5 py-2.5 border-b border-gray-100 flex items-center gap-1.5">
+            {(
+              [
+                { key: "all",       label: `All (${diagnosis.deals.length})` },
+                { key: "matched",   label: `Matched (${matchedDeals.length})` },
+                { key: "unmatched", label: `Not Matched (${unmatchedDeals.length})` },
+              ] as const
+            ).map((f) => (
+              <button
+                key={f.key}
+                onClick={() => setFilter(f.key)}
+                className={`px-3 py-1 rounded-full text-[10px] font-semibold transition-colors ${
+                  filter === f.key
+                    ? f.key === "matched"   ? "bg-green-600 text-white"
+                    : f.key === "unmatched" ? "bg-red-500 text-white"
+                    : "bg-violet-600 text-white"
+                    : "bg-gray-100 text-gray-500 hover:bg-gray-200"
+                }`}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+        )}
 
         {/* scrollable body */}
         <div className="overflow-y-auto flex-1 px-5 py-4 space-y-4">
@@ -395,50 +472,140 @@ function DiagnosisModal({
                 ? "No approved deals found for this airline. Add or approve a deal first."
                 : "Airline code could not be resolved — no deals to diagnose."}
             </div>
+          ) : visibleDeals.length === 0 ? (
+            <div className="py-6 text-center text-xs text-gray-400">
+              No deals match this filter.
+            </div>
           ) : (
-            diagnosis.deals.map((d) => (
-              <div
-                key={`${d.deal_type}-${d.deal_id}`}
-                className={`rounded-xl border p-4 ${d.overall_match ? "border-green-300 bg-green-50/30" : "border-gray-200 bg-white"}`}
-              >
-                {/* deal header */}
-                <div className="flex items-center flex-wrap gap-2 mb-3">
-                  {d.overall_match && (
-                    <span className="px-2 py-0.5 rounded-full text-[9px] font-bold uppercase bg-green-600 text-white">Matched</span>
-                  )}
-                  <span className="font-mono text-[10px] font-bold text-gray-600 bg-gray-100 px-1.5 py-0.5 rounded border border-gray-200">{d.deal_no}</span>
-                  <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase border ${d.deal_type === "b2b" ? "bg-violet-50 text-violet-600 border-violet-200" : "bg-sky-50 text-sky-600 border-sky-200"}`}>
-                    {d.deal_type}
-                  </span>
-                  <span className="text-[11px] font-semibold text-gray-800">{d.deal_name}</span>
-                  {d.valid_from && d.valid_to && (
-                    <span className="text-[10px] text-gray-400 ml-auto">
-                      {d.valid_from.slice(0, 10)} → {d.valid_to.slice(0, 10)}
+            visibleDeals.map((d) => {
+              const key = `${d.deal_type}-${d.deal_id}`;
+              const isExpanded = expanded.has(key);
+              const isBest =
+                bestDeal !== null &&
+                d.deal_id === bestDeal.deal_id &&
+                d.deal_type === bestDeal.deal_type;
+
+              return (
+                <div
+                  key={key}
+                  className={`rounded-xl border overflow-hidden ${
+                    d.overall_match ? "border-green-300" : "border-red-200"
+                  }`}
+                >
+                  {/* collapsible header */}
+                  <div
+                    className={`flex items-center flex-wrap gap-2 px-4 py-3 cursor-pointer select-none ${
+                      d.overall_match ? "bg-green-50/50" : "bg-red-50/30"
+                    }`}
+                    onClick={() => toggleDeal(key)}
+                  >
+                    <span className={`text-[13px] font-bold leading-none ${d.overall_match ? "text-green-600" : "text-red-500"}`}>
+                      {d.overall_match ? "✓" : "✗"}
                     </span>
-                  )}
-                  {d.trigger_type && (
-                    <span className="text-[10px] text-gray-500">trigger: <span className="font-semibold">{d.trigger_type}</span></span>
+
+                    {isBest && (
+                      <span className="px-2 py-0.5 rounded-full text-[9px] font-bold uppercase bg-amber-400 text-white">
+                        Best Deal
+                      </span>
+                    )}
+                    {d.overall_match && !isBest && (
+                      <span className="px-2 py-0.5 rounded-full text-[9px] font-bold uppercase bg-green-600 text-white">
+                        Matched
+                      </span>
+                    )}
+                    {!d.overall_match && (
+                      <span className="px-2 py-0.5 rounded-full text-[9px] font-bold uppercase bg-red-500 text-white">
+                        Not Matched
+                      </span>
+                    )}
+
+                    <span className="font-mono text-[10px] font-bold text-gray-600 bg-gray-100 px-1.5 py-0.5 rounded border border-gray-200">
+                      {d.deal_no}
+                    </span>
+                    <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase border ${
+                      d.deal_type === "b2b"
+                        ? "bg-violet-50 text-violet-600 border-violet-200"
+                        : "bg-sky-50 text-sky-600 border-sky-200"
+                    }`}>
+                      {d.deal_type}
+                    </span>
+                    <span className="text-[11px] font-semibold text-gray-800">{d.deal_name}</span>
+
+                    {d.valid_from && d.valid_to && (
+                      <span className="text-[10px] text-gray-400">
+                        {d.valid_from.slice(0, 10)} → {d.valid_to.slice(0, 10)}
+                      </span>
+                    )}
+                    {d.trigger_type && (
+                      <span className="text-[10px] text-gray-500">
+                        trigger: <span className="font-semibold">{d.trigger_type}</span>
+                      </span>
+                    )}
+
+                    {isBest && d.best_incentive != null && (
+                      <span className="text-[11px] font-bold text-amber-700 ml-1">
+                        ₹ {fmt(d.best_incentive)}
+                      </span>
+                    )}
+                    {d.deal_lifecycle_status === "closed" && (
+                      <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-slate-200 text-slate-600 border border-slate-300">
+                        CLOSED
+                      </span>
+                    )}
+
+                    <span className="ml-auto text-gray-400">
+                      {isExpanded
+                        ? <ChevronDown className="w-3.5 h-3.5" />
+                        : <ChevronRight className="w-3.5 h-3.5" />}
+                    </span>
+                  </div>
+
+                  {/* expandable body */}
+                  {isExpanded && (
+                    <div className="px-4 py-3 space-y-2 border-t border-gray-100 bg-white">
+                      {d.overall_match && d.deal_lifecycle_status === "closed" && (
+                        <div className="px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-[11px] text-amber-700 flex items-start gap-1.5">
+                          <span className="font-bold shrink-0">⚠</span>
+                          <span>
+                            This deal is closed but matched with the ticket.
+                            {diagnosis.deals.some(x => x.overall_match && x.deal_lifecycle_status === "active") && (
+                              <> An active deal also matches — the calculator will prefer the active deal.</>
+                            )}
+                          </span>
+                        </div>
+                      )}
+                      <StepRow step={d.deal_validity_step} />
+                      {d.plbs.map((plb, i) => <PLBBlock key={i} plb={plb} />)}
+                      {d.overall_match && d.best_incentive != null && (
+                        <p className="mt-2 text-xs font-bold text-green-700">
+                          Best matched incentive: ₹ {d.best_incentive.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </p>
+                      )}
+                    </div>
                   )}
                 </div>
-
-                {/* deal validity step */}
-                <StepRow step={d.deal_validity_step} />
-
-                {/* PLB entries */}
-                {d.plbs.map((plb, i) => <PLBBlock key={i} plb={plb} />)}
-
-                {d.overall_match && d.best_incentive != null && (
-                  <p className="mt-3 text-xs font-bold text-green-700">
-                    Best matched incentive: ₹ {d.best_incentive.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                  </p>
-                )}
-              </div>
-            ))
+              );
+            })
           )}
         </div>
 
         {/* footer */}
-        <div className="px-5 py-3 border-t border-gray-100 flex justify-end">
+        <div className="px-5 py-3 border-t border-gray-100 flex items-center justify-between">
+          <button
+            onClick={async () => {
+              setReviewing(true);
+              await onMarkReviewed();
+              setReviewing(false);
+            }}
+            disabled={reviewing || ticket.ticket_status === "reviewed"}
+            className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+              ticket.ticket_status === "reviewed"
+                ? "bg-blue-100 text-blue-500 cursor-default"
+                : "bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
+            }`}
+          >
+            {reviewing ? "Saving…" : ticket.ticket_status === "reviewed" ? "✓ Reviewed" : "Mark as Reviewed"}
+          </button>
           <button onClick={onClose} className="px-4 py-1.5 rounded-lg bg-gray-100 text-gray-700 text-xs font-semibold hover:bg-gray-200">
             Close
           </button>
@@ -464,6 +631,8 @@ export default function TicketsPage() {
   const [loading, setLoading] = useState(true);
   const [apiError, setApiError] = useState("");
   const [search, setSearch] = useState("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
   const [page, setPage] = useState(1);
   const [calcLoading, setCalcLoading] = useState<Record<number, boolean>>({});
   const [batchRunning, setBatchRunning] = useState(false);
@@ -510,17 +679,23 @@ export default function TicketsPage() {
 
   const filtered = tickets.filter((t) => {
     const q = search.toLowerCase();
-    return (
+    const matchesSearch =
       !q ||
-      (t.ticket_number ?? "").toLowerCase().includes(q) ||
-      (t.gds_pnr ?? "").toLowerCase().includes(q) ||
-      (t.last_name ?? "").toLowerCase().includes(q) ||
-      (t.first_name ?? "").toLowerCase().includes(q) ||
-      (t.airlines_code ?? "").toLowerCase().includes(q) ||
-      (t.airline_name ?? "").toLowerCase().includes(q) ||
-      (t.sector ?? "").toLowerCase().includes(q) ||
-      (t.booking_ref ?? "").toLowerCase().includes(q)
-    );
+      (t.ticket_number  ?? "").toLowerCase().includes(q) ||
+      (t.gds_pnr        ?? "").toLowerCase().includes(q) ||
+      (t.last_name      ?? "").toLowerCase().includes(q) ||
+      (t.first_name     ?? "").toLowerCase().includes(q) ||
+      (t.airlines_code  ?? "").toLowerCase().includes(q) ||
+      (t.airline_name   ?? "").toLowerCase().includes(q) ||
+      (t.sector         ?? "").toLowerCase().includes(q) ||
+      (t.booking_ref    ?? "").toLowerCase().includes(q) ||
+      (t.segment_type   ?? "").toLowerCase().includes(q);
+
+    const uploadDate = t.created_at.slice(0, 10);
+    const matchesFrom = !dateFrom || uploadDate >= dateFrom;
+    const matchesTo   = !dateTo   || uploadDate <= dateTo;
+
+    return matchesSearch && matchesFrom && matchesTo;
   });
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
@@ -565,6 +740,7 @@ export default function TicketsPage() {
                 matched_deal_type: data.matched_deal_type,
                 matched_deal_name: data.matched_deal_name,
                 calculated_incentive: data.calculated_incentive,
+                ticket_status: "calculated",
               }
             : t,
         ),
@@ -602,6 +778,15 @@ export default function TicketsPage() {
     } finally {
       setDiagLoading((p) => ({ ...p, [ticket.id]: false }));
     }
+  }
+
+  async function markAsReviewed(ticketId: number) {
+    const { data } = await api.patch<UploadedTicket>(
+      `/tickets/uploads/${ticketId}`,
+      { ticket_status: "reviewed" },
+    );
+    setTickets((prev) => prev.map((t) => (t.id === ticketId ? { ...t, ticket_status: data.ticket_status } : t)));
+    setDiagModal(null);
   }
 
   function openEdit(ticket: UploadedTicket) {
@@ -670,6 +855,7 @@ export default function TicketsPage() {
                       matched_deal_type: data.matched_deal_type,
                       matched_deal_name: data.matched_deal_name,
                       calculated_incentive: data.calculated_incentive,
+                      ticket_status: "calculated",
                     }
                   : t,
               ),
@@ -694,7 +880,7 @@ export default function TicketsPage() {
     }
   }
 
-  const TOTAL_COLS = TEXT_HEADERS.length + NUM_HEADERS.length + 7; // checkbox, CC, AccCode, Calc Incentive, Delta Comm, Matched Deal, Run Calc
+  const TOTAL_COLS = TEXT_HEADERS.length + NUM_HEADERS.length + 9; // checkbox, CC, AccCode, Calc Incentive, Delta Comm, Ticket Status, Matched Deal, Uploaded At, Actions
 
   return (
     <>
@@ -810,8 +996,8 @@ export default function TicketsPage() {
           ))}
         </div>
 
-        {/* search */}
-        <div className="flex items-center gap-2">
+        {/* search + date filter */}
+        <div className="flex items-center gap-2 flex-wrap">
           <div className="relative flex-1 max-w-sm">
             <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
             <input
@@ -820,10 +1006,36 @@ export default function TicketsPage() {
                 setSearch(e.target.value);
                 setPage(1);
               }}
-              placeholder="Search ticket, PNR, passenger, airline, sector…"
+              placeholder="Search by segment type, first name, airline code, PNR…"
               className="w-full pl-8 pr-3 py-1.5 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-1 focus:ring-blue-400"
             />
           </div>
+          <label className="flex items-center gap-1 text-[11px] text-gray-500 whitespace-nowrap">
+            From
+            <input
+              type="date"
+              value={dateFrom}
+              onChange={(e) => { setDateFrom(e.target.value); setPage(1); }}
+              className="border border-gray-200 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400"
+            />
+          </label>
+          <label className="flex items-center gap-1 text-[11px] text-gray-500 whitespace-nowrap">
+            To
+            <input
+              type="date"
+              value={dateTo}
+              onChange={(e) => { setDateTo(e.target.value); setPage(1); }}
+              className="border border-gray-200 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400"
+            />
+          </label>
+          {(dateFrom || dateTo) && (
+            <button
+              onClick={() => { setDateFrom(""); setDateTo(""); setPage(1); }}
+              className="text-[11px] text-gray-400 hover:text-gray-600"
+            >
+              ✕ clear dates
+            </button>
+          )}
           <span className="text-[11px] text-gray-400 ml-auto whitespace-nowrap">
             {filtered.length} ticket{filtered.length !== 1 ? "s" : ""}
           </span>
@@ -888,9 +1100,17 @@ export default function TicketsPage() {
                   <th className="px-3 py-2.5 text-right text-[10px] font-semibold text-gray-300 uppercase tracking-wider whitespace-nowrap">
                     name
                   </th>
+                  {/* ticket status */}
+                  <th className="px-3 py-2.5 text-left text-[10px] font-semibold text-white uppercase tracking-wider whitespace-nowrap">
+                    Status
+                  </th>
                   {/* deal match */}
                   <th className="px-3 py-2.5 text-left text-[10px] font-semibold text-white uppercase tracking-wider whitespace-nowrap">
                     Matched Deal
+                  </th>
+                  {/* uploaded at */}
+                  <th className="px-3 py-2.5 text-left text-[10px] font-semibold text-gray-300 uppercase tracking-wider whitespace-nowrap">
+                    Uploaded At
                   </th>
                   {/* action */}
                   <th
@@ -1047,19 +1267,16 @@ export default function TicketsPage() {
                           )}
                         </td>
 
-                        {/* Delta Comm = Comm Sell - Calc. Incentive */}
+                        {/* Delta Comm = Comm Sell - Calc. Incentive (treat null incentive as 0) */}
                         <td className="px-3 py-2 text-right text-[11px] whitespace-nowrap font-semibold">
-                          {t.comm_sell != null &&
-                          t.calculated_incentive != null ? (
+                          {t.comm_sell != null ? (
                             (() => {
-                              const delta =
-                                (t.comm_sell ?? 0) -
-                                (t.calculated_incentive ?? 0);
+                              const delta = t.comm_sell - (t.calculated_incentive ?? 0);
                               return (
                                 <span
                                   className={
                                     delta >= 0
-                                      ? "text-orange-600"
+                                      ? "text-green-600"
                                       : "text-red-600"
                                   }
                                 >
@@ -1084,6 +1301,18 @@ export default function TicketsPage() {
                         {/* customer name */}
                         <td className="px-3 py-2 text-[11px] text-gray-600 whitespace-nowrap">
                           {t.customer_name ?? <span className="text-gray-300">—</span>}
+                        </td>
+
+                        {/* Ticket Status */}
+                        <td className="px-2 py-1.5 whitespace-nowrap">
+                          {(() => {
+                            const s = t.ticket_status ?? "draft";
+                            return (
+                              <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold border ${TICKET_STATUS_STYLE[s] ?? TICKET_STATUS_STYLE.draft}`}>
+                                {TICKET_STATUS_LABEL[s] ?? s}
+                              </span>
+                            );
+                          })()}
                         </td>
 
                         {/* Matched Deal */}
@@ -1118,6 +1347,11 @@ export default function TicketsPage() {
                               No Deal Found
                             </span>
                           )}
+                        </td>
+
+                        {/* Uploaded At */}
+                        <td className="px-3 py-2 text-[11px] text-gray-500 whitespace-nowrap">
+                          {fmtDateTime(t.created_at)}
                         </td>
 
                         {/* Actions: Edit + Delete + Run Calc — sticky right */}
@@ -1333,6 +1567,7 @@ export default function TicketsPage() {
           ticket={diagModal.ticket}
           diagnosis={diagModal.diagnosis}
           onClose={() => setDiagModal(null)}
+          onMarkReviewed={() => markAsReviewed(diagModal.ticket.id)}
         />
       )}
 

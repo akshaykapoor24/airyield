@@ -97,6 +97,7 @@ async def create_airline(payload: AirlineCreate, db: AsyncSession = Depends(get_
             target_airline.name = payload.name.strip()
             target_airline.iata_code = iata
             target_airline.icao_code = payload.icao_code.strip().upper() if payload.icao_code else None
+            target_airline.contract_year = payload.contract_year or None
             await db.commit()
             await db.refresh(target_airline)
             return {"status": "updated", "airline": AirlineRead.model_validate(target_airline)}
@@ -105,6 +106,7 @@ async def create_airline(payload: AirlineCreate, db: AsyncSession = Depends(get_
             name=payload.name.strip(),
             iata_code=iata,
             icao_code=payload.icao_code.strip().upper() if payload.icao_code else None,
+            contract_year=payload.contract_year or None,
             submitted_by_id=current_user.id,
             tenant_id=current_user.tenant_id,
             status="pending",
@@ -127,6 +129,7 @@ async def create_airline(payload: AirlineCreate, db: AsyncSession = Depends(get_
             iata_code=iata,
             icao_code=payload.icao_code.strip().upper() if payload.icao_code else None,
             logo_url=payload.logo_url,
+            contract_year=payload.contract_year or None,
         )
         airline = await crud.airline.create(db, obj_in=cleaned_payload)
         return {"status": "added", "airline": AirlineRead.model_validate(airline)}
@@ -144,6 +147,7 @@ async def create_airline(payload: AirlineCreate, db: AsyncSession = Depends(get_
         name=payload.name.strip(),
         iata_code=iata,
         icao_code=payload.icao_code.strip().upper() if payload.icao_code else None,
+        contract_year=payload.contract_year or None,
         submitted_by_id=current_user.id,
         tenant_id=current_user.tenant_id,
         status="pending",
@@ -355,6 +359,7 @@ async def approve_airline(
         target.name = approval.name
         target.iata_code = approval.iata_code
         target.icao_code = approval.icao_code
+        target.contract_year = approval.contract_year
 
         approval.status = "approved"
         approval.reviewed_by_id = current_user.id
@@ -381,6 +386,7 @@ async def approve_airline(
             "iata_code": approval.iata_code,
             "icao_code": approval.icao_code,
             "logo_url": None,
+            "contract_year": approval.contract_year,
         },
     )
     approval.status = "approved"

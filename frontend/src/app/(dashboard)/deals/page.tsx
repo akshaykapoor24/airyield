@@ -40,9 +40,10 @@ type DealRepositoryItem = {
   incentive_data:  Record<string, Record<string, string>> | null;
   incl_excl_types: string[] | null;
   incl_excl_data:  Record<string, Record<string, string>> | null;
-  status:          string;
-  created_at:      string;
-  file_type:       string | null;
+  status:                string;
+  deal_lifecycle_status: string | null;
+  created_at:            string;
+  file_type:             string | null;
 };
 
 type DealHistoryStep = {
@@ -85,6 +86,22 @@ const STATUS_LABEL: Record<string, string> = {
   approved:         "Approved",
   rejected:         "Rejected",
   extracted:        "Extracted",
+};
+
+const LIFECYCLE_STYLE: Record<string, string> = {
+  draft:  "bg-gray-50 text-gray-500 border-gray-200",
+  active: "bg-emerald-50 text-emerald-600 border-emerald-200",
+  closed: "bg-slate-100 text-slate-500 border-slate-300",
+};
+const LIFECYCLE_DOT: Record<string, string> = {
+  draft:  "bg-gray-400",
+  active: "bg-emerald-500",
+  closed: "bg-slate-400",
+};
+const LIFECYCLE_LABEL: Record<string, string> = {
+  draft:  "Draft",
+  active: "Active",
+  closed: "Closed",
 };
 
 const DEAL_TYPE_STYLE: Record<string, { label: string; cls: string }> = {
@@ -677,10 +694,12 @@ export default function DealsPage() {
   const paginated  = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
   // ── stat counts ───────────────────────────────────────────────────────
-  const countApproved  = deals.filter(d => d.status === "approved").length;
   const countPending   = deals.filter(d => d.status === "pending_approval" || d.status === "confirmed").length;
   const countAirline   = deals.filter(d => d.deal_type === "airline").length;
   const countB2B       = deals.filter(d => d.deal_type === "b2b").length;
+  const countActive    = deals.filter(d => d.deal_lifecycle_status === "active").length;
+  const countDraft     = deals.filter(d => !d.deal_lifecycle_status || d.deal_lifecycle_status === "draft").length;
+  const countClosed    = deals.filter(d => d.deal_lifecycle_status === "closed").length;
 
   const TABLE_HEADERS = [
     "Deal No", "Deal Type", "Airline Name", "Airline Type", "Contract Year",
@@ -688,7 +707,7 @@ export default function DealsPage() {
     "Trigger Type", "Payout Type",
     "Business Type", "Entity (LCC)",
     "Incentive Types", "Incl / Excl",
-    "Deal Maker", "Status", "Actions",
+    "Deal Maker", "Approval Status", "Deal Status", "Actions",
   ];
 
   return (
@@ -744,12 +763,14 @@ export default function DealsPage() {
           </div>
 
           {/* ── Stats bar ───────────────────────────────────────────────── */}
-          <div className="grid grid-cols-4 gap-2">
+          <div className="grid grid-cols-6 gap-2">
             {[
-              { label: "Total Deals",      value: deals.length,    color: "bg-blue-50 text-blue-700 border-blue-200"     },
-              { label: "Approved",         value: countApproved,   color: "bg-green-50 text-green-700 border-green-200"  },
-              { label: "Pending Approval", value: countPending,    color: "bg-amber-50 text-amber-700 border-amber-200"  },
-              { label: "Airline / B2B",    value: `${countAirline} / ${countB2B}`, color: "bg-violet-50 text-violet-700 border-violet-200" },
+              { label: "Total",            value: deals.length,                           color: "bg-blue-50 text-blue-700 border-blue-200"       },
+              { label: "Active",           value: countActive,                            color: "bg-emerald-50 text-emerald-700 border-emerald-200" },
+              { label: "Draft",            value: countDraft,                             color: "bg-gray-50 text-gray-600 border-gray-200"        },
+              { label: "Closed",           value: countClosed,                            color: "bg-slate-100 text-slate-600 border-slate-300"    },
+              { label: "Pending Approval", value: countPending,                           color: "bg-amber-50 text-amber-700 border-amber-200"     },
+              { label: "Airline / B2B",    value: `${countAirline} / ${countB2B}`,        color: "bg-violet-50 text-violet-700 border-violet-200"  },
             ].map(s => (
               <div key={s.label} className={`rounded-xl border px-4 py-3 ${s.color}`}>
                 <p className="text-xl font-bold">{s.value}</p>
@@ -942,12 +963,25 @@ export default function DealsPage() {
                           </p>
                         </td>
 
-                        {/* status */}
+                        {/* approval status */}
                         <td className="px-2 py-1.5 whitespace-nowrap">
                           <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border ${STATUS_STYLE[d.status] ?? "bg-gray-50 text-gray-500 border-gray-200"}`}>
                             <span className={`w-1.5 h-1.5 rounded-full ${STATUS_DOT[d.status] ?? "bg-gray-400"}`} />
                             {STATUS_LABEL[d.status] ?? d.status.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase())}
                           </span>
+                        </td>
+
+                        {/* deal lifecycle status */}
+                        <td className="px-2 py-1.5 whitespace-nowrap">
+                          {(() => {
+                            const ls = d.deal_lifecycle_status ?? "draft";
+                            return (
+                              <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border ${LIFECYCLE_STYLE[ls] ?? LIFECYCLE_STYLE.draft}`}>
+                                <span className={`w-1.5 h-1.5 rounded-full ${LIFECYCLE_DOT[ls] ?? LIFECYCLE_DOT.draft}`} />
+                                {LIFECYCLE_LABEL[ls] ?? ls}
+                              </span>
+                            );
+                          })()}
                         </td>
 
                         {/* actions */}

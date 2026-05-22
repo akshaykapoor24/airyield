@@ -30,6 +30,7 @@ class AirlineDealCreate(BaseModel):
 class AirlineDealResponse(BaseModel):
     id: int
     status: str
+    deal_lifecycle_status: str = "draft"
     source_agent: str
     deal_maker_name: Optional[str]
     remark: Optional[str]

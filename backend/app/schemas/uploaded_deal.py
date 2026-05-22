@@ -149,10 +149,11 @@ class DealRepositoryItem(BaseModel):
     incentive_data:   Optional[dict] = None
     incl_excl_types:  Optional[list] = None
     incl_excl_data:   Optional[dict] = None
-    status:           str
-    created_at:       datetime
+    status:               str
+    deal_lifecycle_status: Optional[str] = None
+    created_at:           datetime
     # upload-table only
-    file_type:        Optional[str]  = None  # pdf/excel/word/image/manual
+    file_type:            Optional[str]  = None  # pdf/excel/word/image/manual
 
 
 # ── AI Extraction schemas ──────────────────────────────────────────────────────

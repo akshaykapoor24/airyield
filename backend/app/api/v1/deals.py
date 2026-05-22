@@ -3,15 +3,16 @@ from __future__ import annotations
 from datetime import date
 from typing import Optional
 
-from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, status, Query
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, status, Query, Form
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models.user import User
+from app.models.airline import Airline
 from app.models.uploaded_deal import (
     UploadedDeal,
     UploadedDealStatus,
@@ -19,7 +20,7 @@ from app.models.uploaded_deal import (
     DealIncentive,
     DealInclusionExclusion,
 )
-from app.models.airline_deal import AirlineDeal, ManualDealStatus
+from app.models.airline_deal import AirlineDeal, ManualDealStatus, DealLifecycleStatus
 from app.models.b2b_deal import B2BDeal
 from app.schemas.airline_deal import AirlineDealCreate, AirlineDealResponse
 from app.schemas.b2b_deal import B2BDealCreate, B2BDealResponse
@@ -57,6 +58,35 @@ router = APIRouter()
 class UploadConfirmResult(BaseModel):
     created_count: int
     created_ids: list[int]
+
+
+class ClosingDealSummary(BaseModel):
+    deal_id:         int
+    deal_type:       str
+    deal_no:         str
+    airline_name:    Optional[str]
+    airline_type:    Optional[str]
+    source_agent:    Optional[str]
+    deal_maker_name: Optional[str]
+    valid_from:      Optional[date]
+    valid_to:        Optional[date]
+    contract_year:   Optional[str]
+    business_type:   Optional[str]
+    trigger_type:    Optional[str]
+    payout_type:     Optional[str]
+    entity_lcc:      Optional[str]
+    incentive_types: list[str] = []
+    incentive_data:  dict = {}
+    incl_excl_types: list[str] = []
+    incl_excl_data:  dict = {}
+    remark:          Optional[str]
+
+class ClosingPreviewResponse(BaseModel):
+    is_final_step: bool
+    closing_deals: list[ClosingDealSummary]
+
+class BulkClosingPreviewPayload(BaseModel):
+    deal_ids: list[int]
 
 
 def _attach_deal_relations(
@@ -172,9 +202,23 @@ async def extract_deal_file(
     )
 
 
+def _fallback_valid_to(valid_from: date, contract_year: str) -> date:
+    """Derive Contract Valid To from valid_from date and contract_year (FY/CY)."""
+    if contract_year.upper() == "FY":
+        # Financial Year: April 1 – March 31
+        # Jan/Feb/Mar → FY ends March 31 of same year
+        # Apr–Dec     → FY ends March 31 of next year
+        end_year = valid_from.year if valid_from.month <= 3 else valid_from.year + 1
+        return date(end_year, 3, 31)
+    else:  # CY — Calendar Year
+        return date(valid_from.year, 12, 31)
+
+
 @router.post("/upload/ai-extract", response_model=AIExtractResponse)
 async def ai_extract_deals(
     file: UploadFile = File(...),
+    valid_from: str | None = Form(default=None),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -191,6 +235,41 @@ async def ai_extract_deals(
 
     result = await AIDealExtractionService.extract(file, max_deals=15)
     deals = [AIDeal(**d) for d in result.get("deals", [])]
+
+    # Apply Contract Valid To fallback when AI didn't extract the date
+    if valid_from and deals:
+        vf_date: date | None = None
+        try:
+            vf_date = date.fromisoformat(valid_from)
+        except ValueError:
+            pass
+
+        if vf_date:
+            airline_names_lower = [d.airline_name.lower() for d in deals if d.airline_name]
+            airline_rows = await db.execute(
+                select(Airline.name, Airline.contract_year).where(
+                    func.lower(Airline.name).in_(airline_names_lower)
+                )
+            )
+            cy_map: dict[str, str] = {
+                row.name.lower(): row.contract_year
+                for row in airline_rows.all()
+                if row.contract_year
+            }
+
+            for deal in deals:
+                cy = cy_map.get((deal.airline_name or "").lower())
+                if not cy:
+                    continue
+                fallback = _fallback_valid_to(vf_date, cy).isoformat()
+
+                if not deal.contract_valid_to:
+                    deal.contract_valid_to = fallback
+
+                plb = (deal.incentive_data or {}).get("PLB")
+                if isinstance(plb, dict) and not plb.get("validTo"):
+                    plb["validTo"] = fallback
+
     return AIExtractResponse(
         deals=deals,
         file_name=result.get("file_name", file.filename or ""),
@@ -218,6 +297,7 @@ async def ai_confirm_deals(
             tenant_id=current_user.tenant_id,
             created_by_id=current_user.id,
             status=ManualDealStatus.PENDING_APPROVAL,
+            deal_lifecycle_status=DealLifecycleStatus.DRAFT,
             source_agent="ai_extraction",
             airline_type=deal.airline_type or None,
             airline_name=deal.airline_name or None,
@@ -276,6 +356,7 @@ async def confirm_upload(
                 tenant_id=current_user.tenant_id,
                 created_by_id=current_user.id,
                 status=ManualDealStatus.PENDING_APPROVAL,
+                deal_lifecycle_status=DealLifecycleStatus.DRAFT,
                 source_agent=source_agent,
                 deal_maker_name=payload.deal_maker_name or None,
                 remark=(r.remarks or payload.remark) or None,
@@ -300,6 +381,7 @@ async def confirm_upload(
                 tenant_id=current_user.tenant_id,
                 created_by_id=current_user.id,
                 status=ManualDealStatus.PENDING_APPROVAL,
+                deal_lifecycle_status=DealLifecycleStatus.DRAFT,
                 source_agent=source_agent,
                 deal_maker_name=payload.deal_maker_name or None,
                 remark=(r.remarks or payload.remark) or None,
@@ -371,6 +453,7 @@ async def create_manual_deal(
         file_name="manual",
         file_type="manual",
         status=UploadedDealStatus.PENDING_APPROVAL,
+        deal_lifecycle_status=DealLifecycleStatus.DRAFT,
         notes=payload.notes,
         airline_type=payload.airline_type   or None,
         airline_name=payload.airline_name   or None,
@@ -426,6 +509,7 @@ async def create_airline_deal(
         tenant_id=current_user.tenant_id,
         created_by_id=current_user.id,
         status=ManualDealStatus.PENDING_APPROVAL,
+        deal_lifecycle_status=DealLifecycleStatus.DRAFT,
         source_agent=payload.source_agent or "manual",
         deal_maker_name=payload.deal_maker_name or None,
         remark=payload.remark or None,
@@ -472,6 +556,7 @@ async def create_b2b_deal(
         tenant_id=current_user.tenant_id,
         created_by_id=current_user.id,
         status=ManualDealStatus.PENDING_APPROVAL,
+        deal_lifecycle_status=DealLifecycleStatus.DRAFT,
         source_agent=payload.source_agent or "manual",
         deal_maker_name=payload.deal_maker_name or None,
         remark=payload.remark or None,
@@ -538,6 +623,7 @@ async def get_deal_repository(
             incl_excl_types=d.incl_excl_types,
             incl_excl_data=d.incl_excl_data,
             status=d.status.value if hasattr(d.status, "value") else str(d.status),
+            deal_lifecycle_status=d.deal_lifecycle_status.value if hasattr(d.deal_lifecycle_status, "value") else str(d.deal_lifecycle_status or "draft"),
             created_at=d.created_at,
             file_type=d.file_type,
         ))
@@ -568,6 +654,7 @@ async def get_deal_repository(
             incl_excl_types=d.incl_excl_types or [],
             incl_excl_data=d.incl_excl_data or {},
             status=d.status.value if hasattr(d.status, "value") else str(d.status),
+            deal_lifecycle_status=d.deal_lifecycle_status.value if hasattr(d.deal_lifecycle_status, "value") else str(d.deal_lifecycle_status or "draft"),
             created_at=d.created_at,
             file_type=None,
         ))
@@ -598,6 +685,7 @@ async def get_deal_repository(
             incl_excl_types=d.incl_excl_types or [],
             incl_excl_data=d.incl_excl_data or {},
             status=d.status.value if hasattr(d.status, "value") else str(d.status),
+            deal_lifecycle_status=d.deal_lifecycle_status.value if hasattr(d.deal_lifecycle_status, "value") else str(d.deal_lifecycle_status or "draft"),
             created_at=d.created_at,
             file_type=None,
         ))
@@ -745,6 +833,7 @@ async def update_repository_deal(
     await db.refresh(deal)
 
     status_str = deal.status.value if hasattr(deal.status, "value") else str(deal.status)
+    lifecycle_str = deal.deal_lifecycle_status.value if hasattr(deal.deal_lifecycle_status, "value") else str(deal.deal_lifecycle_status or "draft")
     _prefix_map = {"airline": "AIR", "b2b": "B2B", "upload": "UPL"}
     return DealRepositoryItem(
         id=deal.id,
@@ -767,6 +856,7 @@ async def update_repository_deal(
         incl_excl_types=deal.incl_excl_types or [],
         incl_excl_data=deal.incl_excl_data or {},
         status=status_str,
+        deal_lifecycle_status=lifecycle_str,
         created_at=deal.created_at,
         file_type=None,
     )
@@ -1218,6 +1308,111 @@ async def get_deal_approval(
     )
 
 
+async def _load_deal_for_approval(approval: DealApproval, db: AsyncSession):
+    """Return (deal_object, deal_type_str) for a DealApproval record."""
+    if approval.deal_type == "airline":
+        r = await db.execute(select(AirlineDeal).where(AirlineDeal.id == approval.deal_id))
+        return r.scalar_one(), "airline"
+    elif approval.deal_type == "b2b":
+        r = await db.execute(select(B2BDeal).where(B2BDeal.id == approval.deal_id))
+        return r.scalar_one(), "b2b"
+    else:
+        r = await db.execute(select(UploadedDeal).where(UploadedDeal.id == approval.deal_id))
+        return r.scalar_one(), "upload"
+
+
+async def _find_matching_active_deals(
+    new_deal,
+    new_deal_type: str,
+    db: AsyncSession,
+) -> list[ClosingDealSummary]:
+    """Return summaries of ACTIVE deals that would be closed when new_deal is approved."""
+    inc_data  = new_deal.incentive_data or {}
+    inc_types = new_deal.incentive_types or []
+    primary   = inc_types[0] if inc_types else None
+    pdata     = inc_data.get(primary, {}) if (primary and isinstance(inc_data, dict)) else {}
+    new_flight_type = pdata.get("flightType")
+    new_class       = pdata.get("class")
+
+    _prefix = {"airline": "AIR", "b2b": "B2B", "upload": "UPL"}
+    summaries: list[ClosingDealSummary] = []
+    for Model, dtype in [(AirlineDeal, "airline"), (B2BDeal, "b2b"), (UploadedDeal, "upload")]:
+        filters = [
+            Model.tenant_id             == new_deal.tenant_id,
+            Model.deal_lifecycle_status == DealLifecycleStatus.ACTIVE,
+            Model.deal_maker_name       == new_deal.deal_maker_name,
+            Model.airline_name          == new_deal.airline_name,
+            Model.airline_type          == new_deal.airline_type,
+        ]
+        if dtype == new_deal_type:
+            filters.append(Model.id != new_deal.id)
+        result = await db.execute(select(Model).where(*filters))
+        for d in result.scalars().all():
+            d_data  = d.incentive_data or {}
+            d_types = d.incentive_types or []
+            d_p     = d_types[0] if d_types else None
+            d_pd    = d_data.get(d_p, {}) if (d_p and isinstance(d_data, dict)) else {}
+            if d_pd.get("flightType") == new_flight_type and d_pd.get("class") == new_class:
+                summaries.append(ClosingDealSummary(
+                    deal_id=d.id,
+                    deal_type=dtype,
+                    deal_no=f"{_prefix[dtype]}-{d.id:04d}",
+                    airline_name=getattr(d, "airline_name", None),
+                    airline_type=getattr(d, "airline_type", None),
+                    source_agent=getattr(d, "source_agent", None),
+                    deal_maker_name=getattr(d, "deal_maker_name", None),
+                    valid_from=getattr(d, "valid_from", None),
+                    valid_to=getattr(d, "valid_to", None),
+                    contract_year=getattr(d, "contract_year", None),
+                    business_type=getattr(d, "business_type", None),
+                    trigger_type=getattr(d, "trigger_type", None),
+                    payout_type=getattr(d, "payout_type", None),
+                    entity_lcc=getattr(d, "entity_lcc", None),
+                    incentive_types=list(getattr(d, "incentive_types", None) or []),
+                    incentive_data=dict(getattr(d, "incentive_data", None) or {}),
+                    incl_excl_types=list(getattr(d, "incl_excl_types", None) or []),
+                    incl_excl_data=dict(getattr(d, "incl_excl_data", None) or {}),
+                    remark=getattr(d, "remark", None),
+                ))
+    return summaries
+
+
+async def _close_matching_active_deals(
+    new_deal,
+    new_deal_type: str,
+    db: AsyncSession,
+) -> None:
+    """When a deal is finally approved, close all active deals on the same tenant
+    that match on: deal_maker_name, airline_name, airline_type, flightType, class."""
+    inc_data   = (new_deal.incentive_data or {}) if not callable(getattr(new_deal, 'incentive_data', None)) else new_deal.incentive_data
+    inc_types  = (new_deal.incentive_types or []) if not callable(getattr(new_deal, 'incentive_types', None)) else new_deal.incentive_types
+    primary    = inc_types[0] if inc_types else None
+    pdata      = inc_data.get(primary, {}) if (primary and isinstance(inc_data, dict)) else {}
+    new_flight_type = pdata.get("flightType")
+    new_class       = pdata.get("class")
+
+    for Model, dtype in [(AirlineDeal, "airline"), (B2BDeal, "b2b"), (UploadedDeal, "upload")]:
+        filters = [
+            Model.tenant_id             == new_deal.tenant_id,
+            Model.deal_lifecycle_status == DealLifecycleStatus.ACTIVE,
+            Model.deal_maker_name       == new_deal.deal_maker_name,
+            Model.airline_name          == new_deal.airline_name,
+            Model.airline_type          == new_deal.airline_type,
+        ]
+        # Exclude the deal we just approved
+        if dtype == new_deal_type:
+            filters.append(Model.id != new_deal.id)
+
+        result = await db.execute(select(Model).where(*filters))
+        for d in result.scalars().all():
+            d_data   = (d.incentive_data or {}) if not callable(getattr(d, 'incentive_data', None)) else d.incentive_data
+            d_types  = (d.incentive_types or []) if not callable(getattr(d, 'incentive_types', None)) else d.incentive_types
+            d_primary = d_types[0] if d_types else None
+            d_pdata  = d_data.get(d_primary, {}) if (d_primary and isinstance(d_data, dict)) else {}
+            if d_pdata.get("flightType") == new_flight_type and d_pdata.get("class") == new_class:
+                d.deal_lifecycle_status = DealLifecycleStatus.CLOSED
+
+
 async def _apply_decision(
     approval_id: int,
     decision: ApprovalActionStatus,
@@ -1290,6 +1485,8 @@ async def _apply_decision(
         else:
             approval.status = ApprovalActionStatus.APPROVED
             deal.status = approved_status
+            deal.deal_lifecycle_status = DealLifecycleStatus.ACTIVE
+            await _close_matching_active_deals(deal, deal_type, db)
 
     await db.commit()
     refresh = await db.execute(
@@ -1298,6 +1495,62 @@ async def _apply_decision(
         .where(DealApproval.id == approval.id)
     )
     return refresh.scalar_one()
+
+
+@router.get("/approvals/{approval_id}/closing-preview", response_model=ClosingPreviewResponse)
+async def get_closing_preview(
+    approval_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return which ACTIVE deals would be closed if this approval reaches final approval."""
+    result = await db.execute(
+        select(DealApproval)
+        .options(selectinload(DealApproval.steps))
+        .where(DealApproval.id == approval_id)
+    )
+    approval = result.scalar_one_or_none()
+    if not approval:
+        raise HTTPException(status_code=404, detail="Approval not found")
+
+    is_final = not any(s.step_order > approval.current_step_order for s in approval.steps)
+    if not is_final:
+        return ClosingPreviewResponse(is_final_step=False, closing_deals=[])
+
+    deal, deal_type = await _load_deal_for_approval(approval, db)
+    closing = await _find_matching_active_deals(deal, deal_type, db)
+    return ClosingPreviewResponse(is_final_step=True, closing_deals=closing)
+
+
+@router.post("/approvals/bulk-closing-preview", response_model=dict[str, ClosingPreviewResponse])
+async def bulk_closing_preview(
+    payload: BulkClosingPreviewPayload,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return closing preview for each approval_id in one batch call."""
+    out: dict[str, ClosingPreviewResponse] = {}
+    for aid in payload.deal_ids:
+        try:
+            r = await db.execute(
+                select(DealApproval)
+                .options(selectinload(DealApproval.steps))
+                .where(DealApproval.id == aid)
+            )
+            approval = r.scalar_one_or_none()
+            if not approval:
+                out[str(aid)] = ClosingPreviewResponse(is_final_step=False, closing_deals=[])
+                continue
+            is_final = not any(s.step_order > approval.current_step_order for s in approval.steps)
+            if not is_final:
+                out[str(aid)] = ClosingPreviewResponse(is_final_step=False, closing_deals=[])
+                continue
+            deal, deal_type = await _load_deal_for_approval(approval, db)
+            closing = await _find_matching_active_deals(deal, deal_type, db)
+            out[str(aid)] = ClosingPreviewResponse(is_final_step=True, closing_deals=closing)
+        except Exception:
+            out[str(aid)] = ClosingPreviewResponse(is_final_step=False, closing_deals=[])
+    return out
 
 
 @router.post("/approvals/{approval_id}/approve", response_model=DealApprovalRead)

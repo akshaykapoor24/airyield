@@ -11,6 +11,7 @@ class AirlineApproval(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     iata_code: Mapped[str] = mapped_column(String(3), nullable=False)
     icao_code: Mapped[str | None] = mapped_column(String(4), nullable=True)
+    contract_year: Mapped[str | None] = mapped_column(String(2), nullable=True)
 
     status: Mapped[str] = mapped_column(String(20), default="pending")
 

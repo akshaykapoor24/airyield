@@ -10,7 +10,7 @@ from dateutil import parser as dateutil_parser
 from fastapi import APIRouter, Depends, Form, UploadFile, File, HTTPException, status, Query
 from fastapi.responses import StreamingResponse
 import pandas as pd
-from sqlalchemy import select, or_
+from sqlalchemy import select, or_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -138,19 +138,58 @@ async def confirm_ticket_upload(
     if not payload.rows:
         raise HTTPException(status_code=400, detail="No rows to save.")
 
-    # Batch-lookup airline names by IATA code to populate airline_name
-    codes = {r.airlines_code for r in payload.rows if r.airlines_code}
-    airline_map: dict[str, str] = {}
-    if codes:
-        res = await db.execute(select(Airline).where(Airline.iata_code.in_(codes)))
-        for airline in res.scalars():
-            airline_map[airline.iata_code] = airline.name
+    # ── Bidirectional airline resolution ─────────────────────────────────────
+    # Collect all codes (with numeric zero-padding variants) and all names from rows
+    all_codes: set[str] = set()
+    for r in payload.rows:
+        if r.airlines_code:
+            raw = r.airlines_code.strip()
+            all_codes.add(raw)
+            if raw.isdigit():
+                all_codes.add(raw.zfill(3))
+
+    all_names = {r.airline_name.strip().lower() for r in payload.rows if r.airline_name}
+
+    # code (IATA or ICAO) → Airline
+    code_to_airline: dict[str, Airline] = {}
+    if all_codes:
+        res = await db.execute(
+            select(Airline).where(
+                or_(Airline.iata_code.in_(all_codes), Airline.icao_code.in_(all_codes))
+            )
+        )
+        for a in res.scalars():
+            if a.iata_code:
+                code_to_airline[a.iata_code] = a
+            if a.icao_code:
+                code_to_airline[a.icao_code] = a
+
+    # name (lower) → Airline
+    name_to_airline: dict[str, Airline] = {}
+    if all_names:
+        res = await db.execute(
+            select(Airline).where(func.lower(Airline.name).in_(list(all_names)))
+        )
+        for a in res.scalars():
+            name_to_airline[a.name.lower()] = a
 
     batch_id = str(uuid.uuid4())
     now = datetime.utcnow()
 
     for row in payload.rows:
-        resolved_airline_name = row.airline_name or airline_map.get(row.airlines_code or "", None)
+        # Try code lookup (handle numeric zero-padding)
+        raw_code = (row.airlines_code or "").strip()
+        code_variants = [raw_code, raw_code.zfill(3)] if raw_code.isdigit() else [raw_code]
+        airline_by_code = next((code_to_airline[c] for c in code_variants if c in code_to_airline), None)
+
+        # Try name lookup
+        airline_by_name = name_to_airline.get((row.airline_name or "").strip().lower())
+
+        # Prefer code-based match; fall back to name-based match
+        matched = airline_by_code or airline_by_name
+        resolved_airline_name = row.airline_name or (matched.name if matched else None)
+        resolved_airline_code = row.airlines_code or (matched.iata_code if matched else None)
+
         ticket = UploadedTicket(
             batch_id=batch_id,
             file_name=payload.file_name,
@@ -168,7 +207,7 @@ async def confirm_ticket_upload(
             booking_class=row.booking_class,
             departure_datetime=row.departure_datetime,
             gds_pnr=row.gds_pnr,
-            airlines_code=row.airlines_code,
+            airlines_code=resolved_airline_code,
             ticket_number=row.ticket_number,
             sell_fare=row.sell_fare,
             sell_tax=row.sell_tax,
@@ -203,6 +242,7 @@ async def confirm_ticket_upload(
 
     await db.commit()
     return ConfirmTicketUploadResult(batch_id=batch_id, created_count=len(payload.rows))
+
 
 
 # ── List uploaded tickets ──────────────────────────────────────────────────
@@ -324,6 +364,7 @@ async def _run_single(
         ticket.matched_deal_type     = match.deal_type
         ticket.matched_deal_name     = match.deal_name
         ticket.calculated_incentive  = match.calculated_incentive
+        ticket.ticket_status         = "calculated"
         return RunCalculationResult(
             ticket_id=ticket.id, matched=True,
             matched_deal_id=match.deal_id,
@@ -337,6 +378,7 @@ async def _run_single(
         ticket.matched_deal_type     = None
         ticket.matched_deal_name     = None
         ticket.calculated_incentive  = None
+        ticket.ticket_status         = "calculated"
         return RunCalculationResult(
             ticket_id=ticket.id, matched=False,
             matched_deal_id=None, matched_deal_type=None,

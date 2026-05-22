@@ -2,7 +2,7 @@ from datetime import datetime, date
 from sqlalchemy import String, DateTime, Date, ForeignKey, Text, Integer, JSON, Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
-from app.models.airline_deal import ManualDealStatus
+from app.models.airline_deal import ManualDealStatus, DealLifecycleStatus
 
 
 class B2BDeal(Base):
@@ -36,5 +36,11 @@ class B2BDeal(Base):
     vice_versa: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    deal_lifecycle_status: Mapped[DealLifecycleStatus] = mapped_column(
+        SAEnum(DealLifecycleStatus, native_enum=False,
+               values_callable=lambda e: [m.value for m in e]),
+        default=DealLifecycleStatus.DRAFT,
+        server_default="draft",
+    )
 
     created_by: Mapped["User"] = relationship("User", foreign_keys=[created_by_id])  # noqa: F821

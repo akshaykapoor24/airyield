@@ -1,19 +1,24 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { RefreshCw } from "lucide-react";
+import { useEffect, useState, useCallback } from "react";
+import { RefreshCw, Filter } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from "recharts";
 import api from "@/lib/api";
 
-type MonthlyBreakdown = { month: string; commission: number; incentive: number; adm: number };
-type AirlineBreakdown = { airline: string; commission: number; incentive: number; adm: number; total: number };
+type MonthlyBreakdown = { month: string; commission: number; incentive: number; delta_comm: number };
+type AirlineBreakdown = { airline: string; commission: number; incentive: number; delta_comm: number; total: number };
 type IncomeSummaryData = {
   total:      number;
   commission: number;
   incentive:  number;
-  adm:        number;
+  delta_comm: number;
   monthly:    MonthlyBreakdown[];
   by_airline: AirlineBreakdown[];
+};
+type IncomeFilters = {
+  airlines:    string[];
+  segments:    string[];
+  class_types: string[];
 };
 
 function fmt(v: number) {
@@ -25,47 +30,120 @@ function pct(part: number, total: number) {
   return `${Math.round((part / total) * 100)}%`;
 }
 
-export default function IncomeSummaryPage() {
-  const [data,    setData]    = useState<IncomeSummaryData | null>(null);
-  const [loading, setLoading] = useState(true);
+const EMPTY: IncomeSummaryData = { total: 0, commission: 0, incentive: 0, delta_comm: 0, monthly: [], by_airline: [] };
 
+export default function IncomeSummaryPage() {
+  const [data,       setData]       = useState<IncomeSummaryData | null>(null);
+  const [loading,    setLoading]    = useState(true);
+  const [filterOpts, setFilterOpts] = useState<IncomeFilters>({ airlines: [], segments: ["Domestic", "International"], class_types: [] });
+
+  const [airline,    setAirline]    = useState("");
+  const [segment,    setSegment]    = useState("");
+  const [classType,  setClassType]  = useState("");
+
+  // fetch airlines + initial class types on mount
   useEffect(() => {
-    api.get<IncomeSummaryData>("/dashboard/income-summary")
-      .then(r => setData(r.data))
-      .finally(() => setLoading(false));
+    api.get<IncomeFilters>("/dashboard/income-filters")
+      .then(r => setFilterOpts(r.data))
+      .catch(() => {});
   }, []);
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64 text-gray-400">
-        <RefreshCw className="w-5 h-5 animate-spin mr-2" /> Loading…
-      </div>
-    );
-  }
+  // re-fetch class types when airline changes (class master is per-airline)
+  useEffect(() => {
+    const params: Record<string, string> = {};
+    if (airline) params.airline = airline;
+    api.get<IncomeFilters>("/dashboard/income-filters", { params })
+      .then(r => setFilterOpts(prev => ({ ...prev, class_types: r.data.class_types })))
+      .catch(() => {});
+    // reset class selection when airline changes
+    setClassType("");
+  }, [airline]);
 
-  const d = data ?? { total: 0, commission: 0, incentive: 0, adm: 0, monthly: [], by_airline: [] };
+  const fetchData = useCallback(() => {
+    setLoading(true);
+    const params: Record<string, string> = {};
+    if (airline)   params.airline    = airline;
+    if (segment)   params.segment    = segment;
+    if (classType) params.class_type = classType;
+    api.get<IncomeSummaryData>("/dashboard/income-summary", { params })
+      .then(r => setData(r.data))
+      .finally(() => setLoading(false));
+  }, [airline, segment, classType]);
+
+  useEffect(() => { fetchData(); }, [fetchData]);
+
+  const d     = data ?? EMPTY;
   const total = d.total || 1;
 
   const byHead = [
-    { head: "Commission", amount: d.commission, pct: pct(d.commission, total) },
-    { head: "Incentive",  amount: d.incentive,  pct: pct(d.incentive, total) },
-    { head: "ADM",        amount: d.adm,        pct: pct(d.adm, total) },
+    { head: "Commission Statement",  amount: d.commission,  pct: pct(d.commission,  total) },
+    { head: "Commission Calculated", amount: d.incentive,   pct: pct(d.incentive,   total) },
+    { head: "Delta Commission",      amount: d.delta_comm,  pct: pct(d.delta_comm,  total) },
   ].filter(r => r.amount !== 0);
 
+  const activeFilterCount = [airline, segment, classType].filter(Boolean).length;
+
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-gray-900">Income Summary Dashboard</h1>
-        <p className="text-sm text-gray-500 mt-0.5">All time · All income heads</p>
+    <div className="space-y-5">
+      <div className="flex items-start justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">Income Summary Dashboard</h1>
+          <p className="text-sm text-gray-500 mt-0.5">All time · All income heads</p>
+        </div>
+        <button onClick={fetchData} disabled={loading}
+          className="flex items-center gap-1.5 bg-white border border-gray-200 text-gray-600 px-3 py-2 rounded-lg text-xs font-medium hover:bg-gray-50 disabled:opacity-50">
+          <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+        </button>
+      </div>
+
+      {/* ── Filters ── */}
+      <div className="bg-white rounded-xl border border-gray-200 px-4 py-3 flex items-center gap-3 flex-wrap shadow-sm">
+        <div className="flex items-center gap-1.5 text-xs font-semibold text-gray-500 shrink-0">
+          <Filter className="w-3.5 h-3.5" />
+          Filters
+          {activeFilterCount > 0 && (
+            <span className="bg-sky-500 text-white text-[9px] font-bold px-1.5 py-0.5 rounded-full">{activeFilterCount}</span>
+          )}
+        </div>
+
+        {/* Airline — from master */}
+        <select value={airline} onChange={e => setAirline(e.target.value)}
+          className="border border-gray-200 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-sky-400 bg-gray-50 min-w-40">
+          <option value="">All Airlines</option>
+          {filterOpts.airlines.map(a => <option key={a} value={a}>{a}</option>)}
+        </select>
+
+        {/* Segment — always Domestic / International */}
+        <select value={segment} onChange={e => setSegment(e.target.value)}
+          className="border border-gray-200 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-sky-400 bg-gray-50 min-w-35">
+          <option value="">All Segments</option>
+          {filterOpts.segments.map(s => <option key={s} value={s}>{s}</option>)}
+        </select>
+
+        {/* Class — from AirlineClassMaster, narrows when airline is selected */}
+        <select value={classType} onChange={e => setClassType(e.target.value)}
+          className="border border-gray-200 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-sky-400 bg-gray-50 min-w-35">
+          <option value="">All Classes</option>
+          {filterOpts.class_types.map(c => <option key={c} value={c}>{c}</option>)}
+        </select>
+
+        {activeFilterCount > 0 && (
+          <button onClick={() => { setAirline(""); setSegment(""); setClassType(""); }}
+            className="text-xs text-red-500 hover:text-red-700 font-medium ml-1">
+            Clear all
+          </button>
+        )}
+
+        {loading && <RefreshCw className="w-3.5 h-3.5 animate-spin text-gray-400 ml-auto" />}
       </div>
 
       {/* KPI Row */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         {[
-          { label: "Total Income",    value: fmt(d.total),      sub: "All heads combined",         color: "border-blue-500" },
-          { label: "Commission",      value: fmt(d.commission), sub: pct(d.commission, total) + " of total", color: "border-green-500" },
-          { label: "Incentive",       value: fmt(d.incentive),  sub: pct(d.incentive, total) + " of total",  color: "border-purple-500" },
-          { label: "ADM",             value: fmt(d.adm),        sub: pct(d.adm, total) + " of total",        color: "border-orange-500" },
+          { label: "Total Income",             value: fmt(d.total),       sub: "Sell fare · all tickets",               color: "border-blue-500"   },
+          { label: "Commission Statement",     value: fmt(d.commission),  sub: pct(d.commission,  total) + " of total", color: "border-green-500"  },
+          { label: "Commission Calculated",    value: fmt(d.incentive),   sub: pct(d.incentive,   total) + " of total", color: "border-purple-500" },
+          { label: "Delta Commission",         value: fmt(d.delta_comm),  sub: pct(d.delta_comm,  total) + " of total", color: "border-orange-500" },
         ].map(({ label, value, sub, color }) => (
           <div key={label} className={`bg-white rounded-xl border-l-4 ${color} border border-gray-200 p-5`}>
             <p className="text-xs text-gray-500 uppercase font-medium">{label}</p>
@@ -86,9 +164,9 @@ export default function IncomeSummaryPage() {
               <YAxis tickFormatter={(v) => `₹${(v / 1000).toFixed(0)}k`} tick={{ fontSize: 11 }} />
               <Tooltip formatter={(v) => `₹${Number(v).toLocaleString("en-IN")}`} />
               <Legend />
-              <Bar dataKey="commission" name="Commission" stackId="a" fill="#3b82f6" />
-              <Bar dataKey="incentive"  name="Incentive"  stackId="a" fill="#8b5cf6" />
-              <Bar dataKey="adm"        name="ADM"        stackId="a" fill="#f59e0b" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="commission" name="Commission Statement"  stackId="a" fill="#3b82f6" />
+              <Bar dataKey="incentive"  name="Commission Calculated" stackId="a" fill="#8b5cf6" />
+              <Bar dataKey="delta_comm" name="Delta Commission"      stackId="a" fill="#f59e0b" radius={[4, 4, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         ) : (
@@ -142,8 +220,9 @@ export default function IncomeSummaryPage() {
               <thead className="bg-gray-50 text-xs uppercase text-gray-500">
                 <tr>
                   <th className="px-5 py-3 text-left">Airline</th>
-                  <th className="px-5 py-3 text-right">Commission</th>
-                  <th className="px-5 py-3 text-right">Incentive</th>
+                  <th className="px-5 py-3 text-right">Comm Stmt</th>
+                  <th className="px-5 py-3 text-right">Comm Calc</th>
+                  <th className="px-5 py-3 text-right">Delta</th>
                   <th className="px-5 py-3 text-right font-bold">Total</th>
                 </tr>
               </thead>
@@ -153,6 +232,7 @@ export default function IncomeSummaryPage() {
                     <td className="px-5 py-3 font-medium">{r.airline}</td>
                     <td className="px-5 py-3 text-right text-gray-600">{fmt(r.commission)}</td>
                     <td className="px-5 py-3 text-right text-gray-600">{fmt(r.incentive)}</td>
+                    <td className="px-5 py-3 text-right text-gray-600">{fmt(r.delta_comm)}</td>
                     <td className="px-5 py-3 text-right font-bold">{fmt(r.total)}</td>
                   </tr>
                 ))}

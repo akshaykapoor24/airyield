@@ -1089,6 +1089,7 @@ export default function UploadDealPage(){
     try{
       const form=new FormData();form.append("file",file);
       if(aiMode){
+        if(validFromDate) form.append("valid_from",validFromDate);
         const {data}=await api.post<AIExtractResponse>("/deals/upload/ai-extract",form,{headers:{"Content-Type":"multipart/form-data"}});
         const converted=convertAIDealsToRows(data.deals);
         converted.forEach(r=>{

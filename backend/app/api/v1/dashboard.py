@@ -4,13 +4,15 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import get_current_user
+from app.models.airline import Airline
+from app.models.airline_class_master import AirlineClassMaster
 from app.models.approval_workflow import DealApproval, ApprovalActionStatus
 from app.models.uploaded_deal import UploadedDeal, UploadedDealStatus
 from app.models.uploaded_ticket import UploadedTicket
@@ -39,23 +41,23 @@ class SummaryResponse(BaseModel):
 
 
 class MonthlyBreakdown(BaseModel):
-    month:      str
-    commission: float
-    incentive:  float
-    adm:        float
+    month:       str
+    commission:  float
+    incentive:   float
+    delta_comm:  float
 
 class AirlineBreakdown(BaseModel):
     airline:    str
     commission: float
     incentive:  float
-    adm:        float
+    delta_comm: float
     total:      float
 
 class IncomeSummaryResponse(BaseModel):
     total:      float
     commission: float
     incentive:  float
-    adm:        float
+    delta_comm: float
     monthly:    list[MonthlyBreakdown]
     by_airline: list[AirlineBreakdown]
 
@@ -194,60 +196,121 @@ async def get_summary(
     )
 
 
+_DOM_VARIANTS  = {"DOM", "DOMESTIC", "D"}
+_INT_VARIANTS  = {"INT", "INTL", "INTERNATIONAL", "I"}
+
+
+class IncomeFiltersResponse(BaseModel):
+    airlines:    list[str]
+    segments:    list[str]
+    class_types: list[str]
+
+
+@router.get("/income-filters", response_model=IncomeFiltersResponse)
+async def get_income_filters(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    airline: str | None = Query(default=None),
+):
+    # Airlines from master (active only)
+    a_res = await db.execute(
+        select(Airline.name).where(Airline.is_active == True).order_by(Airline.name)
+    )
+    airlines = [r[0] for r in a_res.all()]
+
+    # Segments are always the same two logical values
+    segments = ["Domestic", "International"]
+
+    # Class types from AirlineClassMaster, filtered by airline if provided
+    ct_q = select(AirlineClassMaster.class_type).where(AirlineClassMaster.is_active == True).distinct()
+    if airline:
+        ct_q = ct_q.where(func.lower(AirlineClassMaster.airline_name) == airline.lower())
+    ct_res = await db.execute(ct_q.order_by(AirlineClassMaster.class_type))
+    class_types = [r[0] for r in ct_res.all()]
+
+    return IncomeFiltersResponse(airlines=airlines, segments=segments, class_types=class_types)
+
+
 @router.get("/income-summary", response_model=IncomeSummaryResponse)
 async def get_income_summary(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    airline: str | None = Query(default=None),
+    segment: str | None = Query(default=None),
+    class_type: str | None = Query(default=None),
 ):
     tid = current_user.tenant_id
-    tickets_res = await db.execute(
-        select(UploadedTicket).where(UploadedTicket.tenant_id == tid)
-    )
+    filters = [UploadedTicket.tenant_id == tid]
+
+    if airline:
+        filters.append(UploadedTicket.airline_name == airline)
+
+    if segment:
+        seg_upper = segment.upper()
+        if seg_upper in _DOM_VARIANTS:
+            filters.append(func.upper(UploadedTicket.segment_type).in_(list(_DOM_VARIANTS)))
+        elif seg_upper in _INT_VARIANTS:
+            filters.append(func.upper(UploadedTicket.segment_type).in_(list(_INT_VARIANTS)))
+
+    if class_type:
+        # Resolve class_type → class_codes via AirlineClassMaster for the selected airline
+        cc_q = select(AirlineClassMaster.class_code).where(
+            AirlineClassMaster.class_type == class_type,
+            AirlineClassMaster.is_active == True,
+        )
+        if airline:
+            cc_q = cc_q.where(func.lower(AirlineClassMaster.airline_name) == airline.lower())
+        cc_res = await db.execute(cc_q)
+        class_codes = [r[0] for r in cc_res.all()]
+        if class_codes:
+            filters.append(UploadedTicket.booking_class.in_(class_codes))
+
+    tickets_res = await db.execute(select(UploadedTicket).where(*filters))
     tickets = tickets_res.scalars().all()
 
+    total            = sum(_f(t.sell_fare) for t in tickets)
     total_commission = sum(_f(t.comm_sell) for t in tickets)
-    total_incentive  = sum(_f(t.incentive_sell) + _f(t.calculated_incentive) for t in tickets)
-    total_adm        = sum(_f(t.adm) for t in tickets)
-    total            = total_commission + total_incentive + total_adm
+    total_incentive  = sum(_f(t.calculated_incentive) for t in tickets)
+    total_delta_comm = sum(_f(t.comm_sell) - _f(t.calculated_incentive) for t in tickets)
 
     # Monthly breakdown
-    m_comm: dict[str, float] = defaultdict(float)
-    m_inc:  dict[str, float] = defaultdict(float)
-    m_adm:  dict[str, float] = defaultdict(float)
+    m_comm:  dict[str, float] = defaultdict(float)
+    m_inc:   dict[str, float] = defaultdict(float)
+    m_delta: dict[str, float] = defaultdict(float)
     for t in tickets:
         ym = _ym(t.ticket_date) or _ym(str(t.created_at)[:10] if t.created_at else None)
         if ym:
-            m_comm[ym] += _f(t.comm_sell)
-            m_inc[ym]  += _f(t.incentive_sell) + _f(t.calculated_incentive)
-            m_adm[ym]  += _f(t.adm)
-    all_months = sorted(set(m_comm) | set(m_inc) | set(m_adm))[-12:]
+            m_comm[ym]  += _f(t.comm_sell)
+            m_inc[ym]   += _f(t.calculated_incentive)
+            m_delta[ym] += _f(t.comm_sell) - _f(t.calculated_incentive)
+    all_months = sorted(set(m_comm) | set(m_inc) | set(m_delta))[-12:]
     monthly = [
         MonthlyBreakdown(
             month=ym,
             commission=round(m_comm[ym], 2),
             incentive=round(m_inc[ym], 2),
-            adm=round(m_adm[ym], 2),
+            delta_comm=round(m_delta[ym], 2),
         )
         for ym in all_months
     ]
 
     # By airline
-    a_comm: dict[str, float] = defaultdict(float)
-    a_inc:  dict[str, float] = defaultdict(float)
-    a_adm:  dict[str, float] = defaultdict(float)
+    a_comm:  dict[str, float] = defaultdict(float)
+    a_inc:   dict[str, float] = defaultdict(float)
+    a_delta: dict[str, float] = defaultdict(float)
     for t in tickets:
         key = t.airline_name or t.airlines_code or "Unknown"
-        a_comm[key] += _f(t.comm_sell)
-        a_inc[key]  += _f(t.incentive_sell) + _f(t.calculated_incentive)
-        a_adm[key]  += _f(t.adm)
-    all_airlines = sorted(a_comm, key=lambda k: -(a_comm[k] + a_inc[k] + a_adm[k]))[:15]
+        a_comm[key]  += _f(t.comm_sell)
+        a_inc[key]   += _f(t.calculated_incentive)
+        a_delta[key] += _f(t.comm_sell) - _f(t.calculated_incentive)
+    all_airlines = sorted(a_comm, key=lambda k: -(a_comm[k] + a_inc[k] + a_delta[k]))[:15]
     by_airline = [
         AirlineBreakdown(
             airline=k,
             commission=round(a_comm[k], 2),
             incentive=round(a_inc[k], 2),
-            adm=round(a_adm[k], 2),
-            total=round(a_comm[k] + a_inc[k] + a_adm[k], 2),
+            delta_comm=round(a_delta[k], 2),
+            total=round(a_comm[k] + a_inc[k] + a_delta[k], 2),
         )
         for k in all_airlines
     ]
@@ -256,7 +319,7 @@ async def get_income_summary(
         total=round(total, 2),
         commission=round(total_commission, 2),
         incentive=round(total_incentive, 2),
-        adm=round(total_adm, 2),
+        delta_comm=round(total_delta_comm, 2),
         monthly=monthly,
         by_airline=by_airline,
     )

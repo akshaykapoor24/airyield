@@ -3,6 +3,7 @@ from datetime import datetime, date
 from sqlalchemy import String, DateTime, Date, ForeignKey, Text, Integer, JSON, Enum as SAEnum, Boolean
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
+from app.models.airline_deal import DealLifecycleStatus  # noqa: F401 — re-exported for convenience
 
 
 class UploadedDealStatus(str, enum.Enum):
@@ -69,6 +70,12 @@ class UploadedDeal(Base):
     tenant_id:        Mapped[int | None]       = mapped_column(Integer, ForeignKey("tenants.id", ondelete="SET NULL"), nullable=True)
     created_by_id:Mapped[int]                  = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     created_at:   Mapped[datetime]             = mapped_column(DateTime, default=datetime.utcnow)
+    deal_lifecycle_status: Mapped[DealLifecycleStatus] = mapped_column(
+        SAEnum(DealLifecycleStatus, native_enum=False,
+               values_callable=lambda e: [m.value for m in e]),
+        default=DealLifecycleStatus.DRAFT,
+        server_default="draft",
+    )
     incentives:   Mapped[list["DealIncentive"]] = relationship("DealIncentive", back_populates="deal", cascade="all, delete-orphan")
     incl_excl_rules: Mapped[list["DealInclusionExclusion"]] = relationship(
         "DealInclusionExclusion", back_populates="deal", cascade="all, delete-orphan"

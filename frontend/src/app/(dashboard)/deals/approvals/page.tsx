@@ -53,6 +53,32 @@ type BulkApproveResult = {
   failed: Array<{ deal_id: number; reason: string }>;
 };
 
+type ClosingDealSummary = {
+  deal_id:         number;
+  deal_type:       string;
+  deal_no:         string;
+  airline_name:    string | null;
+  airline_type:    string | null;
+  source_agent:    string | null;
+  deal_maker_name: string | null;
+  valid_from:      string | null;
+  valid_to:        string | null;
+  contract_year:   string | null;
+  business_type:   string | null;
+  trigger_type:    string | null;
+  payout_type:     string | null;
+  entity_lcc:      string | null;
+  incentive_types: string[];
+  incentive_data:  Record<string, Record<string, string>>;
+  incl_excl_types: string[];
+  incl_excl_data:  Record<string, Record<string, string>>;
+  remark:          string | null;
+};
+type ClosingPreview = {
+  is_final_step: boolean;
+  closing_deals: ClosingDealSummary[];
+};
+
 function getErrorMessage(err: unknown, fallback: string): string {
   if (typeof err === "object" && err !== null) {
     const maybe = err as { response?: { data?: { detail?: string } } };
@@ -87,7 +113,7 @@ function InfoRow({ label, value }: { label: string; value: string | null | undef
   );
 }
 
-function DealApprovalModal({ deal, history, remark, onRemarkChange, onApprove, onReject, onClose, acting, rejectError }: {
+function DealApprovalModal({ deal, history, remark, onRemarkChange, onApprove, onReject, onClose, acting, rejectError, closingDeals }: {
   deal: InboxDeal;
   history: DealHistoryData | null;
   remark: string;
@@ -97,6 +123,7 @@ function DealApprovalModal({ deal, history, remark, onRemarkChange, onApprove, o
   onClose: () => void;
   acting: boolean;
   rejectError: string;
+  closingDeals: ClosingDealSummary[];
 }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
@@ -244,6 +271,121 @@ function DealApprovalModal({ deal, history, remark, onRemarkChange, onApprove, o
             )}
           </div>
 
+          {/* Closing Warning */}
+          {closingDeals.length > 0 && (
+            <div className="rounded-lg border border-amber-300 bg-amber-50 overflow-hidden">
+              <div className="px-3.5 py-2.5 bg-amber-100/70 border-b border-amber-200">
+                <p className="text-[11px] font-bold text-amber-800 uppercase tracking-wide">
+                  ⚠ Approving this deal will close the following active deal(s)
+                </p>
+              </div>
+              <div className="divide-y divide-amber-200">
+                {closingDeals.map(cd => (
+                  <div key={`${cd.deal_type}-${cd.deal_id}`} className="px-3.5 py-3 space-y-3">
+                    {/* Header */}
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-mono font-bold text-[10px] bg-amber-200 text-amber-900 px-1.5 py-0.5 rounded">
+                        {cd.deal_no}
+                      </span>
+                      <span className="text-sm font-semibold text-amber-900">{cd.airline_name ?? "—"}</span>
+                      {cd.airline_type && (
+                        <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-blue-100 text-blue-700">{cd.airline_type}</span>
+                      )}
+                      <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-violet-100 text-violet-700 uppercase">{cd.deal_type}</span>
+                    </div>
+
+                    {/* Contract Details */}
+                    <div>
+                      <p className="text-[10px] font-bold text-amber-700 uppercase tracking-wide mb-1.5">Contract Details</p>
+                      <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-xs bg-white/60 rounded border border-amber-200 px-3 py-2">
+                        {cd.source_agent    && <InfoRow label="Source Agent"   value={cd.source_agent} />}
+                        {cd.deal_maker_name && <InfoRow label="Deal Maker"     value={cd.deal_maker_name} />}
+                        {cd.airline_name    && <InfoRow label="Airline Name"   value={cd.airline_name} />}
+                        {cd.airline_type    && <InfoRow label="Airline Type"   value={cd.airline_type} />}
+                        {cd.valid_from      && <InfoRow label="Valid From"     value={cd.valid_from} />}
+                        {cd.valid_to        && <InfoRow label="Valid To"       value={cd.valid_to} />}
+                        {cd.business_type   && <InfoRow label="Business Type"  value={cd.business_type} />}
+                        {cd.contract_year   && <InfoRow label="Contract Year"  value={cd.contract_year} />}
+                        {cd.trigger_type    && <InfoRow label="Trigger Type"   value={cd.trigger_type} />}
+                        {cd.payout_type     && <InfoRow label="Payout Type"    value={cd.payout_type} />}
+                        {cd.entity_lcc      && <InfoRow label="Entity (LCC)"   value={cd.entity_lcc} />}
+                      </div>
+                    </div>
+
+                    {/* Incentive Types */}
+                    {cd.incentive_types.length > 0 && (
+                      <div>
+                        <p className="text-[10px] font-bold text-amber-700 uppercase tracking-wide mb-1.5">Incentive Types</p>
+                        <div className="space-y-1.5">
+                          {cd.incentive_types.map(itype => {
+                            const data = cd.incentive_data?.[itype] ?? {};
+                            const entries = Object.entries(data);
+                            return (
+                              <div key={itype} className="rounded border border-purple-100 overflow-hidden">
+                                <div className="bg-purple-50 px-3 py-1">
+                                  <span className="text-[10px] font-bold text-purple-700 uppercase tracking-wide">{itype}</span>
+                                </div>
+                                {entries.length > 0 ? (
+                                  <div className="grid grid-cols-2 gap-x-6 gap-y-1 px-3 py-1.5 text-xs bg-white/60">
+                                    {entries.map(([k, v]) => (
+                                      <InfoRow key={k} label={k.replace(/_/g, " ")} value={String(v)} />
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <p className="px-3 py-1.5 text-xs text-gray-400 italic">No detail fields recorded.</p>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Inclusions / Exclusions */}
+                    {cd.incl_excl_types.length > 0 && (
+                      <div>
+                        <p className="text-[10px] font-bold text-amber-700 uppercase tracking-wide mb-1.5">Inclusions / Exclusions</p>
+                        <div className="space-y-1.5">
+                          {cd.incl_excl_types.map(ietype => {
+                            const isExcl = ietype.toLowerCase().includes("exclusion");
+                            const data = cd.incl_excl_data?.[ietype] ?? {};
+                            const entries = Object.entries(data);
+                            return (
+                              <div key={ietype} className={`rounded border overflow-hidden ${isExcl ? "border-red-100" : "border-green-100"}`}>
+                                <div className={`px-3 py-1 ${isExcl ? "bg-red-50" : "bg-green-50"}`}>
+                                  <span className={`text-[10px] font-bold uppercase tracking-wide ${isExcl ? "text-red-700" : "text-green-700"}`}>{ietype}</span>
+                                </div>
+                                {entries.length > 0 ? (
+                                  <div className="grid grid-cols-2 gap-x-6 gap-y-1 px-3 py-1.5 text-xs bg-white/60">
+                                    {entries.map(([k, v]) => (
+                                      <InfoRow key={k} label={k.replace(/_/g, " ")} value={String(v)} />
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <p className="px-3 py-1.5 text-xs text-gray-400 italic">No detail fields recorded.</p>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Remark */}
+                    {cd.remark && (
+                      <div>
+                        <p className="text-[10px] font-bold text-amber-700 uppercase tracking-wide mb-1">Deal Remark</p>
+                        <p className="text-xs text-gray-600 italic bg-white/60 rounded border border-amber-200 px-3 py-2">
+                          &ldquo;{cd.remark}&rdquo;
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Approver Remark */}
           <div>
             <label className="block text-[11px] font-medium text-gray-500 uppercase tracking-wide mb-1">
@@ -286,8 +428,11 @@ export default function ApprovalsPage() {
   const [acting,        setActing]        = useState(false);
   const [error,         setError]         = useState<string | null>(null);
   const [success,       setSuccess]       = useState<string | null>(null);
-  const [modalDeal,     setModalDeal]     = useState<InboxDeal | null>(null);
-  const [rejectError,   setRejectError]   = useState("");
+  const [modalDeal,      setModalDeal]      = useState<InboxDeal | null>(null);
+  const [rejectError,    setRejectError]    = useState("");
+  const [closingPreviews,  setClosingPreviews]  = useState<Record<number, ClosingPreview>>({});
+  const [bulkConfirmOpen,  setBulkConfirmOpen]  = useState(false);
+  const [bulkClosingDeals, setBulkClosingDeals] = useState<ClosingDealSummary[]>([]);
 
   const loadInbox = useCallback(async () => {
     setLoading(true);
@@ -357,6 +502,49 @@ export default function ApprovalsPage() {
     setSelectedDeals(inbox.map((d) => d.id));
   };
 
+  const openModal = useCallback(async (d: InboxDeal) => {
+    setRejectError("");
+    setModalDeal(d);
+    if (!historyByDeal[d.id]) loadHistory(d.id, d.deal_id, d.deal_type);
+    if (!closingPreviews[d.id]) {
+      try {
+        const res = await api.get<ClosingPreview>(`/deals/approvals/${d.id}/closing-preview`);
+        setClosingPreviews(prev => ({ ...prev, [d.id]: res.data }));
+      } catch { /* non-blocking */ }
+    }
+  }, [historyByDeal, closingPreviews, loadHistory]);
+
+  const handleBulkApproveClick = async () => {
+    if (!selectedDeals.length) { setError("Please select one or more deals for bulk approve."); return; }
+    const missing = selectedDeals.filter(id => !closingPreviews[id]);
+    let previews = { ...closingPreviews };
+    if (missing.length) {
+      try {
+        const res = await api.post<Record<string, ClosingPreview>>(
+          "/deals/approvals/bulk-closing-preview", { deal_ids: missing }
+        );
+        const parsed = Object.fromEntries(
+          Object.entries(res.data).map(([k, v]) => [Number(k), v])
+        );
+        previews = { ...previews, ...parsed };
+        setClosingPreviews(previews);
+      } catch { /* proceed without preview */ }
+    }
+    const allClosing = selectedDeals.flatMap(id => previews[id]?.closing_deals ?? []);
+    const seen = new Set<string>();
+    const unique = allClosing.filter(cd => {
+      const key = `${cd.deal_type}-${cd.deal_id}`;
+      if (seen.has(key)) return false;
+      seen.add(key); return true;
+    });
+    if (unique.length > 0) {
+      setBulkClosingDeals(unique);
+      setBulkConfirmOpen(true);
+    } else {
+      bulkApprove();
+    }
+  };
+
   const bulkApprove = async () => {
     if (!selectedDeals.length) { setError("Please select one or more deals for bulk approve."); return; }
     setActing(true);
@@ -397,6 +585,142 @@ export default function ApprovalsPage() {
 
   return (
     <div className="space-y-5">
+      {bulkConfirmOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl flex flex-col overflow-hidden max-h-[85vh]">
+            <div className="flex items-start justify-between px-5 py-4 border-b border-gray-100 bg-amber-50/60 shrink-0">
+              <div>
+                <h3 className="text-sm font-bold text-gray-900">Confirm Bulk Approval</h3>
+                <p className="text-[11px] text-amber-700 mt-0.5">
+                  Approving will automatically close the following active deal(s):
+                </p>
+              </div>
+              <button onClick={() => setBulkConfirmOpen(false)} className="text-gray-400 hover:text-gray-600 text-lg leading-none ml-4">×</button>
+            </div>
+            <div className="overflow-y-auto flex-1 px-5 py-4">
+              <div className="rounded-lg border border-amber-300 bg-amber-50 overflow-hidden">
+                <div className="divide-y divide-amber-200">
+                  {bulkClosingDeals.map(cd => (
+                    <div key={`${cd.deal_type}-${cd.deal_id}`} className="px-3.5 py-3 space-y-3">
+                      {/* Header */}
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-mono font-bold text-[10px] bg-amber-200 text-amber-900 px-1.5 py-0.5 rounded">{cd.deal_no}</span>
+                        <span className="text-sm font-semibold text-amber-900">{cd.airline_name ?? "—"}</span>
+                        {cd.airline_type && (
+                          <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-blue-100 text-blue-700">{cd.airline_type}</span>
+                        )}
+                        <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-violet-100 text-violet-700 uppercase">{cd.deal_type}</span>
+                      </div>
+
+                      {/* Contract Details */}
+                      <div>
+                        <p className="text-[10px] font-bold text-amber-700 uppercase tracking-wide mb-1.5">Contract Details</p>
+                        <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-xs bg-white/60 rounded border border-amber-200 px-3 py-2">
+                          {cd.source_agent    && <InfoRow label="Source Agent"   value={cd.source_agent} />}
+                          {cd.deal_maker_name && <InfoRow label="Deal Maker"     value={cd.deal_maker_name} />}
+                          {cd.airline_name    && <InfoRow label="Airline Name"   value={cd.airline_name} />}
+                          {cd.airline_type    && <InfoRow label="Airline Type"   value={cd.airline_type} />}
+                          {cd.valid_from      && <InfoRow label="Valid From"     value={cd.valid_from} />}
+                          {cd.valid_to        && <InfoRow label="Valid To"       value={cd.valid_to} />}
+                          {cd.business_type   && <InfoRow label="Business Type"  value={cd.business_type} />}
+                          {cd.contract_year   && <InfoRow label="Contract Year"  value={cd.contract_year} />}
+                          {cd.trigger_type    && <InfoRow label="Trigger Type"   value={cd.trigger_type} />}
+                          {cd.payout_type     && <InfoRow label="Payout Type"    value={cd.payout_type} />}
+                          {cd.entity_lcc      && <InfoRow label="Entity (LCC)"   value={cd.entity_lcc} />}
+                        </div>
+                      </div>
+
+                      {/* Incentive Types */}
+                      {cd.incentive_types.length > 0 && (
+                        <div>
+                          <p className="text-[10px] font-bold text-amber-700 uppercase tracking-wide mb-1.5">Incentive Types</p>
+                          <div className="space-y-1.5">
+                            {cd.incentive_types.map(itype => {
+                              const data = cd.incentive_data?.[itype] ?? {};
+                              const entries = Object.entries(data);
+                              return (
+                                <div key={itype} className="rounded border border-purple-100 overflow-hidden">
+                                  <div className="bg-purple-50 px-3 py-1">
+                                    <span className="text-[10px] font-bold text-purple-700 uppercase tracking-wide">{itype}</span>
+                                  </div>
+                                  {entries.length > 0 ? (
+                                    <div className="grid grid-cols-2 gap-x-6 gap-y-1 px-3 py-1.5 text-xs bg-white/60">
+                                      {entries.map(([k, v]) => (
+                                        <InfoRow key={k} label={k.replace(/_/g, " ")} value={String(v)} />
+                                      ))}
+                                    </div>
+                                  ) : (
+                                    <p className="px-3 py-1.5 text-xs text-gray-400 italic">No detail fields recorded.</p>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Inclusions / Exclusions */}
+                      {cd.incl_excl_types.length > 0 && (
+                        <div>
+                          <p className="text-[10px] font-bold text-amber-700 uppercase tracking-wide mb-1.5">Inclusions / Exclusions</p>
+                          <div className="space-y-1.5">
+                            {cd.incl_excl_types.map(ietype => {
+                              const isExcl = ietype.toLowerCase().includes("exclusion");
+                              const data = cd.incl_excl_data?.[ietype] ?? {};
+                              const entries = Object.entries(data);
+                              return (
+                                <div key={ietype} className={`rounded border overflow-hidden ${isExcl ? "border-red-100" : "border-green-100"}`}>
+                                  <div className={`px-3 py-1 ${isExcl ? "bg-red-50" : "bg-green-50"}`}>
+                                    <span className={`text-[10px] font-bold uppercase tracking-wide ${isExcl ? "text-red-700" : "text-green-700"}`}>{ietype}</span>
+                                  </div>
+                                  {entries.length > 0 ? (
+                                    <div className="grid grid-cols-2 gap-x-6 gap-y-1 px-3 py-1.5 text-xs bg-white/60">
+                                      {entries.map(([k, v]) => (
+                                        <InfoRow key={k} label={k.replace(/_/g, " ")} value={String(v)} />
+                                      ))}
+                                    </div>
+                                  ) : (
+                                    <p className="px-3 py-1.5 text-xs text-gray-400 italic">No detail fields recorded.</p>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Remark */}
+                      {cd.remark && (
+                        <div>
+                          <p className="text-[10px] font-bold text-amber-700 uppercase tracking-wide mb-1">Deal Remark</p>
+                          <p className="text-xs text-gray-600 italic bg-white/60 rounded border border-amber-200 px-3 py-2">
+                            &ldquo;{cd.remark}&rdquo;
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <div className="flex gap-3 px-5 py-3.5 border-t border-gray-100 shrink-0">
+              <button
+                onClick={() => setBulkConfirmOpen(false)}
+                className="flex-1 border border-gray-200 text-gray-600 rounded-lg py-2 text-sm font-medium hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => { setBulkConfirmOpen(false); bulkApprove(); }}
+                className="flex-1 bg-green-600 text-white rounded-lg py-2 text-sm font-semibold hover:bg-green-700"
+              >
+                Proceed &amp; Approve
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {modalDeal && (
         <DealApprovalModal
           deal={modalDeal}
@@ -408,6 +732,7 @@ export default function ApprovalsPage() {
           onClose={() => { setModalDeal(null); setRejectError(""); }}
           acting={acting}
           rejectError={rejectError}
+          closingDeals={closingPreviews[modalDeal.id]?.closing_deals ?? []}
         />
       )}
 
@@ -432,7 +757,7 @@ export default function ApprovalsPage() {
           <div className="text-sm font-semibold text-gray-900">Approvals Table</div>
           <button
             disabled={acting || !selectedDeals.length}
-            onClick={bulkApprove}
+            onClick={handleBulkApproveClick}
             className="inline-flex items-center gap-2 px-3 py-2 text-sm bg-green-600 text-white rounded-lg disabled:opacity-50 hover:bg-green-700"
           >
             <CheckCircle className="w-4 h-4" /> Approve All Selected
@@ -573,7 +898,7 @@ export default function ApprovalsPage() {
                           </button>
                           <button
                             disabled={acting}
-                            onClick={() => { setRejectError(""); setModalDeal(d); if (!historyByDeal[d.id]) loadHistory(d.id, d.deal_id, d.deal_type); }}
+                            onClick={() => openModal(d)}
                             className="inline-flex items-center gap-1 px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs hover:bg-green-700 disabled:opacity-50"
                           >
                             <Eye className="w-3.5 h-3.5" /> View &amp; Approve

@@ -81,6 +81,7 @@ class UploadedTicketRead(TicketRow):
     tenant_id:       int
     created_by_id:   int
     created_at:      datetime
+    ticket_status:   str = "draft"
 
     model_config = {"from_attributes": True}
 
@@ -150,6 +151,7 @@ class UploadedTicketUpdate(BaseModel):
     acc_code:            Optional[str]   = None
     sold_to:             Optional[str]   = None
     customer_name:       Optional[str]   = None
+    ticket_status:       Optional[str]   = None
 
     model_config = ConfigDict(extra="ignore")
 
@@ -173,17 +175,18 @@ class PLBDiagnostic(BaseModel):
 
 
 class DealDiagnostic(BaseModel):
-    deal_id:           int
-    deal_type:         str            # "airline" | "b2b"
-    deal_name:         str
-    deal_no:           str            # e.g. "AIR-0014", "B2B-0001"
-    valid_from:        Optional[date]
-    valid_to:          Optional[date]
-    trigger_type:      Optional[str]  # airline deals only
-    deal_validity_step: MatchStepResult
-    plbs:              list[PLBDiagnostic]
-    overall_match:     bool
-    best_incentive:    Optional[float]
+    deal_id:              int
+    deal_type:            str            # "airline" | "b2b"
+    deal_name:            str
+    deal_no:              str            # e.g. "AIR-0014", "B2B-0001"
+    valid_from:           Optional[date]
+    valid_to:             Optional[date]
+    trigger_type:         Optional[str]  # airline deals only
+    deal_validity_step:   MatchStepResult
+    plbs:                 list[PLBDiagnostic]
+    overall_match:        bool
+    best_incentive:       Optional[float]
+    deal_lifecycle_status: Optional[str] = None
 
 
 class MatchDiagnosisResponse(BaseModel):
