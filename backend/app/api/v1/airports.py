@@ -509,6 +509,52 @@ async def reject_airport(
     return {"status": "rejected"}
 
 
+# ── distinct option lists for deal form dropdowns ─────────────────────────
+
+@router.get("/options")
+async def get_airport_options(
+    continent: Optional[str] = None,
+    country:   Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return distinct values for deal-form dropdowns.
+
+    ?continent=Asia  → { countries: [...] }
+    ?country=India   → { airports: [...] }  (IATA codes)
+    (no params)      → { continents: [...], country_groups: [...] }
+    """
+    from sqlalchemy import distinct as sql_distinct
+
+    if continent:
+        res = await db.execute(
+            select(sql_distinct(Airport.country))
+            .where(Airport.continent == continent, Airport.is_active == True)
+        )
+        return {"countries": sorted(r[0] for r in res.all())}
+
+    if country:
+        res = await db.execute(
+            select(Airport.iata_code)
+            .where(Airport.country == country, Airport.is_active == True)
+            .order_by(Airport.iata_code)
+        )
+        return {"airports": [r[0] for r in res.all()]}
+
+    cont_q = await db.execute(
+        select(sql_distinct(Airport.continent))
+        .where(Airport.continent.isnot(None), Airport.is_active == True)
+    )
+    cat_q = await db.execute(
+        select(sql_distinct(Airport.categorization))
+        .where(Airport.categorization.isnot(None), Airport.is_active == True)
+    )
+    return {
+        "continents":    sorted(r[0] for r in cont_q.all()),
+        "country_groups": sorted(r[0] for r in cat_q.all()),
+    }
+
+
 # ── get single airport ─────────────────────────────────────────────────────
 
 @router.get("/{airport_id}", response_model=AirportRead)

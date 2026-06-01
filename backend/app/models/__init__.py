@@ -3,6 +3,7 @@ from app.models.user import User, UserRole
 from app.models.airline import Airline
 from app.models.airline_approval import AirlineApproval
 from app.models.supplier import Supplier
+from app.models.supplier_approval import SupplierApproval
 from app.models.airport import Airport
 from app.models.airport_approval import AirportApproval
 from app.models.route import Route
@@ -28,14 +29,16 @@ from app.models.uploaded_deal import (
 from app.models.airline_class_master import AirlineClassMaster
 from app.models.class_approval import ClassApproval
 from app.models.uploaded_ticket import UploadedTicket
+from app.models.ticket_statement import TicketStatement
 from app.models.airline_deal import AirlineDeal, ManualDealStatus
 from app.models.b2b_deal import B2BDeal
+from app.models.deal_batch import DealBatch
 
 __all__ = [
     "Tenant",
     "User", "UserRole",
     "Airline", "AirlineApproval",
-    "Supplier",
+    "Supplier", "SupplierApproval",
     "Airport", "AirportApproval",
     "Route",
     "ApprovalWorkflow", "ApprovalWorkflowStep", "ApprovalWorkflowStepApprover", "DealApproval", "DealApprovalStep",
@@ -46,5 +49,7 @@ __all__ = [
     "UploadedDeal", "DealIncentive", "DealInclusionExclusion", "UploadedDealStatus", "UploadedDealSourceType",
     "AirlineClassMaster", "ClassApproval",
     "UploadedTicket",
+    "TicketStatement",
     "AirlineDeal", "B2BDeal", "ManualDealStatus",
+    "DealBatch",
 ]

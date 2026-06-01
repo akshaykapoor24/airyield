@@ -194,8 +194,28 @@ class AIExtractResponse(BaseModel):
     warning: Optional[str] = None
 
 
+class DealBatchRead(BaseModel):
+    batch_id:        str
+    deal_type:       str
+    supplier_name:   Optional[str]
+    file_name:       Optional[str]
+    file_type:       Optional[str]
+    incentive_types: list[str]
+    valid_from:      Optional[date]
+    valid_to:        Optional[date]
+    deal_count:      int
+    created_by_name: Optional[str]
+    created_at:      datetime
+
+    model_config = {"from_attributes": True}
+
+
 class AIConfirmPayload(BaseModel):
     deals: list[AIDeal]
+    batch_id: Optional[str] = None
+    supplier_name: Optional[str] = None
+    file_name: Optional[str] = None
+    file_type: Optional[str] = "pdf"
 
 
 class ConfirmUploadPayload(BaseModel):

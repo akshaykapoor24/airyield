@@ -7,6 +7,7 @@ from pydantic import BaseModel
 class B2BDealCreate(BaseModel):
     source_agent: Optional[str] = None
     deal_maker_name: Optional[str] = None
+    supplier_name: Optional[str] = None
     remark: Optional[str] = None
     airline_type: str
     airline_name: str
@@ -31,6 +32,7 @@ class B2BDealResponse(BaseModel):
     deal_lifecycle_status: str = "draft"
     source_agent: str
     deal_maker_name: Optional[str]
+    supplier_name: Optional[str]
     remark: Optional[str]
     airline_type: Optional[str]
     airline_name: Optional[str]

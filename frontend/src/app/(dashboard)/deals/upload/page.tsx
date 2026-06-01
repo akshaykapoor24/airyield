@@ -13,7 +13,7 @@ import { useRouter } from "next/navigation";
 // ═══════════════════════════════════════════════════════════════════════════════
 // CONSTANTS
 // ═══════════════════════════════════════════════════════════════════════════════
-const SUPPLIERS      = ["Lords Travel", "Akbar Travels", "Thomas Cook", "Cox & Kings", "SOTC", "Yatra"];
+// Supplier names are fetched live from the supplier master API
 const ENTITIES       = ["ATB", "TSI", "YOL"];
 const CONTRACT_YEARS = ["Calendar year", "Financial year"];
 const TRIGGER_TYPES  = ["Flown", "Sales"];
@@ -30,10 +30,8 @@ const INCLUSIONS_EXCLUSIONS = [
   "Inclusion For Payout","Exclusion For Payout",
 ];
 
-const CONTINENTS         = ["Asia","Europe","North America","South America","Africa","Middle East","Oceania"];
-const COUNTRY_GROUPS     = ["GCC","SAARC","EU","ASEAN","APAC"];
-const COUNTRIES          = ["India","UAE","Saudi Arabia","Qatar","UK","Germany","USA","Singapore","Australia"];
-const AIRPORTS           = ["DEL","BOM","DXB","DOH","LHR","FRA","JFK","SIN","SYD"];
+const CONTINENTS         = ["Africa","Asia","Europe","North America","Oceania","South America","Antarctica"];
+const COUNTRY_GROUPS     = ["APAC","EUROPEAN NATIONS","GCC/MIDDLE EAST","LATIN AMERICA","MEAI","MEAI/APAC","MEAI/SAARC","MEAI/SAARC/APAC","NAM","OTHER","SAARC","SAARC/APAC"];
 const CITIES             = ["Delhi","Mumbai","Dubai","Doha","London","Frankfurt","New York","Singapore","Sydney"];
 const FARE_TYPE_CATS     = ["Normal","Group","Corporate","Excursion","Tour"];
 const TOUR_CODES         = ["TC001","TC002","TC003","TC004"];
@@ -118,6 +116,31 @@ function payoutCalcFields(n:string):FieldConfig[]{return[
   {key:"cappedIncentive",label:`Capped Incentive for ${n}`,                 type:"number",condition:{field:"payoutCalcCols",value:"__set__"}},
 ];}
 
+// Matches every field in InclExclDetailModal (Exclusion + Inclusion).
+// key "_dateExclusion" is a synthetic XLS-only field; extraction expands it to
+// dateExclusionTicket / dateExclusionTravel based on the cell value.
+const INCL_EXCL_FIELDS: FieldConfig[] = [
+  {key:"_dateExclusion",     label:"Date Exclusion",          type:"search"},
+  {key:"validFrom",          label:"Valid From",               type:"date"},
+  {key:"validTo",            label:"Valid To",                 type:"date"},
+  {key:"continents",         label:"Continents",               type:"select"},
+  {key:"countryGroup",       label:"Country Group",            type:"select"},
+  {key:"originContinents",   label:"Origin Continents",        type:"select"},
+  {key:"destContinents",     label:"Destination Continents",   type:"select"},
+  {key:"originCountryGroup", label:"Origin Country Group",     type:"select"},
+  {key:"destCountryGroup",   label:"Destination Country Group",type:"select"},
+  {key:"originCountry",      label:"Origin Country",           type:"search"},
+  {key:"destCountry",        label:"Destination Country",      type:"search"},
+  {key:"originAirport",      label:"Origin Airport",           type:"search"},
+  {key:"destAirport",        label:"Destination Airport",      type:"search"},
+  {key:"city",               label:"City",                     type:"search"},
+  {key:"fareTypeCategory",   label:"Fare Type Category",       type:"select"},
+  {key:"class",              label:"Class",                    type:"select"},
+  {key:"soto",               label:"SOTO",                     type:"select"},
+  {key:"tourCode",           label:"Tour Code",                type:"search"},
+  {key:"domesticCountry",    label:"Domestic Country",         type:"search"},
+];
+
 const INCENTIVE_FIELDS:Record<string,FieldConfig[]> = {
   "PLB":[{key:"validFrom",label:"Contract Valid from for PLB",type:"date"},{key:"validTo",label:"Contract Valid to for PLB",type:"date"},{key:"frequency",label:"Frequency for PLB",type:"select"},{key:"flightType",label:"Flight Type for PLB",type:"select"},{key:"class",label:"Class for PLB",type:"search"},{key:"targetCalcCols",label:"Target Calc Columns for PLB",type:"select"},{key:"payoutCalcCols",label:"Payout Calc Columns for PLB",type:"select"},{key:"targetBased",label:"Target Based for PLB",type:"select"},...payoutFields("PLB")],
   "Super PLB":[{key:"validFrom",label:"Contract Valid from for Super PLB",type:"date"},{key:"validTo",label:"Contract Valid to for Super PLB",type:"date"},{key:"frequency",label:"Frequency for Super PLB",type:"select"},{key:"flightType",label:"Flight Type for Super PLB",type:"select"},{key:"class",label:"Class for Super PLB",type:"search"},{key:"targetBased",label:"Target Based for Super PLB",type:"select"},{key:"targetCalcCols",label:"Target Calc Columns for Super PLB",type:"select"},...payoutFields("Super PLB")],
@@ -132,27 +155,6 @@ const INCENTIVE_FIELDS:Record<string,FieldConfig[]> = {
   "Push Action":[{key:"validFrom",label:"Contract Valid from for Push Action",type:"date"},{key:"validTo",label:"Contract Valid to for Push Action",type:"date"},{key:"frequency",label:"Frequency for Push Action",type:"select"},{key:"flightType",label:"Flight Type for Push Action",type:"select"},{key:"targetBased",label:"Target Based for Push Action",type:"select"},...payoutFields("Push Action")],
 };
 
-// Inclusions / Exclusions detail fields
-const IE_DETAIL_FIELDS: Record<string,{key:string;label:string;options:string[];forExcl?:boolean;forIncl?:boolean}[]> = {
-  all: [
-    {key:"continents",           label:"Continents",                    options:CONTINENTS},
-    {key:"countryGroup",         label:"Country Group",                 options:COUNTRY_GROUPS},
-    {key:"originContinents",     label:"Origin Continents",             options:CONTINENTS},
-    {key:"destContinents",       label:"Destination Continents",        options:CONTINENTS},
-    {key:"originCountryGroup",   label:"Origin Country Group",          options:COUNTRY_GROUPS},
-    {key:"destCountryGroup",     label:"Destination Country Group",     options:COUNTRY_GROUPS},
-    {key:"originCountry",        label:"Origin Country",                options:COUNTRIES},
-    {key:"destCountry",          label:"Destination Country",           options:COUNTRIES},
-    {key:"originAirport",        label:"Origin Airport",                options:AIRPORTS},
-    {key:"destAirport",          label:"Destination Airport",           options:AIRPORTS},
-    {key:"city",                 label:"City",                          options:CITIES},
-    {key:"fareTypeCategory",     label:"Fare Type Category",            options:FARE_TYPE_CATS},
-    {key:"class",                label:"Class",                         options:INCL_CLASS_OPTIONS},
-    {key:"tourCode",             label:"Tour Code",                     options:TOUR_CODES, forIncl:true},
-    {key:"soto",                 label:"SOTO",                          options:SOTO_OPTIONS, forExcl:true},
-    {key:"domesticCountry",      label:"Domestic Country",              options:DOMESTIC_CTRS},
-  ],
-};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // COLUMN DEFINITIONS
@@ -182,6 +184,9 @@ function incentiveMapCols(inc:string){
     key:`i__${inc}__${f.key}`,
     label:f.label.replace(` for ${inc}`,"").replace(/ for .*/,"").replace(/ \(.*\)/,""),
   }));
+}
+function inclExclMapCols(type:string){
+  return INCL_EXCL_FIELDS.map(f=>({key:`ie__${type}__${f.key}`,label:f.label}));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -326,6 +331,34 @@ function SearchSelectField({label,placeholder="Search and select",options,value,
   );
 }
 
+function MultiCheckboxDropdown({label,placeholder="Select...",options,values,onChange}:{label?:string;placeholder?:string;options:string[];values:string[];onChange:(v:string[])=>void}){
+  const [open,setOpen]=useState(false);
+  const ref=useRef<HTMLDivElement>(null);
+  useEffect(()=>{const h=(e:MouseEvent)=>{if(ref.current&&!ref.current.contains(e.target as Node))setOpen(false);};document.addEventListener("mousedown",h);return()=>document.removeEventListener("mousedown",h);},[]);
+  const toggle=(opt:string)=>onChange(values.includes(opt)?values.filter(v=>v!==opt):[...values,opt]);
+  const display=values.length?values.join(", "):null;
+  return(
+    <div className="relative" ref={ref}>
+      {label&&<label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">{label}</label>}
+      <button type="button" onClick={()=>setOpen(o=>!o)} className="w-full flex items-center justify-between border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-white text-left focus:outline-none focus:ring-1 focus:ring-blue-400">
+        <span className={display?"text-gray-800":"text-gray-400"}>{display||placeholder}</span>
+        <div className="flex items-center gap-0.5">
+          {values.length>0&&<span onClick={e=>{e.stopPropagation();onChange([]);}} className="text-gray-300 hover:text-red-400"><X className="w-3 h-3"/></span>}
+          <ChevronDown className="w-3.5 h-3.5 text-gray-400"/>
+        </div>
+      </button>
+      {open&&<div className="absolute z-50 w-full mt-0.5 bg-white border border-gray-200 rounded-md shadow-lg">
+        {options.map(opt=>(
+          <label key={opt} className="flex items-center gap-2 px-2.5 py-1.5 text-xs text-gray-700 hover:bg-blue-50 cursor-pointer">
+            <input type="checkbox" checked={values.includes(opt)} onChange={()=>toggle(opt)} className="w-3.5 h-3.5 rounded border-gray-300 accent-blue-600"/>
+            {opt}
+          </label>
+        ))}
+      </div>}
+    </div>
+  );
+}
+
 function SectionCard({title,children}:{title:string;children:React.ReactNode}){
   return(
     <div className="bg-white rounded-lg border border-gray-200">
@@ -419,13 +452,119 @@ function InclExclDetailModal({
 }){
   const [form, setForm] = useState<Record<string,string>>(initialData);
   const isExcl = type.startsWith("Exclusion");
-  const isIncl = type.startsWith("Inclusion");
+  const suffix  = isExcl ? "for Exclusion" : "for Inclusion";
 
-  const fields = IE_DETAIL_FIELDS.all.filter(f => {
-    if(f.forExcl && !isExcl) return false;
-    if(f.forIncl && !isIncl) return false;
-    return true;
-  });
+  const [continentOptions,    setContinentOptions]    = useState<string[]>(CONTINENTS);
+  const [countryGroupOptions, setCountryGroupOptions] = useState<string[]>(COUNTRY_GROUPS);
+  const [originCountries, setOriginCountries] = useState<string[]>([]);
+  const [destCountries,   setDestCountries]   = useState<string[]>([]);
+  const [originAirports,  setOriginAirports]  = useState<string[]>([]);
+  const [destAirports,    setDestAirports]    = useState<string[]>([]);
+  const [allCountries,    setAllCountries]    = useState<string[]>([]);
+  const [allAirports,     setAllAirports]     = useState<string[]>([]);
+
+  useEffect(()=>{
+    api.get<{continents:string[];country_groups:string[]}>("/airports/options")
+      .then(r=>{
+        if(r.data.continents?.length)     setContinentOptions(r.data.continents);
+        if(r.data.country_groups?.length) setCountryGroupOptions(r.data.country_groups);
+      })
+      .catch(()=>{});
+    api.get<{iata_code:string;country:string|null}[]>("/airports/?limit=5000")
+      .then(r=>{
+        setAllAirports(r.data.map(a=>a.iata_code).filter(Boolean));
+        const countries=[...new Set(r.data.map(a=>a.country).filter(Boolean))] as string[];
+        setAllCountries(countries.sort());
+      })
+      .catch(()=>{});
+  },[]);
+
+  const origContinent = form["originContinents"] ?? "";
+  const destContinent = form["destContinents"]   ?? "";
+  const origCountry   = form["originCountry"]    ?? "";
+  const destCountry   = form["destCountry"]      ?? "";
+
+  useEffect(()=>{
+    if(!origContinent){setOriginCountries([]);return;}
+    api.get<{countries:string[]}>(`/airports/options?continent=${encodeURIComponent(origContinent)}`)
+      .then(r=>setOriginCountries(r.data.countries??[]))
+      .catch(()=>setOriginCountries([]));
+  },[origContinent]);
+
+  useEffect(()=>{
+    if(!destContinent){setDestCountries([]);return;}
+    api.get<{countries:string[]}>(`/airports/options?continent=${encodeURIComponent(destContinent)}`)
+      .then(r=>setDestCountries(r.data.countries??[]))
+      .catch(()=>setDestCountries([]));
+  },[destContinent]);
+
+  useEffect(()=>{
+    if(!origCountry){setOriginAirports([]);return;}
+    api.get<{airports:string[]}>(`/airports/options?country=${encodeURIComponent(origCountry)}`)
+      .then(r=>setOriginAirports(r.data.airports??[]))
+      .catch(()=>setOriginAirports([]));
+  },[origCountry]);
+
+  useEffect(()=>{
+    if(!destCountry){setDestAirports([]);return;}
+    api.get<{airports:string[]}>(`/airports/options?country=${encodeURIComponent(destCountry)}`)
+      .then(r=>setDestAirports(r.data.airports??[]))
+      .catch(()=>setDestAirports([]));
+  },[destCountry]);
+
+  const handleChange=(k:string,v:string)=>{
+    setForm(p=>({...p,[k]:v}));
+  };
+
+  const opts:Record<string,string[]>={
+    continents:continentOptions,           countryGroup:countryGroupOptions,
+    originContinents:continentOptions,     destContinents:continentOptions,
+    originCountryGroup:countryGroupOptions,destCountryGroup:countryGroupOptions,
+    originCountry:origContinent?originCountries:allCountries,
+    destCountry:destContinent?destCountries:allCountries,
+    originAirport:origCountry?originAirports:allAirports,
+    destAirport:destCountry?destAirports:allAirports,
+    city:CITIES, fareTypeCategory:FARE_TYPE_CATS,
+    class:INCL_CLASS_OPTIONS, tourCode:TOUR_CODES, domesticCountry:DOMESTIC_CTRS,
+  };
+
+  const dateExclusionValues=[
+    ...(form["dateExclusionTicket"]==="true"?["Ticket Date"]:[]),
+    ...(form["dateExclusionTravel"]==="true"?["Travel Date"]:[]),
+  ];
+  const handleDateExclusionChange=(selected:string[])=>{
+    setForm(p=>({...p,
+      dateExclusionTicket:selected.includes("Ticket Date")?"true":"",
+      dateExclusionTravel:selected.includes("Travel Date")?"true":"",
+    }));
+  };
+
+  type IERow={key:string;label:string;isDate?:boolean;isSelect?:boolean;options?:string[];placeholder?:string};
+  const rows:IERow[][]=[
+    [{key:"validFrom",label:"Valid From",isDate:true},{key:"validTo",label:"Valid To",isDate:true}],
+    [{key:"continents",label:`Continents ${suffix}`},{key:"countryGroup",label:`Country Group ${suffix}`}],
+    [{key:"originContinents",label:`Origin Continents ${suffix}`},{key:"destContinents",label:`Destination Continents ${suffix}`}],
+    [{key:"originCountryGroup",label:`Origin Country Group ${suffix}`},{key:"destCountryGroup",label:`Destination Country Group ${suffix}`}],
+    [
+      {key:"originCountry",label:`Origin Country ${suffix}`,placeholder:"Search and select"},
+      {key:"destCountry",  label:`Destination Country ${suffix}`,placeholder:"Search and select"},
+    ],
+    [
+      {key:"originAirport",label:`Origin Airport ${suffix}`,placeholder:"Search and select"},
+      {key:"destAirport",  label:`Destination Airport ${suffix}`,placeholder:"Search and select"},
+    ],
+    [{key:"city",label:`City ${suffix}`},{key:"fareTypeCategory",label:`Fare Type Category ${suffix}`}],
+    [
+      {key:"class",label:`Class ${suffix}`},
+      isExcl
+        ?{key:"soto",label:"SOTO for Exclusion",isSelect:true,options:SOTO_OPTIONS}
+        :{key:"tourCode",label:`Tour Code ${suffix}`},
+    ],
+    ...(isExcl
+      ?[[{key:"tourCode",label:`Tour Code ${suffix}`},{key:"domesticCountry",label:`Domestic Country ${suffix}`}]]
+      :[[{key:"domesticCountry",label:`Domestic Country ${suffix}`}]]
+    ),
+  ];
 
   return(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
@@ -437,18 +576,35 @@ function InclExclDetailModal({
           </div>
           <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-lg"><X className="w-4 h-4 text-gray-500"/></button>
         </div>
-        <div className="overflow-y-auto flex-1 p-5">
-          <div className="grid grid-cols-2 gap-3">
-            {fields.map(f=>(
-              <SearchSelectField
-                key={f.key}
-                label={f.label}
-                options={f.options}
-                value={form[f.key]??""}
-                onChange={v=>setForm(p=>({...p,[f.key]:v}))}
-              />
-            ))}
+        <div className="overflow-y-auto flex-1 p-5 space-y-3">
+          <div className="grid gap-3 grid-cols-1 max-w-[50%]">
+            <MultiCheckboxDropdown
+              label="Date Exclusion"
+              placeholder="Select date exclusion"
+              options={["Ticket Date","Travel Date"]}
+              values={dateExclusionValues}
+              onChange={handleDateExclusionChange}
+            />
           </div>
+          {rows.map((pair,ri)=>(
+            <div key={ri} className={`grid gap-3 ${pair.length===2?"grid-cols-2":"grid-cols-1 max-w-[50%]"}`}>
+              {pair.map(f=>(
+                <div key={f.key}>
+                  {f.isDate?(
+                    <div>
+                      <label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">{f.label}</label>
+                      <input type="date" value={form[f.key]??""} onChange={e=>handleChange(f.key,e.target.value)}
+                        className="w-full border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 text-gray-800"/>
+                    </div>
+                  ):f.isSelect?(
+                    <SelectField label={f.label} options={f.options??[]} value={form[f.key]??""} onChange={v=>handleChange(f.key,v)}/>
+                  ):(
+                    <SearchSelectField label={f.label} placeholder={f.placeholder} options={opts[f.key]??[]} value={form[f.key]??""} onChange={v=>handleChange(f.key,v)}/>
+                  )}
+                </div>
+              ))}
+            </div>
+          ))}
         </div>
         <div className="flex gap-3 px-5 py-3.5 border-t border-gray-100">
           <button onClick={onClose} className="flex-1 border border-gray-200 text-gray-600 rounded-lg py-2 text-sm font-medium hover:bg-gray-50">Cancel</button>
@@ -466,11 +622,15 @@ function InclExclPopup({
   rowIdx,
   rowState,
   onToggleType,
+  onOpenType,
+  onRemoveType,
   onClose,
 }:{
   rowIdx:number;
   rowState: RowInclExcl;
   onToggleType:(type:string)=>void;
+  onOpenType:(type:string)=>void;
+  onRemoveType:(type:string)=>void;
   onClose:()=>void;
 }){
   const ref=useRef<HTMLDivElement>(null);
@@ -481,17 +641,29 @@ function InclExclPopup({
   },[onClose]);
 
   return(
-    <div ref={ref} className="absolute z-40 top-full mt-1 right-0 bg-white border border-gray-200 rounded-xl shadow-xl p-3 w-56">
-      <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wide mb-2">Select types</p>
-      {INCLUSIONS_EXCLUSIONS.map(type=>(
-        <label key={type} className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-blue-50 cursor-pointer">
-          <span className={`w-3.5 h-3.5 rounded border flex items-center justify-center flex-shrink-0 ${rowState.types.includes(type)?"bg-[#1e3a5f] border-[#1e3a5f]":"border-gray-300"}`}>
-            {rowState.types.includes(type)&&<Check className="w-2.5 h-2.5 text-white"/>}
-          </span>
-          <input type="checkbox" className="hidden" checked={rowState.types.includes(type)} onChange={()=>onToggleType(type)}/>
-          <span className="text-[11px] text-gray-700">{type}</span>
-        </label>
-      ))}
+    <div ref={ref} className="absolute z-40 top-full mt-1 right-0 bg-white border border-gray-200 rounded-xl shadow-xl p-3 w-64">
+      <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wide mb-2">Inclusions &amp; Exclusions</p>
+      {INCLUSIONS_EXCLUSIONS.map(type=>{
+        const isSelected=rowState.types.includes(type);
+        return(
+          <div key={type} className="flex items-center gap-1 px-2 py-1.5 rounded-lg hover:bg-blue-50">
+            <button
+              onClick={()=>isSelected?onOpenType(type):onToggleType(type)}
+              className="flex items-center gap-2 flex-1 text-left"
+            >
+              <span className={`w-3.5 h-3.5 rounded border flex items-center justify-center flex-shrink-0 ${isSelected?"bg-[#1e3a5f] border-[#1e3a5f]":"border-gray-300"}`}>
+                {isSelected&&<Check className="w-2.5 h-2.5 text-white"/>}
+              </span>
+              <span className={`text-[11px] ${isSelected?"text-[#1e3a5f] font-semibold":"text-gray-700"}`}>{type}</span>
+            </button>
+            {isSelected&&(
+              <button onClick={()=>onRemoveType(type)} className="p-0.5 hover:bg-red-50 rounded text-red-400 flex-shrink-0" title="Remove">
+                <X className="w-3 h-3"/>
+              </button>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -500,14 +672,15 @@ function InclExclPopup({
 // STEP 2 — COLUMN MAPPING
 // ═══════════════════════════════════════════════════════════════════════════════
 function ColumnMappingStep({
-  preview, columnMap, onMapChange, selectedIncentives, dealType, onConfirm, onBack
+  preview, columnMap, onMapChange, selectedIncentives, selectedInclExcl, dealType, onConfirm, onBack
 }:{
   preview:ExtractionPreview;
   columnMap:Record<string,string>;
   onMapChange:(ourKey:string,docCol:string)=>void;
   selectedIncentives:string[];
+  selectedInclExcl:string[];
   dealType:string;
-  onConfirm:(contract:Record<string,string>,rows:ReviewRow[])=>void;
+  onConfirm:(contract:Record<string,string>,rows:ReviewRow[],rowInclExcl:Record<number,RowInclExcl>)=>void;
   onBack:()=>void;
 }){
   const docCols:string[] = preview.doc_columns?.length
@@ -516,13 +689,26 @@ function ColumnMappingStep({
   const rawRows = preview.raw_rows?.length ? preview.raw_rows : [];
   const contractCols = getContractCols(dealType);
 
+  // Normalize a raw cell value to YYYY-MM-DD for date inputs
+  const toDateStr=(v:string):string=>{
+    if(!v)return v;
+    // Already YYYY-MM-DD
+    if(/^\d{4}-\d{2}-\d{2}$/.test(v.trim()))return v.trim();
+    // YYYY-MM-DD HH:MM:SS or YYYY-MM-DDTHH:MM:SS
+    const m=v.trim().match(/^(\d{4}-\d{2}-\d{2})[T ]?/);
+    if(m)return m[1];
+    // Fallback: try Date parse
+    try{const d=new Date(v);if(!isNaN(d.getTime()))return d.toISOString().split("T")[0];}catch{}
+    return v;
+  };
+
   const applyAndContinue=()=>{
     const cellVal=(row:Record<string,string>,docCol:string)=>(row[docCol]??"").trim();
     // Extract contract-level values from first data row (used as global fallback)
     const contract:Record<string,string>={};
     for(const col of contractCols){
       const dc=columnMap[col.key];
-      if(dc){for(const row of rawRows){const v=cellVal(row,dc);if(v){contract[col.key]=v;break;}}}
+      if(dc){for(const row of rawRows){let v=cellVal(row,dc);if(v){if(col.key==="c__valid_from"||col.key==="c__valid_to")v=toDateStr(v);contract[col.key]=v;break;}}}
     }
     // Use rawRows as primary row source so XLS uploads (where preview.rows may be empty) still work
     const rowCount=Math.max(preview.rows.length,rawRows.length);
@@ -534,7 +720,7 @@ function ColumnMappingStep({
       if(rawRow){
         for(const col of contractCols){
           const dc=columnMap[col.key];
-          if(dc){const v=cellVal(rawRow,dc);if(v)extra[col.key]=v;}
+          if(dc){let v=cellVal(rawRow,dc);if(v){if(col.key==="c__valid_from"||col.key==="c__valid_to")v=toDateStr(v);extra[col.key]=v;}}
         }
       }
       // Per-row incentive column values
@@ -542,19 +728,47 @@ function ColumnMappingStep({
         for(const f of INCENTIVE_FIELDS[inc]??[]){
           const colKey=`i__${inc}__${f.key}`;
           const dc=columnMap[colKey];
-          if(dc&&rawRow){let v=cellVal(rawRow,dc);if(v){const opts=FIELD_OPTIONS[f.key];if(opts)v=normalizeSelectValue(v,opts);extra[`inc::${inc}::${f.key}`]=v;}}
+          if(dc&&rawRow){let v=cellVal(rawRow,dc);if(v){if(f.type==="date")v=toDateStr(v);else{const opts=FIELD_OPTIONS[f.key];if(opts)v=normalizeSelectValue(v,opts);}extra[`inc::${inc}::${f.key}`]=v;}}
         }
       }
       const remDc=columnMap[REMARKS_COL.key];
       const remVal=remDc&&rawRow?cellVal(rawRow,remDc):base.remarks;
       return{...base,row_order:i,remarks:remVal||base.remarks,extra};
     });
-    onConfirm(contract,rows);
+    // Extract incl/excl column values per row from XLS
+    const rowInclExclFromXLS:Record<number,RowInclExcl>={};
+    for(let i=0;i<rowCount;i++){
+      const rawRow=rawRows[i];
+      if(!rawRow)continue;
+      const inclExclData:Record<string,Record<string,string>>={};
+      for(const type of selectedInclExcl){
+        for(const f of INCL_EXCL_FIELDS){
+          const colKey=`ie__${type}__${f.key}`;
+          const dc=columnMap[colKey];
+          if(dc){let v=cellVal(rawRow,dc);if(v){
+            if(f.type==="date")v=toDateStr(v);
+            if(!inclExclData[type])inclExclData[type]={};
+            if(f.key==="_dateExclusion"){
+              // Expand combined column into two bool flags
+              const lower=v.toLowerCase();
+              if(lower.includes("ticket"))inclExclData[type]["dateExclusionTicket"]="true";
+              if(lower.includes("travel"))inclExclData[type]["dateExclusionTravel"]="true";
+            }else{
+              inclExclData[type][f.key]=v;
+            }
+          }}
+        }
+      }
+      const types=Object.keys(inclExclData).filter(t=>Object.keys(inclExclData[t]).length>0);
+      if(types.length>0)rowInclExclFromXLS[i]={types,data:inclExclData,viceVersa:{}};
+    }
+    onConfirm(contract,rows,rowInclExclFromXLS);
   };
 
   const groups=[
     {label:"Airline Contract Details",cols:contractCols},
     ...selectedIncentives.map(inc=>({label:`Incentive Types — ${inc}`,cols:incentiveMapCols(inc)})),
+    ...selectedInclExcl.map(type=>({label:`Incl/Excl — ${type}`,cols:inclExclMapCols(type)})),
     {label:"Remarks",cols:[REMARKS_COL]},
   ];
 
@@ -715,6 +929,7 @@ function buildColGroups(selectedIncentives:string[], dealType:string):ColGroup[]
 function ReviewTable({
   rows, colGroups, onChange, onDelete, onAdd,
   rowInclExcl, inclExclPopup, setInclExclPopup, onToggleInclExclType,
+  onOpenInclExclType, onRemoveInclExclType,
   filterText, selectedRows, onToggleRow, onToggleAllFiltered,
 }:{
   rows:ReviewRow[];
@@ -726,6 +941,8 @@ function ReviewTable({
   inclExclPopup:number|null;
   setInclExclPopup:(idx:number|null)=>void;
   onToggleInclExclType:(rowIdx:number,type:string)=>void;
+  onOpenInclExclType:(rowIdx:number,type:string)=>void;
+  onRemoveInclExclType:(rowIdx:number,type:string)=>void;
   filterText:string;
   selectedRows:Set<number>;
   onToggleRow:(idx:number)=>void;
@@ -758,6 +975,8 @@ function ReviewTable({
                 rowIdx={idx}
                 rowState={state?? {types:[],data:{},viceVersa:{}}}
                 onToggleType={(type)=>onToggleInclExclType(idx,type)}
+                onOpenType={(type)=>onOpenInclExclType(idx,type)}
+                onRemoveType={(type)=>onRemoveInclExclType(idx,type)}
                 onClose={()=>setInclExclPopup(null)}
               />
             )}
@@ -922,18 +1141,22 @@ function ReviewTable({
 // ═══════════════════════════════════════════════════════════════════════════════
 // Template uses CONTRACT_COLS_ALL labels exactly + full incentive labels (e.g. "Contract Valid from for PLB")
 // so that initColumnMap can auto-match them without case-insensitive collisions.
-function downloadXLSTemplate(incentiveTypes: string[]){
+function downloadXLSTemplate(incentiveTypes: string[], inclExclTypes: string[]){
   const contractHeaders = CONTRACT_COLS_ALL.map(c => c.label);
   // Use FULL INCENTIVE_FIELDS labels (not stripped) to avoid collision with contract col labels
   const incentiveHeaders = incentiveTypes.flatMap(inc =>
     (INCENTIVE_FIELDS[inc]??[]).map(f => f.label)
   );
-  const headers = [...contractHeaders, ...incentiveHeaders, REMARKS_COL.label];
+  const inclExclHeaders = inclExclTypes.flatMap(type =>
+    INCL_EXCL_FIELDS.map(f => `${f.label} for ${type}`)
+  );
+  const headers = [...contractHeaders, ...incentiveHeaders, ...inclExclHeaders, REMARKS_COL.label];
 
   const sampleRow = [
     "GDS","Airline Name","Calendar year","B2C",
     "2025-01-01","2025-12-31","Sales","Sales","ATB","",
     ...incentiveTypes.flatMap(inc => (INCENTIVE_FIELDS[inc]??[]).map(() => "")),
+    ...inclExclTypes.flatMap(() => INCL_EXCL_FIELDS.map(() => "")),
     "",
   ];
   const ws = XLSX.utils.aoa_to_sheet([headers, sampleRow]);
@@ -953,6 +1176,7 @@ export default function UploadDealPage(){
   // ── Step 1 state ────────────────────────────────────────────────────────────
   const [dealType,      setDealType]      = useState("");           // "airline" | "b2b"
   const [supplierName,  setSupplierName]  = useState("");
+  const [supplierOptions, setSupplierOptions] = useState<string[]>([]);
   const [validFromDate, setValidFromDate] = useState("");
   const [file,          setFile]          = useState<File|null>(null);
   const [dragging,     setDragging]     = useState(false);
@@ -960,6 +1184,7 @@ export default function UploadDealPage(){
   const [uploadError,  setUploadError]  = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
   const [selectedIncentives, setSelectedIncentives] = useState<string[]>([]);
+  const [selectedInclExcl,   setSelectedInclExcl]   = useState<string[]>([]);
 
   // ── Step 2 state ────────────────────────────────────────────────────────────
   const [preview,   setPreview]   = useState<ExtractionPreview|null>(null);
@@ -982,6 +1207,15 @@ export default function UploadDealPage(){
           dc.toLowerCase().trim()===fullLabel.toLowerCase()
         );
         if(match)auto[col.key]=match;
+      }
+    }
+    // Auto-map incl/excl columns by full label "Field for Type"
+    for(const type of selectedInclExcl){
+      for(const f of INCL_EXCL_FIELDS){
+        const colKey=`ie__${type}__${f.key}`;
+        const fullLabel=`${f.label} for ${type}`;
+        const match=docCols.find(dc=>dc.toLowerCase().trim()===fullLabel.toLowerCase());
+        if(match)auto[colKey]=match;
       }
     }
     // Remarks: try exact label, then common synonyms
@@ -1010,6 +1244,13 @@ export default function UploadDealPage(){
   const [selectedRows,  setSelectedRows]  = useState<Set<number>>(new Set());
   const [bulkColKey,    setBulkColKey]    = useState("");
   const [bulkColValue,  setBulkColValue]  = useState("");
+  const [savedBatchId,  setSavedBatchId]  = useState<string|null>(null);
+
+  useEffect(()=>{
+    api.get<{id:number;name:string}[]>("/suppliers/?limit=5000")
+      .then(r=>setSupplierOptions(r.data.map(s=>s.name)))
+      .catch(()=>{});
+  },[]);
 
   const colGroups = buildColGroups(selectedIncentives, dealType);
 
@@ -1050,6 +1291,20 @@ export default function UploadDealPage(){
     setInclExclModal(null);
   };
 
+  const handleOpenInclExclType=useCallback((rowIdx:number,type:string)=>{
+    setInclExclPopup(null);
+    setInclExclModal({rowIdx,type});
+  },[]);
+
+  const handleRemoveInclExclType=useCallback((rowIdx:number,type:string)=>{
+    setRowInclExcl(p=>{
+      const state=p[rowIdx]??{types:[],data:{},viceVersa:{}};
+      const next={types:state.types.filter(t=>t!==type),data:{...state.data},viceVersa:{...state.viceVersa}};
+      delete next.data[type];delete next.viceVersa[type];
+      return{...p,[rowIdx]:next};
+    });
+  },[]);
+
   // ── Table row helpers ──────────────────────────────────────────────────────
   const handleRowChange=useCallback((idx:number,key:string,val:string)=>{
     setRows(prev=>prev.map((r,i)=>{
@@ -1060,7 +1315,13 @@ export default function UploadDealPage(){
     }));
   },[]);
   const handleDeleteRow=useCallback((idx:number)=>setRows(prev=>prev.filter((_,i)=>i!==idx)),[]);
-  const handleAddRow=()=>setRows(prev=>[...prev,{...EMPTY_ROW(),row_order:prev.length}]);
+  const handleAddRow=()=>{
+    const newIdx=rows.length;
+    setRows(prev=>[...prev,{...EMPTY_ROW(),row_order:prev.length}]);
+    if(selectedInclExcl.length>0){
+      setRowInclExcl(prev=>({...prev,[newIdx]:{types:selectedInclExcl,data:{},viceVersa:{}}}));
+    }
+  };
 
   // ── Filter + bulk edit helpers ─────────────────────────────────────────────
   const handleToggleRow=useCallback((idx:number)=>{
@@ -1099,6 +1360,11 @@ export default function UploadDealPage(){
         });
         setRows(converted);
         setSelectedIncentives(["PLB"]);
+        if(selectedInclExcl.length>0){
+          const initRIE:Record<number,RowInclExcl>={};
+          converted.forEach((_,i)=>{initRIE[i]={types:selectedInclExcl,data:{},viceVersa:{}};});
+          setRowInclExcl(initRIE);
+        }
         setAiFileName(data.file_name);
         setAiConfidence(data.confidence);
         setFilterText("");setSelectedRows(new Set());setBulkColKey("");setBulkColValue("");
@@ -1115,7 +1381,7 @@ export default function UploadDealPage(){
   };
 
   // ── Step 2 → 3: Apply mapping ────────────────────────────────────────────────
-  const handleMappingConfirm=(contract:Record<string,string>,mappedRows:ReviewRow[])=>{
+  const handleMappingConfirm=(contract:Record<string,string>,mappedRows:ReviewRow[],prePopulatedInclExcl:Record<number,RowInclExcl>)=>{
     const fallbackContract: Record<string, string> = {
       c__airline_type:  contract.c__airline_type  || "GDS",
       c__trigger_type:  contract.c__trigger_type  || "Sales",
@@ -1132,7 +1398,18 @@ export default function UploadDealPage(){
         c__valid_to:     r.extra.c__valid_to     || contract.c__valid_to     || "",
       },
     }));
+    const finalRowInclExcl:Record<number,RowInclExcl>={};
+    for(let i=0;i<rowsWithContract.length;i++){
+      const fromXLS=prePopulatedInclExcl[i];
+      const xlsTypes=fromXLS?.types??[];
+      const xlsData=fromXLS?.data??{};
+      const types=[...new Set([...selectedInclExcl,...xlsTypes])];
+      if(types.length>0){
+        finalRowInclExcl[i]={types,data:xlsData,viceVersa:fromXLS?.viceVersa??{}};
+      }
+    }
     setRows(rowsWithContract);
+    setRowInclExcl(finalRowInclExcl);
     setFilterText("");setSelectedRows(new Set());setBulkColKey("");setBulkColValue("");
     setStep(3);
   };
@@ -1148,8 +1425,8 @@ export default function UploadDealPage(){
     const getContractVal=(key:string)=>{for(const r of rows){if(r.extra[key])return r.extra[key];}return "";};
 
     try{
-      await api.post(
-        `/deals/upload/confirm?file_name=${encodeURIComponent(file?.name??"")}&file_type=${fileType}`,
+      const {data:confirmData}=await api.post<{created_count:number;created_ids:number[];batch_id?:string}>(
+        `/deals/upload/confirm?file_name=${encodeURIComponent(file?.name??"")}&file_type=${fileType}&supplier_name=${encodeURIComponent(supplierName||sourceAgent)}`,
         {
           source_agent:    sourceAgent,
           source_type:     "upload",
@@ -1165,7 +1442,7 @@ export default function UploadDealPage(){
           login_id:        getContractVal("c__login_id")||null,
           incentive_types: selectedIncentives,
           incentive_data:  {},
-          incl_excl_types: [],
+          incl_excl_types: selectedInclExcl,
           incl_excl_data:  {},
           vice_versa:      {},
           column_map:      columnMap,
@@ -1182,7 +1459,9 @@ export default function UploadDealPage(){
             const ie=rowInclExcl[i]??{types:[],data:{},viceVersa:{}};
             return{
               row_order:i,
-              airline_name:r.airline_name,
+              airline_name:r.extra["c__airline_name"]||r.airline_name||null,
+              valid_from:  r.extra["c__valid_from"]||null,
+              valid_to:    r.extra["c__valid_to"]||null,
               iata_code:r.iata_code,
               eco_commission:r.eco_commission,
               peco_commission:r.peco_commission,
@@ -1198,6 +1477,7 @@ export default function UploadDealPage(){
           }),
         }
       );
+      setSavedBatchId(confirmData.batch_id ?? null);
       setStep(4);
     }catch(err:unknown){
       const msg=(err as {response?:{data?:{detail?:string}}})?.response?.data?.detail;
@@ -1216,9 +1496,12 @@ export default function UploadDealPage(){
         <span className="font-medium">{rows.length} row{rows.length!==1?"s":""}</span> saved and submitted for approval.
         {selectedIncentives.length>0&&<> Incentives: <span className="font-medium">{selectedIncentives.join(", ")}</span>.</>}
       </p>
-      <div className="flex gap-3 justify-center pt-2">
-        <button onClick={()=>router.push("/deals")} className="bg-[#1e3a5f] text-white px-5 py-2 rounded-lg text-sm font-medium hover:bg-[#16304f]">View Deals</button>
-        <button onClick={()=>{setStep(1);setFile(null);setPreview(null);setRows([]);setDealType("");setSupplierName("");setValidFromDate("");setColumnMap({});setSelectedIncentives([]);setRowInclExcl({});setAiMode(false);setAiFileName("");setAiConfidence(0);}}
+      <div className="flex gap-3 justify-center pt-2 flex-wrap">
+        {savedBatchId&&(
+          <button onClick={()=>router.push(`/deals/${savedBatchId}`)} className="bg-[#1e3a5f] text-white px-5 py-2 rounded-lg text-sm font-medium hover:bg-[#16304f]">View Batch</button>
+        )}
+        <button onClick={()=>router.push("/deals")} className="border border-[#1e3a5f] text-[#1e3a5f] px-5 py-2 rounded-lg text-sm font-medium hover:bg-blue-50">View All Deals</button>
+        <button onClick={()=>{setStep(1);setFile(null);setPreview(null);setRows([]);setDealType("");setSupplierName("");setValidFromDate("");setColumnMap({});setSelectedIncentives([]);setSelectedInclExcl([]);setRowInclExcl({});setAiMode(false);setAiFileName("");setAiConfidence(0);setSavedBatchId(null);}}
           className="border border-gray-200 text-gray-700 px-5 py-2 rounded-lg text-sm font-medium hover:bg-gray-50">Upload Another</button>
       </div>
     </div>
@@ -1262,11 +1545,10 @@ export default function UploadDealPage(){
                   onChange={v=>{ setDealType(v==="Airline"?"airline":v==="B2B"?"b2b":""); setSupplierName(""); }}
                 />
                 {dealType==="b2b"&&(
-                  <SelectField
-                    label="Supplier Name"
-                    required
-                    placeholder="Select supplier…"
-                    options={SUPPLIERS}
+                  <SearchSelectField
+                    label="Supplier Name *"
+                    placeholder="Search supplier…"
+                    options={supplierOptions}
                     value={supplierName}
                     onChange={setSupplierName}
                   />
@@ -1280,6 +1562,17 @@ export default function UploadDealPage(){
                 {selectedIncentives.length>0&&(
                   <p className="text-[10px] text-blue-600">
                     {selectedIncentives.join(", ")} — column mapping in Step 2, editable in Step 3.
+                  </p>
+                )}
+                <MultiSelectDropdown
+                  label="Inclusions & Exclusions"
+                  options={INCLUSIONS_EXCLUSIONS}
+                  selected={selectedInclExcl}
+                  onChange={setSelectedInclExcl}
+                />
+                {selectedInclExcl.length>0&&(
+                  <p className="text-[10px] text-emerald-600">
+                    {selectedInclExcl.join(", ")} — columns in XLS template, editable in Step 3.
                   </p>
                 )}
                 <div>
@@ -1305,7 +1598,7 @@ export default function UploadDealPage(){
                   <span className="text-[11px] text-gray-400">PDF · Excel · Word · Image</span>
                   <button
                     type="button"
-                    onClick={()=>downloadXLSTemplate(selectedIncentives)}
+                    onClick={()=>downloadXLSTemplate(selectedIncentives,selectedInclExcl)}
                     className="flex items-center gap-1 text-[11px] text-blue-600 hover:text-blue-800 hover:underline font-medium"
                   >
                     <FileSpreadsheet className="w-3 h-3"/>Download XLS Template
@@ -1393,6 +1686,7 @@ export default function UploadDealPage(){
           columnMap={columnMap}
           onMapChange={(key,val)=>setColumnMap(p=>({...p,[key]:val}))}
           selectedIncentives={selectedIncentives}
+          selectedInclExcl={selectedInclExcl}
           dealType={dealType}
           onConfirm={handleMappingConfirm}
           onBack={()=>setStep(1)}
@@ -1524,6 +1818,8 @@ export default function UploadDealPage(){
               inclExclPopup={inclExclPopup}
               setInclExclPopup={setInclExclPopup}
               onToggleInclExclType={handleToggleInclExclType}
+              onOpenInclExclType={handleOpenInclExclType}
+              onRemoveInclExclType={handleRemoveInclExclType}
               filterText={filterText}
               selectedRows={selectedRows}
               onToggleRow={handleToggleRow}

@@ -161,8 +161,8 @@ const INCLUSIONS_EXCLUSIONS = [
   "Exclusion For Payout",
 ];
 
-const CONTINENTS         = ["Asia","Europe","North America","South America","Africa","Middle East","Oceania"];
-const COUNTRY_GROUPS     = ["GCC","SAARC","EU","ASEAN","APAC"];
+const CONTINENTS         = ["Africa","Asia","Europe","North America","Oceania","South America","Antarctica"];
+const COUNTRY_GROUPS     = ["APAC","EUROPEAN NATIONS","GCC/MIDDLE EAST","LATIN AMERICA","MEAI","MEAI/APAC","MEAI/SAARC","MEAI/SAARC/APAC","NAM","OTHER","SAARC","SAARC/APAC"];
 const COUNTRIES          = ["India","UAE","Saudi Arabia","Qatar","UK","Germany","USA","Singapore","Australia"];
 const AIRPORTS           = ["DEL","BOM","DXB","DOH","LHR","FRA","JFK","SIN","SYD"];
 const CITIES             = ["Delhi","Mumbai","Dubai","Doha","London","Frankfurt","New York","Singapore","Sydney"];
@@ -276,6 +276,50 @@ function SearchSelectField({ label, placeholder="Search and select", options, va
   );
 }
 
+// ── multi-checkbox dropdown ────────────────────────────────────────────────
+function MultiCheckboxDropdown({ label, placeholder="Select...", options, values, onChange }: {
+  label?: string; placeholder?: string; options: string[];
+  values: string[]; onChange: (v: string[]) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+  const toggle = (opt: string) => {
+    onChange(values.includes(opt) ? values.filter(v => v !== opt) : [...values, opt]);
+  };
+  const display = values.length ? values.join(", ") : null;
+  return (
+    <div className="relative" ref={ref}>
+      {label && <label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">{label}</label>}
+      <button type="button" onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center justify-between border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-white text-left focus:outline-none focus:ring-1 focus:ring-blue-400">
+        <span className={display ? "text-gray-800" : "text-gray-400"}>{display || placeholder}</span>
+        <div className="flex items-center gap-0.5">
+          {values.length > 0 && <span onClick={e => { e.stopPropagation(); onChange([]); }} className="text-gray-300 hover:text-red-400"><X className="w-3 h-3"/></span>}
+          <ChevronDown className="w-3.5 h-3.5 text-gray-400"/>
+        </div>
+      </button>
+      {open && (
+        <div className="absolute z-50 w-full mt-0.5 bg-white border border-gray-200 rounded-md shadow-lg">
+          {options.map(opt => (
+            <label key={opt} className="flex items-center gap-2 px-2.5 py-1.5 text-xs text-gray-700 hover:bg-blue-50 cursor-pointer">
+              <input type="checkbox" checked={values.includes(opt)} onChange={() => toggle(opt)}
+                className="w-3.5 h-3.5 rounded border-gray-300 accent-blue-600"/>
+              {opt}
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── date input ─────────────────────────────────────────────────────────────
 function DateField({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
   return (
@@ -360,17 +404,93 @@ function IncentiveTabContent({ name, data, onChange }: {
 }
 
 // ── incl/excl tab content ──────────────────────────────────────────────────
-function InclExclTabContent({ suffix, isExclusion, data, onChange, viceVersa, onViceVersa }: {
+function InclExclTabContent({ suffix, isExclusion, data, onChange, viceVersa, onViceVersa, continentOptions, countryGroupOptions }: {
   suffix: string; isExclusion: boolean;
   data: Record<string, string>; onChange: (k: string, v: string) => void;
   viceVersa: boolean; onViceVersa: () => void;
+  continentOptions: string[]; countryGroupOptions: string[];
 }) {
-  const rows: { key: string; label: string; isSelect?: boolean; options?: string[] }[][] = [
+  const [originCountries, setOriginCountries] = useState<string[]>([]);
+  const [destCountries,   setDestCountries]   = useState<string[]>([]);
+  const [originAirports,  setOriginAirports]  = useState<string[]>([]);
+  const [destAirports,    setDestAirports]    = useState<string[]>([]);
+  const [allCountries,    setAllCountries]    = useState<string[]>([]);
+  const [allAirports,     setAllAirports]     = useState<string[]>([]);
+
+  const origContinent = data["originContinents"] ?? "";
+  const destContinent = data["destContinents"]   ?? "";
+  const origCountry   = data["originCountry"]    ?? "";
+  const destCountry   = data["destCountry"]      ?? "";
+
+  useEffect(() => {
+    api.get<{ iata_code: string; country: string | null }[]>("/airports/?limit=5000")
+      .then(r => {
+        setAllAirports(r.data.map(a => a.iata_code).filter(Boolean));
+        const countries = [...new Set(r.data.map(a => a.country).filter(Boolean))] as string[];
+        setAllCountries(countries.sort());
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!origContinent) { setOriginCountries([]); return; }
+    api.get<{ countries: string[] }>(`/airports/options?continent=${encodeURIComponent(origContinent)}`)
+      .then(r => setOriginCountries(r.data.countries ?? []))
+      .catch(() => setOriginCountries([]));
+  }, [origContinent]);
+
+  useEffect(() => {
+    if (!destContinent) { setDestCountries([]); return; }
+    api.get<{ countries: string[] }>(`/airports/options?continent=${encodeURIComponent(destContinent)}`)
+      .then(r => setDestCountries(r.data.countries ?? []))
+      .catch(() => setDestCountries([]));
+  }, [destContinent]);
+
+  useEffect(() => {
+    if (!origCountry) { setOriginAirports([]); return; }
+    api.get<{ airports: string[] }>(`/airports/options?country=${encodeURIComponent(origCountry)}`)
+      .then(r => setOriginAirports(r.data.airports ?? []))
+      .catch(() => setOriginAirports([]));
+  }, [origCountry]);
+
+  useEffect(() => {
+    if (!destCountry) { setDestAirports([]); return; }
+    api.get<{ airports: string[] }>(`/airports/options?country=${encodeURIComponent(destCountry)}`)
+      .then(r => setDestAirports(r.data.airports ?? []))
+      .catch(() => setDestAirports([]));
+  }, [destCountry]);
+
+  const handleChange = (k: string, v: string) => {
+    onChange(k, v);
+  };
+
+  const localOptions: Record<string, string[]> = {
+    ...INCL_EXCL_SEARCH_OPTIONS,
+    continents:         continentOptions,
+    countryGroup:       countryGroupOptions,
+    originContinents:   continentOptions,
+    destContinents:     continentOptions,
+    originCountryGroup: countryGroupOptions,
+    destCountryGroup:   countryGroupOptions,
+    originCountry:      origContinent ? originCountries : allCountries,
+    destCountry:        destContinent ? destCountries   : allCountries,
+    originAirport:      origCountry   ? originAirports  : allAirports,
+    destAirport:        destCountry   ? destAirports    : allAirports,
+  };
+
+  const rows: { key: string; label: string; isSelect?: boolean; isDate?: boolean; options?: string[]; placeholder?: string }[][] = [
+    [{ key:"validFrom", label:"Valid From", isDate:true }, { key:"validTo", label:"Valid To", isDate:true }],
     [{ key:"continents", label:`Continents ${suffix}` }, { key:"countryGroup", label:`Country Group ${suffix}` }],
     [{ key:"originContinents", label:`Origin Continents ${suffix}` }, { key:"destContinents", label:`Destination Continents ${suffix}` }],
     [{ key:"originCountryGroup", label:`Origin Country Group ${suffix}` }, { key:"destCountryGroup", label:`Destination Country Group ${suffix}` }],
-    [{ key:"originCountry", label:`Origin Country ${suffix}` }, { key:"destCountry", label:`Destination Country ${suffix}` }],
-    [{ key:"originAirport", label:`Origin Airport ${suffix}` }, { key:"destAirport", label:`Destination Airport ${suffix}` }],
+    [
+      { key:"originCountry", label:`Origin Country ${suffix}`, placeholder: "Search and select" },
+      { key:"destCountry",   label:`Destination Country ${suffix}`, placeholder: "Search and select" },
+    ],
+    [
+      { key:"originAirport", label:`Origin Airport ${suffix}`, placeholder: "Search and select" },
+      { key:"destAirport",   label:`Destination Airport ${suffix}`, placeholder: "Search and select" },
+    ],
     [{ key:"city", label:`City ${suffix}` }, { key:"fareTypeCategory", label:`Fare Type Category ${suffix}` }],
     [
       { key:"class", label:`Class ${suffix}` },
@@ -383,20 +503,40 @@ function InclExclTabContent({ suffix, isExclusion, data, onChange, viceVersa, on
       : [[{ key:"domesticCountry", label:`Domestic Country ${suffix}` }]]),
   ];
 
+  const dateExclusionValues = [
+    ...(data["dateExclusionTicket"] === "true" ? ["Ticket Date"] : []),
+    ...(data["dateExclusionTravel"] === "true" ? ["Travel Date"] : []),
+  ];
+  const handleDateExclusionChange = (selected: string[]) => {
+    onChange("dateExclusionTicket", selected.includes("Ticket Date") ? "true" : "");
+    onChange("dateExclusionTravel", selected.includes("Travel Date") ? "true" : "");
+  };
+
   return (
     <div className="px-4 py-3 space-y-3">
+      <div className="grid gap-3 grid-cols-1 max-w-[50%]">
+        <MultiCheckboxDropdown
+          label="Date Exclusion"
+          placeholder="Select date exclusion"
+          options={["Ticket Date", "Travel Date"]}
+          values={dateExclusionValues}
+          onChange={handleDateExclusionChange}
+        />
+      </div>
       {rows.map((pair, ri) => (
-        <div key={ri} className={`grid gap-3 ${pair.length === 2 ? "grid-cols-2" : "grid-cols-1 max-w-[50%]"}`}>
-          {pair.map(f => (
-            <div key={f.key}>
-              {f.isSelect
-                ? <SelectField label={f.label} options={f.options??[]} value={data[f.key]??""} onChange={v => onChange(f.key, v)}/>
-                : <SearchSelectField label={f.label} options={INCL_EXCL_SEARCH_OPTIONS[f.key]??[]} value={data[f.key]??""} onChange={v => onChange(f.key, v)}/>
-              }
-            </div>
-          ))}
-        </div>
-      ))}
+          <div key={ri} className={`grid gap-3 ${pair.length === 2 ? "grid-cols-2" : "grid-cols-1 max-w-[50%]"}`}>
+            {pair.map(f => (
+              <div key={f.key}>
+                {f.isDate
+                  ? <DateField label={f.label} value={data[f.key]??""} onChange={v => handleChange(f.key, v)}/>
+                  : f.isSelect
+                    ? <SelectField label={f.label} options={f.options??[]} value={data[f.key]??""} onChange={v => handleChange(f.key, v)}/>
+                    : <SearchSelectField label={f.label} placeholder={f.placeholder} options={localOptions[f.key]??[]} value={data[f.key]??""} onChange={v => handleChange(f.key, v)}/>
+                }
+              </div>
+            ))}
+          </div>
+        ))}
       <label className="flex items-center gap-2 cursor-pointer pt-1">
         <input type="checkbox" checked={viceVersa} onChange={onViceVersa} className="w-3.5 h-3.5 rounded border-gray-300 accent-blue-600"/>
         <span className="text-xs text-gray-600">Select this option if the route is vice versa.</span>
@@ -540,6 +680,27 @@ export default function NewDealPage() {
   const [airlineOptions, setAirlineOptions] = useState<string[]>([]);
   const [loadingAirlines, setLoadingAirlines] = useState(false);
 
+  const [supplierName, setSupplierName]       = useState("");
+  const [supplierOptions, setSupplierOptions] = useState<string[]>([]);
+
+  const [continentOptions, setContinentOptions] = useState<string[]>(CONTINENTS);
+  const [countryGroupOptions, setCountryGroupOptions] = useState<string[]>(COUNTRY_GROUPS);
+
+  useEffect(() => {
+    api.get<{ id: number; name: string }[]>("/suppliers/?limit=5000")
+      .then(r => setSupplierOptions(r.data.map(s => s.name)))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    api.get<{ continents: string[]; country_groups: string[] }>("/airports/options")
+      .then(({ data }) => {
+        if (data.continents?.length)     setContinentOptions(data.continents);
+        if (data.country_groups?.length) setCountryGroupOptions(data.country_groups);
+      })
+      .catch(() => {});
+  }, []);
+
   const fetchAirlinesByType = async (type: string) => {
     if (!type) { setAirlineOptions([]); return; }
     setLoadingAirlines(true);
@@ -612,6 +773,10 @@ export default function NewDealPage() {
         payload.trigger_type  = triggerType  || null;
         payload.payout_type   = payoutType   || null;
       }
+      // b2b-only fields
+      if (dealType === "b2b") {
+        payload.supplier_name = supplierName || null;
+      }
       await api.post(endpoint, payload);
       router.push("/deals");
     } catch (err: unknown) {
@@ -663,6 +828,17 @@ export default function NewDealPage() {
             onChange={setAirlineName}
             placeholder={loadingAirlines ? "Loading..." : airlineType ? "Search and select" : "Select airline type first"}
           />
+
+          {/* Supplier Name — B2B only */}
+          {dealType === "b2b" && (
+            <SearchSelectField
+              label="Supplier Name"
+              options={supplierOptions}
+              value={supplierName}
+              onChange={setSupplierName}
+              placeholder={supplierOptions.length ? "Search and select supplier" : "Loading suppliers..."}
+            />
+          )}
 
           {/* Contract Year — Airline only */}
           {dealType === "airline" && (
@@ -755,6 +931,8 @@ export default function NewDealPage() {
                   onChange={(k, v) => setInclExclField(activeInclExclTab, k, v)}
                   viceVersa={!!viceVersa[activeInclExclTab]}
                   onViceVersa={() => toggleViceVersa(activeInclExclTab)}
+                  continentOptions={continentOptions}
+                  countryGroupOptions={countryGroupOptions}
                 />
               );
             })()}

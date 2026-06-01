@@ -18,6 +18,7 @@ class B2BDeal(Base):
     )
     source_agent: Mapped[str] = mapped_column(String(255), nullable=False)
     deal_maker_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    supplier_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     remark: Mapped[str | None] = mapped_column(Text, nullable=True)
     airline_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
     airline_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -34,6 +35,7 @@ class B2BDeal(Base):
     incl_excl_types: Mapped[list | None] = mapped_column(JSON, nullable=True)
     incl_excl_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     vice_versa: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    batch_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     deal_lifecycle_status: Mapped[DealLifecycleStatus] = mapped_column(

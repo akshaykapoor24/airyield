@@ -16,7 +16,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models.airline import Airline
+from app.models.airline_deal import AirlineDeal
+from app.models.b2b_deal import B2BDeal
 from app.models.uploaded_ticket import UploadedTicket
+from app.models.ticket_statement import TicketStatement
 from app.models.user import User
 from app.schemas.uploaded_ticket import (
     TicketExtractionPreview,
@@ -28,9 +31,11 @@ from app.schemas.uploaded_ticket import (
     BatchRunCalculationResult,
     UploadedTicketUpdate,
     MatchDiagnosisResponse,
+    TicketStatementRead,
 )
 from pydantic import BaseModel
 from app.services.deal_matching import DealMatchingService
+from app.services.exclusion_evaluator import evaluate_exclusion_for_payout
 from app.services.ticket_extraction import TicketExtractionService, TEMPLATE_HEADERS
 
 router = APIRouter()
@@ -176,6 +181,19 @@ async def confirm_ticket_upload(
     batch_id = str(uuid.uuid4())
     now = datetime.utcnow()
 
+    statement = TicketStatement(
+        batch_id=batch_id,
+        tenant_id=current_user.tenant_id,
+        statement_name=payload.statement_name,
+        agency=payload.agency,
+        valid_from=payload.valid_from,
+        valid_to=payload.valid_to,
+        file_name=payload.file_name,
+        created_by_id=current_user.id,
+        created_at=now,
+    )
+    db.add(statement)
+
     for row in payload.rows:
         # Try code lookup (handle numeric zero-padding)
         raw_code = (row.airlines_code or "").strip()
@@ -237,12 +255,87 @@ async def confirm_ticket_upload(
             sold_to=row.sold_to,
             customer_name=row.customer_name,
             airline_name=resolved_airline_name,
+            split_type=row.split_type,
         )
         db.add(ticket)
 
     await db.commit()
     return ConfirmTicketUploadResult(batch_id=batch_id, created_count=len(payload.rows))
 
+
+
+# ── Statement listing ──────────────────────────────────────────────────────
+
+@router.get("/statements", response_model=list[TicketStatementRead])
+async def list_ticket_statements(
+    db:           AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return all ticket statements for the current tenant with ticket counts."""
+    count_subq = (
+        select(UploadedTicket.batch_id, func.count(UploadedTicket.id).label("ticket_count"))
+        .where(UploadedTicket.tenant_id == current_user.tenant_id)
+        .group_by(UploadedTicket.batch_id)
+        .subquery()
+    )
+    q = (
+        select(TicketStatement, func.coalesce(count_subq.c.ticket_count, 0).label("ticket_count"))
+        .outerjoin(count_subq, TicketStatement.batch_id == count_subq.c.batch_id)
+        .where(TicketStatement.tenant_id == current_user.tenant_id)
+        .order_by(TicketStatement.created_at.desc())
+    )
+    result = await db.execute(q)
+    rows = result.all()
+    return [
+        TicketStatementRead(
+            batch_id=stmt.batch_id,
+            statement_name=stmt.statement_name,
+            agency=stmt.agency,
+            valid_from=stmt.valid_from,
+            valid_to=stmt.valid_to,
+            file_name=stmt.file_name,
+            ticket_count=int(count),
+            created_at=stmt.created_at,
+        )
+        for stmt, count in rows
+    ]
+
+
+@router.get("/statements/{batch_id}", response_model=TicketStatementRead)
+async def get_ticket_statement(
+    batch_id:     str,
+    db:           AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return a single ticket statement with its ticket count."""
+    stmt_res = await db.execute(
+        select(TicketStatement).where(
+            TicketStatement.batch_id == batch_id,
+            TicketStatement.tenant_id == current_user.tenant_id,
+        )
+    )
+    stmt = stmt_res.scalar_one_or_none()
+    if not stmt:
+        raise HTTPException(status_code=404, detail="Statement not found")
+
+    count_res = await db.execute(
+        select(func.count(UploadedTicket.id)).where(
+            UploadedTicket.batch_id == batch_id,
+            UploadedTicket.tenant_id == current_user.tenant_id,
+        )
+    )
+    ticket_count = count_res.scalar() or 0
+
+    return TicketStatementRead(
+        batch_id=stmt.batch_id,
+        statement_name=stmt.statement_name,
+        agency=stmt.agency,
+        valid_from=stmt.valid_from,
+        valid_to=stmt.valid_to,
+        file_name=stmt.file_name,
+        ticket_count=int(ticket_count),
+        created_at=stmt.created_at,
+    )
 
 
 # ── List uploaded tickets ──────────────────────────────────────────────────
@@ -346,6 +439,12 @@ async def _run_single(
             message="Could not parse travel date.",
         )
 
+    stmt_res = await db.execute(
+        select(TicketStatement).where(TicketStatement.batch_id == ticket.batch_id)
+    )
+    statement = stmt_res.scalar_one_or_none()
+    supplier_agency = (statement.agency or None) if statement else None
+
     match = await DealMatchingService.find_best_deal(
         db=db,
         airline_name=airline.name,
@@ -357,22 +456,53 @@ async def _run_single(
         sell_fare=float(ticket.sell_fare) if ticket.sell_fare is not None else None,
         sell_tax_yq=float(ticket.sell_tax_yq) if ticket.sell_tax_yq is not None else None,
         sale_yr=float(ticket.sale_yr) if ticket.sale_yr is not None else None,
+        supplier_agency=supplier_agency,
     )
 
     if match:
-        ticket.matched_deal_id       = match.deal_id
-        ticket.matched_deal_type     = match.deal_type
-        ticket.matched_deal_name     = match.deal_name
-        ticket.calculated_incentive  = match.calculated_incentive
-        ticket.ticket_status         = "calculated"
-        return RunCalculationResult(
-            ticket_id=ticket.id, matched=True,
-            matched_deal_id=match.deal_id,
-            matched_deal_type=match.deal_type,
-            matched_deal_name=match.deal_name,
-            calculated_incentive=match.calculated_incentive,
-            message=f"Matched {match.deal_type} deal ID {match.deal_id}.",
-        )
+        ticket.matched_deal_id   = match.deal_id
+        ticket.matched_deal_type = match.deal_type
+        ticket.matched_deal_name = match.deal_name
+
+        # Evaluate "Exclusion For Payout" rule on the matched deal
+        excl_is_excluded = False
+        excl_reason = ""
+        if match.deal_type == "airline":
+            deal_res = await db.execute(select(AirlineDeal).where(AirlineDeal.id == match.deal_id))
+            matched_deal = deal_res.scalar_one_or_none()
+        else:
+            deal_res = await db.execute(select(B2BDeal).where(B2BDeal.id == match.deal_id))
+            matched_deal = deal_res.scalar_one_or_none()
+
+        if matched_deal and "Exclusion For Payout" in (matched_deal.incl_excl_types or []):
+            rule = (matched_deal.incl_excl_data or {}).get("Exclusion For Payout", {})
+            if rule:
+                excl_is_excluded, excl_reason = await evaluate_exclusion_for_payout(ticket, rule, db)
+
+        if excl_is_excluded:
+            ticket.calculated_incentive = 0
+            ticket.ticket_status        = "excluded"
+            ticket.exclusion_reason     = excl_reason
+            return RunCalculationResult(
+                ticket_id=ticket.id, matched=True, excluded=True,
+                matched_deal_id=match.deal_id,
+                matched_deal_type=match.deal_type,
+                matched_deal_name=match.deal_name,
+                calculated_incentive=0,
+                message=excl_reason,
+            )
+        else:
+            ticket.calculated_incentive = match.calculated_incentive
+            ticket.ticket_status        = "calculated"
+            ticket.exclusion_reason     = None
+            return RunCalculationResult(
+                ticket_id=ticket.id, matched=True,
+                matched_deal_id=match.deal_id,
+                matched_deal_type=match.deal_type,
+                matched_deal_name=match.deal_name,
+                calculated_incentive=match.calculated_incentive,
+                message=f"Matched {match.deal_type} deal ID {match.deal_id}.",
+            )
     else:
         ticket.matched_deal_id       = None
         ticket.matched_deal_type     = None
@@ -427,13 +557,16 @@ async def run_all_calculation(
     res = await db.execute(q)
     tickets = res.scalars().all()
 
-    processed = matched = unmatched = errors = 0
+    processed = matched = unmatched = errors = excluded = 0
     for ticket in tickets:
         try:
             result = await _run_single(ticket, db, current_user.tenant_id)
             processed += 1
             if result.matched:
-                matched += 1
+                if ticket.ticket_status == "excluded":
+                    excluded += 1
+                else:
+                    matched += 1
             else:
                 unmatched += 1
         except Exception:
@@ -445,6 +578,7 @@ async def run_all_calculation(
         matched=matched,
         unmatched=unmatched,
         errors=errors,
+        excluded=excluded,
     )
 
 

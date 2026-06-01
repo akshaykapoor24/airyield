@@ -48,6 +48,7 @@ class AirlineDeal(Base):
     incl_excl_types: Mapped[list | None] = mapped_column(JSON, nullable=True)
     incl_excl_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     vice_versa: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    batch_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     deal_lifecycle_status: Mapped[DealLifecycleStatus] = mapped_column(

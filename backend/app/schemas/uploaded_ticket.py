@@ -48,12 +48,14 @@ class TicketRow(BaseModel):
     acc_code:            Optional[str]   = None
     sold_to:             Optional[str]   = None   # 'customer' | 'agency'
     customer_name:       Optional[str]   = None
+    split_type:            Optional[str]   = None   # "normal" | "split"
     # derived / calculation fields
     airline_name:          Optional[str]   = None
     matched_deal_id:       Optional[int]   = None
     matched_deal_type:     Optional[str]   = None
     matched_deal_name:     Optional[str]   = None
     calculated_incentive:  Optional[float] = None
+    exclusion_reason:      Optional[str]   = None
 
 
 class TicketExtractionPreview(BaseModel):
@@ -69,8 +71,25 @@ class TicketExtractionPreview(BaseModel):
 
 
 class ConfirmTicketUploadPayload(BaseModel):
-    file_name: str
-    rows:      list[TicketRow]
+    file_name:      str
+    rows:           list[TicketRow]
+    statement_name: str
+    agency:         str
+    valid_from:     date
+    valid_to:       date
+
+
+class TicketStatementRead(BaseModel):
+    batch_id:       str
+    statement_name: str
+    agency:         str
+    valid_from:     date
+    valid_to:       date
+    file_name:      str
+    ticket_count:   int
+    created_at:     datetime
+
+    model_config = {"from_attributes": True}
 
 
 class UploadedTicketRead(TicketRow):
@@ -94,6 +113,7 @@ class ConfirmTicketUploadResult(BaseModel):
 class RunCalculationResult(BaseModel):
     ticket_id:            int
     matched:              bool
+    excluded:             bool = False
     matched_deal_id:      Optional[int]
     matched_deal_type:    Optional[str]
     matched_deal_name:    Optional[str]
@@ -106,6 +126,7 @@ class BatchRunCalculationResult(BaseModel):
     matched:     int
     unmatched:   int
     errors:      int
+    excluded:    int = 0
 
 
 class UploadedTicketUpdate(BaseModel):
@@ -152,6 +173,8 @@ class UploadedTicketUpdate(BaseModel):
     sold_to:             Optional[str]   = None
     customer_name:       Optional[str]   = None
     ticket_status:       Optional[str]   = None
+    split_type:          Optional[str]   = None
+    exclusion_reason:    Optional[str]   = None
 
     model_config = ConfigDict(extra="ignore")
 

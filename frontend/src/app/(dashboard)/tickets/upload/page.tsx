@@ -1,10 +1,11 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useDropzone } from "react-dropzone";
 import {
   Upload, CheckCircle, AlertCircle, RefreshCw, ChevronLeft,
   FileSpreadsheet, X, Download, ArrowRight, ChevronDown, Trash2, Plus, Search,
+  Building2, Calendar, FileText,
 } from "lucide-react";
 import api from "@/lib/api";
 import { useRouter } from "next/navigation";
@@ -54,6 +55,7 @@ type TicketRow = {
   sold_to?:             string | null;
   customer_name?:       string | null;
   airline_name?:        string | null;
+  split_type?:          string | null;
 };
 
 type ExtractionPreview = {
@@ -62,12 +64,11 @@ type ExtractionPreview = {
   rows:              TicketRow[];
   warnings:          string[];
   xls_columns:       string[];
-  suggested_mapping: Record<string, string>; // canonical → xls_col
+  suggested_mapping: Record<string, string>;
   is_template_match: boolean;
-  sample_row:        Record<string, string>; // xls_col → first-row raw value
+  sample_row:        Record<string, string>;
 };
 
-// ── Our canonical fields (in display order) ────────────────────────────────
 type FieldDef = { key: string; label: string; required: boolean };
 
 const OUR_FIELDS: FieldDef[] = [
@@ -114,7 +115,6 @@ const OUR_FIELDS: FieldDef[] = [
   { key: "net_amt",            label: "Net AMT",             required: false },
 ];
 
-// Editable review table column groups
 type TColDef   = { key: keyof TicketRow; label: string; type: "text"|"date"|"number" };
 type TColGroup = { label: string; color: string; cols: TColDef[] };
 
@@ -170,10 +170,9 @@ const TICKET_COL_GROUPS: TColGroup[] = [
   ]},
 ];
 
-function fmt(v: number | null | undefined) {
-  if (v == null) return <span className="text-gray-300">—</span>;
-  return v.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
+// Agency options are fetched live from the supplier master API
+
+const SKIP = "__skip__";
 
 // ── Editable review table ──────────────────────────────────────────────────
 function TicketReviewTable({
@@ -218,6 +217,7 @@ function TicketReviewTable({
               />
             </th>
             <th className="px-2 py-2 text-[10px] text-white font-bold sticky left-9 z-10 whitespace-nowrap" style={{background:"#1e3a5f"}}>#</th>
+            <th rowSpan={2} className="px-2 py-2 text-[10px] text-white font-bold uppercase tracking-wider text-center border-l border-white/20 whitespace-nowrap" style={{background:"#1e3a5f"}}>Type</th>
             {colGroups.map(g=>(
               <th key={g.label} colSpan={g.cols.length} className="px-2 py-2 text-[10px] text-white font-bold uppercase tracking-wider text-center border-l border-white/20 whitespace-nowrap" style={{background:g.color}}>
                 {g.label}
@@ -236,7 +236,7 @@ function TicketReviewTable({
         </thead>
         <tbody>
           {filteredIndices.length===0?(
-            <tr><td colSpan={allCols.length+3} className="px-4 py-10 text-center text-xs text-gray-400">
+            <tr><td colSpan={allCols.length+4} className="px-4 py-10 text-center text-xs text-gray-400">
               {rows.length===0?"No rows. Add a row manually.":"No rows match the filter."}
             </td></tr>
           ):filteredIndices.map(idx=>{
@@ -248,6 +248,11 @@ function TicketReviewTable({
                   <input type="checkbox" checked={isSelected} onChange={()=>onToggleRow(idx)} className="accent-blue-500 cursor-pointer"/>
                 </td>
                 <td className={`px-2 py-1.5 text-[10px] text-gray-400 sticky left-9 ${isSelected?"bg-blue-50":"bg-white group-hover:bg-blue-50/20"}`}>{idx+1}</td>
+                <td className="px-2 py-1.5 border-l border-gray-100 whitespace-nowrap">
+                  {row.split_type === "split"
+                    ? <span className="inline-flex px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-50 text-amber-600 border border-amber-200">Split</span>
+                    : <span className="inline-flex px-2 py-0.5 rounded-full text-[10px] font-semibold bg-gray-100 text-gray-500">Normal</span>}
+                </td>
                 {allCols.map(col=>{
                   const raw=row[col.key];
                   const val=raw==null?"":String(raw);
@@ -282,7 +287,199 @@ function TicketReviewTable({
   );
 }
 
-const SKIP = "__skip__";
+// ── Agency custom dropdown (always opens downward) ─────────────────────────
+function AgencyDropdown({ agency, setAgency, agencyOptions, touched, fieldCls }: {
+  agency: string; setAgency: (v: string) => void;
+  agencyOptions: string[]; touched: boolean;
+  fieldCls: (v: string) => string;
+}) {
+  const [open, setOpen]     = useState(false);
+  const [query, setQuery]   = useState("");
+  const ref                 = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  const filtered = agencyOptions.filter(a => a.toLowerCase().includes(query.toLowerCase()));
+
+  const handleSelect = (a: string) => { setAgency(a); setOpen(false); setQuery(""); };
+
+  return (
+    <div>
+      <label className="block text-xs font-semibold text-gray-600 mb-1.5 uppercase tracking-wide">
+        <Building2 className="w-3.5 h-3.5 inline mr-1" />
+        Statement Agency <span className="text-red-500">*</span>
+      </label>
+      <div className="relative" ref={ref}>
+        <button
+          type="button"
+          onClick={() => setOpen(o => !o)}
+          className={`${fieldCls(agency)} w-full text-left flex items-center justify-between pr-8`}
+        >
+          <span className={agency ? "text-gray-800" : "text-gray-400"}>
+            {agency || "— Select agency —"}
+          </span>
+          <ChevronDown className="w-4 h-4 text-gray-400 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+        </button>
+
+        {open && (
+          <div className="absolute z-50 top-full left-0 right-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg">
+            <div className="p-2 border-b border-gray-100">
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 text-gray-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                <input
+                  autoFocus
+                  value={query}
+                  onChange={e => setQuery(e.target.value)}
+                  placeholder="Search Agency..."
+                  className="w-full pl-8 pr-3 py-1.5 text-xs border border-gray-200 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-400 bg-gray-50"
+                />
+              </div>
+            </div>
+            <ul className="max-h-48 overflow-y-auto py-1">
+              {filtered.length === 0 ? (
+                <li className="px-3 py-2 text-xs text-gray-400 italic">No agencies found</li>
+              ) : filtered.map(a => (
+                <li key={a}>
+                  <button
+                    type="button"
+                    onClick={() => handleSelect(a)}
+                    className={`w-full text-left px-3 py-2 text-xs hover:bg-blue-50 transition-colors ${
+                      a === agency ? "bg-blue-50 text-blue-700 font-semibold" : "text-gray-700"
+                    }`}
+                  >
+                    {a}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+      {touched && !agency && (
+        <p className="text-[11px] text-red-500 mt-1">Agency is required</p>
+      )}
+    </div>
+  );
+}
+
+// ── Statement form panel ───────────────────────────────────────────────────
+function StatementFormPanel({
+  statementName, setStatementName,
+  agency, setAgency,
+  agencyOptions,
+  validFrom, setValidFrom,
+  validTo, setValidTo,
+  touched, isComplete,
+}: {
+  statementName: string; setStatementName: (v: string) => void;
+  agency: string; setAgency: (v: string) => void;
+  agencyOptions: string[];
+  validFrom: string; setValidFrom: (v: string) => void;
+  validTo: string; setValidTo: (v: string) => void;
+  touched: boolean;
+  isComplete: boolean;
+}) {
+  const fieldCls = (val: string) =>
+    `w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 ${
+      touched && !val.trim()
+        ? "border-red-300 bg-red-50"
+        : "border-gray-200 bg-white"
+    }`;
+  const dateError = touched && validFrom && validTo && validTo < validFrom;
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl overflow-hidden h-fit sticky top-4">
+      {/* panel header */}
+      <div className="px-5 py-4 border-b border-gray-100" style={{background:"#1e3a5f"}}>
+        <div className="flex items-center gap-2.5">
+          <FileText className="w-4 h-4 text-white/80" />
+          <h2 className="text-sm font-semibold text-white">Statement Details</h2>
+        </div>
+        <p className="text-xs text-white/60 mt-1">Fill in the statement information before saving</p>
+      </div>
+
+      <div className="px-5 py-5 space-y-4">
+        {/* Statement Name */}
+        <div>
+          <label className="block text-xs font-semibold text-gray-600 mb-1.5 uppercase tracking-wide">
+            Statement Name <span className="text-red-500">*</span>
+          </label>
+          <input
+            type="text"
+            placeholder="e.g. May 2026 IndiGo Statement"
+            value={statementName}
+            onChange={e => setStatementName(e.target.value)}
+            className={fieldCls(statementName)}
+          />
+          {touched && !statementName.trim() && (
+            <p className="text-[11px] text-red-500 mt-1">Statement name is required</p>
+          )}
+        </div>
+
+        {/* Agency */}
+        <AgencyDropdown
+          agency={agency}
+          setAgency={setAgency}
+          agencyOptions={agencyOptions}
+          touched={touched}
+          fieldCls={fieldCls}
+        />
+
+        {/* Valid From */}
+        <div>
+          <label className="block text-xs font-semibold text-gray-600 mb-1.5 uppercase tracking-wide">
+            <Calendar className="w-3.5 h-3.5 inline mr-1" />
+            Statement Valid From <span className="text-red-500">*</span>
+          </label>
+          <input
+            type="date"
+            value={validFrom}
+            onChange={e => setValidFrom(e.target.value)}
+            className={fieldCls(validFrom)}
+          />
+          {touched && !validFrom && (
+            <p className="text-[11px] text-red-500 mt-1">Valid from date is required</p>
+          )}
+        </div>
+
+        {/* Valid To */}
+        <div>
+          <label className="block text-xs font-semibold text-gray-600 mb-1.5 uppercase tracking-wide">
+            <Calendar className="w-3.5 h-3.5 inline mr-1" />
+            Statement Valid To <span className="text-red-500">*</span>
+          </label>
+          <input
+            type="date"
+            value={validTo}
+            min={validFrom || undefined}
+            onChange={e => setValidTo(e.target.value)}
+            className={dateError ? "w-full border border-red-300 bg-red-50 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" : fieldCls(validTo)}
+          />
+          {touched && !validTo && (
+            <p className="text-[11px] text-red-500 mt-1">Valid to date is required</p>
+          )}
+          {dateError && (
+            <p className="text-[11px] text-red-500 mt-1">Valid to must be on or after valid from</p>
+          )}
+        </div>
+
+        {/* completion indicator */}
+        <div className={`flex items-center gap-2 px-3 py-2.5 rounded-lg text-xs font-medium ${
+          isComplete ? "bg-green-50 text-green-700 border border-green-200" : "bg-gray-50 text-gray-400 border border-gray-200"
+        }`}>
+          <CheckCircle className={`w-4 h-4 ${isComplete ? "text-green-600" : "text-gray-300"}`} />
+          {isComplete ? "Statement details complete" : "Complete all fields above"}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 // ── component ──────────────────────────────────────────────────────────────
 export default function UploadTicketsPage() {
@@ -292,7 +489,7 @@ export default function UploadTicketsPage() {
   const [step,           setStep]           = useState<Step>("drop");
   const [preview,        setPreview]        = useState<ExtractionPreview | null>(null);
   const [storedFile,     setStoredFile]     = useState<File | null>(null);
-  const [mapping,        setMapping]        = useState<Record<string, string>>({});  // canonical → xls_col
+  const [mapping,        setMapping]        = useState<Record<string, string>>({});
   const [applyingMap,    setApplyingMap]    = useState(false);
   const [parsing,        setParsing]        = useState(false);
   const [downloading,    setDownloading]    = useState(false);
@@ -300,6 +497,27 @@ export default function UploadTicketsPage() {
   const [batchId,        setBatchId]        = useState<string | null>(null);
   const [rows,           setRows]           = useState<TicketRow[]>([]);
   const downloadLinkRef  = useRef<HTMLAnchorElement>(null);
+
+  // ── Statement form state ───────────────────────────────────────────────────
+  const [statementName, setStatementName]   = useState("");
+  const [agency,        setAgency]          = useState("");
+  const [agencyOptions, setAgencyOptions]   = useState<string[]>([]);
+
+  useEffect(() => {
+    api.get<{ id: number; name: string }[]>("/suppliers/?limit=5000")
+      .then(r => setAgencyOptions(r.data.map(s => s.name)))
+      .catch(() => {});
+  }, []);
+  const [validFrom,     setValidFrom]     = useState("");
+  const [validTo,       setValidTo]       = useState("");
+  const [formTouched,   setFormTouched]   = useState(false);
+
+  const isStatementComplete =
+    statementName.trim() !== "" &&
+    agency !== "" &&
+    validFrom !== "" &&
+    validTo !== "" &&
+    validTo >= validFrom;
 
   // ── Editable row handlers ─────────────────────────────────────────────────
   const handleTicketRowChange = useCallback((idx: number, key: keyof TicketRow, val: string) => {
@@ -413,19 +631,26 @@ export default function UploadTicketsPage() {
     }
   };
 
-  // ── Check required fields are mapped ─────────────────────────────────────
-  const requiredKeys   = OUR_FIELDS.filter(f => f.required).map(f => f.key);
+  const requiredKeys    = OUR_FIELDS.filter(f => f.required).map(f => f.key);
   const missingRequired = requiredKeys.filter(k => !mapping[k] || mapping[k] === SKIP);
 
   // ── Step 3: confirm → save ────────────────────────────────────────────────
   const confirmUpload = async () => {
-    if (!preview) return;
+    setFormTouched(true);
+    if (!isStatementComplete || !preview) return;
     setStep("saving");
     setError(null);
     try {
       const { data } = await api.post<{ batch_id: string; created_count: number }>(
         "/tickets/upload/confirm",
-        { file_name: preview.file_name, rows },
+        {
+          file_name:      preview.file_name,
+          rows,
+          statement_name: statementName,
+          agency,
+          valid_from:     validFrom,
+          valid_to:       validTo,
+        },
       );
       setBatchId(data.batch_id);
       setStep("done");
@@ -439,15 +664,17 @@ export default function UploadTicketsPage() {
   const reset = () => {
     setStep("drop"); setPreview(null); setStoredFile(null);
     setMapping({}); setBatchId(null); setError(null); setRows([]); resetFilter();
+    setStatementName(""); setAgency(""); setValidFrom(""); setValidTo(""); setFormTouched(false);
   };
+
+  const isDone = step === "done";
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <div className="space-y-4">
-      {/* hidden anchor for template download */}
       <a ref={downloadLinkRef} className="hidden" />
 
-      {/* header */}
+      {/* page header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <Link href="/tickets" className="p-1.5 rounded-lg border border-gray-200 hover:bg-gray-50 text-gray-500">
@@ -455,30 +682,32 @@ export default function UploadTicketsPage() {
           </Link>
           <div>
             <h1 className="text-xl font-bold text-gray-900 uppercase tracking-wide">Upload Tickets</h1>
-            <p className="text-xs text-gray-500 mt-0.5">Import supplier statement XLS/XLSX file</p>
+            <p className="text-xs text-gray-500 mt-0.5">Create a new statement and import supplier XLS/XLSX</p>
           </div>
         </div>
 
         {/* Step indicator */}
-        <div className="flex items-center gap-2 text-xs text-gray-500">
-          {(["drop", "mapping", "preview", "done"] as Step[]).map((s, i) => {
-            const labels: Record<Step, string> = { drop: "Upload", mapping: "Map Columns", preview: "Preview", saving: "Saving", done: "Done" };
-            const active  = step === s;
-            const passed  = ["drop", "mapping", "preview", "saving", "done"].indexOf(step) > i;
-            return (
-              <div key={s} className="flex items-center gap-1.5">
-                {i > 0 && <span className="text-gray-300">›</span>}
-                <span className={`px-2.5 py-0.5 rounded-full font-medium ${
-                  active  ? "bg-[#1e3a5f] text-white" :
-                  passed  ? "bg-green-100 text-green-700" :
-                            "bg-gray-100 text-gray-400"
-                }`}>
-                  {labels[s as Step] ?? s}
-                </span>
-              </div>
-            );
-          })}
-        </div>
+        {!isDone && (
+          <div className="flex items-center gap-2 text-xs text-gray-500">
+            {(["drop", "mapping", "preview", "done"] as Step[]).map((s, i) => {
+              const labels: Record<Step, string> = { drop: "Upload", mapping: "Map Columns", preview: "Preview", saving: "Saving", done: "Done" };
+              const active  = step === s;
+              const passed  = ["drop", "mapping", "preview", "saving", "done"].indexOf(step) > i;
+              return (
+                <div key={s} className="flex items-center gap-1.5">
+                  {i > 0 && <span className="text-gray-300">›</span>}
+                  <span className={`px-2.5 py-0.5 rounded-full font-medium ${
+                    active  ? "bg-[#1e3a5f] text-white" :
+                    passed  ? "bg-green-100 text-green-700" :
+                              "bg-gray-100 text-gray-400"
+                  }`}>
+                    {labels[s as Step] ?? s}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* error banner */}
@@ -489,56 +718,130 @@ export default function UploadTicketsPage() {
         </div>
       )}
 
-      {/* ── Step: drop ─────────────────────────────────────────────────────── */}
-      {step === "drop" && (
-        <div className="max-w-xl space-y-4">
-          {/* template download card */}
-          <div className="bg-blue-50 border border-blue-200 rounded-xl px-5 py-4 flex items-start gap-4">
-            <FileSpreadsheet className="w-8 h-8 text-blue-500 shrink-0 mt-0.5" />
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-semibold text-blue-800 mb-0.5">Download the ticket template</p>
-              <p className="text-xs text-blue-600 leading-relaxed">
-                Use our template for instant column auto-mapping. If you have your own format,
-                upload it and we&apos;ll guide you through column mapping.
-              </p>
-            </div>
-            <button
-              onClick={handleDownloadTemplate}
-              disabled={downloading}
-              className="flex items-center gap-1.5 shrink-0 px-3.5 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white rounded-lg text-xs font-semibold transition-colors"
-            >
-              {downloading
-                ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                : <Download className="w-3.5 h-3.5" />}
-              {downloading ? "Downloading…" : "Download Template"}
-            </button>
+      {/* ── Done screen (full width, no split) ─────────────────────────────── */}
+      {isDone && batchId && preview && (
+        <div className="max-w-md mx-auto text-center space-y-5 py-10">
+          <div className="w-16 h-16 bg-green-50 rounded-full flex items-center justify-center mx-auto">
+            <CheckCircle className="w-8 h-8 text-green-600" />
           </div>
-
-          {/* dropzone */}
-          <div className="bg-white rounded-xl border border-gray-200 p-6">
-            <div
-              {...getRootProps()}
-              className={`border-2 border-dashed rounded-xl p-14 text-center cursor-pointer transition-colors ${
-                isDragActive ? "border-blue-400 bg-blue-50" : "border-gray-300 hover:border-gray-400"
-              } ${parsing ? "opacity-60 cursor-not-allowed" : ""}`}
+          <div>
+            <h2 className="text-lg font-bold text-gray-900">Statement Created</h2>
+            <p className="text-sm font-medium text-gray-700 mt-1">{statementName}</p>
+            <p className="text-xs text-gray-500 mt-0.5">
+              {agency} · {validFrom} – {validTo}
+            </p>
+            <p className="text-sm text-gray-500 mt-2">
+              {preview.total_rows} tickets saved from <span className="font-medium">{preview.file_name}</span>
+            </p>
+            <p className="text-xs text-gray-400 mt-0.5 font-mono">Batch: {batchId}</p>
+          </div>
+          <div className="flex items-center justify-center gap-3">
+            <button
+              onClick={reset}
+              className="px-4 py-2 border border-gray-200 rounded-lg text-sm text-gray-600 hover:bg-gray-50"
             >
-              <input {...getInputProps()} />
-              {parsing
-                ? <RefreshCw className="w-10 h-10 mx-auto text-blue-400 mb-3 animate-spin" />
-                : <Upload className="w-10 h-10 mx-auto text-gray-400 mb-3" />}
-              <p className="text-sm font-medium text-gray-700">
-                {parsing ? "Parsing file…" : isDragActive ? "Drop the file here" : "Drag & drop XLS / XLSX"}
-              </p>
-              {!parsing && <p className="text-xs text-gray-400 mt-1">or click to browse</p>}
-            </div>
+              Upload Another
+            </button>
+            <button
+              onClick={() => router.push("/tickets")}
+              className="flex items-center gap-2 px-4 py-2 bg-[#1e3a5f] text-white rounded-lg text-sm font-medium hover:bg-[#16304f]"
+            >
+              <FileSpreadsheet className="w-4 h-4" /> View Ticket Repository
+            </button>
           </div>
         </div>
       )}
 
-      {/* ── Step: mapping ──────────────────────────────────────────────────── */}
+      {/* ── Saving screen ──────────────────────────────────────────────────── */}
+      {step === "saving" && (
+        <div className="flex items-center justify-center py-20">
+          <div className="text-center space-y-3">
+            <RefreshCw className="w-8 h-8 text-blue-500 animate-spin mx-auto" />
+            <p className="text-sm text-gray-600">Saving statement and tickets to database…</p>
+          </div>
+        </div>
+      )}
+
+      {/* ── Drop step — two-panel layout ──────────────────────────────────── */}
+      {step === "drop" && (
+        <div className="grid grid-cols-1 lg:grid-cols-[380px_1fr] gap-6 items-start">
+          {/* LEFT: Statement form */}
+          <StatementFormPanel
+            statementName={statementName} setStatementName={setStatementName}
+            agency={agency}               setAgency={setAgency}
+            agencyOptions={agencyOptions}
+            validFrom={validFrom}         setValidFrom={setValidFrom}
+            validTo={validTo}             setValidTo={setValidTo}
+            touched={formTouched}
+            isComplete={isStatementComplete}
+          />
+          {/* RIGHT: dropzone */}
+          <div className="space-y-4 min-w-0">
+
+            {/* drop content */}
+            <div className="space-y-4">
+              <div className="bg-blue-50 border border-blue-200 rounded-xl px-5 py-4 flex items-start gap-4">
+                <FileSpreadsheet className="w-8 h-8 text-blue-500 shrink-0 mt-0.5" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-semibold text-blue-800 mb-0.5">Download the ticket template</p>
+                  <p className="text-xs text-blue-600 leading-relaxed">
+                    Use our template for instant column auto-mapping. If you have your own format,
+                    upload it and we&apos;ll guide you through column mapping.
+                  </p>
+                </div>
+                <button
+                  onClick={handleDownloadTemplate}
+                  disabled={downloading}
+                  className="flex items-center gap-1.5 shrink-0 px-3.5 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white rounded-lg text-xs font-semibold transition-colors"
+                >
+                  {downloading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+                  {downloading ? "Downloading…" : "Download Template"}
+                </button>
+              </div>
+
+              <div className="bg-white rounded-xl border border-gray-200 p-6">
+                <div
+                  {...getRootProps()}
+                  className={`border-2 border-dashed rounded-xl p-14 text-center cursor-pointer transition-colors ${
+                    isDragActive ? "border-blue-400 bg-blue-50" : "border-gray-300 hover:border-gray-400"
+                  } ${parsing ? "opacity-60 cursor-not-allowed" : ""}`}
+                >
+                  <input {...getInputProps()} />
+                  {parsing
+                    ? <RefreshCw className="w-10 h-10 mx-auto text-blue-400 mb-3 animate-spin" />
+                    : <Upload className="w-10 h-10 mx-auto text-gray-400 mb-3" />}
+                  <p className="text-sm font-medium text-gray-700">
+                    {parsing ? "Parsing file…" : isDragActive ? "Drop the file here" : "Drag & drop XLS / XLSX"}
+                  </p>
+                  {!parsing && <p className="text-xs text-gray-400 mt-1">or click to browse</p>}
+                </div>
+              </div>
+            </div>
+          </div>{/* /right panel */}
+        </div>
+      )}{/* /drop two-panel */}
+
+      {/* ── Mapping step — full width ──────────────────────────────────────── */}
       {step === "mapping" && preview && (
         <div className="space-y-4">
-          {/* file info bar */}
+          {/* statement summary bar */}
+          <div className="bg-[#1e3a5f]/5 border border-[#1e3a5f]/20 rounded-xl px-5 py-3 flex items-center gap-4 flex-wrap">
+            <FileText className="w-4 h-4 text-[#1e3a5f] shrink-0" />
+            <span className="text-xs font-semibold text-[#1e3a5f]">{statementName || <span className="text-red-400 italic">Statement name missing</span>}</span>
+            <span className="text-gray-300 text-xs">·</span>
+            <span className="text-xs text-gray-600">{agency || <span className="text-red-400 italic">Agency missing</span>}</span>
+            <span className="text-gray-300 text-xs">·</span>
+            <span className="text-xs text-gray-600">{validFrom && validTo ? `${validFrom} – ${validTo}` : <span className="text-red-400 italic">Dates missing</span>}</span>
+            {!isStatementComplete && (
+              <button
+                onClick={() => setStep("drop")}
+                className="ml-auto text-xs text-amber-600 underline hover:text-amber-700"
+              >
+                ← Fill statement details
+              </button>
+            )}
+          </div>
+
           <div className="flex items-center justify-between bg-white border border-gray-200 rounded-xl px-5 py-3">
             <div className="flex items-center gap-3">
               <FileSpreadsheet className="w-5 h-5 text-blue-600" />
@@ -552,7 +855,6 @@ export default function UploadTicketsPage() {
             </button>
           </div>
 
-          {/* auto-match banner */}
           {preview.is_template_match ? (
             <div className="bg-green-50 border border-green-200 rounded-xl px-5 py-4 flex items-start gap-3">
               <CheckCircle className="w-5 h-5 text-green-600 shrink-0 mt-0.5" />
@@ -580,7 +882,6 @@ export default function UploadTicketsPage() {
             </div>
           )}
 
-          {/* warnings */}
           {preview.warnings.length > 0 && (
             <div className="bg-yellow-50 border border-yellow-200 rounded-xl px-4 py-3 text-xs text-yellow-800 space-y-1">
               {preview.warnings.map((w, i) => (
@@ -589,7 +890,6 @@ export default function UploadTicketsPage() {
             </div>
           )}
 
-          {/* mapping table */}
           <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
             <div className="px-5 py-3 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
               <p className="text-xs font-semibold text-gray-600 uppercase tracking-wider">Column Mapping</p>
@@ -601,16 +901,11 @@ export default function UploadTicketsPage() {
                 const isSkipped = !mapped || mapped === SKIP;
                 return (
                   <div key={field.key} className="flex items-center px-5 py-2.5 gap-4">
-                    {/* our field label */}
                     <div className="w-48 shrink-0">
                       <span className="text-xs font-medium text-gray-700">{field.label}</span>
                       {field.required && <span className="text-red-500 ml-0.5 text-xs">*</span>}
                     </div>
-
-                    {/* arrow */}
                     <ArrowRight className="w-3.5 h-3.5 text-gray-300 shrink-0" />
-
-                    {/* xls column dropdown */}
                     <div className="flex-1 relative">
                       <select
                         value={mapped ?? SKIP}
@@ -630,21 +925,14 @@ export default function UploadTicketsPage() {
                       </select>
                       <ChevronDown className="w-3 h-3 text-gray-400 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                     </div>
-
-                    {/* sample value from first XLS row */}
                     <div className="w-36 shrink-0">
                       {!isSkipped ? (
                         (() => {
                           const sample = preview.sample_row?.[mapped!];
-                          if (!sample) {
-                            return <span className="text-[10px] text-gray-300 italic">empty</span>;
-                          }
+                          if (!sample) return <span className="text-[10px] text-gray-300 italic">empty</span>;
                           const display = sample.length > 20 ? sample.slice(0, 18) + "…" : sample;
                           return (
-                            <span
-                              title={sample}
-                              className="inline-block px-2 py-0.5 rounded bg-blue-50 border border-blue-100 text-[10px] font-mono text-blue-700 truncate max-w-full"
-                            >
+                            <span title={sample} className="inline-block px-2 py-0.5 rounded bg-blue-50 border border-blue-100 text-[10px] font-mono text-blue-700 truncate max-w-full">
                               {display}
                             </span>
                           );
@@ -653,8 +941,6 @@ export default function UploadTicketsPage() {
                         <span className="text-[10px] text-gray-200">—</span>
                       )}
                     </div>
-
-                    {/* status badge */}
                     <div className="w-20 shrink-0 text-right">
                       {!isSkipped
                         ? <span className="inline-flex items-center gap-1 text-[10px] font-medium text-green-700 bg-green-100 px-2 py-0.5 rounded-full"><CheckCircle className="w-2.5 h-2.5" /> Mapped</span>
@@ -668,7 +954,6 @@ export default function UploadTicketsPage() {
             </div>
           </div>
 
-          {/* action row */}
           <div className="flex items-center justify-between">
             <div className="text-xs text-gray-500">
               {missingRequired.length > 0 && !preview.is_template_match && (
@@ -701,10 +986,27 @@ export default function UploadTicketsPage() {
         </div>
       )}
 
-      {/* ── Step: preview ──────────────────────────────────────────────────── */}
+      {/* ── Preview step — full width ──────────────────────────────────────── */}
       {step === "preview" && preview && (
         <div className="space-y-3">
-          {/* summary bar */}
+          {/* statement summary bar */}
+          <div className="bg-[#1e3a5f]/5 border border-[#1e3a5f]/20 rounded-xl px-5 py-3 flex items-center gap-4 flex-wrap">
+            <FileText className="w-4 h-4 text-[#1e3a5f] shrink-0" />
+            <span className="text-xs font-semibold text-[#1e3a5f]">{statementName || <span className="text-red-400 italic">Statement name missing</span>}</span>
+            <span className="text-gray-300 text-xs">·</span>
+            <span className="text-xs text-gray-600">{agency || <span className="text-red-400 italic">Agency missing</span>}</span>
+            <span className="text-gray-300 text-xs">·</span>
+            <span className="text-xs text-gray-600">{validFrom && validTo ? `${validFrom} – ${validTo}` : <span className="text-red-400 italic">Dates missing</span>}</span>
+            {!isStatementComplete && (
+              <button
+                onClick={() => setStep("drop")}
+                className="ml-auto text-xs text-amber-600 underline hover:text-amber-700"
+              >
+                ← Fill statement details
+              </button>
+            )}
+          </div>
+
           <div className="flex items-center justify-between bg-white border border-gray-200 rounded-xl px-5 py-3">
             <div className="flex items-center gap-4">
               <FileSpreadsheet className="w-5 h-5 text-green-600" />
@@ -722,14 +1024,15 @@ export default function UploadTicketsPage() {
               </button>
               <button
                 onClick={confirmUpload}
-                className="flex items-center gap-1.5 px-4 py-1.5 bg-[#1e3a5f] text-white rounded-lg text-xs font-semibold hover:bg-[#16304f]"
+                disabled={!isStatementComplete}
+                title={!isStatementComplete ? "Complete statement details first" : undefined}
+                className="flex items-center gap-1.5 px-4 py-1.5 bg-[#1e3a5f] text-white rounded-lg text-xs font-semibold hover:bg-[#16304f] disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <CheckCircle className="w-3.5 h-3.5" /> Confirm & Save {rows.length} Rows
               </button>
             </div>
           </div>
 
-          {/* warnings */}
           {preview.warnings.length > 0 && (
             <div className="bg-yellow-50 border border-yellow-200 rounded-xl px-4 py-3 text-xs text-yellow-800 space-y-1">
               {preview.warnings.map((w, i) => (
@@ -738,7 +1041,6 @@ export default function UploadTicketsPage() {
             </div>
           )}
 
-          {/* Filter + Bulk Edit Toolbar */}
           <div className="bg-white rounded-xl border border-gray-200 px-4 py-2.5 space-y-2">
             <div className="flex items-center gap-2">
               <div className="relative flex-1">
@@ -813,7 +1115,6 @@ export default function UploadTicketsPage() {
             )}
           </div>
 
-          {/* editable review table */}
           <div className="bg-white rounded-lg border border-gray-200">
             <div className="px-4 py-2.5 border-b border-gray-100 flex items-center gap-2">
               <h2 className="text-xs font-semibold text-blue-600 uppercase tracking-wide">Review &amp; Edit</h2>
@@ -831,46 +1132,6 @@ export default function UploadTicketsPage() {
               onToggleRow={handleToggleRow}
               onToggleAllFiltered={handleToggleAllFiltered}
             />
-          </div>
-        </div>
-      )}
-
-      {/* ── Step: saving ───────────────────────────────────────────────────── */}
-      {step === "saving" && (
-        <div className="flex items-center justify-center py-20">
-          <div className="text-center space-y-3">
-            <RefreshCw className="w-8 h-8 text-blue-500 animate-spin mx-auto" />
-            <p className="text-sm text-gray-600">Saving tickets to database…</p>
-          </div>
-        </div>
-      )}
-
-      {/* ── Step: done ─────────────────────────────────────────────────────── */}
-      {step === "done" && batchId && preview && (
-        <div className="max-w-md mx-auto text-center space-y-5 py-10">
-          <div className="w-16 h-16 bg-green-50 rounded-full flex items-center justify-center mx-auto">
-            <CheckCircle className="w-8 h-8 text-green-600" />
-          </div>
-          <div>
-            <h2 className="text-lg font-bold text-gray-900">Upload Complete</h2>
-            <p className="text-sm text-gray-500 mt-1">
-              {preview.total_rows} tickets saved from <span className="font-medium">{preview.file_name}</span>
-            </p>
-            <p className="text-xs text-gray-400 mt-0.5 font-mono">Batch: {batchId}</p>
-          </div>
-          <div className="flex items-center justify-center gap-3">
-            <button
-              onClick={reset}
-              className="px-4 py-2 border border-gray-200 rounded-lg text-sm text-gray-600 hover:bg-gray-50"
-            >
-              Upload Another
-            </button>
-            <button
-              onClick={() => router.push("/tickets")}
-              className="flex items-center gap-2 px-4 py-2 bg-[#1e3a5f] text-white rounded-lg text-sm font-medium hover:bg-[#16304f]"
-            >
-              <FileSpreadsheet className="w-4 h-4" /> View Ticket Repository
-            </button>
           </div>
         </div>
       )}

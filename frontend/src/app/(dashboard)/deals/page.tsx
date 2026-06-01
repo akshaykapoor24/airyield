@@ -2,8 +2,24 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
-import { Plus, Upload, Search, RefreshCw, Clock, X, CheckCircle, XCircle, AlertCircle, MinusCircle, User, Pencil, Save, Trash2 } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { Plus, Upload, Search, RefreshCw, X, CheckCircle, XCircle, AlertCircle, MinusCircle, User, Save, Trash2, FileText, FileSpreadsheet, ChevronRight, Building2, Calendar, Hash } from "lucide-react";
 import api from "@/lib/api";
+
+// ── types ── batch ─────────────────────────────────────────────────────────
+type DealBatch = {
+  batch_id:        string;
+  deal_type:       string;
+  supplier_name:   string | null;
+  file_name:       string | null;
+  file_type:       string | null;
+  incentive_types: string[];
+  valid_from:      string | null;
+  valid_to:        string | null;
+  deal_count:      number;
+  created_by_name: string | null;
+  created_at:      string;
+};
 
 // ── section tabs ───────────────────────────────────────────────────────────
 const SECTION_TABS = [
@@ -144,8 +160,6 @@ function formatDateTime(d: string | null) {
     });
   } catch { return d; }
 }
-
-const PAGE_SIZE = 20;
 
 // ── IncentiveEditModal ─────────────────────────────────────────────────────
 function IncentiveEditModal({ name, data, onSave, onClose }: {
@@ -561,8 +575,10 @@ function DealEditPanel({ deal, onSave, onClose }: {
 
 // ── main page ──────────────────────────────────────────────────────────────
 export default function DealsPage() {
+  const router = useRouter();
   const [sectionTab, setSectionTab] = useState("Deal Repository");
   const [deals,      setDeals]      = useState<DealRepositoryItem[]>([]);
+  const [batches,    setBatches]    = useState<DealBatch[]>([]);
   const [loading,    setLoading]    = useState(true);
   const [apiError,   setApiError]   = useState("");
   const [search,     setSearch]     = useState("");
@@ -595,8 +611,12 @@ export default function DealsPage() {
     setLoading(true);
     setApiError("");
     try {
-      const { data } = await api.get<DealRepositoryItem[]>("/deals/repository");
-      setDeals(data);
+      const [batchRes, dealRes] = await Promise.all([
+        api.get<DealBatch[]>("/deals/batches"),
+        api.get<DealRepositoryItem[]>("/deals/repository"),
+      ]);
+      setBatches(batchRes.data);
+      setDeals(dealRes.data);
     } catch (err: unknown) {
       const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
       setApiError(msg ?? "Failed to load deals.");
@@ -680,35 +700,21 @@ export default function DealsPage() {
     }
   }, [deleteTarget]);
 
-  // ── filtered ──────────────────────────────────────────────────────────
-  const filtered = deals.filter(d => {
-    if (dealTypeFilter !== "all" && d.deal_type !== dealTypeFilter) return false;
+  // ── stat counts ───────────────────────────────────────────────────────
+  const totalDeals     = batches.reduce((s, b) => s + b.deal_count, 0);
+  const countAirline   = batches.filter(b => b.deal_type === "airline").reduce((s, b) => s + b.deal_count, 0);
+  const countB2B       = batches.filter(b => b.deal_type === "b2b").reduce((s, b) => s + b.deal_count, 0);
+  const countPending   = deals.filter(d => d.status === "pending_approval" || d.status === "confirmed").length;
+  const countActive    = deals.filter(d => d.deal_lifecycle_status === "active").length;
+  // ── filtered batches ──────────────────────────────────────────────────
+  const filteredBatches = batches.filter(b => {
+    if (dealTypeFilter !== "all" && b.deal_type !== dealTypeFilter) return false;
     const q = search.toLowerCase();
     return !q ||
-      d.source_agent.toLowerCase().includes(q) ||
-      (d.airline_name ?? "").toLowerCase().includes(q) ||
-      (d.deal_maker_name ?? "").toLowerCase().includes(q);
+      (b.supplier_name ?? "").toLowerCase().includes(q) ||
+      (b.file_name     ?? "").toLowerCase().includes(q) ||
+      (b.created_by_name ?? "").toLowerCase().includes(q);
   });
-
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  const paginated  = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
-
-  // ── stat counts ───────────────────────────────────────────────────────
-  const countPending   = deals.filter(d => d.status === "pending_approval" || d.status === "confirmed").length;
-  const countAirline   = deals.filter(d => d.deal_type === "airline").length;
-  const countB2B       = deals.filter(d => d.deal_type === "b2b").length;
-  const countActive    = deals.filter(d => d.deal_lifecycle_status === "active").length;
-  const countDraft     = deals.filter(d => !d.deal_lifecycle_status || d.deal_lifecycle_status === "draft").length;
-  const countClosed    = deals.filter(d => d.deal_lifecycle_status === "closed").length;
-
-  const TABLE_HEADERS = [
-    "Deal No", "Deal Type", "Airline Name", "Airline Type", "Contract Year",
-    "Valid From", "Valid To",
-    "Trigger Type", "Payout Type",
-    "Business Type", "Entity (LCC)",
-    "Incentive Types", "Incl / Excl",
-    "Deal Maker", "Approval Status", "Deal Status", "Actions",
-  ];
 
   return (
     <div className="space-y-3">
@@ -765,12 +771,12 @@ export default function DealsPage() {
           {/* ── Stats bar ───────────────────────────────────────────────── */}
           <div className="grid grid-cols-6 gap-2">
             {[
-              { label: "Total",            value: deals.length,                           color: "bg-blue-50 text-blue-700 border-blue-200"       },
+              { label: "Total Batches",    value: batches.length,                         color: "bg-blue-50 text-blue-700 border-blue-200"       },
+              { label: "Total Deals",      value: totalDeals,                             color: "bg-indigo-50 text-indigo-700 border-indigo-200"  },
+              { label: "Airline Deals",    value: countAirline,                           color: "bg-sky-50 text-sky-700 border-sky-200"           },
+              { label: "B2B Deals",        value: countB2B,                               color: "bg-violet-50 text-violet-700 border-violet-200"  },
               { label: "Active",           value: countActive,                            color: "bg-emerald-50 text-emerald-700 border-emerald-200" },
-              { label: "Draft",            value: countDraft,                             color: "bg-gray-50 text-gray-600 border-gray-200"        },
-              { label: "Closed",           value: countClosed,                            color: "bg-slate-100 text-slate-600 border-slate-300"    },
               { label: "Pending Approval", value: countPending,                           color: "bg-amber-50 text-amber-700 border-amber-200"     },
-              { label: "Airline / B2B",    value: `${countAirline} / ${countB2B}`,        color: "bg-violet-50 text-violet-700 border-violet-200"  },
             ].map(s => (
               <div key={s.label} className={`rounded-xl border px-4 py-3 ${s.color}`}>
                 <p className="text-xl font-bold">{s.value}</p>
@@ -784,7 +790,7 @@ export default function DealsPage() {
             <div className="relative flex-1">
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
               <input value={search} onChange={e => { setSearch(e.target.value); setPage(1); }}
-                placeholder="Search by airline, deal maker, agent..."
+                placeholder="Search by supplier, file name, uploaded by..."
                 className="w-full pl-8 pr-3 py-1.5 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-1 focus:ring-blue-400" />
             </div>
             <select value={dealTypeFilter} onChange={e => { setDealTypeFilter(e.target.value as "all" | DealType); setPage(1); }}
@@ -794,259 +800,156 @@ export default function DealsPage() {
               <option value="b2b">B2B</option>
             </select>
             <span className="text-[11px] text-gray-400 ml-auto whitespace-nowrap">
-              {filtered.length} deal{filtered.length !== 1 ? "s" : ""}
+              {filteredBatches.length} batch{filteredBatches.length !== 1 ? "es" : ""}
             </span>
           </div>
 
-          {/* ── Table ───────────────────────────────────────────────────── */}
+          {/* ── Batch list table ─────────────────────────────────────────── */}
           <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm border-collapse">
-                <thead>
-                  <tr style={{ background: "#1e3a5f" }}>
-                    {TABLE_HEADERS.map(h => (
-                      <th key={h} className="px-2 py-2 text-left text-[10px] font-semibold text-white uppercase tracking-wider whitespace-nowrap">
-                        {h}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {loading ? (
-                    <tr>
-                      <td colSpan={TABLE_HEADERS.length} className="px-4 py-12 text-center text-xs text-gray-400">
-                        <RefreshCw className="w-4 h-4 animate-spin mx-auto mb-2 text-gray-300" />
-                        Loading deals...
-                      </td>
-                    </tr>
-                  ) : apiError ? (
-                    <tr>
-                      <td colSpan={TABLE_HEADERS.length} className="px-4 py-12 text-center text-xs text-red-400">{apiError}</td>
-                    </tr>
-                  ) : paginated.length === 0 ? (
-                    <tr>
-                      <td colSpan={TABLE_HEADERS.length} className="px-4 py-12 text-center">
-                        <div className="flex flex-col items-center gap-3">
-                          <Upload className="w-8 h-8 text-gray-300" />
-                          <p className="text-xs text-gray-400 font-medium">No deals found</p>
-                          <Link href="/deals/new"
-                            className="flex items-center gap-1.5 bg-[#1e3a5f] text-white px-3 py-1.5 rounded-lg text-xs font-medium hover:bg-[#16304f]">
-                            <Plus className="w-3 h-3" /> Create First Deal
-                          </Link>
-                        </div>
-                      </td>
-                    </tr>
-                  ) : paginated.map((d, idx) => {
-                    const dtStyle = getDealTypeBadge(d);
-                    return (
-                      <tr key={`${d.deal_type}-${d.id}`}
-                        className={`border-b border-gray-100 hover:bg-gray-50/60 transition-colors ${idx % 2 === 0 ? "bg-white" : "bg-gray-50/30"}`}>
-
-                        {/* deal no */}
-                        <td className="px-2 py-1.5 whitespace-nowrap">
-                          <span className="font-mono text-[10px] font-semibold text-gray-600 bg-gray-100 px-1.5 py-0.5 rounded border border-gray-200">
-                            {d.deal_no}
-                          </span>
-                        </td>
-
-                        {/* deal type */}
-                        <td className="px-2 py-1.5 whitespace-nowrap">
-                          <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold uppercase border ${dtStyle.cls}`}>
-                            {dtStyle.label}
-                          </span>
-                        </td>
-
-                        {/* airline name */}
-                        <td className="px-2 py-1.5 min-w-32">
-                          <p className="text-[11px] font-semibold text-gray-800 whitespace-nowrap">
-                            {d.airline_name || <span className="text-gray-300">—</span>}
-                          </p>
-                        </td>
-
-                        {/* airline type */}
-                        <td className="px-2 py-1.5 min-w-20">
-                          {d.airline_type ? (
-                            <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase border ${
-                              d.airline_type === "LCC"
-                                ? "bg-purple-50 text-purple-700 border-purple-200"
-                                : "bg-sky-50 text-sky-700 border-sky-200"
-                            }`}>{d.airline_type}</span>
-                          ) : <span className="text-[11px] text-gray-300">—</span>}
-                        </td>
-
-                        {/* contract year */}
-                        <td className="px-2 py-1.5 min-w-24">
-                          <p className="text-[11px] text-gray-700 font-medium whitespace-nowrap">
-                            {d.contract_year || <span className="text-gray-300">—</span>}
-                          </p>
-                        </td>
-
-                        {/* valid from */}
-                        <td className="px-2 py-1.5 min-w-24">
-                          <p className="text-[11px] text-green-600 font-medium whitespace-nowrap">{formatDate(d.valid_from)}</p>
-                        </td>
-
-                        {/* valid to */}
-                        <td className="px-2 py-1.5 min-w-24">
-                          <p className="text-[11px] text-red-500 font-medium whitespace-nowrap">{formatDate(d.valid_to)}</p>
-                        </td>
-
-                        {/* trigger type */}
-                        <td className="px-2 py-1.5 min-w-20">
-                          <p className="text-[11px] text-gray-700 whitespace-nowrap">
-                            {d.trigger_type || <span className="text-gray-300">—</span>}
-                          </p>
-                        </td>
-
-                        {/* payout type */}
-                        <td className="px-2 py-1.5 min-w-20">
-                          <p className="text-[11px] text-gray-700 whitespace-nowrap">
-                            {d.payout_type || <span className="text-gray-300">—</span>}
-                          </p>
-                        </td>
-
-                        {/* business type */}
-                        <td className="px-2 py-1.5 min-w-20">
-                          {d.business_type ? (
-                            <span className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-gray-100 text-gray-600 border border-gray-200">{d.business_type}</span>
-                          ) : <span className="text-[11px] text-gray-300">—</span>}
-                        </td>
-
-                        {/* entity lcc */}
-                        <td className="px-2 py-1.5 min-w-20">
-                          <p className="text-[11px] text-gray-700 whitespace-nowrap">
-                            {d.entity_lcc || <span className="text-gray-300">—</span>}
-                          </p>
-                        </td>
-
-                        {/* incentive type pills */}
-                        <td className="px-2 py-1.5 min-w-28">
-                          {(d.incentive_types ?? []).length > 0 ? (
-                            <div className="flex flex-wrap gap-0.5">
-                              {(d.incentive_types ?? []).map(t => (
-                                <button key={t}
-                                  onClick={() => setIncentivePopup({ name: t, data: d.incentive_data?.[t] ?? {}, dealId: d.id, dealType: d.deal_type })}
-                                  className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-blue-50 text-blue-700 border border-blue-200 whitespace-nowrap hover:bg-blue-100 cursor-pointer transition-colors">
-                                  {t}
-                                </button>
-                              ))}
-                            </div>
-                          ) : <span className="text-[11px] text-gray-300">—</span>}
-                        </td>
-
-                        {/* incl / excl pills */}
-                        <td className="px-2 py-1.5 min-w-28">
-                          {(d.incl_excl_types ?? []).length > 0 ? (
-                            <div className="flex flex-wrap gap-0.5">
-                              {(d.incl_excl_types ?? []).map(t => {
-                                const isExcl = t.toLowerCase().includes("exclusion");
-                                return (
-                                  <button key={t}
-                                    onClick={() => setInclExclPopup({ name: t, data: d.incl_excl_data?.[t] ?? {}, dealId: d.id, dealType: d.deal_type })}
-                                    className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border whitespace-nowrap cursor-pointer transition-colors ${
-                                      isExcl
-                                        ? "bg-red-50 text-red-600 border-red-200 hover:bg-red-100"
-                                        : "bg-green-50 text-green-700 border-green-200 hover:bg-green-100"
-                                    }`}>
-                                    {t}
-                                  </button>
-                                );
-                              })}
-                            </div>
-                          ) : <span className="text-[11px] text-gray-300">—</span>}
-                        </td>
-
-                        {/* deal maker */}
-                        <td className="px-2 py-1.5 min-w-28">
-                          <p className="text-[11px] font-medium text-gray-700 whitespace-nowrap">
-                            {d.deal_maker_name || d.source_agent}
-                          </p>
-                        </td>
-
-                        {/* approval status */}
-                        <td className="px-2 py-1.5 whitespace-nowrap">
-                          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border ${STATUS_STYLE[d.status] ?? "bg-gray-50 text-gray-500 border-gray-200"}`}>
-                            <span className={`w-1.5 h-1.5 rounded-full ${STATUS_DOT[d.status] ?? "bg-gray-400"}`} />
-                            {STATUS_LABEL[d.status] ?? d.status.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase())}
-                          </span>
-                        </td>
-
-                        {/* deal lifecycle status */}
-                        <td className="px-2 py-1.5 whitespace-nowrap">
-                          {(() => {
-                            const ls = d.deal_lifecycle_status ?? "draft";
-                            return (
-                              <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border ${LIFECYCLE_STYLE[ls] ?? LIFECYCLE_STYLE.draft}`}>
-                                <span className={`w-1.5 h-1.5 rounded-full ${LIFECYCLE_DOT[ls] ?? LIFECYCLE_DOT.draft}`} />
-                                {LIFECYCLE_LABEL[ls] ?? ls}
-                              </span>
-                            );
-                          })()}
-                        </td>
-
-                        {/* actions */}
-                        <td className="px-2 py-1.5 whitespace-nowrap">
-                          <div className="flex items-center gap-1">
-                            <button
-                              onClick={() => openHistory(d)}
-                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium border border-gray-200 text-gray-600 hover:bg-gray-50 hover:border-gray-300 transition-colors">
-                              <Clock className="w-3 h-3" /> History
-                            </button>
-                            <button
-                              onClick={() => (d.status === "approved" || d.status === "rejected") && setEditDeal(d)}
-                              disabled={d.status !== "approved" && d.status !== "rejected"}
-                              title={
-                                d.status === "rejected" ? "Edit and resubmit for approval" :
-                                d.status !== "approved" ? "Only approved or rejected deals can be edited" :
-                                undefined
-                              }
-                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium border border-blue-200 text-blue-600 hover:bg-blue-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent">
-                              {d.status === "rejected"
-                                ? <><RefreshCw className="w-3 h-3" /> Edit &amp; Resubmit</>
-                                : <><Pencil className="w-3 h-3" /> Edit</>
-                              }
-                            </button>
-                            <button
-                              onClick={() => d.status === "approved" && setDeleteTarget(d)}
-                              disabled={d.status !== "approved"}
-                              title={d.status !== "approved" ? "Only approved deals can be deleted" : undefined}
-                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium border border-red-200 text-red-500 hover:bg-red-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent">
-                              <Trash2 className="w-3 h-3" /> Delete
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+            {/* summary bar */}
+            <div className="px-5 py-3 border-b border-gray-100 bg-gray-50/40 flex items-center justify-between">
+              <p className="text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                {filteredBatches.length === batches.length
+                  ? `${batches.length} Batch${batches.length !== 1 ? "es" : ""}`
+                  : `${filteredBatches.length} of ${batches.length} Batches`}
+              </p>
+              <p className="text-xs text-gray-400">Click a row to view deals</p>
             </div>
 
-            {/* pagination */}
-            {totalPages > 1 && (
-              <div className="px-4 py-2.5 border-t border-gray-100 flex items-center justify-between">
-                <p className="text-[10px] text-gray-400">
-                  {Math.min((page-1)*PAGE_SIZE+1, filtered.length)}–{Math.min(page*PAGE_SIZE, filtered.length)} of{" "}
-                  <span className="font-semibold text-gray-600">{filtered.length}</span>
-                </p>
-                <div className="flex items-center gap-1">
-                  <button onClick={() => setPage(p => Math.max(1, p-1))} disabled={page === 1}
-                    className="px-2.5 py-1 rounded border border-gray-200 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-40">
-                    Previous
-                  </button>
-                  {Array.from({ length: totalPages }, (_, i) => i + 1).map(p => (
-                    <button key={p} onClick={() => setPage(p)}
-                      className={`w-6 h-6 rounded-full text-[11px] font-medium border ${
-                        p === page ? "bg-[#1e3a5f] text-white border-[#1e3a5f]" : "bg-white text-gray-600 border-gray-200 hover:border-gray-400"
-                      }`}>{p}</button>
-                  ))}
-                  <button onClick={() => setPage(p => Math.min(totalPages, p+1))} disabled={page === totalPages}
-                    className="px-2.5 py-1 rounded border border-gray-200 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-40">
-                    Next
-                  </button>
-                </div>
-              </div>
-            )}
+            <table className="w-full">
+              <thead>
+                <tr style={{ background: "#1e3a5f" }}>
+                  <th className="px-4 py-2 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide">Supplier / Source</th>
+                  <th className="px-4 py-2 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide">Deal Type</th>
+                  <th className="px-4 py-2 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide">Incentive Types</th>
+                  <th className="px-4 py-2 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide">
+                    <span className="flex items-center gap-1"><Calendar className="w-3.5 h-3.5" /> Valid Period</span>
+                  </th>
+                  <th className="px-4 py-2 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide">File</th>
+                  <th className="px-4 py-2 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide">
+                    <span className="flex items-center gap-1"><Hash className="w-3.5 h-3.5" /> Deals</span>
+                  </th>
+                  <th className="px-4 py-2 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide">
+                    <span className="flex items-center gap-1"><User className="w-3.5 h-3.5" /> Uploaded By</span>
+                  </th>
+                  <th className="px-4 py-2 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide">Date</th>
+                  <th className="px-4 py-2" />
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {loading ? (
+                  <tr>
+                    <td colSpan={9} className="px-4 py-12 text-center text-xs text-gray-400">
+                      <RefreshCw className="w-4 h-4 animate-spin mx-auto mb-2 text-gray-300" />
+                      Loading batches...
+                    </td>
+                  </tr>
+                ) : apiError ? (
+                  <tr>
+                    <td colSpan={9} className="px-4 py-10 text-center text-xs text-red-400">{apiError}</td>
+                  </tr>
+                ) : filteredBatches.length === 0 ? (
+                  <tr>
+                    <td colSpan={9} className="px-4 py-12 text-center">
+                      <div className="flex flex-col items-center gap-3">
+                        <Upload className="w-8 h-8 text-gray-300" />
+                        <p className="text-xs text-gray-400 font-medium">
+                          {batches.length === 0 ? "No deal batches yet" : "No batches match the filters"}
+                        </p>
+                        {batches.length === 0 && (
+                          <Link href="/deals/upload"
+                            className="flex items-center gap-1.5 bg-[#1e3a5f] text-white px-3 py-1.5 rounded-lg text-xs font-medium hover:bg-[#16304f]">
+                            <Upload className="w-3 h-3" /> Upload First Deal
+                          </Link>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ) : filteredBatches.map(b => {
+                  const dtStyle = DEAL_TYPE_STYLE[b.deal_type] ?? DEAL_TYPE_STYLE.airline;
+                  const FileIcon = b.file_type === "pdf" ? FileText : FileSpreadsheet;
+                  return (
+                    <tr
+                      key={b.batch_id}
+                      onClick={() => router.push(`/deals/${b.batch_id}`)}
+                      className="hover:bg-blue-50/40 cursor-pointer transition-colors group"
+                    >
+                      {/* Supplier */}
+                      <td className="px-4 py-2">
+                        <div className="flex items-center gap-2.5">
+                          <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center shrink-0">
+                            <Building2 className="w-4 h-4 text-blue-500" />
+                          </div>
+                          <p className="text-sm font-semibold text-gray-800 group-hover:text-[#1e3a5f]">
+                            {b.supplier_name || "—"}
+                          </p>
+                        </div>
+                      </td>
+
+                      {/* Deal type */}
+                      <td className="px-4 py-2">
+                        <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase border ${dtStyle.cls}`}>
+                          {dtStyle.label}
+                        </span>
+                      </td>
+
+                      {/* Incentive types */}
+                      <td className="px-4 py-2">
+                        <div className="flex flex-wrap gap-1">
+                          {(b.incentive_types ?? []).length > 0
+                            ? b.incentive_types.map(t => (
+                                <span key={t} className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-blue-50 text-blue-700 border border-blue-200">{t}</span>
+                              ))
+                            : <span className="text-xs text-gray-400">—</span>
+                          }
+                        </div>
+                      </td>
+
+                      {/* Valid period */}
+                      <td className="px-4 py-2">
+                        <div className="text-xs text-gray-700">
+                          <span className="font-medium">{formatDate(b.valid_from)}</span>
+                          <span className="text-gray-400 mx-1.5">→</span>
+                          <span className="font-medium">{formatDate(b.valid_to)}</span>
+                        </div>
+                      </td>
+
+                      {/* File */}
+                      <td className="px-4 py-2">
+                        <div className="flex items-center gap-1.5">
+                          <FileIcon className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+                          <span className="text-xs text-gray-500 truncate max-w-40 block" title={b.file_name ?? undefined}>
+                            {b.file_name || "—"}
+                          </span>
+                        </div>
+                      </td>
+
+                      {/* Deal count */}
+                      <td className="px-4 py-2">
+                        <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-[#1e3a5f]/10 text-[#1e3a5f] text-xs font-semibold">
+                          {b.deal_count}
+                        </span>
+                      </td>
+
+                      {/* Uploaded by */}
+                      <td className="px-4 py-2 text-xs text-gray-600 font-medium">
+                        {b.created_by_name || "—"}
+                      </td>
+
+                      {/* Date */}
+                      <td className="px-4 py-2 text-xs text-gray-500">
+                        {formatDate(b.created_at)}
+                      </td>
+
+                      {/* Arrow */}
+                      <td className="px-4 py-2 text-right">
+                        <ChevronRight className="w-4 h-4 text-gray-300 group-hover:text-[#1e3a5f] transition-colors inline" />
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         </>
       )}

@@ -176,20 +176,23 @@ class DealMatchingService:
 
     @staticmethod
     async def find_all_deals(
-        db:            AsyncSession,
-        airline_name:  str,
-        travel_date:   date,
-        tenant_id:     int,
-        segment_type:  str | None = None,
-        booking_class: str | None = None,
-        invoice_type:  str | None = None,
-        sell_fare:     float | None = None,
-        sell_tax_yq:   float | None = None,
-        sale_yr:       float | None = None,
+        db:              AsyncSession,
+        airline_name:    str,
+        travel_date:     date,
+        tenant_id:       int,
+        segment_type:    str | None = None,
+        booking_class:   str | None = None,
+        invoice_type:    str | None = None,
+        sell_fare:       float | None = None,
+        sell_tax_yq:     float | None = None,
+        sale_yr:         float | None = None,
+        supplier_agency: str | None = None,
     ) -> list[DealMatchResult]:
         """
         Search airline_deals and b2b_deals, return ALL matching deals.
         Results are sorted by calculated_incentive descending (highest first).
+        If supplier_agency is provided and a B2B deal has a supplier_name set,
+        they must match (case-insensitive) for the deal to be considered.
         """
         airline_lower = airline_name.lower()
         cabin_groups = await _resolve_cabin_groups(db, airline_name, booking_class)
@@ -235,6 +238,10 @@ class DealMatchingService:
             ).order_by(B2BDeal.created_at.desc())
         )
         for deal in b_result.scalars().all():
+            # Supplier guard: if both sides specify a supplier, they must match
+            if deal.supplier_name and supplier_agency:
+                if deal.supplier_name.lower() != supplier_agency.lower():
+                    continue
             match = _try_match(
                 deal, "b2b", travel_date,
                 segment_type, cabin_groups, None,   # b2b has no trigger_type
@@ -465,16 +472,17 @@ class DealMatchingService:
 
     @staticmethod
     async def find_best_deal(
-        db:            AsyncSession,
-        airline_name:  str,
-        travel_date:   date,
-        tenant_id:     int,
-        segment_type:  str | None = None,
-        booking_class: str | None = None,
-        invoice_type:  str | None = None,
-        sell_fare:     float | None = None,
-        sell_tax_yq:   float | None = None,
-        sale_yr:       float | None = None,
+        db:              AsyncSession,
+        airline_name:    str,
+        travel_date:     date,
+        tenant_id:       int,
+        segment_type:    str | None = None,
+        booking_class:   str | None = None,
+        invoice_type:    str | None = None,
+        sell_fare:       float | None = None,
+        sell_tax_yq:     float | None = None,
+        sale_yr:         float | None = None,
+        supplier_agency: str | None = None,
     ) -> DealMatchResult | None:
         """Return the single best (highest incentive) matching deal."""
         matches = await DealMatchingService.find_all_deals(
@@ -482,6 +490,7 @@ class DealMatchingService:
             tenant_id=tenant_id, segment_type=segment_type,
             booking_class=booking_class, invoice_type=invoice_type,
             sell_fare=sell_fare, sell_tax_yq=sell_tax_yq, sale_yr=sale_yr,
+            supplier_agency=supplier_agency,
         )
         return matches[0] if matches else None
 

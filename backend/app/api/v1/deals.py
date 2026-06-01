@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from typing import Optional
+import uuid
 
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, status, Query, Form
 from pydantic import BaseModel
@@ -22,6 +23,7 @@ from app.models.uploaded_deal import (
 )
 from app.models.airline_deal import AirlineDeal, ManualDealStatus, DealLifecycleStatus
 from app.models.b2b_deal import B2BDeal
+from app.models.deal_batch import DealBatch
 from app.schemas.airline_deal import AirlineDealCreate, AirlineDealResponse
 from app.schemas.b2b_deal import B2BDealCreate, B2BDealResponse
 from app.models.approval_workflow import (
@@ -35,7 +37,7 @@ from app.models.approval_workflow import (
 from app.schemas.uploaded_deal import (
     ExtractionPreview, ConfirmUploadPayload,
     UploadedDealRead, UploadedDealSummary, ExtractedRow,
-    DealRepositoryItem,
+    DealRepositoryItem, DealBatchRead,
     AIDeal, AIExtractResponse, AIConfirmPayload,
     DealUpdatePayload,
 )
@@ -58,6 +60,7 @@ router = APIRouter()
 class UploadConfirmResult(BaseModel):
     created_count: int
     created_ids: list[int]
+    batch_id: Optional[str] = None
 
 
 class ClosingDealSummary(BaseModel):
@@ -288,6 +291,21 @@ async def ai_confirm_deals(
     Bulk-create AirlineDeal records from AI-extracted deals.
     One record per deal object (i.e. one per airline × class).
     """
+    batch_id = payload.batch_id or str(uuid.uuid4())
+
+    batch = DealBatch(
+        batch_id=batch_id,
+        tenant_id=current_user.tenant_id,
+        deal_type="airline",
+        supplier_name=payload.supplier_name or None,
+        file_name=payload.file_name or None,
+        file_type=payload.file_type or "pdf",
+        incentive_types=[d.incentive_types[0] for d in payload.deals if d.incentive_types][:1] or [],
+        created_by_id=current_user.id,
+    )
+    db.add(batch)
+    await db.flush()
+
     created_ids: list[int] = []
     for deal in payload.deals:
         vf = date.fromisoformat(deal.contract_valid_from) if deal.contract_valid_from else None
@@ -306,6 +324,7 @@ async def ai_confirm_deals(
             incentive_types=deal.incentive_types or [],
             incentive_data=deal.incentive_data or {},
             remark=deal.remark or None,
+            batch_id=batch_id,
         )
         db.add(db_deal)
         await db.flush()
@@ -313,7 +332,7 @@ async def ai_confirm_deals(
         created_ids.append(db_deal.id)
 
     await db.commit()
-    return UploadConfirmResult(created_count=len(created_ids), created_ids=created_ids)
+    return UploadConfirmResult(created_count=len(created_ids), created_ids=created_ids, batch_id=batch_id)
 
 
 @router.post("/upload/confirm", response_model=UploadConfirmResult, status_code=status.HTTP_201_CREATED)
@@ -321,6 +340,7 @@ async def confirm_upload(
     payload: ConfirmUploadPayload,
     file_name: str = Query(..., description="Original file name"),
     file_type: str = Query(..., description="File type: pdf/excel/word/image"),
+    supplier_name: Optional[str] = Query(None, description="Supplier / agency name for batch record"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -337,6 +357,23 @@ async def confirm_upload(
         rows = [ExtractedRow()]
 
     use_b2b = bool(payload.business_type)
+
+    batch_id = str(uuid.uuid4())
+    batch = DealBatch(
+        batch_id=batch_id,
+        tenant_id=current_user.tenant_id,
+        deal_type="b2b" if use_b2b else "airline",
+        supplier_name=supplier_name or payload.source_agent or None,
+        file_name=file_name or None,
+        file_type=file_type or None,
+        incentive_types=payload.incentive_types or [],
+        valid_from=vf_deal,
+        valid_to=vt_deal,
+        created_by_id=current_user.id,
+    )
+    db.add(batch)
+    await db.flush()
+
     created_ids: list[int] = []
 
     for r in rows:
@@ -359,6 +396,7 @@ async def confirm_upload(
                 deal_lifecycle_status=DealLifecycleStatus.DRAFT,
                 source_agent=source_agent,
                 deal_maker_name=payload.deal_maker_name or None,
+                supplier_name=supplier_name or None,
                 remark=(r.remarks or payload.remark) or None,
                 airline_type=payload.airline_type or None,
                 airline_name=(r.airline_name or payload.airline_name) or None,
@@ -374,6 +412,7 @@ async def confirm_upload(
                 incl_excl_types=ie_types,
                 incl_excl_data=ie_data,
                 vice_versa=ie_vv,
+                batch_id=batch_id,
             )
             deal_type_key = "b2b"
         else:
@@ -402,6 +441,7 @@ async def confirm_upload(
                 incl_excl_types=ie_types,
                 incl_excl_data=ie_data,
                 vice_versa=ie_vv,
+                batch_id=batch_id,
             )
             deal_type_key = "airline"
 
@@ -411,7 +451,7 @@ async def confirm_upload(
         created_ids.append(deal.id)
 
     await db.commit()
-    return UploadConfirmResult(created_count=len(created_ids), created_ids=created_ids)
+    return UploadConfirmResult(created_count=len(created_ids), created_ids=created_ids, batch_id=batch_id)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -559,6 +599,7 @@ async def create_b2b_deal(
         deal_lifecycle_status=DealLifecycleStatus.DRAFT,
         source_agent=payload.source_agent or "manual",
         deal_maker_name=payload.deal_maker_name or None,
+        supplier_name=payload.supplier_name or None,
         remark=payload.remark or None,
         airline_type=payload.airline_type or None,
         airline_name=payload.airline_name or None,
@@ -589,6 +630,7 @@ async def create_b2b_deal(
 
 @router.get("/repository", response_model=list[DealRepositoryItem])
 async def get_deal_repository(
+    batch_id: Optional[str] = Query(None, description="Filter by batch_id"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -596,11 +638,12 @@ async def get_deal_repository(
     items: list[DealRepositoryItem] = []
 
     # 1. Upload-table deals (file uploads + legacy manual)
-    upload_result = await db.execute(
+    upload_q = (
         select(UploadedDeal)
         .options(selectinload(UploadedDeal.incentives), selectinload(UploadedDeal.incl_excl_rules))
         .where(UploadedDeal.tenant_id == current_user.tenant_id)
     )
+    upload_result = await db.execute(upload_q)
     for d in upload_result.scalars().all():
         items.append(DealRepositoryItem(
             id=d.id,
@@ -629,9 +672,10 @@ async def get_deal_repository(
         ))
 
     # 2. Airline deals
-    airline_result = await db.execute(
-        select(AirlineDeal).where(AirlineDeal.tenant_id == current_user.tenant_id)
-    )
+    airline_q = select(AirlineDeal).where(AirlineDeal.tenant_id == current_user.tenant_id)
+    if batch_id:
+        airline_q = airline_q.where(AirlineDeal.batch_id == batch_id)
+    airline_result = await db.execute(airline_q)
     for d in airline_result.scalars().all():
         items.append(DealRepositoryItem(
             id=d.id,
@@ -660,9 +704,10 @@ async def get_deal_repository(
         ))
 
     # 3. B2B deals
-    b2b_result = await db.execute(
-        select(B2BDeal).where(B2BDeal.tenant_id == current_user.tenant_id)
-    )
+    b2b_q = select(B2BDeal).where(B2BDeal.tenant_id == current_user.tenant_id)
+    if batch_id:
+        b2b_q = b2b_q.where(B2BDeal.batch_id == batch_id)
+    b2b_result = await db.execute(b2b_q)
     for d in b2b_result.scalars().all():
         items.append(DealRepositoryItem(
             id=d.id,
@@ -692,6 +737,112 @@ async def get_deal_repository(
 
     items.sort(key=lambda x: x.created_at, reverse=True)
     return items
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DEAL BATCHES
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/batches", response_model=list[DealBatchRead])
+async def list_deal_batches(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List all deal upload batches for the tenant, with deal count per batch."""
+    from app.models.user import User as UserModel
+    batches_result = await db.execute(
+        select(DealBatch)
+        .where(DealBatch.tenant_id == current_user.tenant_id)
+        .order_by(DealBatch.created_at.desc())
+    )
+    batches = batches_result.scalars().all()
+
+    airline_counts_result = await db.execute(
+        select(AirlineDeal.batch_id, func.count(AirlineDeal.id))
+        .where(AirlineDeal.tenant_id == current_user.tenant_id, AirlineDeal.batch_id != None)  # noqa: E711
+        .group_by(AirlineDeal.batch_id)
+    )
+    b2b_counts_result = await db.execute(
+        select(B2BDeal.batch_id, func.count(B2BDeal.id))
+        .where(B2BDeal.tenant_id == current_user.tenant_id, B2BDeal.batch_id != None)  # noqa: E711
+        .group_by(B2BDeal.batch_id)
+    )
+    deal_counts: dict[str, int] = {}
+    for bid, cnt in airline_counts_result.all():
+        deal_counts[bid] = deal_counts.get(bid, 0) + cnt
+    for bid, cnt in b2b_counts_result.all():
+        deal_counts[bid] = deal_counts.get(bid, 0) + cnt
+
+    user_ids = list({b.created_by_id for b in batches})
+    user_names: dict[int, str] = {}
+    if user_ids:
+        users_result = await db.execute(select(UserModel).where(UserModel.id.in_(user_ids)))
+        for u in users_result.scalars().all():
+            user_names[u.id] = u.full_name or u.email or str(u.id)
+
+    return [
+        DealBatchRead(
+            batch_id=b.batch_id,
+            deal_type=b.deal_type,
+            supplier_name=b.supplier_name,
+            file_name=b.file_name,
+            file_type=b.file_type,
+            incentive_types=b.incentive_types or [],
+            valid_from=b.valid_from,
+            valid_to=b.valid_to,
+            deal_count=deal_counts.get(b.batch_id, 0),
+            created_by_name=user_names.get(b.created_by_id),
+            created_at=b.created_at,
+        )
+        for b in batches
+    ]
+
+
+@router.get("/batches/{batch_id}", response_model=DealBatchRead)
+async def get_deal_batch(
+    batch_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get a single deal batch by batch_id."""
+    from app.models.user import User as UserModel
+    result = await db.execute(
+        select(DealBatch).where(
+            DealBatch.batch_id == batch_id,
+            DealBatch.tenant_id == current_user.tenant_id,
+        )
+    )
+    batch = result.scalar_one_or_none()
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    airline_cnt = await db.execute(
+        select(func.count(AirlineDeal.id))
+        .where(AirlineDeal.batch_id == batch_id, AirlineDeal.tenant_id == current_user.tenant_id)
+    )
+    b2b_cnt = await db.execute(
+        select(func.count(B2BDeal.id))
+        .where(B2BDeal.batch_id == batch_id, B2BDeal.tenant_id == current_user.tenant_id)
+    )
+    deal_count = (airline_cnt.scalar() or 0) + (b2b_cnt.scalar() or 0)
+
+    user_result = await db.execute(select(UserModel).where(UserModel.id == batch.created_by_id))
+    user = user_result.scalar_one_or_none()
+    created_by_name = user.full_name or user.email if user else None
+
+    return DealBatchRead(
+        batch_id=batch.batch_id,
+        deal_type=batch.deal_type,
+        supplier_name=batch.supplier_name,
+        file_name=batch.file_name,
+        file_type=batch.file_type,
+        incentive_types=batch.incentive_types or [],
+        valid_from=batch.valid_from,
+        valid_to=batch.valid_to,
+        deal_count=deal_count,
+        created_by_name=created_by_name,
+        created_at=batch.created_at,
+    )
 
 
 @router.get("/repository/{deal_id}/history", response_model=DealHistoryResponse)

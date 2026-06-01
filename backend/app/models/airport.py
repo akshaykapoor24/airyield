@@ -5,13 +5,14 @@ from app.database import Base
 
 
 CATEGORIZATIONS = [
-    "APAC", "MEAI", "MEAI/SAARC", "SAARC",
-    "EUROPEAN NATIONS", "LATIN AMERICA", "OTHER",
+    "APAC", "EUROPEAN NATIONS", "GCC/MIDDLE EAST", "LATIN AMERICA",
+    "MEAI", "MEAI/APAC", "MEAI/SAARC", "MEAI/SAARC/APAC",
+    "NAM", "OTHER", "SAARC", "SAARC/APAC",
 ]
 
 CONTINENTS = [
     "Africa", "Asia", "Europe",
-    "North America", "Oceania", "South America",
+    "North America", "Oceania", "South America", "Antarctica",
 ]
 
 

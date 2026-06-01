@@ -97,6 +97,44 @@ NUMERIC_COLS = {
     "total_amt", "paid_by_credit_card", "net_amt",
 }
 
+# Financial columns that get divided equally across split legs
+_SPLIT_FIN_COLS = {"sell_fare", "sell_tax", "sell_tax_yq", "sale_yr"}
+
+
+def _split_multi_sector_rows(rows: list[dict]) -> list[dict]:
+    """Expand multi-sector rows into one row per leg.
+
+    Detection: sector has more than one '/' (i.e. 3+ airports → 2+ legs).
+    Financial fields in _SPLIT_FIN_COLS are divided equally across legs.
+    """
+    result: list[dict] = []
+    for row in rows:
+        sector = (row.get("sector") or "").strip()
+        airports = [a.strip() for a in sector.split("/") if a.strip()]
+        n = len(airports) - 1  # number of legs
+
+        if n <= 1:
+            row["split_type"] = "normal"
+            result.append(row)
+            continue
+
+        raw_cls_str = (row.get("booking_class") or "").strip()
+        classes = [c.strip() for c in raw_cls_str.split("/") if c.strip()]
+        while len(classes) < n:
+            classes.append(classes[-1] if classes else "")
+
+        for i in range(n):
+            r = dict(row)
+            r["sector"] = f"{airports[i]}/{airports[i + 1]}"
+            r["booking_class"] = classes[i]
+            r["split_type"] = "split"
+            for col in _SPLIT_FIN_COLS:
+                if row.get(col) is not None:
+                    r[col] = round(row[col] / n, 2)
+            r["row_order"] = row.get("row_order", 0) * 1000 + i
+            result.append(r)
+    return result
+
 
 def _to_float(val: Any) -> float | None:
     """Convert a cell value to float, treating '-', '', NaN as None."""
@@ -211,6 +249,8 @@ class TicketExtractionService:
                         s = s.strip().lower()
                     row[canon] = s
             rows.append(row)
+
+        rows = _split_multi_sector_rows(rows)
 
         return {
             "file_name": file_name,
