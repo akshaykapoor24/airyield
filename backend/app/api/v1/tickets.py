@@ -397,7 +397,16 @@ async def _run_single(
     tenant_id: int,
 ) -> RunCalculationResult:
     """Core matching logic shared by single and batch endpoints."""
+    # Set status upfront so every early-exit path persists "calculated" to the DB.
+    # The excluded branch below overrides this to "excluded".
+    ticket.ticket_status = "calculated"
+
     if not ticket.airlines_code:
+        ticket.matched_deal_id      = None
+        ticket.matched_deal_type    = None
+        ticket.matched_deal_name    = None
+        ticket.calculated_incentive = None
+        ticket.exclusion_reason     = None
         return RunCalculationResult(
             ticket_id=ticket.id, matched=False,
             matched_deal_id=None, matched_deal_type=None,
@@ -419,10 +428,11 @@ async def _run_single(
     )
     airline = airline_res.scalar_one_or_none()
     if not airline:
-        ticket.matched_deal_id   = None
-        ticket.matched_deal_type = None
-        ticket.matched_deal_name = None
+        ticket.matched_deal_id      = None
+        ticket.matched_deal_type    = None
+        ticket.matched_deal_name    = None
         ticket.calculated_incentive = None
+        ticket.exclusion_reason     = None
         return RunCalculationResult(
             ticket_id=ticket.id, matched=False,
             matched_deal_id=None, matched_deal_type=None,
@@ -432,6 +442,11 @@ async def _run_single(
 
     travel_date = _parse_travel_date(ticket.departure_datetime, ticket.ticket_date)
     if not travel_date:
+        ticket.matched_deal_id      = None
+        ticket.matched_deal_type    = None
+        ticket.matched_deal_name    = None
+        ticket.calculated_incentive = None
+        ticket.exclusion_reason     = None
         return RunCalculationResult(
             ticket_id=ticket.id, matched=False,
             matched_deal_id=None, matched_deal_type=None,
@@ -824,6 +839,10 @@ async def match_diagnosis(
         sell_fare=float(ticket.sell_fare) if ticket.sell_fare is not None else None,
         sell_tax_yq=float(ticket.sell_tax_yq) if ticket.sell_tax_yq is not None else None,
         sale_yr=float(ticket.sale_yr) if ticket.sale_yr is not None else None,
+        ticket_sector=ticket.sector,
+        ticket_date_raw=ticket.ticket_date,
+        ticket_departure_raw=ticket.departure_datetime,
+        ticket_airline_name=ticket.airline_name,
     )
 
     return MatchDiagnosisResponse(

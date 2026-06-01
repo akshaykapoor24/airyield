@@ -197,6 +197,20 @@ class PLBDiagnostic(BaseModel):
     plb_overall_match:  bool
 
 
+class ExclusionRuleStep(BaseModel):
+    field:        str   # e.g. "validFrom", "class", "originAirport"
+    rule_value:   str   # what the rule requires
+    ticket_value: str   # resolved value from the ticket
+    matched:      bool  # did this field match?
+
+
+class ExclusionRuleDiagnostic(BaseModel):
+    rule_name:   str                    # "Exclusion For Payout"
+    is_excluded: bool                   # final AND verdict
+    reason:      str                    # human-readable summary
+    steps:       list[ExclusionRuleStep]
+
+
 class DealDiagnostic(BaseModel):
     deal_id:              int
     deal_type:            str            # "airline" | "b2b"
@@ -209,7 +223,8 @@ class DealDiagnostic(BaseModel):
     plbs:                 list[PLBDiagnostic]
     overall_match:        bool
     best_incentive:       Optional[float]
-    deal_lifecycle_status: Optional[str] = None
+    deal_lifecycle_status:   Optional[str] = None
+    exclusion_diagnostic: Optional[ExclusionRuleDiagnostic] = None
 
 
 class MatchDiagnosisResponse(BaseModel):

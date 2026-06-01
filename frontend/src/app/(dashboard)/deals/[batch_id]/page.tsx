@@ -6,7 +6,7 @@ import { useParams } from "next/navigation";
 import {
   ArrowLeft, RefreshCw, Upload, Plus, X, CheckCircle, XCircle,
   AlertCircle, MinusCircle, User, Clock, Pencil, Save, Trash2,
-  FileText, FileSpreadsheet, Building2, Calendar, Hash, ChevronDown,
+  FileText, FileSpreadsheet, Building2, Calendar, Hash, ChevronDown, Search,
 } from "lucide-react";
 import api from "@/lib/api";
 
@@ -727,10 +727,15 @@ export default function DealBatchPage() {
   const params = useParams();
   const batchId = params.batch_id as string;
 
-  const [batch,   setBatch]   = useState<DealBatch | null>(null);
-  const [deals,   setDeals]   = useState<DealRepositoryItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error,   setError]   = useState<string | null>(null);
+  const [batch,    setBatch]   = useState<DealBatch | null>(null);
+  const [deals,    setDeals]   = useState<DealRepositoryItem[]>([]);
+  const [loading,  setLoading] = useState(true);
+  const [error,    setError]   = useState<string | null>(null);
+
+  // ── Search / filter ────────────────────────────────────────────────────
+  const [search,   setSearch]   = useState("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo,   setDateTo]   = useState("");
 
   // history panel
   const [historyDealId,   setHistoryDealId]   = useState<number | null>(null);
@@ -844,6 +849,20 @@ export default function DealBatchPage() {
     }
   }, [deleteTarget]);
 
+  // ── Client-side filtering ──────────────────────────────────────────────
+  const filteredDeals = deals.filter(d => {
+    if (search) {
+      const q = search.toLowerCase();
+      const dtLabel = getDealTypeBadge(d).label.toLowerCase();
+      const hay = [d.deal_no, dtLabel, d.airline_name, d.airline_type]
+        .filter(Boolean).join(" ").toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    if (dateFrom && d.valid_from && d.valid_from < dateFrom) return false;
+    if (dateTo   && d.valid_to   && d.valid_to   > dateTo)   return false;
+    return true;
+  });
+
   if (loading) return (
     <div className="flex items-center justify-center py-32">
       <div className="text-center space-y-3">
@@ -928,19 +947,60 @@ export default function DealBatchPage() {
 
       {/* ── Deals table ── */}
       <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-        <div className="px-5 py-3 border-b border-gray-100 bg-gray-50/40 flex items-center justify-between">
-          <p className="text-xs font-semibold text-gray-600 uppercase tracking-wider">
-            {deals.length} Deal{deals.length !== 1 ? "s" : ""}
-          </p>
-          <div className="flex gap-2">
-            <Link href="/deals/upload"
-              className="flex items-center gap-1.5 bg-white border border-gray-200 text-gray-700 px-3 py-1 rounded-lg text-xs font-medium hover:bg-gray-50">
-              <Upload className="w-3 h-3" /> Upload
-            </Link>
-            <Link href="/deals/new"
-              className="flex items-center gap-1.5 bg-[#1e3a5f] text-white px-3 py-1 rounded-lg text-xs font-medium hover:bg-[#16304f]">
-              <Plus className="w-3 h-3" /> Create Deal
-            </Link>
+        <div className="px-5 py-3 border-b border-gray-100 bg-gray-50/40 space-y-2">
+          {/* row 1: count + action buttons */}
+          <div className="flex items-center justify-between">
+            <p className="text-xs font-semibold text-gray-600 uppercase tracking-wider">
+              {filteredDeals.length} Deal{filteredDeals.length !== 1 ? "s" : ""}
+              {filteredDeals.length !== deals.length && (
+                <span className="ml-1.5 text-gray-400 font-normal normal-case">(filtered from {deals.length})</span>
+              )}
+            </p>
+            <div className="flex gap-2">
+              <Link href="/deals/upload"
+                className="flex items-center gap-1.5 bg-white border border-gray-200 text-gray-700 px-3 py-1 rounded-lg text-xs font-medium hover:bg-gray-50">
+                <Upload className="w-3 h-3" /> Upload
+              </Link>
+              <Link href="/deals/new"
+                className="flex items-center gap-1.5 bg-[#1e3a5f] text-white px-3 py-1 rounded-lg text-xs font-medium hover:bg-[#16304f]">
+                <Plus className="w-3 h-3" /> Create Deal
+              </Link>
+            </div>
+          </div>
+          {/* row 2: search + date filters */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="relative">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" />
+              <input
+                type="text"
+                placeholder="Search by Deal No, Type, Airline…"
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                className="pl-8 pr-3 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400 w-64"
+              />
+            </div>
+            <input
+              type="date" value={dateFrom}
+              onChange={e => setDateFrom(e.target.value)}
+              title="Valid From — on or after"
+              className="py-1.5 px-2.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400"
+            />
+            <span className="text-xs text-gray-400">to</span>
+            <input
+              type="date" value={dateTo}
+              onChange={e => setDateTo(e.target.value)}
+              title="Valid To — on or before"
+              className="py-1.5 px-2.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400"
+            />
+            {(search || dateFrom || dateTo) && (
+              <button
+                onClick={() => { setSearch(""); setDateFrom(""); setDateTo(""); }}
+                className="p-1.5 hover:bg-gray-100 rounded-lg text-gray-400"
+                title="Clear filters"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
           </div>
         </div>
 
@@ -956,16 +1016,18 @@ export default function DealBatchPage() {
               </tr>
             </thead>
             <tbody>
-              {deals.length === 0 ? (
+              {filteredDeals.length === 0 ? (
                 <tr>
                   <td colSpan={TABLE_HEADERS.length} className="px-4 py-12 text-center">
                     <div className="flex flex-col items-center gap-3">
                       <Upload className="w-8 h-8 text-gray-300" />
-                      <p className="text-xs text-gray-400 font-medium">No deals in this batch</p>
+                      <p className="text-xs text-gray-400 font-medium">
+                        {deals.length === 0 ? "No deals in this batch" : "No deals match the filter"}
+                      </p>
                     </div>
                   </td>
                 </tr>
-              ) : deals.map((d, idx) => {
+              ) : filteredDeals.map((d, idx) => {
                 const dtBadge = getDealTypeBadge(d);
                 return (
                   <tr key={`${d.deal_type}-${d.id}`}

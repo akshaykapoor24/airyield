@@ -255,16 +255,20 @@ class DealMatchingService:
 
     @staticmethod
     async def diagnose_match(
-        db:            AsyncSession,
-        airline_name:  str,
-        travel_date:   date,
-        tenant_id:     int,
-        segment_type:  str | None = None,
-        booking_class: str | None = None,
-        invoice_type:  str | None = None,
-        sell_fare:     float | None = None,
-        sell_tax_yq:   float | None = None,
-        sale_yr:       float | None = None,
+        db:                  AsyncSession,
+        airline_name:        str,
+        travel_date:         date,
+        tenant_id:           int,
+        segment_type:        str | None = None,
+        booking_class:       str | None = None,
+        invoice_type:        str | None = None,
+        sell_fare:           float | None = None,
+        sell_tax_yq:         float | None = None,
+        sale_yr:             float | None = None,
+        ticket_sector:       str | None = None,
+        ticket_date_raw:     str | None = None,
+        ticket_departure_raw: str | None = None,
+        ticket_airline_name: str | None = None,
     ) -> list:
         """
         Return a full step-by-step diagnostic for every approved deal belonging to this
@@ -431,6 +435,22 @@ class DealMatchingService:
             raw_lifecycle = getattr(deal, 'deal_lifecycle_status', None)
             lifecycle_str = raw_lifecycle.value if hasattr(raw_lifecycle, 'value') else str(raw_lifecycle or 'active')
 
+            # ── Exclusion For Payout diagnostic ───────────────────────────
+            excl_diagnostic = None
+            if "Exclusion For Payout" in (deal.incl_excl_types or []):
+                from app.services.exclusion_evaluator import diagnose_exclusion_for_payout
+                rule = (deal.incl_excl_data or {}).get("Exclusion For Payout", {})
+                if rule:
+                    excl_diagnostic = await diagnose_exclusion_for_payout(
+                        excl_data=rule,
+                        db=db,
+                        sector=ticket_sector,
+                        booking_class=booking_class,
+                        ticket_date_raw=ticket_date_raw,
+                        departure_raw=ticket_departure_raw,
+                        airline_name=ticket_airline_name or airline_name,
+                    )
+
             return DealDiagnostic(
                 deal_id=deal.id,
                 deal_type=deal_type,
@@ -444,6 +464,7 @@ class DealMatchingService:
                 overall_match=overall,
                 best_incentive=best_incentive,
                 deal_lifecycle_status=lifecycle_str,
+                exclusion_diagnostic=excl_diagnostic,
             )
 
         # ── Query airline_deals (no date filter) ──────────────────────────

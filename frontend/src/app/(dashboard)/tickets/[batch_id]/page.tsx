@@ -109,11 +109,14 @@ type DealMatchSummary = {
 type MatchStep = { step: string; passed: boolean; ticket_value: string; deal_value: string; detail: string };
 type IncentiveBreakdown = { targetCalcCols: string[] | string; sell_fare: number | null; sell_tax_yq_added: boolean; sale_yr_added: boolean; base_total: number; incentiveAmtPct: number; formula: string; result: number };
 type PLBDiagnostic = { plb_key: string; raw_plb: Record<string, unknown>; steps: MatchStep[]; incentive_breakdown: IncentiveBreakdown | null; plb_overall_match: boolean };
+type ExclusionRuleStep = { field: string; rule_value: string; ticket_value: string; matched: boolean };
+type ExclusionRuleDiagnostic = { rule_name: string; is_excluded: boolean; reason: string; steps: ExclusionRuleStep[] };
 type DealDiagnosticItem = {
   deal_id: number; deal_type: string; deal_name: string; deal_no: string;
   valid_from: string | null; valid_to: string | null; trigger_type: string | null;
   deal_validity_step: MatchStep; plbs: PLBDiagnostic[];
   overall_match: boolean; best_incentive: number | null; deal_lifecycle_status: string | null;
+  exclusion_diagnostic: ExclusionRuleDiagnostic | null;
 };
 type MatchDiagnosis = {
   ticket_id: number; raw_airline_code: string; normalized_codes: string[];
@@ -129,7 +132,24 @@ type MatchDiagnosis = {
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-const PAGE_SIZE = 20;
+const PAGE_SIZE_OPTIONS = [25, 50, 100] as const;
+
+const EXCL_FIELD_LABELS: Record<string, string> = {
+  validFrom:          "Valid From",
+  validTo:            "Valid To",
+  originAirport:      "Origin Airport",
+  destAirport:        "Dest Airport",
+  originContinents:   "Origin Continent",
+  destContinents:     "Dest Continent",
+  continents:         "Continent",
+  originCountry:      "Origin Country",
+  destCountry:        "Dest Country",
+  originCountryGroup: "Origin Country Group",
+  destCountryGroup:   "Dest Country Group",
+  countryGroup:       "Country Group",
+  city:               "City",
+  class:              "Booking Class",
+};
 
 const TICKET_STATUS_STYLE: Record<string, string> = {
   draft:      "bg-gray-100 text-gray-500",
@@ -271,6 +291,7 @@ export default function StatementDetailPage() {
   const [dateFrom,   setDateFrom]   = useState("");
   const [dateTo,     setDateTo]     = useState("");
   const [page,       setPage]       = useState(1);
+  const [pageSize,   setPageSize]   = useState<25|50|100>(25);
 
   // ── Selection ──────────────────────────────────────────────────────────
   const [selected,   setSelected]   = useState<Set<number>>(new Set());
@@ -319,6 +340,18 @@ export default function StatementDetailPage() {
     }
   }, [batchId]);
 
+  // Silent refresh — used after batch operations so the table never flickers
+  const refreshData = useCallback(async () => {
+    try {
+      const [stmtRes, ticketsRes] = await Promise.all([
+        api.get<TicketStatement>(`/tickets/statements/${batchId}`),
+        api.get<UploadedTicket[]>("/tickets/uploads", { params: { batch_id: batchId, limit: 2000 } }),
+      ]);
+      setStatement(stmtRes.data);
+      setTickets(ticketsRes.data);
+    } catch { /* silent */ }
+  }, [batchId]);
+
   useEffect(() => { fetchData(); }, [fetchData]);
 
   // ── Filtered + paginated tickets ───────────────────────────────────────
@@ -333,8 +366,8 @@ export default function StatementDetailPage() {
     if (dateTo   && t.ticket_date && t.ticket_date > dateTo)   return false;
     return true;
   });
-  const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
-  const pageTickets = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const totalPages = Math.ceil(filtered.length / pageSize);
+  const pageTickets = filtered.slice((page - 1) * pageSize, page * pageSize);
 
   // ── Selection helpers ──────────────────────────────────────────────────
   const toggleRow = (id: number) => setSelected(prev => {
@@ -379,24 +412,46 @@ export default function StatementDetailPage() {
       const ids = selected.size > 0 ? [...selected] : undefined;
       let res: BatchRunCalcResult;
       if (ids) {
+        // Process in chunks of 10 to avoid overwhelming the server
         let matched = 0, unmatched = 0, errors = 0, excluded = 0;
-        await Promise.all(ids.map(async id => {
-          try {
-            const r = await api.patch<RunCalcResult>(`/tickets/uploads/${id}/run-calculation`);
-            if (r.data.excluded) excluded++;
-            else if (r.data.matched) matched++;
-            else unmatched++;
-          } catch { errors++; }
+        const results = new Map<number, RunCalcResult>();
+        const CHUNK = 10;
+        for (let i = 0; i < ids.length; i += CHUNK) {
+          await Promise.all(ids.slice(i, i + CHUNK).map(async id => {
+            try {
+              const r = await api.patch<RunCalcResult>(`/tickets/uploads/${id}/run-calculation`);
+              results.set(id, r.data);
+              if (r.data.excluded) excluded++;
+              else if (r.data.matched) matched++;
+              else unmatched++;
+            } catch { errors++; }
+          }));
+        }
+        // Apply API response directly — no refreshData() here so we never overwrite correct state
+        setTickets(prev => prev.map(t => {
+          const r = results.get(t.id);
+          if (!r) return t;
+          return {
+            ...t,
+            matched_deal_id:      r.matched_deal_id,
+            matched_deal_type:    r.matched_deal_type,
+            matched_deal_name:    r.matched_deal_name,
+            calculated_incentive: r.calculated_incentive,
+            ticket_status:        r.excluded ? "excluded" : "calculated",
+            exclusion_reason:     r.excluded ? (r.message || null) : null,
+          };
         }));
         res = { processed: ids.length, matched, unmatched, errors, excluded };
       } else {
+        // True "Run All" — server processes every ticket; re-fetch is the only way to get statuses
         const { data } = await api.patch<BatchRunCalcResult>("/tickets/uploads/run-all-calculation", null, {
           params: { batch_id: batchId },
         });
         res = data;
+        // Await so no background request races with other local state updates
+        await refreshData();
       }
       setBatchResult(res);
-      fetchData();
     } catch { /* silent */ } finally {
       setBatchCalcing(false);
     }
@@ -458,9 +513,10 @@ export default function StatementDetailPage() {
 
   const markAsReviewed = async () => {
     if (!diagTicket) return;
+    const id = diagTicket.id; // capture before closing clears diagTicket
     try {
-      await api.patch(`/tickets/uploads/${diagTicket.id}`, { ticket_status: "reviewed" });
-      setTickets(prev => prev.map(t => t.id === diagTicket.id ? { ...t, ticket_status: "reviewed" } : t));
+      const { data } = await api.patch<UploadedTicket>(`/tickets/uploads/${id}`, { ticket_status: "reviewed" });
+      setTickets(prev => prev.map(t => t.id === id ? data : t));
       closeDiagnosis();
     } catch { /* silent */ }
   };
@@ -590,6 +646,15 @@ export default function StatementDetailPage() {
         )}
 
         <div className="ml-auto flex items-center gap-2">
+          <select
+            value={pageSize}
+            onChange={e => { setPageSize(Number(e.target.value) as 25|50|100); setPage(1); }}
+            className="py-2 px-2.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400 bg-white text-gray-600"
+          >
+            {PAGE_SIZE_OPTIONS.map(n => (
+              <option key={n} value={n}>{n} / page</option>
+            ))}
+          </select>
           {selected.size > 0 && (
             <span className="text-xs text-gray-500">{selected.size} selected</span>
           )}
@@ -805,11 +870,9 @@ export default function StatementDetailPage() {
           </table>
         </div>
 
-        {/* pagination */}
-        {totalPages > 1 && (
-          <div className="px-5 py-3 border-t border-gray-100">
-            <Pagination page={page} pageSize={PAGE_SIZE} total={filtered.length} onPageChange={setPage} />
-          </div>
+        {/* pagination — always visible when there are tickets */}
+        {filtered.length > 0 && (
+          <Pagination page={page} pageSize={pageSize} total={filtered.length} onPageChange={setPage} />
         )}
       </div>
 
@@ -1159,6 +1222,40 @@ export default function StatementDetailPage() {
                                   </div>
                                 );
                               })}
+
+                              {/* ── Exclusion For Payout diagnostic ── */}
+                              {d.exclusion_diagnostic && d.exclusion_diagnostic.steps.length > 0 && (
+                                <div className="border border-gray-100 rounded-lg overflow-hidden">
+                                  <div className="flex items-center gap-2 px-3 py-2.5 bg-gray-50 border-b border-gray-100">
+                                    <span className="px-2 py-0.5 rounded bg-orange-100 text-orange-700 text-[10px] font-semibold shrink-0">EXCL</span>
+                                    <span className="text-[11px] font-semibold text-gray-700 flex-1">Exclusion For Payout</span>
+                                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                      d.exclusion_diagnostic.is_excluded
+                                        ? "bg-red-100 text-red-600"
+                                        : "bg-emerald-100 text-emerald-600"
+                                    }`}>
+                                      {d.exclusion_diagnostic.is_excluded ? "Excluded" : "Not Excluded"}
+                                    </span>
+                                  </div>
+                                  <div className="px-3 py-2 space-y-1.5">
+                                    {d.exclusion_diagnostic.steps.map((s, si) => (
+                                      <div key={si} className={`flex items-center gap-2 px-2.5 py-2 rounded-lg ${s.matched ? "bg-red-50" : "bg-emerald-50"}`}>
+                                        <span className={`font-bold text-sm shrink-0 ${s.matched ? "text-red-500" : "text-emerald-500"}`}>{s.matched ? "✓" : "✗"}</span>
+                                        <span className="font-semibold text-gray-700 flex-1 text-[11px]">
+                                          {EXCL_FIELD_LABELS[s.field] ?? s.field}
+                                        </span>
+                                        <span className="px-2 py-0.5 rounded bg-white border border-gray-200 text-gray-700 text-[11px] font-mono shrink-0 max-w-32 truncate" title={s.ticket_value}>{s.ticket_value}</span>
+                                        <span className="text-gray-400 shrink-0">→</span>
+                                        <span className="px-2 py-0.5 rounded bg-white border border-gray-200 text-gray-700 text-[11px] font-mono shrink-0 max-w-32 truncate" title={s.rule_value}>{s.rule_value}</span>
+                                        <ChevronRight className="w-3.5 h-3.5 text-gray-300 shrink-0" />
+                                      </div>
+                                    ))}
+                                    {d.exclusion_diagnostic.reason && (
+                                      <p className="text-[10px] text-gray-400 italic pt-0.5 leading-relaxed">{d.exclusion_diagnostic.reason}</p>
+                                    )}
+                                  </div>
+                                </div>
+                              )}
                             </div>
                           )}
                         </div>
