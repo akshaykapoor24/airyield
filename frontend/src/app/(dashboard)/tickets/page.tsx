@@ -10,14 +10,15 @@ import {
 import api from "@/lib/api";
 
 type TicketStatement = {
-  batch_id:       string;
-  statement_name: string;
-  agency:         string;
-  valid_from:     string;
-  valid_to:       string;
-  file_name:      string;
-  ticket_count:   number;
-  created_at:     string;
+  batch_id:        string;
+  statement_name:  string;
+  agency:          string;
+  valid_from:      string;
+  valid_to:        string;
+  file_name:       string;
+  ticket_count:    number;
+  created_by_name: string | null;
+  created_at:      string;
 };
 
 function formatDate(d: string) {
@@ -190,6 +191,7 @@ export default function TicketRepositoryPage() {
                 <th className="px-4 py-2 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide">
                   <span className="flex items-center gap-1"><Hash className="w-3.5 h-3.5" /> Tickets</span>
                 </th>
+                <th className="px-4 py-2 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide">Uploaded By</th>
                 <th className="px-4 py-2 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide">Uploaded</th>
                 <th className="px-4 py-2" />
               </tr>
@@ -197,7 +199,7 @@ export default function TicketRepositoryPage() {
             <tbody className="divide-y divide-gray-100">
               {filtered.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-10 text-center text-xs text-gray-400">
+                  <td colSpan={8} className="px-4 py-10 text-center text-xs text-gray-400">
                     No statements match the current filters.
                   </td>
                 </tr>
@@ -251,6 +253,11 @@ export default function TicketRepositoryPage() {
                     <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-[#1e3a5f]/10 text-[#1e3a5f] text-xs font-semibold">
                       {stmt.ticket_count.toLocaleString()}
                     </span>
+                  </td>
+
+                  {/* Uploaded By */}
+                  <td className="px-4 py-2 text-xs text-gray-600 font-medium">
+                    {stmt.created_by_name || "—"}
                   </td>
 
                   {/* Created */}

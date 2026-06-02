@@ -132,6 +132,7 @@ type DealRepositoryItem = {
   incentive_data:  Record<string, Record<string, string>> | null;
   incl_excl_types: string[] | null;
   incl_excl_data:  Record<string, Record<string, string>> | null;
+  deal_tag:              string | null;
   status:                string;
   deal_lifecycle_status: string | null;
   created_at:            string;
@@ -238,7 +239,7 @@ function getDealTypeBadge(d: DealRepositoryItem) {
 }
 
 const TABLE_HEADERS = [
-  "Deal No", "Deal Type", "Airline Name", "Airline Type", "Contract Year",
+  "Deal No", "Deal Type", "Deal Tag", "Airline Name", "Airline Type", "Contract Year",
   "Valid From", "Valid To",
   "Trigger Type", "Payout Type",
   "Business Type", "Entity (LCC)",
@@ -247,6 +248,18 @@ const TABLE_HEADERS = [
 ];
 
 // ── IncentiveEditModal ─────────────────────────────────────────────────────
+const INCENTIVE_FIELD_META: Record<string, { type: "date" | "select" | "number" | "text"; options?: string[] }> = {
+  validFrom:       { type: "date" },
+  validTo:         { type: "date" },
+  frequency:       { type: "select", options: ["Quarterly", "Half Yearly", "Yearly"] },
+  flightType:      { type: "select", options: ["International", "Domestic", "Both"] },
+  class:           { type: "select", options: ["All", "Economy", "Premium", "Business"] },
+  targetCalcCols:  { type: "select", options: ["Basic", "Basic + YQ", "Basic + YQ +YR", "Basic + YR"] },
+  payoutCalcCols:  { type: "select", options: ["Basic", "Basic + YQ", "Basic + YQ +YR", "Basic + YR"] },
+  incentiveNumPct: { type: "select", options: ["Number", "Percentage"] },
+  incentiveAmtPct: { type: "number" },
+};
+
 function IncentiveEditModal({ name, data, onSave, onClose }: {
   name: string;
   data: Record<string, string>;
@@ -256,11 +269,15 @@ function IncentiveEditModal({ name, data, onSave, onClose }: {
   const [fields, setFields] = useState<Record<string, string>>({ ...data });
   const [saving, setSaving] = useState(false);
 
+  const set = (k: string, v: string) => setFields(prev => ({ ...prev, [k]: v }));
+
   const handleSave = async () => {
     setSaving(true);
     try { await onSave(fields); onClose(); }
     finally { setSaving(false); }
   };
+
+  const inputCls = "w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400 bg-white";
 
   return (
     <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={onClose}>
@@ -277,19 +294,51 @@ function IncentiveEditModal({ name, data, onSave, onClose }: {
             <p className="text-xs text-gray-400 py-2">No fields recorded for this incentive.</p>
           ) : (
             <div className="space-y-3">
-              {Object.entries(fields).map(([k, v]) => (
-                <div key={k}>
-                  <label className="block text-[9px] font-semibold text-gray-400 uppercase tracking-wide mb-1">
-                    {k.replace(/([A-Z])/g, " $1").trim()}
-                  </label>
-                  <input
-                    type="text"
-                    value={v}
-                    onChange={e => setFields(prev => ({ ...prev, [k]: e.target.value }))}
-                    className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400"
-                  />
-                </div>
-              ))}
+              {Object.entries(fields).map(([k, v]) => {
+                const meta = INCENTIVE_FIELD_META[k] ?? { type: "text" };
+                const label = k.replace(/([A-Z])/g, " $1").trim();
+                return (
+                  <div key={k}>
+                    <label className="block text-[9px] font-semibold text-gray-400 uppercase tracking-wide mb-1">
+                      {label}
+                    </label>
+                    {meta.type === "select" ? (
+                      <select
+                        value={v}
+                        onChange={e => set(k, e.target.value)}
+                        className={inputCls}
+                      >
+                        <option value="">— select —</option>
+                        {meta.options!.map(opt => (
+                          <option key={opt} value={opt}>{opt}</option>
+                        ))}
+                      </select>
+                    ) : meta.type === "date" ? (
+                      <input
+                        type="date"
+                        value={v ? v.slice(0, 10) : ""}
+                        onChange={e => set(k, e.target.value)}
+                        className={inputCls}
+                      />
+                    ) : meta.type === "number" ? (
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={v}
+                        onChange={e => set(k, e.target.value)}
+                        className={inputCls}
+                      />
+                    ) : (
+                      <input
+                        type="text"
+                        value={v}
+                        onChange={e => set(k, e.target.value)}
+                        className={inputCls}
+                      />
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
@@ -737,6 +786,10 @@ export default function DealBatchPage() {
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo,   setDateTo]   = useState("");
 
+  // ── Pagination ─────────────────────────────────────────────────────────
+  const [page,    setPage]    = useState(1);
+  const [perPage, setPerPage] = useState(25);
+
   // history panel
   const [historyDealId,   setHistoryDealId]   = useState<number | null>(null);
   const [historyDealType, setHistoryDealType] = useState<DealType>("upload");
@@ -863,6 +916,11 @@ export default function DealBatchPage() {
     return true;
   });
 
+  // ── Pagination derived values ───────────────────────────────────────────
+  const totalPages = Math.max(1, Math.ceil(filteredDeals.length / perPage));
+  const safePage   = Math.min(page, totalPages);
+  const pagedDeals = filteredDeals.slice((safePage - 1) * perPage, safePage * perPage);
+
   if (loading) return (
     <div className="flex items-center justify-center py-32">
       <div className="text-center space-y-3">
@@ -975,26 +1033,26 @@ export default function DealBatchPage() {
                 type="text"
                 placeholder="Search by Deal No, Type, Airline…"
                 value={search}
-                onChange={e => setSearch(e.target.value)}
+                onChange={e => { setSearch(e.target.value); setPage(1); }}
                 className="pl-8 pr-3 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400 w-64"
               />
             </div>
             <input
               type="date" value={dateFrom}
-              onChange={e => setDateFrom(e.target.value)}
+              onChange={e => { setDateFrom(e.target.value); setPage(1); }}
               title="Valid From — on or after"
               className="py-1.5 px-2.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400"
             />
             <span className="text-xs text-gray-400">to</span>
             <input
               type="date" value={dateTo}
-              onChange={e => setDateTo(e.target.value)}
+              onChange={e => { setDateTo(e.target.value); setPage(1); }}
               title="Valid To — on or before"
               className="py-1.5 px-2.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400"
             />
             {(search || dateFrom || dateTo) && (
               <button
-                onClick={() => { setSearch(""); setDateFrom(""); setDateTo(""); }}
+                onClick={() => { setSearch(""); setDateFrom(""); setDateTo(""); setPage(1); }}
                 className="p-1.5 hover:bg-gray-100 rounded-lg text-gray-400"
                 title="Clear filters"
               >
@@ -1027,7 +1085,7 @@ export default function DealBatchPage() {
                     </div>
                   </td>
                 </tr>
-              ) : filteredDeals.map((d, idx) => {
+              ) : pagedDeals.map((d, idx) => {
                 const dtBadge = getDealTypeBadge(d);
                 return (
                   <tr key={`${d.deal_type}-${d.id}`}
@@ -1042,6 +1100,12 @@ export default function DealBatchPage() {
                     <td className="px-2 py-1.5 whitespace-nowrap">
                       <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold uppercase border ${dtBadge.cls}`}>
                         {dtBadge.label}
+                      </span>
+                    </td>
+
+                    <td className="px-2 py-1.5 whitespace-nowrap">
+                      <span className={`px-2 py-0.5 rounded-full text-[9px] font-semibold border ${(d.deal_tag||"standard")==="adhoc"?"bg-amber-50 text-amber-700 border-amber-200":"bg-slate-50 text-slate-600 border-slate-200"}`}>
+                        {(d.deal_tag||"standard")==="adhoc"?"Adhoc":"Standard"}
                       </span>
                     </td>
 
@@ -1194,6 +1258,43 @@ export default function DealBatchPage() {
             </tbody>
           </table>
         </div>
+
+        {/* ── Pagination bar ── */}
+        {filteredDeals.length > 0 && (
+          <div className="px-4 py-3 border-t border-gray-100 flex items-center justify-between flex-wrap gap-3 bg-gray-50/40">
+            <div className="flex items-center gap-2 text-xs text-gray-500">
+              <span>Rows per page:</span>
+              <select
+                value={perPage}
+                onChange={e => { setPerPage(Number(e.target.value)); setPage(1); }}
+                className="border border-gray-200 rounded-md px-2 py-1 text-xs text-gray-700 bg-white focus:outline-none focus:ring-1 focus:ring-blue-400"
+              >
+                {[25, 50, 100].map(n => <option key={n} value={n}>{n}</option>)}
+              </select>
+            </div>
+            <div className="flex items-center gap-3 text-xs text-gray-500">
+              <span>
+                {(safePage - 1) * perPage + 1}–{Math.min(safePage * perPage, filteredDeals.length)} of {filteredDeals.length}
+              </span>
+              <div className="flex gap-1">
+                <button
+                  onClick={() => setPage(p => Math.max(1, p - 1))}
+                  disabled={safePage === 1}
+                  className="px-2.5 py-1 rounded-md border border-gray-200 bg-white text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed text-xs font-medium"
+                >
+                  ‹ Prev
+                </button>
+                <button
+                  onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                  disabled={safePage === totalPages}
+                  className="px-2.5 py-1 rounded-md border border-gray-200 bg-white text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed text-xs font-medium"
+                >
+                  Next ›
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* ── Deal History Slide-over ── */}

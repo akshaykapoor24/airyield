@@ -279,8 +279,13 @@ async def list_ticket_statements(
         .subquery()
     )
     q = (
-        select(TicketStatement, func.coalesce(count_subq.c.ticket_count, 0).label("ticket_count"))
+        select(
+            TicketStatement,
+            func.coalesce(count_subq.c.ticket_count, 0).label("ticket_count"),
+            User.full_name.label("created_by_name"),
+        )
         .outerjoin(count_subq, TicketStatement.batch_id == count_subq.c.batch_id)
+        .outerjoin(User, User.id == TicketStatement.created_by_id)
         .where(TicketStatement.tenant_id == current_user.tenant_id)
         .order_by(TicketStatement.created_at.desc())
     )
@@ -295,9 +300,10 @@ async def list_ticket_statements(
             valid_to=stmt.valid_to,
             file_name=stmt.file_name,
             ticket_count=int(count),
+            created_by_name=created_by_name,
             created_at=stmt.created_at,
         )
-        for stmt, count in rows
+        for stmt, count, created_by_name in rows
     ]
 
 
@@ -391,6 +397,9 @@ def _parse_travel_date(departure_datetime: str | None, ticket_date: str | None) 
     return None
 
 
+_CANCELLED_INVOICE_TYPES = {"credit note", "refund"}
+
+
 async def _run_single(
     ticket: UploadedTicket,
     db: AsyncSession,
@@ -400,6 +409,20 @@ async def _run_single(
     # Set status upfront so every early-exit path persists "calculated" to the DB.
     # The excluded branch below overrides this to "excluded".
     ticket.ticket_status = "calculated"
+
+    if ticket.invoice_type and ticket.invoice_type.strip().lower() in _CANCELLED_INVOICE_TYPES:
+        ticket.ticket_status        = "cancelled"
+        ticket.matched_deal_id      = None
+        ticket.matched_deal_type    = None
+        ticket.matched_deal_name    = None
+        ticket.calculated_incentive = None
+        ticket.exclusion_reason     = None
+        return RunCalculationResult(
+            ticket_id=ticket.id, matched=False, cancelled=True,
+            matched_deal_id=None, matched_deal_type=None,
+            matched_deal_name=None, calculated_incentive=None,
+            message=f"Skipped: invoice type '{ticket.invoice_type}' is a cancellation (credit note/refund).",
+        )
 
     if not ticket.airlines_code:
         ticket.matched_deal_id      = None
@@ -572,12 +595,14 @@ async def run_all_calculation(
     res = await db.execute(q)
     tickets = res.scalars().all()
 
-    processed = matched = unmatched = errors = excluded = 0
+    processed = matched = unmatched = errors = excluded = cancelled = 0
     for ticket in tickets:
         try:
             result = await _run_single(ticket, db, current_user.tenant_id)
             processed += 1
-            if result.matched:
+            if result.cancelled:
+                cancelled += 1
+            elif result.matched:
                 if ticket.ticket_status == "excluded":
                     excluded += 1
                 else:
@@ -594,6 +619,7 @@ async def run_all_calculation(
         unmatched=unmatched,
         errors=errors,
         excluded=excluded,
+        cancelled=cancelled,
     )
 
 

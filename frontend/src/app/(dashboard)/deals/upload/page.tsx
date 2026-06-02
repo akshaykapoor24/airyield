@@ -20,6 +20,8 @@ const TRIGGER_TYPES  = ["Flown", "Sales"];
 const PAYOUT_TYPES   = ["Flown", "Sales"];
 const BUSINESS_TYPES = ["B2B", "B2C", "B2E", "MICE"];
 
+const DEAL_TAG_OPTIONS = ["Standard", "Adhoc"];
+
 const INCENTIVE_TYPES = [
   "PLB","Super PLB","Transaction Fee","Deposit Incentive (DI)","Marketing Fund",
   "Ancillary","Frontend","Backend","Cashback","Segment Incentive","Push Action",
@@ -900,6 +902,7 @@ const CELL_PLACEHOLDER: Record<string, string> = {
 type ColGroup={label:string;color:string;cols:{key:string;label:string}[]};
 
 function getColMeta(key:string):{type:"date"|"select"|"number"|"text";options?:string[]}{
+  if(key==="c__deal_tag")return{type:"select",options:DEAL_TAG_OPTIONS};
   if(key==="c__valid_from"||key==="c__valid_to")return{type:"date"};
   if(key==="c__entity_lcc")return{type:"select",options:ENTITIES};
   if(CONTRACT_COL_OPTIONS[key])return{type:"select",options:CONTRACT_COL_OPTIONS[key]};
@@ -910,7 +913,7 @@ function getColMeta(key:string):{type:"date"|"select"|"number"|"text";options?:s
 function buildColGroups(selectedIncentives:string[], dealType:string):ColGroup[]{
   const contractCols = getContractCols(dealType);
   const groups:ColGroup[]=[
-    {label:"Airline Contract Details",color:"#1e3a5f",cols:contractCols},
+    {label:"Airline Contract Details",color:"#1e3a5f",cols:[{key:"c__deal_tag",label:"Deal Tag"},...contractCols]},
   ];
   for(const inc of selectedIncentives){
     groups.push({
@@ -1175,6 +1178,7 @@ export default function UploadDealPage(){
 
   // ── Step 1 state ────────────────────────────────────────────────────────────
   const [dealType,      setDealType]      = useState("");           // "airline" | "b2b"
+  const [dealTag,       setDealTag]       = useState("standard");   // "standard" | "adhoc"
   const [supplierName,  setSupplierName]  = useState("");
   const [supplierOptions, setSupplierOptions] = useState<string[]>([]);
   const [validFromDate, setValidFromDate] = useState("");
@@ -1317,7 +1321,7 @@ export default function UploadDealPage(){
   const handleDeleteRow=useCallback((idx:number)=>setRows(prev=>prev.filter((_,i)=>i!==idx)),[]);
   const handleAddRow=()=>{
     const newIdx=rows.length;
-    setRows(prev=>[...prev,{...EMPTY_ROW(),row_order:prev.length}]);
+    setRows(prev=>[...prev,{...EMPTY_ROW(),row_order:prev.length,extra:{c__deal_tag:dealTag==="adhoc"?"Adhoc":"Standard"}}]);
     if(selectedInclExcl.length>0){
       setRowInclExcl(prev=>({...prev,[newIdx]:{types:selectedInclExcl,data:{},viceVersa:{}}}));
     }
@@ -1357,6 +1361,7 @@ export default function UploadDealPage(){
           if(!r.extra["c__valid_from"] && validFromDate)     r.extra["c__valid_from"]          = validFromDate;
           if(!r.extra["inc::PLB::validFrom"] && validFromDate) r.extra["inc::PLB::validFrom"]  = validFromDate;
           if(!r.extra["c__business_type"] && dealType==="b2b") r.extra["c__business_type"]     = "B2B";
+          r.extra["c__deal_tag"] = dealTag==="adhoc"?"Adhoc":"Standard";
         });
         setRows(converted);
         setSelectedIncentives(["PLB"]);
@@ -1408,7 +1413,7 @@ export default function UploadDealPage(){
         finalRowInclExcl[i]={types,data:xlsData,viceVersa:fromXLS?.viceVersa??{}};
       }
     }
-    setRows(rowsWithContract);
+    setRows(rowsWithContract.map(r=>({...r,extra:{...r.extra,c__deal_tag:dealTag==="adhoc"?"Adhoc":"Standard"}})));
     setRowInclExcl(finalRowInclExcl);
     setFilterText("");setSelectedRows(new Set());setBulkColKey("");setBulkColValue("");
     setStep(3);
@@ -1430,6 +1435,7 @@ export default function UploadDealPage(){
         {
           source_agent:    sourceAgent,
           source_type:     "upload",
+          deal_tag:        dealTag,
           airline_type:    getContractVal("c__airline_type")||null,
           airline_name:    getContractVal("c__airline_name")||null,
           contract_year:   dealType==="airline"?(getContractVal("c__contract_year")||null):null,
@@ -1575,6 +1581,12 @@ export default function UploadDealPage(){
                     {selectedInclExcl.join(", ")} — columns in XLS template, editable in Step 3.
                   </p>
                 )}
+                <SelectField
+                  label="Deal Tag"
+                  options={DEAL_TAG_OPTIONS}
+                  value={dealTag==="adhoc"?"Adhoc":"Standard"}
+                  onChange={v=>setDealTag(v.toLowerCase())}
+                />
                 <div>
                   <label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">Valid From Date</label>
                   <input
@@ -1713,6 +1725,9 @@ export default function UploadDealPage(){
               ?<span className="px-2.5 py-1 rounded-full text-[11px] font-semibold border bg-purple-50 text-purple-700 border-purple-200">AI Extraction</span>
               :<span className={`px-2.5 py-1 rounded-full text-[11px] font-semibold border ${dealType==="b2b"?"bg-violet-50 text-violet-700 border-violet-200":"bg-sky-50 text-sky-700 border-sky-200"}`}>{dealType==="b2b"?"B2B":"Airline"}</span>
             }
+            <span className={`px-2.5 py-1 rounded-full text-[11px] font-semibold border ${dealTag==="adhoc"?"bg-amber-50 text-amber-700 border-amber-200":"bg-slate-50 text-slate-700 border-slate-200"}`}>
+              {dealTag==="adhoc"?"Adhoc":"Standard"}
+            </span>
             {selectedIncentives.map(t=><span key={t} className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-purple-50 text-purple-700 border border-purple-200">{t}</span>)}
             {!aiMode&&preview?.warning&&<span className="flex items-center gap-1 text-[11px] text-amber-600"><AlertTriangle className="w-3.5 h-3.5"/>{preview.warning}</span>}
           </div>

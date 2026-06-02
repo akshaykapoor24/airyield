@@ -85,6 +85,7 @@ type RunCalcResult = {
   ticket_id: number;
   matched: boolean;
   excluded: boolean;
+  cancelled: boolean;
   matched_deal_id: number | null;
   matched_deal_type: string | null;
   matched_deal_name: string | null;
@@ -92,7 +93,7 @@ type RunCalcResult = {
   message: string;
 };
 
-type BatchRunCalcResult = { processed: number; matched: number; unmatched: number; errors: number; excluded: number };
+type BatchRunCalcResult = { processed: number; matched: number; unmatched: number; errors: number; excluded: number; cancelled: number };
 
 type DealMatchSummary = {
   deal_id: number;
@@ -156,9 +157,10 @@ const TICKET_STATUS_STYLE: Record<string, string> = {
   calculated: "bg-emerald-50 text-emerald-600",
   reviewed:   "bg-blue-50 text-blue-600",
   excluded:   "bg-red-50 text-red-600 border border-red-200",
+  cancelled:  "bg-orange-50 text-orange-600 border border-orange-200",
 };
 const TICKET_STATUS_LABEL: Record<string, string> = {
-  draft: "Draft", calculated: "Calculated", reviewed: "Reviewed", excluded: "Excluded",
+  draft: "Draft", calculated: "Calculated", reviewed: "Reviewed", excluded: "Excluded", cancelled: "Cancelled",
 };
 
 const TEXT_HEADERS: { key: keyof UploadedTicket; label: string }[] = [
@@ -396,7 +398,7 @@ export default function StatementDetailPage() {
         matched_deal_type: data.matched_deal_type,
         matched_deal_name: data.matched_deal_name,
         calculated_incentive: data.calculated_incentive,
-        ticket_status: data.excluded ? "excluded" : "calculated",
+        ticket_status: data.cancelled ? "cancelled" : data.excluded ? "excluded" : "calculated",
         exclusion_reason: data.excluded ? (data.message || null) : null,
       }));
     } catch { /* silent */ } finally {
@@ -413,7 +415,7 @@ export default function StatementDetailPage() {
       let res: BatchRunCalcResult;
       if (ids) {
         // Process in chunks of 10 to avoid overwhelming the server
-        let matched = 0, unmatched = 0, errors = 0, excluded = 0;
+        let matched = 0, unmatched = 0, errors = 0, excluded = 0, cancelled = 0;
         const results = new Map<number, RunCalcResult>();
         const CHUNK = 10;
         for (let i = 0; i < ids.length; i += CHUNK) {
@@ -421,7 +423,8 @@ export default function StatementDetailPage() {
             try {
               const r = await api.patch<RunCalcResult>(`/tickets/uploads/${id}/run-calculation`);
               results.set(id, r.data);
-              if (r.data.excluded) excluded++;
+              if (r.data.cancelled) cancelled++;
+              else if (r.data.excluded) excluded++;
               else if (r.data.matched) matched++;
               else unmatched++;
             } catch { errors++; }
@@ -437,11 +440,11 @@ export default function StatementDetailPage() {
             matched_deal_type:    r.matched_deal_type,
             matched_deal_name:    r.matched_deal_name,
             calculated_incentive: r.calculated_incentive,
-            ticket_status:        r.excluded ? "excluded" : "calculated",
+            ticket_status:        r.cancelled ? "cancelled" : r.excluded ? "excluded" : "calculated",
             exclusion_reason:     r.excluded ? (r.message || null) : null,
           };
         }));
-        res = { processed: ids.length, matched, unmatched, errors, excluded };
+        res = { processed: ids.length, matched, unmatched, errors, excluded, cancelled };
       } else {
         // True "Run All" — server processes every ticket; re-fetch is the only way to get statuses
         const { data } = await api.patch<BatchRunCalcResult>("/tickets/uploads/run-all-calculation", null, {

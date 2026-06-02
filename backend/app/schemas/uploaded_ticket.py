@@ -80,14 +80,15 @@ class ConfirmTicketUploadPayload(BaseModel):
 
 
 class TicketStatementRead(BaseModel):
-    batch_id:       str
-    statement_name: str
-    agency:         str
-    valid_from:     date
-    valid_to:       date
-    file_name:      str
-    ticket_count:   int
-    created_at:     datetime
+    batch_id:         str
+    statement_name:   str
+    agency:           str
+    valid_from:       date
+    valid_to:         date
+    file_name:        str
+    ticket_count:     int
+    created_by_name:  Optional[str] = None
+    created_at:       datetime
 
     model_config = {"from_attributes": True}
 
@@ -114,6 +115,7 @@ class RunCalculationResult(BaseModel):
     ticket_id:            int
     matched:              bool
     excluded:             bool = False
+    cancelled:            bool = False
     matched_deal_id:      Optional[int]
     matched_deal_type:    Optional[str]
     matched_deal_name:    Optional[str]
@@ -127,6 +129,7 @@ class BatchRunCalculationResult(BaseModel):
     unmatched:   int
     errors:      int
     excluded:    int = 0
+    cancelled:   int = 0
 
 
 class UploadedTicketUpdate(BaseModel):

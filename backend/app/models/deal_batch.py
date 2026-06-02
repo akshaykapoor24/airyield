@@ -11,6 +11,7 @@ class DealBatch(Base):
     batch_id: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
     tenant_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="SET NULL"), nullable=True)
     deal_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    deal_tag: Mapped[str] = mapped_column(String(50), nullable=False, server_default='standard')
     supplier_name: Mapped[str | None] = mapped_column(String(300), nullable=True)
     file_name: Mapped[str | None] = mapped_column(String(500), nullable=True)
     file_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
