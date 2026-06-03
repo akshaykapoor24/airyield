@@ -86,6 +86,7 @@ type RunCalcResult = {
   matched: boolean;
   excluded: boolean;
   cancelled: boolean;
+  included: boolean;
   matched_deal_id: number | null;
   matched_deal_type: string | null;
   matched_deal_name: string | null;
@@ -115,9 +116,11 @@ type ExclusionRuleDiagnostic = { rule_name: string; is_excluded: boolean; reason
 type DealDiagnosticItem = {
   deal_id: number; deal_type: string; deal_name: string; deal_no: string;
   valid_from: string | null; valid_to: string | null; trigger_type: string | null;
+  supplier_name: string | null;
   deal_validity_step: MatchStep; plbs: PLBDiagnostic[];
   overall_match: boolean; best_incentive: number | null; deal_lifecycle_status: string | null;
   exclusion_diagnostic: ExclusionRuleDiagnostic | null;
+  inclusion_diagnostic: ExclusionRuleDiagnostic | null;
 };
 type MatchDiagnosis = {
   ticket_id: number; raw_airline_code: string; normalized_codes: string[];
@@ -155,13 +158,29 @@ const EXCL_FIELD_LABELS: Record<string, string> = {
 const TICKET_STATUS_STYLE: Record<string, string> = {
   draft:      "bg-gray-100 text-gray-500",
   calculated: "bg-emerald-50 text-emerald-600",
+  included:   "bg-teal-50 text-teal-600 border border-teal-200",
   reviewed:   "bg-blue-50 text-blue-600",
   excluded:   "bg-red-50 text-red-600 border border-red-200",
   cancelled:  "bg-orange-50 text-orange-600 border border-orange-200",
 };
 const TICKET_STATUS_LABEL: Record<string, string> = {
-  draft: "Draft", calculated: "Calculated", reviewed: "Reviewed", excluded: "Excluded", cancelled: "Cancelled",
+  draft: "Draft", calculated: "Calculated", included: "Included",
+  reviewed: "Reviewed", excluded: "Excluded", cancelled: "Cancelled",
 };
+
+function getStatusDisplay(status: string, exclusionReason: string | null): { style: string; label: string } {
+  if (status === "excluded") {
+    if (exclusionReason?.startsWith("Not included:"))
+      return { style: "bg-amber-50 text-amber-700 border border-amber-200", label: "Incl. Failed" };
+    if (exclusionReason?.startsWith("Excluded by Exclusion"))
+      return { style: "bg-red-50 text-red-600 border border-red-200", label: "Excl. Rule" };
+    return { style: "bg-red-50 text-red-600 border border-red-200", label: "Excluded" };
+  }
+  return {
+    style: TICKET_STATUS_STYLE[status] ?? "bg-gray-100 text-gray-400",
+    label: TICKET_STATUS_LABEL[status] ?? status,
+  };
+}
 
 const TEXT_HEADERS: { key: keyof UploadedTicket; label: string }[] = [
   { key: "ticket_number",      label: "Ticket #"      },
@@ -398,7 +417,7 @@ export default function StatementDetailPage() {
         matched_deal_type: data.matched_deal_type,
         matched_deal_name: data.matched_deal_name,
         calculated_incentive: data.calculated_incentive,
-        ticket_status: data.cancelled ? "cancelled" : data.excluded ? "excluded" : "calculated",
+        ticket_status: data.cancelled ? "cancelled" : data.excluded ? "excluded" : data.included ? "included" : "calculated",
         exclusion_reason: data.excluded ? (data.message || null) : null,
       }));
     } catch { /* silent */ } finally {
@@ -498,7 +517,7 @@ export default function StatementDetailPage() {
   const openDiagnosis = async (t: UploadedTicket) => {
     setDiagnosis(null);
     setDiagTicket(t);
-    setDiagTab("all");
+    setDiagTab("matched");
     setDiagLoading(true);
     setExpandedDeals(new Set());
     setRawPLBVisible(new Set());
@@ -796,12 +815,17 @@ export default function StatementDetailPage() {
 
                     {/* Status */}
                     <td className="px-2.5 py-2 border-l border-gray-100 whitespace-nowrap">
-                      <span
-                        className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-semibold ${TICKET_STATUS_STYLE[t.ticket_status] ?? "bg-gray-100 text-gray-400"}`}
-                        title={t.ticket_status === "excluded" && t.exclusion_reason ? t.exclusion_reason : undefined}
-                      >
-                        {TICKET_STATUS_LABEL[t.ticket_status] ?? t.ticket_status}
-                      </span>
+                      {(() => {
+                        const { style, label } = getStatusDisplay(t.ticket_status, t.exclusion_reason);
+                        return (
+                          <span
+                            className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-semibold ${style}`}
+                            title={t.exclusion_reason ?? undefined}
+                          >
+                            {label}
+                          </span>
+                        );
+                      })()}
                     </td>
 
                     {/* Split Type */}
@@ -1140,6 +1164,9 @@ export default function StatementDetailPage() {
                             )}
                             <span className="px-2 py-0.5 rounded bg-gray-100 text-gray-700 text-[11px] font-mono shrink-0">{d.deal_no}</span>
                             <span className={`px-2 py-0.5 rounded border text-[10px] font-semibold shrink-0 ${d.deal_type === "b2b" ? "border-violet-300 text-violet-600" : "border-sky-300 text-sky-600"}`}>{d.deal_type?.toUpperCase()}</span>
+                            {d.supplier_name && (
+                              <span className="px-2 py-0.5 rounded bg-violet-50 text-violet-600 text-[10px] border border-violet-200 shrink-0 max-w-32 truncate" title={d.supplier_name}>{d.supplier_name}</span>
+                            )}
                             <span className="text-gray-700 text-[11px] truncate flex-1 min-w-0 text-left">{d.deal_name}</span>
                             {(d.valid_from || d.valid_to) && <span className="text-[10px] text-gray-400 shrink-0">{d.valid_from} → {d.valid_to}</span>}
                             {d.deal_lifecycle_status && <span className="px-1.5 py-0.5 rounded bg-gray-200 text-gray-600 text-[10px] font-semibold uppercase shrink-0">{d.deal_lifecycle_status}</span>}
@@ -1225,6 +1252,40 @@ export default function StatementDetailPage() {
                                   </div>
                                 );
                               })}
+
+                              {/* ── Inclusion For Payout diagnostic ── */}
+                              {d.inclusion_diagnostic && d.inclusion_diagnostic.steps.length > 0 && (
+                                <div className="border border-gray-100 rounded-lg overflow-hidden">
+                                  <div className="flex items-center gap-2 px-3 py-2.5 bg-gray-50 border-b border-gray-100">
+                                    <span className="px-2 py-0.5 rounded bg-teal-100 text-teal-700 text-[10px] font-semibold shrink-0">INCL</span>
+                                    <span className="text-[11px] font-semibold text-gray-700 flex-1">Inclusion For Payout</span>
+                                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                      !d.inclusion_diagnostic.is_excluded
+                                        ? "bg-teal-100 text-teal-600"
+                                        : "bg-amber-100 text-amber-700"
+                                    }`}>
+                                      {!d.inclusion_diagnostic.is_excluded ? "Included" : "Not Included"}
+                                    </span>
+                                  </div>
+                                  <div className="px-3 py-2 space-y-1.5">
+                                    {d.inclusion_diagnostic.steps.map((s, si) => (
+                                      <div key={si} className={`flex items-center gap-2 px-2.5 py-2 rounded-lg ${s.matched ? "bg-teal-50" : "bg-amber-50"}`}>
+                                        <span className={`font-bold text-sm shrink-0 ${s.matched ? "text-teal-500" : "text-amber-500"}`}>{s.matched ? "✓" : "✗"}</span>
+                                        <span className="font-semibold text-gray-700 flex-1 text-[11px]">
+                                          {EXCL_FIELD_LABELS[s.field] ?? s.field}
+                                        </span>
+                                        <span className="px-2 py-0.5 rounded bg-white border border-gray-200 text-gray-700 text-[11px] font-mono shrink-0 max-w-32 truncate" title={s.ticket_value}>{s.ticket_value}</span>
+                                        <span className="text-gray-400 shrink-0">→</span>
+                                        <span className="px-2 py-0.5 rounded bg-white border border-gray-200 text-gray-700 text-[11px] font-mono shrink-0 max-w-32 truncate" title={s.rule_value}>{s.rule_value}</span>
+                                        <ChevronRight className="w-3.5 h-3.5 text-gray-300 shrink-0" />
+                                      </div>
+                                    ))}
+                                    {d.inclusion_diagnostic.reason && (
+                                      <p className="text-[10px] text-gray-400 italic pt-0.5 leading-relaxed">{d.inclusion_diagnostic.reason}</p>
+                                    )}
+                                  </div>
+                                </div>
+                              )}
 
                               {/* ── Exclusion For Payout diagnostic ── */}
                               {d.exclusion_diagnostic && d.exclusion_diagnostic.steps.length > 0 && (

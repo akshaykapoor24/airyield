@@ -35,7 +35,7 @@ from app.schemas.uploaded_ticket import (
 )
 from pydantic import BaseModel
 from app.services.deal_matching import DealMatchingService
-from app.services.exclusion_evaluator import evaluate_exclusion_for_payout
+from app.services.exclusion_evaluator import evaluate_exclusion_for_payout, evaluate_inclusion_for_payout
 from app.services.ticket_extraction import TicketExtractionService, TEMPLATE_HEADERS
 
 router = APIRouter()
@@ -144,30 +144,37 @@ async def confirm_ticket_upload(
         raise HTTPException(status_code=400, detail="No rows to save.")
 
     # ── Bidirectional airline resolution ─────────────────────────────────────
-    # Collect all codes (with numeric zero-padding variants) and all names from rows
+    # Collect all codes (with numeric zero-padding + uppercase variants) and names
     all_codes: set[str] = set()
     for r in payload.rows:
         if r.airlines_code:
             raw = r.airlines_code.strip()
             all_codes.add(raw)
+            all_codes.add(raw.upper())    # handle "ai" → "AI"
             if raw.isdigit():
                 all_codes.add(raw.zfill(3))
 
     all_names = {r.airline_name.strip().lower() for r in payload.rows if r.airline_name}
 
-    # code (IATA or ICAO) → Airline
+    # code (IATA or ICAO, uppercased) → Airline
     code_to_airline: dict[str, Airline] = {}
     if all_codes:
+        upper_codes = [c.upper() for c in all_codes]
         res = await db.execute(
             select(Airline).where(
-                or_(Airline.iata_code.in_(all_codes), Airline.icao_code.in_(all_codes))
+                or_(
+                    func.upper(Airline.iata_code).in_(upper_codes),
+                    func.upper(Airline.icao_code).in_(upper_codes),
+                )
             )
         )
         for a in res.scalars():
             if a.iata_code:
                 code_to_airline[a.iata_code] = a
+                code_to_airline[a.iata_code.upper()] = a
             if a.icao_code:
                 code_to_airline[a.icao_code] = a
+                code_to_airline[a.icao_code.upper()] = a
 
     # name (lower) → Airline
     name_to_airline: dict[str, Airline] = {}
@@ -195,9 +202,11 @@ async def confirm_ticket_upload(
     db.add(statement)
 
     for row in payload.rows:
-        # Try code lookup (handle numeric zero-padding)
+        # Try code lookup (numeric zero-padding + uppercase for alphabetic)
         raw_code = (row.airlines_code or "").strip()
-        code_variants = [raw_code, raw_code.zfill(3)] if raw_code.isdigit() else [raw_code]
+        code_variants = [raw_code, raw_code.upper()]
+        if raw_code.isdigit():
+            code_variants.append(raw_code.zfill(3))
         airline_by_code = next((code_to_airline[c] for c in code_variants if c in code_to_airline), None)
 
         # Try name lookup
@@ -438,14 +447,18 @@ async def _run_single(
         )
 
     raw_code = (ticket.airlines_code or "").strip()
-    # Normalize numeric codes: "98" → "098", "57" → "057", "217" → "217"
-    code_variants = list({raw_code, raw_code.zfill(3)}) if raw_code.isdigit() else [raw_code]
+    # Numeric codes: "98" → also try "098"; alphabetic: also try uppercase ("ai" → "AI")
+    if raw_code.isdigit():
+        code_variants = list({raw_code, raw_code.zfill(3)})
+    else:
+        code_variants = list({raw_code, raw_code.upper()})
+    upper_variants = [c.upper() for c in code_variants]
 
     airline_res = await db.execute(
         select(Airline).where(
             or_(
-                Airline.iata_code.in_(code_variants),
-                Airline.icao_code.in_(code_variants),
+                func.upper(Airline.iata_code).in_(upper_variants),
+                func.upper(Airline.icao_code).in_(upper_variants),
             )
         )
     )
@@ -502,9 +515,7 @@ async def _run_single(
         ticket.matched_deal_type = match.deal_type
         ticket.matched_deal_name = match.deal_name
 
-        # Evaluate "Exclusion For Payout" rule on the matched deal
-        excl_is_excluded = False
-        excl_reason = ""
+        # Fetch the matched deal record once (used for both incl and excl checks)
         if match.deal_type == "airline":
             deal_res = await db.execute(select(AirlineDeal).where(AirlineDeal.id == match.deal_id))
             matched_deal = deal_res.scalar_one_or_none()
@@ -512,10 +523,35 @@ async def _run_single(
             deal_res = await db.execute(select(B2BDeal).where(B2BDeal.id == match.deal_id))
             matched_deal = deal_res.scalar_one_or_none()
 
-        if matched_deal and "Exclusion For Payout" in (matched_deal.incl_excl_types or []):
-            rule = (matched_deal.incl_excl_data or {}).get("Exclusion For Payout", {})
-            if rule:
-                excl_is_excluded, excl_reason = await evaluate_exclusion_for_payout(ticket, rule, db)
+        incl_excl_types = matched_deal.incl_excl_types or [] if matched_deal else []
+        incl_excl_data  = matched_deal.incl_excl_data  or {} if matched_deal else {}
+
+        # ── Step 1: Inclusion For Payout ──────────────────────────────────
+        # Ticket must satisfy ALL filled inclusion fields to be eligible for payout.
+        if "Inclusion For Payout" in incl_excl_types:
+            incl_rule = incl_excl_data.get("Inclusion For Payout", {})
+            is_included, incl_reason = await evaluate_inclusion_for_payout(ticket, incl_rule, db)
+            if not is_included:
+                ticket.calculated_incentive = 0
+                ticket.ticket_status        = "excluded"
+                ticket.exclusion_reason     = incl_reason
+                return RunCalculationResult(
+                    ticket_id=ticket.id, matched=True, excluded=True,
+                    matched_deal_id=match.deal_id,
+                    matched_deal_type=match.deal_type,
+                    matched_deal_name=match.deal_name,
+                    calculated_incentive=0,
+                    message=incl_reason,
+                )
+
+        # ── Step 2: Exclusion For Payout ──────────────────────────────────
+        # Ticket must NOT satisfy all exclusion fields; if it does, kick it out.
+        excl_is_excluded = False
+        excl_reason = ""
+        if "Exclusion For Payout" in incl_excl_types:
+            excl_rule = incl_excl_data.get("Exclusion For Payout", {})
+            if excl_rule:
+                excl_is_excluded, excl_reason = await evaluate_exclusion_for_payout(ticket, excl_rule, db)
 
         if excl_is_excluded:
             ticket.calculated_incentive = 0
@@ -530,11 +566,13 @@ async def _run_single(
                 message=excl_reason,
             )
         else:
+            had_inclusion_rule = "Inclusion For Payout" in incl_excl_types
             ticket.calculated_incentive = match.calculated_incentive
-            ticket.ticket_status        = "calculated"
+            ticket.ticket_status        = "included" if had_inclusion_rule else "calculated"
             ticket.exclusion_reason     = None
             return RunCalculationResult(
                 ticket_id=ticket.id, matched=True,
+                included=had_inclusion_rule,
                 matched_deal_id=match.deal_id,
                 matched_deal_type=match.deal_type,
                 matched_deal_name=match.deal_name,
@@ -789,12 +827,16 @@ async def match_diagnosis(
             deals=[],
         )
 
-    code_variants = list({raw_code, raw_code.zfill(3)}) if raw_code.isdigit() else [raw_code]
+    if raw_code.isdigit():
+        code_variants = list({raw_code, raw_code.zfill(3)})
+    else:
+        code_variants = list({raw_code, raw_code.upper()})
+    upper_variants = [c.upper() for c in code_variants]
     airline_res = await db.execute(
         select(Airline).where(
             or_(
-                Airline.iata_code.in_(code_variants),
-                Airline.icao_code.in_(code_variants),
+                func.upper(Airline.iata_code).in_(upper_variants),
+                func.upper(Airline.icao_code).in_(upper_variants),
             )
         )
     )
@@ -853,6 +895,13 @@ async def match_diagnosis(
         db, airline_name, ticket.booking_class
     )
 
+    # ── Supplier agency from ticket statement ─────────────────────────────
+    stmt_res = await db.execute(
+        select(TicketStatement).where(TicketStatement.batch_id == ticket.batch_id)
+    )
+    stmt_row = stmt_res.scalar_one_or_none()
+    supplier_agency = (stmt_row.agency or None) if stmt_row else None
+
     # ── Run diagnosis ─────────────────────────────────────────────────────
     deals = await DealMatchingService.diagnose_match(
         db=db,
@@ -869,6 +918,7 @@ async def match_diagnosis(
         ticket_date_raw=ticket.ticket_date,
         ticket_departure_raw=ticket.departure_datetime,
         ticket_airline_name=ticket.airline_name,
+        supplier_agency=supplier_agency,
     )
 
     return MatchDiagnosisResponse(

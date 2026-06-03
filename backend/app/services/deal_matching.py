@@ -85,13 +85,23 @@ def _class_matches_groups(cabin_groups: set[str], plb_class: str | None) -> bool
 # ── Filter helpers ─────────────────────────────────────────────────────────
 
 def _flight_type_matches(segment_type: str | None, plb_flight_type: str | None) -> bool:
-    """DOM/INT segment vs PLB flightType (Domestic / International / Both / null)."""
+    """DOM/INT segment vs PLB flightType (Domestic / International / Both / null).
+
+    Accepts any common variant from the ticket XLS:
+      International, INTERNATIONAL, INTL, INTER, Int, INT  → treated as INT
+      Domestic, DOMESTIC, Dom, DOM                          → treated as DOM
+    """
     if not plb_flight_type or plb_flight_type.lower() in ("both", "all", ""):
         return True
     if not segment_type:
         return True  # can't determine, allow
     seg = segment_type.strip().upper()
-    ft  = plb_flight_type.strip().lower()
+    # Normalise full names / aliases → standard abbreviations
+    if seg in ("INTERNATIONAL", "INTL", "INTER"):
+        seg = "INT"
+    elif seg in ("DOMESTIC",):
+        seg = "DOM"
+    ft = plb_flight_type.strip().lower()
     if seg == "DOM" and ft in ("domestic", "dom"):
         return True
     if seg == "INT" and ft in ("international", "int"):
@@ -269,12 +279,12 @@ class DealMatchingService:
         ticket_date_raw:     str | None = None,
         ticket_departure_raw: str | None = None,
         ticket_airline_name: str | None = None,
+        supplier_agency:     str | None = None,
     ) -> list:
         """
         Return a full step-by-step diagnostic for every approved deal belonging to this
-        airline+tenant, regardless of validity dates, so the user can see exactly which
-        filter caused the ticket not to match.  Never short-circuits — every step is
-        evaluated for every deal and every PLB entry.
+        airline+tenant. B2B deals are filtered by supplier_agency when both sides specify one.
+        Never short-circuits — every step is evaluated for every deal and every PLB entry.
         """
         from app.schemas.uploaded_ticket import (
             MatchStepResult, PLBDiagnostic, DealDiagnostic,
@@ -436,9 +446,11 @@ class DealMatchingService:
             lifecycle_str = raw_lifecycle.value if hasattr(raw_lifecycle, 'value') else str(raw_lifecycle or 'active')
 
             # ── Exclusion For Payout diagnostic ───────────────────────────
+            from app.services.exclusion_evaluator import (
+                diagnose_exclusion_for_payout, diagnose_inclusion_for_payout,
+            )
             excl_diagnostic = None
             if "Exclusion For Payout" in (deal.incl_excl_types or []):
-                from app.services.exclusion_evaluator import diagnose_exclusion_for_payout
                 rule = (deal.incl_excl_data or {}).get("Exclusion For Payout", {})
                 if rule:
                     excl_diagnostic = await diagnose_exclusion_for_payout(
@@ -451,6 +463,20 @@ class DealMatchingService:
                         airline_name=ticket_airline_name or airline_name,
                     )
 
+            # ── Inclusion For Payout diagnostic ───────────────────────────
+            incl_diagnostic = None
+            if "Inclusion For Payout" in (deal.incl_excl_types or []):
+                incl_rule = (deal.incl_excl_data or {}).get("Inclusion For Payout", {})
+                incl_diagnostic = await diagnose_inclusion_for_payout(
+                    incl_data=incl_rule,
+                    db=db,
+                    sector=ticket_sector,
+                    booking_class=booking_class,
+                    ticket_date_raw=ticket_date_raw,
+                    departure_raw=ticket_departure_raw,
+                    airline_name=ticket_airline_name or airline_name,
+                )
+
             return DealDiagnostic(
                 deal_id=deal.id,
                 deal_type=deal_type,
@@ -459,12 +485,14 @@ class DealMatchingService:
                 valid_from=vf,
                 valid_to=vt,
                 trigger_type=getattr(deal, "trigger_type", None),
+                supplier_name=getattr(deal, "supplier_name", None),
                 deal_validity_step=deal_validity_step,
                 plbs=plb_diagnostics,
                 overall_match=overall,
                 best_incentive=best_incentive,
                 deal_lifecycle_status=lifecycle_str,
                 exclusion_diagnostic=excl_diagnostic,
+                inclusion_diagnostic=incl_diagnostic,
             )
 
         # ── Query airline_deals (no date filter) ──────────────────────────
@@ -478,7 +506,7 @@ class DealMatchingService:
         for deal in a_result.scalars().all():
             results.append(await _diagnose_deal(deal, "airline"))
 
-        # ── Query b2b_deals (no date filter) ─────────────────────────────
+        # ── Query b2b_deals (no date filter — but apply supplier guard) ───
         b_result = await db.execute(
             select(B2BDeal).where(
                 B2BDeal.tenant_id == tenant_id,
@@ -487,6 +515,9 @@ class DealMatchingService:
             ).order_by(B2BDeal.created_at.desc())
         )
         for deal in b_result.scalars().all():
+            if deal.supplier_name and supplier_agency:
+                if deal.supplier_name.lower() != supplier_agency.lower():
+                    continue
             results.append(await _diagnose_deal(deal, "b2b"))
 
         return results

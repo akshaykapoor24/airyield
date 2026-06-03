@@ -116,6 +116,7 @@ class RunCalculationResult(BaseModel):
     matched:              bool
     excluded:             bool = False
     cancelled:            bool = False
+    included:             bool = False
     matched_deal_id:      Optional[int]
     matched_deal_type:    Optional[str]
     matched_deal_name:    Optional[str]
@@ -222,12 +223,14 @@ class DealDiagnostic(BaseModel):
     valid_from:           Optional[date]
     valid_to:             Optional[date]
     trigger_type:         Optional[str]  # airline deals only
+    supplier_name:        Optional[str]  = None  # B2B deals only
     deal_validity_step:   MatchStepResult
     plbs:                 list[PLBDiagnostic]
     overall_match:        bool
     best_incentive:       Optional[float]
-    deal_lifecycle_status:   Optional[str] = None
+    deal_lifecycle_status:    Optional[str] = None
     exclusion_diagnostic: Optional[ExclusionRuleDiagnostic] = None
+    inclusion_diagnostic: Optional[ExclusionRuleDiagnostic] = None
 
 
 class MatchDiagnosisResponse(BaseModel):
