@@ -1179,6 +1179,10 @@ export default function UploadDealPage(){
   // ── Step 1 state ────────────────────────────────────────────────────────────
   const [dealType,      setDealType]      = useState("");           // "airline" | "b2b"
   const [dealTag,       setDealTag]       = useState("standard");   // "standard" | "adhoc"
+  const [dealCategory,  setDealCategory]  = useState<"proprietary"|"enterprise">("enterprise");
+  const [workflowPreview, setWorkflowPreview] = useState<{step_order:number;role:string;approvers:{id:number;full_name:string;email:string}[]}[]|null>(null);
+  const [workflowPreviewLoading, setWorkflowPreviewLoading] = useState(false);
+  const [workflowModalOpen, setWorkflowModalOpen] = useState(false);
   const [supplierName,  setSupplierName]  = useState("");
   const [supplierOptions, setSupplierOptions] = useState<string[]>([]);
   const [validFromDate, setValidFromDate] = useState("");
@@ -1255,6 +1259,15 @@ export default function UploadDealPage(){
       .then(r=>setSupplierOptions(r.data.map(s=>s.name)))
       .catch(()=>{});
   },[]);
+
+  useEffect(()=>{
+    if(dealCategory!=="enterprise"){setWorkflowPreview(null);return;}
+    setWorkflowPreviewLoading(true);
+    api.get<{step_order:number;role:string;approvers:{id:number;full_name:string;email:string}[]}[]>("/approval-workflows/deals-preview")
+      .then(r=>setWorkflowPreview(r.data))
+      .catch(()=>setWorkflowPreview([]))
+      .finally(()=>setWorkflowPreviewLoading(false));
+  },[dealCategory]);
 
   const colGroups = buildColGroups(selectedIncentives, dealType);
 
@@ -1436,6 +1449,7 @@ export default function UploadDealPage(){
           source_agent:    sourceAgent,
           source_type:     "upload",
           deal_tag:        dealTag,
+          deal_category:   dealCategory,
           airline_type:    getContractVal("c__airline_type")||null,
           airline_name:    getContractVal("c__airline_name")||null,
           contract_year:   dealType==="airline"?(getContractVal("c__contract_year")||null):null,
@@ -1499,7 +1513,11 @@ export default function UploadDealPage(){
       <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto"><Check className="w-8 h-8 text-green-500"/></div>
       <h2 className="text-xl font-bold text-gray-900">Deal Saved Successfully</h2>
       <p className="text-sm text-gray-500">
-        <span className="font-medium">{rows.length} row{rows.length!==1?"s":""}</span> saved and submitted for approval.
+        <span className="font-medium">{rows.length} row{rows.length!==1?"s":""}</span> saved and{" "}
+        {dealCategory==="proprietary"
+          ?<span className="text-green-600 font-medium">auto-approved (Proprietary)</span>
+          :<span>submitted for approval (Enterprise)</span>
+        }.
         {selectedIncentives.length>0&&<> Incentives: <span className="font-medium">{selectedIncentives.join(", ")}</span>.</>}
       </p>
       <div className="flex gap-3 justify-center pt-2 flex-wrap">
@@ -1542,6 +1560,43 @@ export default function UploadDealPage(){
           <div className="col-span-2 space-y-3">
             <SectionCard title="Deal Details">
               <div className="px-4 py-3 space-y-3">
+                {/* ── Deal Category ─────────────────────────────────────── */}
+                <div>
+                  <label className="block text-[11px] font-medium text-gray-500 uppercase tracking-wide mb-1.5">Deal Category</label>
+                  <div className="flex gap-2">
+                    {([
+                      {value:"proprietary" as const, label:"Proprietary"},
+                      {value:"enterprise"  as const, label:"Enterprise"},
+                    ] as const).map(opt=>(
+                      <button
+                        key={opt.value}
+                        type="button"
+                        onClick={()=>setDealCategory(opt.value)}
+                        className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border text-xs font-semibold transition-all ${dealCategory===opt.value?"border-[#1e3a5f] bg-[#1e3a5f] text-white":"border-gray-200 bg-white text-gray-600 hover:border-gray-300"}`}
+                      >
+                        <span className={`w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center flex-shrink-0 ${dealCategory===opt.value?"border-white":"border-gray-400"}`}>
+                          {dealCategory===opt.value&&<span className="w-1.5 h-1.5 rounded-full bg-white block"/>}
+                        </span>
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                  {dealCategory==="proprietary"&&(
+                    <p className="text-[10px] text-gray-400 mt-1">Deal will be auto-approved and skip the approval workflow.</p>
+                  )}
+                  {dealCategory==="enterprise"&&(
+                    <div className="flex items-center justify-between mt-1">
+                      <p className="text-[10px] text-gray-400">Deal will follow the approval workflow.</p>
+                      <button
+                        type="button"
+                        onClick={()=>setWorkflowModalOpen(true)}
+                        className="text-[10px] font-semibold text-[#1e3a5f] hover:underline flex-shrink-0 ml-2"
+                      >
+                        See workflow →
+                      </button>
+                    </div>
+                  )}
+                </div>
                 <SelectField
                   label="Deal Type"
                   required
@@ -1686,6 +1741,71 @@ export default function UploadDealPage(){
                   :"After upload you'll map document columns to our fields, then review & edit all data before saving."
                 }
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Workflow preview modal ─────────────────────────────────────────── */}
+      {workflowModalOpen&&(
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={()=>setWorkflowModalOpen(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md" onClick={e=>e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+              <div>
+                <h2 className="text-sm font-bold text-gray-900">Approval Workflow</h2>
+                <p className="text-xs text-gray-400 mt-0.5">Steps your deal will go through before approval</p>
+              </div>
+              <button onClick={()=>setWorkflowModalOpen(false)} className="p-1.5 hover:bg-gray-100 rounded-lg"><X className="w-4 h-4 text-gray-500"/></button>
+            </div>
+            <div className="px-5 py-4">
+              {workflowPreviewLoading&&(
+                <div className="flex items-center gap-2 text-sm text-gray-400 py-6 justify-center">
+                  <RefreshCw className="w-4 h-4 animate-spin"/><span>Loading workflow…</span>
+                </div>
+              )}
+              {!workflowPreviewLoading&&(!workflowPreview||workflowPreview.length===0)&&(
+                <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2.5">
+                  <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 flex-shrink-0"/>
+                  <p className="text-xs text-amber-700">No approval workflow configured. Ask your Super Admin to set one up.</p>
+                </div>
+              )}
+              {!workflowPreviewLoading&&workflowPreview&&workflowPreview.length>0&&(
+                <div className="relative">
+                  {workflowPreview.map((s,i)=>(
+                    <div key={s.step_order} className="flex gap-4 pb-5 last:pb-0">
+                      {/* timeline spine */}
+                      <div className="flex flex-col items-center">
+                        <span className="w-7 h-7 rounded-full bg-[#1e3a5f] text-white flex items-center justify-center text-xs font-bold flex-shrink-0">{s.step_order}</span>
+                        {i<workflowPreview.length-1&&<span className="flex-1 w-px bg-gray-200 mt-1"/>}
+                      </div>
+                      {/* content */}
+                      <div className="flex-1 pt-0.5">
+                        <p className="text-xs font-semibold text-gray-800 capitalize">{s.role.replace(/_/g," ")}</p>
+                        {s.approvers.length>0?(
+                          <div className="mt-1.5 space-y-1">
+                            {s.approvers.map(a=>(
+                              <div key={a.id} className="flex items-center gap-2">
+                                <span className="w-5 h-5 rounded-full bg-blue-100 text-[#1e3a5f] flex items-center justify-center text-[10px] font-bold flex-shrink-0">
+                                  {a.full_name.charAt(0).toUpperCase()}
+                                </span>
+                                <div>
+                                  <p className="text-[11px] font-medium text-gray-700">{a.full_name}</p>
+                                  <p className="text-[10px] text-gray-400">{a.email}</p>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        ):(
+                          <p className="text-[11px] text-gray-400 mt-1">No approvers assigned</p>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="px-5 py-3 border-t border-gray-100 flex justify-end">
+              <button onClick={()=>setWorkflowModalOpen(false)} className="px-4 py-1.5 rounded-lg text-xs font-semibold bg-[#1e3a5f] text-white hover:bg-[#16304f]">Close</button>
             </div>
           </div>
         </div>

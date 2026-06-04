@@ -11,6 +11,7 @@ type DealBatch = {
   batch_id:        string;
   deal_type:       string;
   deal_tag:        string;
+  deal_category:   string;
   supplier_name:   string | null;
   file_name:       string | null;
   file_type:       string | null;
@@ -824,6 +825,7 @@ export default function DealsPage() {
                   <th className="px-4 py-2 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide">Supplier / Source</th>
                   <th className="px-4 py-2 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide">Deal Type</th>
                   <th className="px-4 py-2 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide">Deal Tag</th>
+                  <th className="px-4 py-2 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide">Deal Category</th>
                   <th className="px-4 py-2 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide">Incentive Types</th>
                   <th className="px-4 py-2 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide">
                     <span className="flex items-center gap-1"><Calendar className="w-3.5 h-3.5" /> Valid Period</span>
@@ -842,18 +844,18 @@ export default function DealsPage() {
               <tbody className="divide-y divide-gray-100">
                 {loading ? (
                   <tr>
-                    <td colSpan={10} className="px-4 py-12 text-center text-xs text-gray-400">
+                    <td colSpan={11} className="px-4 py-12 text-center text-xs text-gray-400">
                       <RefreshCw className="w-4 h-4 animate-spin mx-auto mb-2 text-gray-300" />
                       Loading batches...
                     </td>
                   </tr>
                 ) : apiError ? (
                   <tr>
-                    <td colSpan={10} className="px-4 py-10 text-center text-xs text-red-400">{apiError}</td>
+                    <td colSpan={11} className="px-4 py-10 text-center text-xs text-red-400">{apiError}</td>
                   </tr>
                 ) : filteredBatches.length === 0 ? (
                   <tr>
-                    <td colSpan={10} className="px-4 py-12 text-center">
+                    <td colSpan={11} className="px-4 py-12 text-center">
                       <div className="flex flex-col items-center gap-3">
                         <Upload className="w-8 h-8 text-gray-300" />
                         <p className="text-xs text-gray-400 font-medium">
@@ -900,6 +902,13 @@ export default function DealsPage() {
                       <td className="px-4 py-2">
                         <span className={`px-2.5 py-1 rounded-full text-[10px] font-semibold border ${(b.deal_tag||"standard")==="adhoc"?"bg-amber-50 text-amber-700 border-amber-200":"bg-slate-50 text-slate-600 border-slate-200"}`}>
                           {(b.deal_tag||"standard")==="adhoc"?"Adhoc":"Standard"}
+                        </span>
+                      </td>
+
+                      {/* Deal category */}
+                      <td className="px-4 py-2">
+                        <span className={`px-2.5 py-1 rounded-full text-[10px] font-semibold border ${(b.deal_category||"enterprise")==="proprietary"?"bg-violet-50 text-violet-700 border-violet-200":"bg-blue-50 text-blue-700 border-blue-200"}`}>
+                          {(b.deal_category||"enterprise")==="proprietary"?"Proprietary":"Enterprise"}
                         </span>
                       </td>
 

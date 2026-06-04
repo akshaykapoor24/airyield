@@ -133,6 +133,7 @@ type DealRepositoryItem = {
   incl_excl_types: string[] | null;
   incl_excl_data:  Record<string, Record<string, string>> | null;
   deal_tag:              string | null;
+  deal_category:         string | null;
   status:                string;
   deal_lifecycle_status: string | null;
   created_at:            string;
@@ -239,7 +240,7 @@ function getDealTypeBadge(d: DealRepositoryItem) {
 }
 
 const TABLE_HEADERS = [
-  "Deal No", "Deal Type", "Deal Tag", "Airline Name", "Airline Type", "Contract Year",
+  "Deal No", "Deal Type", "Deal Tag", "Deal Category", "Airline Name", "Airline Type", "Contract Year",
   "Valid From", "Valid To",
   "Trigger Type", "Payout Type",
   "Business Type", "Entity (LCC)",
@@ -1109,6 +1110,13 @@ export default function DealBatchPage() {
                       </span>
                     </td>
 
+                    {/* Deal Category */}
+                    <td className="px-2 py-1.5 whitespace-nowrap">
+                      <span className={`px-2 py-0.5 rounded-full text-[9px] font-semibold border ${(d.deal_category||"enterprise")==="proprietary"?"bg-violet-50 text-violet-700 border-violet-200":"bg-blue-50 text-blue-700 border-blue-200"}`}>
+                        {(d.deal_category||"enterprise")==="proprietary"?"Proprietary":"Enterprise"}
+                      </span>
+                    </td>
+
                     <td className="px-2 py-1.5 min-w-32">
                       <p className="text-[11px] font-semibold text-gray-800 whitespace-nowrap">
                         {d.airline_name || <span className="text-gray-300">—</span>}
@@ -1231,7 +1239,7 @@ export default function DealBatchPage() {
                         </button>
                         <button
                           onClick={() => (d.status === "approved" || d.status === "rejected") && setEditDeal(d)}
-                          disabled={d.status !== "approved" && d.status !== "rejected"}
+                          disabled={d.status !== "approved" && d.status !== "rejected" || d.deal_lifecycle_status === "closed"}
                           title={
                             d.status === "rejected" ? "Edit and resubmit for approval" :
                             d.status !== "approved" ? "Only approved or rejected deals can be edited" :

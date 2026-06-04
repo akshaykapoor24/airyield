@@ -112,6 +112,18 @@ class BulkApproveResult(BaseModel):
     failed: list[dict]
 
 
+class WorkflowPreviewApproverRead(BaseModel):
+    id: int
+    full_name: str
+    email: str
+
+
+class WorkflowPreviewStepRead(BaseModel):
+    step_order: int
+    role: str
+    approvers: list[WorkflowPreviewApproverRead]
+
+
 class DealHistoryStepRead(BaseModel):
     step_order: int
     role: str

@@ -366,6 +366,7 @@ async def confirm_upload(
         tenant_id=current_user.tenant_id,
         deal_type="b2b" if use_b2b else "airline",
         deal_tag=payload.deal_tag or "standard",
+        deal_category=payload.deal_category or "enterprise",
         supplier_name=supplier_name or payload.source_agent or None,
         file_name=file_name or None,
         file_type=file_type or None,
@@ -391,13 +392,18 @@ async def confirm_upload(
         # Use per-row incentive_data if provided; fall back to payload-level only when absent
         row_inc_data = r.incentive_data if r.incentive_data else (payload.incentive_data or {})
 
+        deal_cat = payload.deal_category or "enterprise"
+        deal_status = ManualDealStatus.APPROVED if deal_cat == "proprietary" else ManualDealStatus.PENDING_APPROVAL
+        deal_lifecycle = DealLifecycleStatus.ACTIVE if deal_cat == "proprietary" else DealLifecycleStatus.DRAFT
+
         if use_b2b:
             deal: B2BDeal | AirlineDeal = B2BDeal(
                 tenant_id=current_user.tenant_id,
                 created_by_id=current_user.id,
-                status=ManualDealStatus.PENDING_APPROVAL,
-                deal_lifecycle_status=DealLifecycleStatus.DRAFT,
+                status=deal_status,
+                deal_lifecycle_status=deal_lifecycle,
                 deal_tag=payload.deal_tag or "standard",
+                deal_category=deal_cat,
                 source_agent=source_agent,
                 deal_maker_name=payload.deal_maker_name or None,
                 supplier_name=supplier_name or None,
@@ -423,9 +429,10 @@ async def confirm_upload(
             deal = AirlineDeal(
                 tenant_id=current_user.tenant_id,
                 created_by_id=current_user.id,
-                status=ManualDealStatus.PENDING_APPROVAL,
-                deal_lifecycle_status=DealLifecycleStatus.DRAFT,
+                status=deal_status,
+                deal_lifecycle_status=deal_lifecycle,
                 deal_tag=payload.deal_tag or "standard",
+                deal_category=deal_cat,
                 source_agent=source_agent,
                 deal_maker_name=payload.deal_maker_name or None,
                 remark=(r.remarks or payload.remark) or None,
@@ -452,7 +459,10 @@ async def confirm_upload(
 
         db.add(deal)
         await db.flush()
-        await _seed_approval_for_deal(deal.id, current_user, db, deal_type=deal_type_key)
+        if deal_cat == "proprietary":
+            await _close_matching_active_deals(deal, deal_type_key, db)
+        else:
+            await _seed_approval_for_deal(deal.id, current_user, db, deal_type=deal_type_key)
         created_ids.append(deal.id)
 
     await db.commit()
@@ -550,11 +560,13 @@ async def create_airline_deal(
     vf = date.fromisoformat(payload.valid_from) if payload.valid_from else None
     vt = date.fromisoformat(payload.valid_to) if payload.valid_to else None
 
+    deal_cat = payload.deal_category or "enterprise"
     deal = AirlineDeal(
         tenant_id=current_user.tenant_id,
         created_by_id=current_user.id,
-        status=ManualDealStatus.PENDING_APPROVAL,
-        deal_lifecycle_status=DealLifecycleStatus.DRAFT,
+        status=ManualDealStatus.APPROVED if deal_cat == "proprietary" else ManualDealStatus.PENDING_APPROVAL,
+        deal_lifecycle_status=DealLifecycleStatus.ACTIVE if deal_cat == "proprietary" else DealLifecycleStatus.DRAFT,
+        deal_category=deal_cat,
         source_agent=payload.source_agent or "manual",
         deal_maker_name=payload.deal_maker_name or None,
         remark=payload.remark or None,
@@ -578,7 +590,10 @@ async def create_airline_deal(
     )
     db.add(deal)
     await db.flush()
-    await _seed_approval_for_deal(deal.id, current_user, db, deal_type="airline")
+    if deal_cat == "proprietary":
+        await _close_matching_active_deals(deal, "airline", db)
+    else:
+        await _seed_approval_for_deal(deal.id, current_user, db, deal_type="airline")
     await db.commit()
     result = await db.execute(select(AirlineDeal).where(AirlineDeal.id == deal.id))
     return result.scalar_one()
@@ -597,11 +612,13 @@ async def create_b2b_deal(
     vf = date.fromisoformat(payload.valid_from) if payload.valid_from else None
     vt = date.fromisoformat(payload.valid_to) if payload.valid_to else None
 
+    deal_cat = payload.deal_category or "enterprise"
     deal = B2BDeal(
         tenant_id=current_user.tenant_id,
         created_by_id=current_user.id,
-        status=ManualDealStatus.PENDING_APPROVAL,
-        deal_lifecycle_status=DealLifecycleStatus.DRAFT,
+        status=ManualDealStatus.APPROVED if deal_cat == "proprietary" else ManualDealStatus.PENDING_APPROVAL,
+        deal_lifecycle_status=DealLifecycleStatus.ACTIVE if deal_cat == "proprietary" else DealLifecycleStatus.DRAFT,
+        deal_category=deal_cat,
         source_agent=payload.source_agent or "manual",
         deal_maker_name=payload.deal_maker_name or None,
         supplier_name=payload.supplier_name or None,
@@ -623,7 +640,10 @@ async def create_b2b_deal(
     )
     db.add(deal)
     await db.flush()
-    await _seed_approval_for_deal(deal.id, current_user, db, deal_type="b2b")
+    if deal_cat == "proprietary":
+        await _close_matching_active_deals(deal, "b2b", db)
+    else:
+        await _seed_approval_for_deal(deal.id, current_user, db, deal_type="b2b")
     await db.commit()
     result = await db.execute(select(B2BDeal).where(B2BDeal.id == deal.id))
     return result.scalar_one()
@@ -671,6 +691,7 @@ async def get_deal_repository(
             incl_excl_types=d.incl_excl_types,
             incl_excl_data=d.incl_excl_data,
             deal_tag=getattr(d, "deal_tag", "standard") or "standard",
+            deal_category=getattr(d, "deal_category", "enterprise") or "enterprise",
             status=d.status.value if hasattr(d.status, "value") else str(d.status),
             deal_lifecycle_status=d.deal_lifecycle_status.value if hasattr(d.deal_lifecycle_status, "value") else str(d.deal_lifecycle_status or "draft"),
             created_at=d.created_at,
@@ -704,6 +725,7 @@ async def get_deal_repository(
             incl_excl_types=d.incl_excl_types or [],
             incl_excl_data=d.incl_excl_data or {},
             deal_tag=d.deal_tag or "standard",
+            deal_category=getattr(d, "deal_category", "enterprise") or "enterprise",
             status=d.status.value if hasattr(d.status, "value") else str(d.status),
             deal_lifecycle_status=d.deal_lifecycle_status.value if hasattr(d.deal_lifecycle_status, "value") else str(d.deal_lifecycle_status or "draft"),
             created_at=d.created_at,
@@ -737,6 +759,7 @@ async def get_deal_repository(
             incl_excl_types=d.incl_excl_types or [],
             incl_excl_data=d.incl_excl_data or {},
             deal_tag=d.deal_tag or "standard",
+            deal_category=getattr(d, "deal_category", "enterprise") or "enterprise",
             status=d.status.value if hasattr(d.status, "value") else str(d.status),
             deal_lifecycle_status=d.deal_lifecycle_status.value if hasattr(d.deal_lifecycle_status, "value") else str(d.deal_lifecycle_status or "draft"),
             created_at=d.created_at,
@@ -792,6 +815,8 @@ async def list_deal_batches(
         DealBatchRead(
             batch_id=b.batch_id,
             deal_type=b.deal_type,
+            deal_tag=getattr(b, "deal_tag", "standard") or "standard",
+            deal_category=getattr(b, "deal_category", "enterprise") or "enterprise",
             supplier_name=b.supplier_name,
             file_name=b.file_name,
             file_type=b.file_type,
@@ -841,6 +866,8 @@ async def get_deal_batch(
     return DealBatchRead(
         batch_id=batch.batch_id,
         deal_type=batch.deal_type,
+        deal_tag=getattr(batch, "deal_tag", "standard") or "standard",
+        deal_category=getattr(batch, "deal_category", "enterprise") or "enterprise",
         supplier_name=batch.supplier_name,
         file_name=batch.file_name,
         file_type=batch.file_type,

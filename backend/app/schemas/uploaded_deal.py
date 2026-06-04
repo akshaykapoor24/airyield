@@ -150,6 +150,7 @@ class DealRepositoryItem(BaseModel):
     incl_excl_types:  Optional[list] = None
     incl_excl_data:   Optional[dict] = None
     deal_tag:             Optional[str]  = "standard"
+    deal_category:        Optional[str]  = "enterprise"
     status:               str
     deal_lifecycle_status: Optional[str] = None
     created_at:           datetime
@@ -199,6 +200,7 @@ class DealBatchRead(BaseModel):
     batch_id:        str
     deal_type:       str
     deal_tag:        str = "standard"
+    deal_category:   str = "enterprise"
     supplier_name:   Optional[str]
     file_name:       Optional[str]
     file_type:       Optional[str]
@@ -229,6 +231,7 @@ class ConfirmUploadPayload(BaseModel):
     source_type:     str            = "upload"   # "upload" | "manual"
     source_agent:    Optional[str]  = None  # auto-set from filename if omitted
     deal_tag:        Optional[str]  = "standard"  # "standard" | "adhoc"
+    deal_category:   Optional[str]  = "enterprise"  # "proprietary" | "enterprise"
     issue_date:      Optional[str]  = None   # ISO string "2026-03-18"
     notes:           Optional[str]  = None
     # deal header (same as new deal form)
