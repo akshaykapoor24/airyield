@@ -613,7 +613,6 @@ function DealTypeSelector({ onSelect }: { onSelect: (t: "airline" | "b2b") => vo
 export default function NewDealPage() {
   const router = useRouter();
 
-  // step: null = deal-type selection, set = form
   const [dealType, setDealType] = useState<"airline" | "b2b" | null>(null);
 
   // airline contract
@@ -794,9 +793,11 @@ export default function NewDealPage() {
     "Exclusion For Payout":  { title:"Exclusion For Payout",  suffix:"for Exclusion", isExclusion:true  },
   };
 
-  // ── Step 0: deal-type selection ──────────────────────────────────────────
+  // ── Step 0: deal-type + category selection ──────────────────────────────
   if (dealType === null) {
-    return <DealTypeSelector onSelect={setDealType} />;
+    return (
+      <DealTypeSelector onSelect={setDealType} />
+    );
   }
 
   // ── Step 1: form ─────────────────────────────────────────────────────────

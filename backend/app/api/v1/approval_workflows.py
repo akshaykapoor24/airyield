@@ -13,7 +13,7 @@ from app.models.approval_workflow import (
     ApprovalWorkflowStepApprover,
     WorkflowModule,
 )
-from app.schemas.approval_workflow import WorkflowCreate, WorkflowRead, WorkflowUserRead
+from app.schemas.approval_workflow import WorkflowCreate, WorkflowRead, WorkflowUserRead, WorkflowPreviewStepRead, WorkflowPreviewApproverRead
 
 router = APIRouter()
 
@@ -39,6 +39,54 @@ def _require_super_admin(current_user: User = Depends(get_current_user)) -> User
     if current_user.role != UserRole.SUPER_ADMIN:
         raise HTTPException(status_code=403, detail="Super Admin access required")
     return current_user
+
+
+@router.get("/deals-preview", response_model=list[WorkflowPreviewStepRead])
+async def deals_workflow_preview(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return the active deals approval workflow steps with approver names.
+    Accessible to any authenticated user so they can see who will review their deal.
+    """
+    result = await db.execute(
+        select(ApprovalWorkflow)
+        .options(
+            selectinload(ApprovalWorkflow.steps).selectinload(ApprovalWorkflowStep.approvers)
+        )
+        .where(
+            ApprovalWorkflow.tenant_id == current_user.tenant_id,
+            ApprovalWorkflow.module == WorkflowModule.DEALS,
+            ApprovalWorkflow.is_active == True,  # noqa: E712
+        )
+    )
+    workflow = result.scalar_one_or_none()
+    if not workflow or not workflow.steps:
+        return []
+
+    user_ids: set[int] = set()
+    for step in workflow.steps:
+        for approver in step.approvers or []:
+            user_ids.add(approver.user_id)
+
+    users_result = await db.execute(
+        select(User).where(User.id.in_(user_ids))
+    )
+    users_by_id = {u.id: u for u in users_result.scalars().all()}
+
+    preview: list[WorkflowPreviewStepRead] = []
+    for step in sorted(workflow.steps, key=lambda s: s.step_order):
+        approvers = [
+            WorkflowPreviewApproverRead(id=usr.id, full_name=usr.full_name, email=usr.email)
+            for a in (step.approvers or [])
+            if (usr := users_by_id.get(a.user_id)) is not None
+        ]
+        preview.append(WorkflowPreviewStepRead(
+            step_order=step.step_order,
+            role=step.role,
+            approvers=approvers,
+        ))
+    return preview
 
 
 @router.get("/", response_model=list[WorkflowRead])
@@ -71,7 +119,8 @@ async def create_or_replace_workflow(
     current_user: User = Depends(_require_super_admin),
 ):
     module = _parse_module(payload.module)
-    if not payload.steps:
+    is_proprietary = payload.deal_category == "proprietary" and module == WorkflowModule.DEALS
+    if not is_proprietary and not payload.steps:
         raise HTTPException(status_code=400, detail="At least one step is required")
 
     # enforce unique step ordering
@@ -100,6 +149,7 @@ async def create_or_replace_workflow(
         tenant_id=current_user.tenant_id,
         module=module,
         is_active=True,
+        deal_category=payload.deal_category,
         created_by_id=current_user.id,
     )
     db.add(workflow)
@@ -147,6 +197,12 @@ async def update_workflow(
 
     if _parse_module(payload.module) != workflow.module:
         raise HTTPException(status_code=400, detail="Module cannot be changed")
+
+    is_proprietary = payload.deal_category == "proprietary" and workflow.module == WorkflowModule.DEALS
+    if not is_proprietary and not payload.steps:
+        raise HTTPException(status_code=400, detail="At least one step is required")
+
+    workflow.deal_category = payload.deal_category
 
     for step in list(workflow.steps):
         await db.delete(step)

@@ -196,18 +196,19 @@ class AIExtractResponse(BaseModel):
 
 
 class DealBatchRead(BaseModel):
-    batch_id:        str
-    deal_type:       str
-    deal_tag:        str = "standard"
-    supplier_name:   Optional[str]
-    file_name:       Optional[str]
-    file_type:       Optional[str]
-    incentive_types: list[str]
-    valid_from:      Optional[date]
-    valid_to:        Optional[date]
-    deal_count:      int
-    created_by_name: Optional[str]
-    created_at:      datetime
+    batch_id:         str
+    deal_type:        str
+    deal_tag:         str = "standard"
+    supplier_name:    Optional[str]
+    file_name:        Optional[str]
+    file_type:        Optional[str]
+    incentive_types:  list[str]
+    valid_from:       Optional[date]
+    valid_to:         Optional[date]
+    deal_count:       int
+    lifecycle_counts: dict[str, int] = {}
+    created_by_name:  Optional[str]
+    created_at:       datetime
 
     model_config = {"from_attributes": True}
 
@@ -259,3 +260,5 @@ class ConfirmUploadPayload(BaseModel):
     # column map used during extraction (stored for audit)
     column_map:      dict           = {}     # {our_col: doc_col}
     rows:            list[ExtractedRow] = []
+    # toggle: auto-copy incl/excl from previous deal with same airline+supplier+segment
+    copy_prev_incl_excl: bool       = True

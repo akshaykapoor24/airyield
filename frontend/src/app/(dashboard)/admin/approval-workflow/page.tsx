@@ -15,6 +15,7 @@ type WorkflowStep = {
 type Workflow = {
   id: number;
   module: string;
+  deal_category: string;
   steps: Array<{ id: number; step_order: number; role: string; approver_user_ids: number[] }>;
 };
 type ModuleOption = { value: "deals" | "tickets"; label: string };
@@ -41,6 +42,7 @@ function getErrorMessage(err: unknown, fallback: string): string {
 export default function ApprovalWorkflowPage() {
   const [selectedModule, setSelectedModule] = useState<ModuleOption["value"]>("deals");
   const [workflowId, setWorkflowId] = useState<number | null>(null);
+  const [dealCategory, setDealCategory] = useState<"enterprise" | "proprietary">("enterprise");
   const [steps, setSteps] = useState<WorkflowStep[]>([{ step_order: 1, role: "operations_user", approver_user_ids: [] }]);
   const [usersByRole, setUsersByRole] = useState<Record<string, WorkflowUser[]>>({});
   const [loading, setLoading] = useState(false);
@@ -64,9 +66,11 @@ export default function ApprovalWorkflowPage() {
       const wf = res.data[0];
       if (!wf) {
         setWorkflowId(null);
+        setDealCategory("enterprise");
         setSteps([{ step_order: 1, role: "operations_user", approver_user_ids: [] }]);
       } else {
         setWorkflowId(wf.id);
+        setDealCategory((wf.deal_category ?? "enterprise") as "enterprise" | "proprietary");
         setSteps(
           wf.steps
             .sort((a, b) => a.step_order - b.step_order)
@@ -112,18 +116,22 @@ export default function ApprovalWorkflowPage() {
   const save = async () => {
     setError(null);
     setSuccess(null);
-    if (!steps.length) {
-      setError("At least one step is required");
-      return;
-    }
-    if (steps.some((s) => !s.approver_user_ids.length)) {
-      setError("Please choose one or more approvers for every step");
-      return;
+    const isProprietary = dealCategory === "proprietary" && selectedModule === "deals";
+    if (!isProprietary) {
+      if (!steps.length) {
+        setError("At least one step is required");
+        return;
+      }
+      if (steps.some((s) => !s.approver_user_ids.length)) {
+        setError("Please choose one or more approvers for every step");
+        return;
+      }
     }
 
     const payload = {
       module: selectedModule,
-      steps: steps.map((s, idx) => ({
+      deal_category: selectedModule === "deals" ? dealCategory : "enterprise",
+      steps: isProprietary ? [] : steps.map((s, idx) => ({
         step_order: idx + 1,
         role: s.role,
         approver_user_ids: s.approver_user_ids,
@@ -180,7 +188,41 @@ export default function ApprovalWorkflowPage() {
           </select>
         </div>
 
-        {steps.map((step, idx) => {
+        {/* Deal Category — deals module only */}
+        {selectedModule === "deals" && (
+          <div className="space-y-2">
+            <label className="block text-xs font-medium text-gray-600">Deal Category</label>
+            <div className="flex gap-2 max-w-sm">
+              {(["enterprise", "proprietary"] as const).map(cat => (
+                <button
+                  key={cat}
+                  type="button"
+                  onClick={() => setDealCategory(cat)}
+                  className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border text-xs font-semibold transition-all ${
+                    dealCategory === cat
+                      ? "border-[#1e3a5f] bg-[#1e3a5f] text-white"
+                      : "border-gray-200 bg-white text-gray-600 hover:border-gray-300"
+                  }`}
+                >
+                  <span className={`w-3 h-3 rounded-full border-2 flex items-center justify-center shrink-0 ${
+                    dealCategory === cat ? "border-white" : "border-gray-400"
+                  }`}>
+                    {dealCategory === cat && <span className="w-1.5 h-1.5 rounded-full bg-white block" />}
+                  </span>
+                  {cat === "enterprise" ? "Enterprise" : "Proprietary"}
+                </button>
+              ))}
+            </div>
+            <p className="text-xs text-gray-500">
+              {dealCategory === "proprietary"
+                ? "All deals will be auto-approved — no approval steps required."
+                : "Deals will follow the approval steps configured below."}
+            </p>
+          </div>
+        )}
+
+        {/* Approval steps — hidden when proprietary */}
+        {(selectedModule !== "deals" || dealCategory === "enterprise") && steps.map((step, idx) => {
           const users = usersByRole[step.role] || [];
           return (
             <div key={idx} className="grid grid-cols-12 gap-3 items-end border border-gray-100 rounded-lg p-3">
@@ -223,12 +265,14 @@ export default function ApprovalWorkflowPage() {
         })}
 
         <div className="flex gap-3">
-          <button
-            onClick={addStep}
-            className="inline-flex items-center gap-2 px-3 py-2 text-sm border border-gray-200 rounded-lg hover:bg-gray-50"
-          >
-            <Plus className="w-4 h-4" /> Add Step
-          </button>
+          {(selectedModule !== "deals" || dealCategory === "enterprise") && (
+            <button
+              onClick={addStep}
+              className="inline-flex items-center gap-2 px-3 py-2 text-sm border border-gray-200 rounded-lg hover:bg-gray-50"
+            >
+              <Plus className="w-4 h-4" /> Add Step
+            </button>
+          )}
           <button
             onClick={save}
             disabled={saving}

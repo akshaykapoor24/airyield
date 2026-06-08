@@ -33,7 +33,7 @@ const INCLUSIONS_EXCLUSIONS = [
 ];
 
 const CONTINENTS         = ["Africa","Asia","Europe","North America","Oceania","South America","Antarctica"];
-const COUNTRY_GROUPS     = ["APAC","EUROPEAN NATIONS","GCC/MIDDLE EAST","LATIN AMERICA","MEAI","MEAI/APAC","MEAI/SAARC","MEAI/SAARC/APAC","NAM","OTHER","SAARC","SAARC/APAC"];
+const COUNTRY_GROUPS     = ["APAC","EUROPEAN NATIONS","GCC/MIDDLE EAST","LATIN AMERICA","MEAI","NAM","OTHER","SAARC"];
 const CITIES             = ["Delhi","Mumbai","Dubai","Doha","London","Frankfurt","New York","Singapore","Sydney"];
 const FARE_TYPE_CATS     = ["Normal","Group","Corporate","Excursion","Tour"];
 const TOUR_CODES         = ["TC001","TC002","TC003","TC004"];
@@ -202,9 +202,10 @@ type ReviewRow = {
   extra: Record<string,string>;
 };
 
+type IEFieldValue = string | string[];
 type RowInclExcl = {
   types:     string[];
-  data:      Record<string, Record<string,string>>;
+  data:      Record<string, Record<string, IEFieldValue>>;
   viceVersa: Record<string, boolean>;
 };
 
@@ -361,6 +362,73 @@ function MultiCheckboxDropdown({label,placeholder="Select...",options,values,onC
   );
 }
 
+function MultiSearchSelectField({label,placeholder="Search and select",options,values,onChange}:{label?:string;placeholder?:string;options:string[];values:string[];onChange:(v:string[])=>void}){
+  const [open,setOpen]=useState(false);const [search,setSearch]=useState("");
+  const ref=useRef<HTMLDivElement>(null);
+  useEffect(()=>{const h=(e:MouseEvent)=>{if(ref.current&&!ref.current.contains(e.target as Node))setOpen(false);};document.addEventListener("mousedown",h);return()=>document.removeEventListener("mousedown",h);},[]);
+  const filtered=options.filter(o=>o.toLowerCase().includes(search.toLowerCase()));
+  const toggle=(opt:string)=>onChange(values.includes(opt)?values.filter(v=>v!==opt):[...values,opt]);
+  const display=values.length?values.join(", "):null;
+  return(
+    <div className="relative" ref={ref}>
+      {label&&<label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">{label}</label>}
+      <button type="button" onClick={()=>{setOpen(o=>!o);setSearch("");}} className="w-full flex items-start justify-between border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-white text-left focus:outline-none focus:ring-1 focus:ring-blue-400 min-h-[28px]">
+        <span className={display?"text-gray-800 whitespace-normal break-words leading-relaxed":"text-gray-400"}>{display||placeholder}</span>
+        <div className="flex items-center gap-0.5 flex-shrink-0 ml-1 mt-0.5">
+          {values.length>0&&<span onClick={e=>{e.stopPropagation();onChange([]);}} className="text-gray-300 hover:text-red-400"><X className="w-3 h-3"/></span>}
+          <ChevronDown className="w-3.5 h-3.5 text-gray-400"/>
+        </div>
+      </button>
+      {open&&<div className="absolute z-50 w-full mt-0.5 bg-white border border-gray-200 rounded-md shadow-lg">
+        <div className="p-1.5 border-b border-gray-100"><input autoFocus value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search..." className="w-full text-xs px-2 py-1 border border-gray-200 rounded focus:outline-none"/></div>
+        <div className="max-h-44 overflow-y-auto">
+          {filtered.length?filtered.map(opt=>(
+            <label key={opt} className="flex items-center gap-2 px-2.5 py-1.5 text-xs text-gray-700 hover:bg-blue-50 cursor-pointer">
+              <input type="checkbox" checked={values.includes(opt)} onChange={()=>toggle(opt)} className="w-3.5 h-3.5 rounded border-gray-300 accent-blue-600"/>
+              {opt}
+            </label>
+          )):<p className="px-2.5 py-1.5 text-xs text-gray-400">No results</p>}
+        </div>
+      </div>}
+    </div>
+  );
+}
+
+function TagInput({label,placeholder="Type and press Enter",values,onChange}:{label?:string;placeholder?:string;values:string[];onChange:(v:string[])=>void}){
+  const [text,setText]=useState("");
+  const commit=()=>{
+    const v=text.trim();
+    if(v&&!values.includes(v)){onChange([...values,v]);}
+    setText("");
+  };
+  const handleKey=(e:React.KeyboardEvent<HTMLInputElement>)=>{
+    if(e.key==="Enter"||e.key===","){e.preventDefault();commit();}
+    if(e.key==="Backspace"&&!text&&values.length){onChange(values.slice(0,-1));}
+  };
+  return(
+    <div>
+      {label&&<label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">{label}</label>}
+      <div className="min-h-[28px] border border-gray-200 rounded-md px-2 py-1 flex flex-wrap gap-1 bg-white focus-within:ring-1 focus-within:ring-blue-400">
+        {values.map(v=>(
+          <span key={v} className="flex items-center gap-1 px-1.5 py-0.5 bg-blue-50 text-blue-700 border border-blue-200 rounded text-[10px] font-medium">
+            {v}
+            <button type="button" onClick={()=>onChange(values.filter(x=>x!==v))} className="text-blue-400 hover:text-red-500 leading-none"><X className="w-2.5 h-2.5"/></button>
+          </span>
+        ))}
+        <input
+          value={text}
+          onChange={e=>setText(e.target.value)}
+          onKeyDown={handleKey}
+          onBlur={commit}
+          placeholder={values.length?"":placeholder}
+          className="flex-1 min-w-[80px] text-xs border-none outline-none bg-transparent py-0.5 text-gray-800 placeholder-gray-400"
+        />
+      </div>
+      <p className="text-[9px] text-gray-400 mt-0.5">Press Enter or comma to add a code</p>
+    </div>
+  );
+}
+
 function SectionCard({title,children}:{title:string;children:React.ReactNode}){
   return(
     <div className="bg-white rounded-lg border border-gray-200">
@@ -448,22 +516,20 @@ function InclExclDetailModal({
   onClose,
 }:{
   type:string;
-  initialData: Record<string,string>;
-  onSave:(data:Record<string,string>)=>void;
+  initialData: Record<string, IEFieldValue>;
+  onSave:(data:Record<string, IEFieldValue>)=>void;
   onClose:()=>void;
 }){
-  const [form, setForm] = useState<Record<string,string>>(initialData);
+  const [form, setForm] = useState<Record<string, IEFieldValue>>(initialData);
   const isExcl = type.startsWith("Exclusion");
   const suffix  = isExcl ? "for Exclusion" : "for Inclusion";
 
+  // Load all options once — no dependencies between fields
   const [continentOptions,    setContinentOptions]    = useState<string[]>(CONTINENTS);
   const [countryGroupOptions, setCountryGroupOptions] = useState<string[]>(COUNTRY_GROUPS);
-  const [originCountries, setOriginCountries] = useState<string[]>([]);
-  const [destCountries,   setDestCountries]   = useState<string[]>([]);
-  const [originAirports,  setOriginAirports]  = useState<string[]>([]);
-  const [destAirports,    setDestAirports]    = useState<string[]>([]);
-  const [allCountries,    setAllCountries]    = useState<string[]>([]);
-  const [allAirports,     setAllAirports]     = useState<string[]>([]);
+  const [allCountries,        setAllCountries]        = useState<string[]>([]);
+  const [allAirports,         setAllAirports]         = useState<string[]>([]);
+  const [allCities,           setAllCities]           = useState<string[]>([]);
 
   useEffect(()=>{
     api.get<{continents:string[];country_groups:string[]}>("/airports/options")
@@ -472,63 +538,24 @@ function InclExclDetailModal({
         if(r.data.country_groups?.length) setCountryGroupOptions(r.data.country_groups);
       })
       .catch(()=>{});
-    api.get<{iata_code:string;country:string|null}[]>("/airports/?limit=5000")
+    api.get<{iata_code:string;country:string|null;city_airport_name:string}[]>("/airports/?limit=5000")
       .then(r=>{
         setAllAirports(r.data.map(a=>a.iata_code).filter(Boolean));
         const countries=[...new Set(r.data.map(a=>a.country).filter(Boolean))] as string[];
         setAllCountries(countries.sort());
+        const cities=[...new Set(r.data.map(a=>a.city_airport_name).filter(Boolean))].sort();
+        setAllCities(cities);
       })
       .catch(()=>{});
   },[]);
 
-  const origContinent = form["originContinents"] ?? "";
-  const destContinent = form["destContinents"]   ?? "";
-  const origCountry   = form["originCountry"]    ?? "";
-  const destCountry   = form["destCountry"]      ?? "";
-
-  useEffect(()=>{
-    if(!origContinent){setOriginCountries([]);return;}
-    api.get<{countries:string[]}>(`/airports/options?continent=${encodeURIComponent(origContinent)}`)
-      .then(r=>setOriginCountries(r.data.countries??[]))
-      .catch(()=>setOriginCountries([]));
-  },[origContinent]);
-
-  useEffect(()=>{
-    if(!destContinent){setDestCountries([]);return;}
-    api.get<{countries:string[]}>(`/airports/options?continent=${encodeURIComponent(destContinent)}`)
-      .then(r=>setDestCountries(r.data.countries??[]))
-      .catch(()=>setDestCountries([]));
-  },[destContinent]);
-
-  useEffect(()=>{
-    if(!origCountry){setOriginAirports([]);return;}
-    api.get<{airports:string[]}>(`/airports/options?country=${encodeURIComponent(origCountry)}`)
-      .then(r=>setOriginAirports(r.data.airports??[]))
-      .catch(()=>setOriginAirports([]));
-  },[origCountry]);
-
-  useEffect(()=>{
-    if(!destCountry){setDestAirports([]);return;}
-    api.get<{airports:string[]}>(`/airports/options?country=${encodeURIComponent(destCountry)}`)
-      .then(r=>setDestAirports(r.data.airports??[]))
-      .catch(()=>setDestAirports([]));
-  },[destCountry]);
-
-  const handleChange=(k:string,v:string)=>{
-    setForm(p=>({...p,[k]:v}));
+  // Helpers to read/write multi-value fields
+  const getArr=(k:string):string[]=>{
+    const v=form[k];
+    if(!v)return[];
+    return Array.isArray(v)?v:[v];
   };
-
-  const opts:Record<string,string[]>={
-    continents:continentOptions,           countryGroup:countryGroupOptions,
-    originContinents:continentOptions,     destContinents:continentOptions,
-    originCountryGroup:countryGroupOptions,destCountryGroup:countryGroupOptions,
-    originCountry:origContinent?originCountries:allCountries,
-    destCountry:destContinent?destCountries:allCountries,
-    originAirport:origCountry?originAirports:allAirports,
-    destAirport:destCountry?destAirports:allAirports,
-    city:CITIES, fareTypeCategory:FARE_TYPE_CATS,
-    class:INCL_CLASS_OPTIONS, tourCode:TOUR_CODES, domesticCountry:DOMESTIC_CTRS,
-  };
+  const setArr=(k:string,vals:string[])=>setForm(p=>({...p,[k]:vals}));
 
   const dateExclusionValues=[
     ...(form["dateExclusionTicket"]==="true"?["Ticket Date"]:[]),
@@ -541,30 +568,43 @@ function InclExclDetailModal({
     }));
   };
 
-  type IERow={key:string;label:string;isDate?:boolean;isSelect?:boolean;options?:string[];placeholder?:string};
+  const opts:Record<string,string[]>={
+    continents:continentOptions,            countryGroup:countryGroupOptions,
+    originContinents:continentOptions,      destContinents:continentOptions,
+    originCountryGroup:countryGroupOptions, destCountryGroup:countryGroupOptions,
+    originCountry:allCountries,             destCountry:allCountries,
+    originAirport:allAirports,              destAirport:allAirports,
+    city:allCities.length?allCities:CITIES, fareTypeCategory:FARE_TYPE_CATS,
+    class:INCL_CLASS_OPTIONS, soto:SOTO_OPTIONS,
+    domesticCountry:allCountries.length?allCountries:DOMESTIC_CTRS,
+  };
+
+  // All non-date fields use the same multi-select component
+  // Date fields remain single-value
+  type IERow={key:string;label:string;isDate?:boolean;isSearch?:boolean;isTag?:boolean;placeholder?:string};
   const rows:IERow[][]=[
     [{key:"validFrom",label:"Valid From",isDate:true},{key:"validTo",label:"Valid To",isDate:true}],
     [{key:"continents",label:`Continents ${suffix}`},{key:"countryGroup",label:`Country Group ${suffix}`}],
     [{key:"originContinents",label:`Origin Continents ${suffix}`},{key:"destContinents",label:`Destination Continents ${suffix}`}],
     [{key:"originCountryGroup",label:`Origin Country Group ${suffix}`},{key:"destCountryGroup",label:`Destination Country Group ${suffix}`}],
     [
-      {key:"originCountry",label:`Origin Country ${suffix}`,placeholder:"Search and select"},
-      {key:"destCountry",  label:`Destination Country ${suffix}`,placeholder:"Search and select"},
+      {key:"originCountry",label:`Origin Country ${suffix}`,isSearch:true,placeholder:"Search and select"},
+      {key:"destCountry",  label:`Destination Country ${suffix}`,isSearch:true,placeholder:"Search and select"},
     ],
     [
-      {key:"originAirport",label:`Origin Airport ${suffix}`,placeholder:"Search and select"},
-      {key:"destAirport",  label:`Destination Airport ${suffix}`,placeholder:"Search and select"},
+      {key:"originAirport",label:`Origin Airport ${suffix}`,isSearch:true,placeholder:"Search and select"},
+      {key:"destAirport",  label:`Destination Airport ${suffix}`,isSearch:true,placeholder:"Search and select"},
     ],
-    [{key:"city",label:`City ${suffix}`},{key:"fareTypeCategory",label:`Fare Type Category ${suffix}`}],
+    [{key:"city",label:`City ${suffix}`,isSearch:true,placeholder:"Search and select"},{key:"fareTypeCategory",label:`Fare Type Category ${suffix}`}],
     [
       {key:"class",label:`Class ${suffix}`},
       isExcl
-        ?{key:"soto",label:"SOTO for Exclusion",isSelect:true,options:SOTO_OPTIONS}
-        :{key:"tourCode",label:`Tour Code ${suffix}`},
+        ?{key:"soto",label:"SOTO for Exclusion"}
+        :{key:"tourCode",label:`Tour Code ${suffix}`,isTag:true},
     ],
     ...(isExcl
-      ?[[{key:"tourCode",label:`Tour Code ${suffix}`},{key:"domesticCountry",label:`Domestic Country ${suffix}`}]]
-      :[[{key:"domesticCountry",label:`Domestic Country ${suffix}`}]]
+      ?[[{key:"tourCode",label:`Tour Code ${suffix}`,isTag:true},{key:"domesticCountry",label:`Domestic Country ${suffix}`,isSearch:true,placeholder:"Search and select"}]]
+      :[[{key:"domesticCountry",label:`Domestic Country ${suffix}`,isSearch:true,placeholder:"Search and select"}]]
     ),
   ];
 
@@ -574,7 +614,7 @@ function InclExclDetailModal({
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
           <div>
             <h2 className="text-sm font-bold text-gray-900">Configure — {type}</h2>
-            <p className="text-xs text-gray-400 mt-0.5">Fill the applicable fields for this rule</p>
+            <p className="text-xs text-gray-400 mt-0.5">All fields support multiple selections. Fields are independent of each other.</p>
           </div>
           <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-lg"><X className="w-4 h-4 text-gray-500"/></button>
         </div>
@@ -595,13 +635,15 @@ function InclExclDetailModal({
                   {f.isDate?(
                     <div>
                       <label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">{f.label}</label>
-                      <input type="date" value={form[f.key]??""} onChange={e=>handleChange(f.key,e.target.value)}
+                      <input type="date" value={(form[f.key] as string)??""} onChange={e=>setForm(p=>({...p,[f.key]:e.target.value}))}
                         className="w-full border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 text-gray-800"/>
                     </div>
-                  ):f.isSelect?(
-                    <SelectField label={f.label} options={f.options??[]} value={form[f.key]??""} onChange={v=>handleChange(f.key,v)}/>
+                  ):f.isTag?(
+                    <TagInput label={f.label} values={getArr(f.key)} onChange={v=>setArr(f.key,v)}/>
+                  ):f.isSearch?(
+                    <MultiSearchSelectField label={f.label} placeholder={f.placeholder} options={opts[f.key]??[]} values={getArr(f.key)} onChange={v=>setArr(f.key,v)}/>
                   ):(
-                    <SearchSelectField label={f.label} placeholder={f.placeholder} options={opts[f.key]??[]} value={form[f.key]??""} onChange={v=>handleChange(f.key,v)}/>
+                    <MultiCheckboxDropdown label={f.label} placeholder={`Select ${f.label.toLowerCase()}…`} options={opts[f.key]??[]} values={getArr(f.key)} onChange={v=>setArr(f.key,v)}/>
                   )}
                 </div>
               ))}
@@ -647,21 +689,41 @@ function InclExclPopup({
       <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wide mb-2">Inclusions &amp; Exclusions</p>
       {INCLUSIONS_EXCLUSIONS.map(type=>{
         const isSelected=rowState.types.includes(type);
+        const typeData=rowState.data[type]??{};
+        // Collect all filled values for this type as human-readable chips
+        const valueSummary=Object.entries(typeData)
+          .filter(([k])=>!["dateExclusionTicket","dateExclusionTravel"].includes(k))
+          .flatMap(([,v])=>Array.isArray(v)?v:[v])
+          .filter(Boolean);
+        const dateExclParts=[
+          typeData["dateExclusionTicket"]==="true"?"Ticket Date":null,
+          typeData["dateExclusionTravel"]==="true"?"Travel Date":null,
+        ].filter(Boolean) as string[];
+        const allValues=[...dateExclParts,...valueSummary];
         return(
-          <div key={type} className="flex items-center gap-1 px-2 py-1.5 rounded-lg hover:bg-blue-50">
-            <button
-              onClick={()=>isSelected?onOpenType(type):onToggleType(type)}
-              className="flex items-center gap-2 flex-1 text-left"
-            >
-              <span className={`w-3.5 h-3.5 rounded border flex items-center justify-center flex-shrink-0 ${isSelected?"bg-[#1e3a5f] border-[#1e3a5f]":"border-gray-300"}`}>
-                {isSelected&&<Check className="w-2.5 h-2.5 text-white"/>}
-              </span>
-              <span className={`text-[11px] ${isSelected?"text-[#1e3a5f] font-semibold":"text-gray-700"}`}>{type}</span>
-            </button>
-            {isSelected&&(
-              <button onClick={()=>onRemoveType(type)} className="p-0.5 hover:bg-red-50 rounded text-red-400 flex-shrink-0" title="Remove">
-                <X className="w-3 h-3"/>
+          <div key={type} className="px-2 py-1.5 rounded-lg hover:bg-blue-50">
+            <div className="flex items-center gap-1">
+              <button
+                onClick={()=>isSelected?onOpenType(type):onToggleType(type)}
+                className="flex items-center gap-2 flex-1 text-left"
+              >
+                <span className={`w-3.5 h-3.5 rounded border flex items-center justify-center flex-shrink-0 ${isSelected?"bg-[#1e3a5f] border-[#1e3a5f]":"border-gray-300"}`}>
+                  {isSelected&&<Check className="w-2.5 h-2.5 text-white"/>}
+                </span>
+                <span className={`text-[11px] ${isSelected?"text-[#1e3a5f] font-semibold":"text-gray-700"}`}>{type}</span>
               </button>
+              {isSelected&&(
+                <button onClick={()=>onRemoveType(type)} className="p-0.5 hover:bg-red-50 rounded text-red-400 flex-shrink-0" title="Remove">
+                  <X className="w-3 h-3"/>
+                </button>
+              )}
+            </div>
+            {isSelected&&allValues.length>0&&(
+              <div className="flex flex-wrap gap-1 mt-1 ml-5">
+                {allValues.map((v,i)=>(
+                  <span key={i} className="px-1.5 py-0.5 rounded text-[9px] font-medium bg-blue-50 text-blue-700 border border-blue-100">{v}</span>
+                ))}
+              </div>
             )}
           </div>
         );
@@ -742,7 +804,7 @@ function ColumnMappingStep({
     for(let i=0;i<rowCount;i++){
       const rawRow=rawRows[i];
       if(!rawRow)continue;
-      const inclExclData:Record<string,Record<string,string>>={};
+      const inclExclData:Record<string,Record<string,IEFieldValue>>={};
       for(const type of selectedInclExcl){
         for(const f of INCL_EXCL_FIELDS){
           const colKey=`ie__${type}__${f.key}`;
@@ -755,8 +817,12 @@ function ColumnMappingStep({
               const lower=v.toLowerCase();
               if(lower.includes("ticket"))inclExclData[type]["dateExclusionTicket"]="true";
               if(lower.includes("travel"))inclExclData[type]["dateExclusionTravel"]="true";
-            }else{
+            }else if(f.type==="date"){
               inclExclData[type][f.key]=v;
+            }else{
+              // Split pipe-separated multi-values (e.g. "Asia|Europe")
+              const parts=v.split("|").map((s:string)=>s.trim()).filter(Boolean);
+              inclExclData[type][f.key]=parts.length>1?parts:parts[0];
             }
           }}
         }
@@ -1189,6 +1255,7 @@ export default function UploadDealPage(){
   const fileRef = useRef<HTMLInputElement>(null);
   const [selectedIncentives, setSelectedIncentives] = useState<string[]>([]);
   const [selectedInclExcl,   setSelectedInclExcl]   = useState<string[]>([]);
+  const [copyPrevInclExcl,   setCopyPrevInclExcl]   = useState(true);
 
   // ── Step 2 state ────────────────────────────────────────────────────────────
   const [preview,   setPreview]   = useState<ExtractionPreview|null>(null);
@@ -1285,7 +1352,7 @@ export default function UploadDealPage(){
   // eslint-disable-next-line react-hooks/exhaustive-deps
   },[rowInclExcl]);
 
-  const handleInclExclModalSave=(data:Record<string,string>)=>{
+  const handleInclExclModalSave=(data:Record<string, IEFieldValue>)=>{
     if(!inclExclModal)return;
     const {rowIdx,type}=inclExclModal;
     setRowInclExcl(p=>{
@@ -1451,6 +1518,7 @@ export default function UploadDealPage(){
           incl_excl_types: selectedInclExcl,
           incl_excl_data:  {},
           vice_versa:      {},
+          copy_prev_incl_excl: copyPrevInclExcl,
           column_map:      columnMap,
           rows: rows.map((r,i)=>{
             // Build this row's own incentive_data from its inc:: extra keys
@@ -1507,7 +1575,7 @@ export default function UploadDealPage(){
           <button onClick={()=>router.push(`/deals/${savedBatchId}`)} className="bg-[#1e3a5f] text-white px-5 py-2 rounded-lg text-sm font-medium hover:bg-[#16304f]">View Batch</button>
         )}
         <button onClick={()=>router.push("/deals")} className="border border-[#1e3a5f] text-[#1e3a5f] px-5 py-2 rounded-lg text-sm font-medium hover:bg-blue-50">View All Deals</button>
-        <button onClick={()=>{setStep(1);setFile(null);setPreview(null);setRows([]);setDealType("");setSupplierName("");setValidFromDate("");setColumnMap({});setSelectedIncentives([]);setSelectedInclExcl([]);setRowInclExcl({});setAiMode(false);setAiFileName("");setAiConfidence(0);setSavedBatchId(null);}}
+        <button onClick={()=>{setStep(1);setFile(null);setPreview(null);setRows([]);setDealType("");setSupplierName("");setValidFromDate("");setColumnMap({});setSelectedIncentives([]);setSelectedInclExcl([]);setRowInclExcl({});setAiMode(false);setAiFileName("");setAiConfidence(0);setSavedBatchId(null);setCopyPrevInclExcl(true);}}
           className="border border-gray-200 text-gray-700 px-5 py-2 rounded-lg text-sm font-medium hover:bg-gray-50">Upload Another</button>
       </div>
     </div>
@@ -1670,6 +1738,22 @@ export default function UploadDealPage(){
               </label>
               );})()}
 
+              {/* Copy Incl/Excl from Previous Deal toggle */}
+              <label className="flex items-center gap-2.5 select-none py-1 cursor-pointer">
+                <div
+                  onClick={()=>setCopyPrevInclExcl(v=>!v)}
+                  className={`relative w-10 h-5 rounded-full transition-colors duration-200 flex-shrink-0 ${copyPrevInclExcl?"bg-[#1e3a5f]":"bg-gray-200"}`}
+                >
+                  <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform duration-200 ${copyPrevInclExcl?"translate-x-5":"translate-x-0"}`}/>
+                </div>
+                <span className="text-xs font-medium text-gray-700">
+                  Copy Incl/Excl from Previous Deal
+                  <span className="ml-1.5 text-[11px] text-gray-400 font-normal">
+                    {copyPrevInclExcl?"Auto-copies from matching deal if incl/excl not set":"Will not auto-copy — set incl/excl manually"}
+                  </span>
+                </span>
+              </label>
+
               <button onClick={handleExtract} disabled={!file||!dealType||(dealType==="b2b"&&!supplierName)||uploading}
                 className="w-full bg-[#1e3a5f] text-white rounded-xl py-3 text-sm font-semibold hover:bg-[#16304f] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2">
                 {uploading
@@ -1690,6 +1774,8 @@ export default function UploadDealPage(){
           </div>
         </div>
       )}
+
+
 
       {/* ══ STEP 2 ══ */}
       {step===2&&preview&&(

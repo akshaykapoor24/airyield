@@ -14,6 +14,7 @@ class WorkflowStepCreate(BaseModel):
 class WorkflowCreate(BaseModel):
     module: str
     steps: list[WorkflowStepCreate]
+    deal_category: str = "enterprise"  # "proprietary" | "enterprise" — applies to deals module only
 
 
 class WorkflowStepRead(BaseModel):
@@ -31,6 +32,7 @@ class WorkflowRead(BaseModel):
     tenant_id: int
     module: str
     is_active: bool
+    deal_category: str = "enterprise"
     created_by_id: int
     created_at: datetime
     updated_at: datetime
@@ -110,6 +112,18 @@ class BulkApprovePayload(BaseModel):
 class BulkApproveResult(BaseModel):
     approved: list[int]
     failed: list[dict]
+
+
+class WorkflowPreviewApproverRead(BaseModel):
+    id: int
+    full_name: str
+    email: str
+
+
+class WorkflowPreviewStepRead(BaseModel):
+    step_order: int
+    role: str
+    approvers: list[WorkflowPreviewApproverRead]
 
 
 class DealHistoryStepRead(BaseModel):

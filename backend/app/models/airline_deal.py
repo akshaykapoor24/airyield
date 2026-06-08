@@ -49,6 +49,7 @@ class AirlineDeal(Base):
     incl_excl_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     vice_versa: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     deal_tag: Mapped[str] = mapped_column(String(50), nullable=False, server_default='standard')
+    deal_category: Mapped[str] = mapped_column(String(50), nullable=False, server_default='enterprise')
     batch_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

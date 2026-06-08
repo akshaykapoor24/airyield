@@ -36,6 +36,7 @@ class ApprovalWorkflow(Base):
         nullable=False,
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    deal_category: Mapped[str] = mapped_column(String(50), nullable=False, server_default='enterprise')
     created_by_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

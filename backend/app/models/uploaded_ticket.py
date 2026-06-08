@@ -62,6 +62,7 @@ class UploadedTicket(Base):
     acc_code:            Mapped[str | None]   = mapped_column(String(100), nullable=True)
     sold_to:             Mapped[str | None]   = mapped_column(String(20),  nullable=True)   # 'customer' | 'agency'
     customer_name:       Mapped[str | None]   = mapped_column(String(300), nullable=True)
+    tour_code:           Mapped[str | None]   = mapped_column(String(100), nullable=True)
 
     # ── Derived / calculation columns ─────────────────────────────────────────
     airline_name:          Mapped[str | None]   = mapped_column(String(200), nullable=True)

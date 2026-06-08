@@ -50,14 +50,33 @@ type ClassApproval = {
   target_id: number | null;
 };
 
-type AirportRecord = { id: number; iata_code: string; country: string; categorization: string | null; continent: string | null; city_airport_name: string };
-type AirlineRecord = { id: number; name: string; iata_code: string; icao_code: string | null };
-type ClassRecord   = { id: number; airline_name: string; class_type: string; class_code: string; airline_type: string | null; class_note: string | null };
-type CurrentRecord = AirportRecord | AirlineRecord | ClassRecord;
+type SupplierApproval = {
+  id: number;
+  name: string;
+  vendor_name: string | null;
+  vendor_type: string | null;
+  branches: { name: string; iata_code: string }[] | null;
+  contact_phone: string | null;
+  gst_number: string | null;
+  pan_number: string | null;
+  notes: string | null;
+  status: "pending" | "approved" | "rejected";
+  submitted_by: { id: number; full_name: string; email: string };
+  submitted_at: string;
+  rejection_reason: string | null;
+  request_type: "new" | "update";
+  target_id: number | null;
+};
+
+type AirportRecord  = { id: number; iata_code: string; country: string; categorization: string | null; continent: string | null; city_airport_name: string };
+type AirlineRecord  = { id: number; name: string; iata_code: string; icao_code: string | null };
+type ClassRecord    = { id: number; airline_name: string; class_type: string; class_code: string; airline_type: string | null; class_note: string | null };
+type SupplierRecord = { id: number; name: string; vendor_name: string | null; vendor_type: string | null; branches: { name: string; iata_code: string }[] | null; contact_phone: string | null; gst_number: string | null; pan_number: string | null; notes: string | null };
+type CurrentRecord  = AirportRecord | AirlineRecord | ClassRecord | SupplierRecord;
 
 type ApprovalItem = {
   key: string;
-  type: "airport" | "airline" | "class";
+  type: "airport" | "airline" | "class" | "supplier";
   id: number;
   code: string;
   name: string;
@@ -71,6 +90,16 @@ type ApprovalItem = {
 };
 
 // ── diff modal ─────────────────────────────────────────────────────────────
+
+function formatDiffVal(key: string, val: unknown): string {
+  if (key === "branches") {
+    if (!Array.isArray(val) || val.length === 0) return "";
+    return (val as { name: string; iata_code: string }[])
+      .map((b) => `${b.name} (${b.iata_code})`)
+      .join(", ");
+  }
+  return String(val ?? "");
+}
 
 const DIFF_FIELDS: Record<ApprovalItem["type"], { label: string; key: string }[]> = {
   airport: [
@@ -91,6 +120,16 @@ const DIFF_FIELDS: Record<ApprovalItem["type"], { label: string; key: string }[]
     { label: "Class Code",    key: "class_code" },
     { label: "Airline Type",  key: "airline_type" },
     { label: "Class Note",    key: "class_note" },
+  ],
+  supplier: [
+    { label: "Name",         key: "name" },
+    { label: "Display Name", key: "vendor_name" },
+    { label: "Type",         key: "vendor_type" },
+    { label: "Branches",     key: "branches" },
+    { label: "Contact",      key: "contact_phone" },
+    { label: "GST Number",   key: "gst_number" },
+    { label: "PAN Number",   key: "pan_number" },
+    { label: "Remarks",      key: "notes" },
   ],
 };
 
@@ -143,8 +182,8 @@ function ApprovalDiffModal({
               </thead>
               <tbody>
                 {fields.map(({ label, key }) => {
-                  const currentVal = String(cur[key] ?? "");
-                  const proposed  = String(item.rawData[key] ?? "");
+                  const currentVal = formatDiffVal(key, cur[key]);
+                  const proposed   = formatDiffVal(key, item.rawData[key]);
                   const changed   = currentVal !== proposed;
                   return (
                     <tr key={key} className={`border-b border-gray-50 ${changed ? "bg-amber-50/60" : ""}`}>
@@ -197,7 +236,7 @@ export default function ApprovalMatrixPage() {
   const [error, setError] = useState("");
   const [items, setItems] = useState<ApprovalItem[]>([]);
   const [query, setQuery] = useState("");
-  const [typeFilter, setTypeFilter] = useState<"all" | "airport" | "airline" | "class">("all");
+  const [typeFilter, setTypeFilter] = useState<"all" | "airport" | "airline" | "class" | "supplier">("all");
   const [statusFilter, setStatusFilter] = useState<"all" | "pending" | "approved" | "rejected">("pending");
   const [actingKey, setActingKey] = useState<string | null>(null);
   const [rejectingKey, setRejectingKey] = useState<string | null>(null);
@@ -211,10 +250,11 @@ export default function ApprovalMatrixPage() {
     setLoading(true);
     setError("");
     try {
-      const [airportsRes, airlinesRes, classesRes] = await Promise.all([
+      const [airportsRes, airlinesRes, classesRes, suppliersRes] = await Promise.all([
         api.get<AirportApproval[]>("/airports/approvals"),
         api.get<AirlineApproval[]>("/airlines/approvals"),
         api.get<ClassApproval[]>("/classes/approvals"),
+        api.get<SupplierApproval[]>("/suppliers/approvals"),
       ]);
 
       const airportItems: ApprovalItem[] = airportsRes.data.map((a) => ({
@@ -262,7 +302,22 @@ export default function ApprovalMatrixPage() {
         rawData: a as unknown as Record<string, unknown>,
       }));
 
-      setItems([...airportItems, ...airlineItems, ...classItems].sort((x, y) =>
+      const supplierItems: ApprovalItem[] = suppliersRes.data.map((a) => ({
+        key: `supplier-${a.id}`,
+        type: "supplier" as const,
+        id: a.id,
+        code: a.name,
+        name: a.vendor_name ?? a.name,
+        status: a.status,
+        submitted_by: a.submitted_by,
+        submitted_at: a.submitted_at,
+        rejection_reason: a.rejection_reason,
+        requestType: a.request_type ?? "new",
+        targetId: a.target_id ?? null,
+        rawData: a as unknown as Record<string, unknown>,
+      }));
+
+      setItems([...airportItems, ...airlineItems, ...classItems, ...supplierItems].sort((x, y) =>
         new Date(y.submitted_at).getTime() - new Date(x.submitted_at).getTime()
       ));
     } catch (e: unknown) {
@@ -286,6 +341,7 @@ export default function ApprovalMatrixPage() {
     try {
       const base = item.type === "airport" ? "/airports"
                  : item.type === "airline" ? "/airlines"
+                 : item.type === "supplier" ? "/suppliers"
                  : "/classes";
       const { data } = await api.get<CurrentRecord>(`${base}/${item.targetId}`);
       setDiffRecord(data);
@@ -333,7 +389,9 @@ export default function ApprovalMatrixPage() {
         ? "/airports/approvals"
         : item.type === "airline"
           ? "/airlines/approvals"
-          : "/classes/approvals";
+          : item.type === "supplier"
+            ? "/suppliers/approvals"
+            : "/classes/approvals";
       await api.patch(`${base}/${item.id}/approve`);
       await fetchApprovals();
     } catch (e: unknown) {
@@ -357,7 +415,9 @@ export default function ApprovalMatrixPage() {
         ? "/airports/approvals"
         : item.type === "airline"
           ? "/airlines/approvals"
-          : "/classes/approvals";
+          : item.type === "supplier"
+            ? "/suppliers/approvals"
+            : "/classes/approvals";
       await api.patch(`${base}/${item.id}/reject`, { rejection_reason: rejectReason || null });
       setRejectingKey(null);
       setRejectReason("");
@@ -426,6 +486,7 @@ export default function ApprovalMatrixPage() {
           <option value="airport">Airport</option>
           <option value="airline">Airline</option>
           <option value="class">Class</option>
+          <option value="supplier">Supplier</option>
         </select>
         <select
           value={statusFilter}
@@ -474,7 +535,9 @@ export default function ApprovalMatrixPage() {
                       ? "bg-teal-50 text-teal-700"
                       : item.type === "airline"
                         ? "bg-sky-50 text-sky-700"
-                        : "bg-emerald-50 text-emerald-700"
+                        : item.type === "supplier"
+                          ? "bg-purple-50 text-purple-700"
+                          : "bg-emerald-50 text-emerald-700"
                   }`}>
                     {item.type}
                   </span>

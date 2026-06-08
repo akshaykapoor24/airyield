@@ -59,6 +59,7 @@ async def count_suppliers(
             Supplier.name.ilike(term),
             Supplier.code.ilike(term),
             Supplier.vendor_type.ilike(term),
+            Supplier.vendor_name.ilike(term),
             Supplier.branch.ilike(term),
         ))
     result = await db.execute(q)
@@ -79,6 +80,7 @@ async def list_suppliers(
             Supplier.name.ilike(term),
             Supplier.code.ilike(term),
             Supplier.vendor_type.ilike(term),
+            Supplier.vendor_name.ilike(term),
             Supplier.branch.ilike(term),
         ))
     q = q.order_by(Supplier.name).offset(skip).limit(limit)
@@ -105,7 +107,9 @@ async def create_supplier(
             target = (await db.execute(select(Supplier).where(Supplier.id == payload.target_id))).scalar_one()
             target.name = payload.name.strip()
             target.vendor_type = payload.vendor_type
+            target.vendor_name = payload.vendor_name
             target.branch = payload.branch
+            target.branches = payload.branches
             target.contact_phone = payload.contact_phone
             target.alternate_phone = payload.alternate_phone
             target.contact_email = payload.contact_email
@@ -120,7 +124,9 @@ async def create_supplier(
         approval = SupplierApproval(
             name=payload.name.strip(),
             vendor_type=payload.vendor_type,
+            vendor_name=payload.vendor_name,
             branch=payload.branch,
+            branches=payload.branches,
             contact_phone=payload.contact_phone,
             alternate_phone=payload.alternate_phone,
             contact_email=payload.contact_email,
@@ -149,7 +155,9 @@ async def create_supplier(
             name=payload.name.strip(),
             code=code,
             vendor_type=payload.vendor_type,
+            vendor_name=payload.vendor_name,
             branch=payload.branch,
+            branches=payload.branches,
             contact_phone=payload.contact_phone,
             alternate_phone=payload.alternate_phone,
             contact_email=payload.contact_email,
@@ -166,7 +174,9 @@ async def create_supplier(
     approval = SupplierApproval(
         name=payload.name.strip(),
         vendor_type=payload.vendor_type,
+        vendor_name=payload.vendor_name,
         branch=payload.branch,
+        branches=payload.branches,
         contact_phone=payload.contact_phone,
         alternate_phone=payload.alternate_phone,
         contact_email=payload.contact_email,
@@ -250,7 +260,18 @@ async def bulk_upload_suppliers(
             continue
 
         vendor_type = str(row.get("TYPE", "") or "").strip() or None
+        vendor_name = str(row.get("VENDOR_DISPLAY_NAME", "") or "").strip() or None
         branch = str(row.get("BRANCH", "") or "").strip() or None
+        # Parse BRANCHES column: "Delhi|DEL;Mumbai|BOM"
+        branches_raw = str(row.get("BRANCHES", "") or "").strip()
+        branches: list | None = None
+        if branches_raw:
+            parsed = []
+            for entry in branches_raw.split(";"):
+                parts = entry.strip().split("|")
+                if parts[0].strip():
+                    parsed.append({"name": parts[0].strip(), "iata_code": (parts[1].strip().upper() if len(parts) > 1 else "")})
+            branches = parsed or None
         contact_phone = str(row.get("CONTACT_NUMBER", "") or "").strip() or None
         alternate_phone = str(row.get("ALTERNATE_CONTACT_NO", "") or "").strip() or None
         contact_email = str(row.get("CONTACT_EMAIL", "") or "").strip() or None
@@ -264,7 +285,8 @@ async def bulk_upload_suppliers(
                 code = await _generate_code(db)
                 supplier = Supplier(
                     name=name, code=code,
-                    vendor_type=vendor_type, branch=branch,
+                    vendor_type=vendor_type, vendor_name=vendor_name,
+                    branch=branch, branches=branches,
                     contact_phone=contact_phone, alternate_phone=alternate_phone,
                     contact_email=contact_email, alternate_email=alternate_email,
                     gst_number=gst_number, pan_number=pan_number, notes=notes,
@@ -273,7 +295,8 @@ async def bulk_upload_suppliers(
                 await db.commit()
             else:
                 approval = SupplierApproval(
-                    name=name, vendor_type=vendor_type, branch=branch,
+                    name=name, vendor_type=vendor_type, vendor_name=vendor_name,
+                    branch=branch, branches=branches,
                     contact_phone=contact_phone, alternate_phone=alternate_phone,
                     contact_email=contact_email, alternate_email=alternate_email,
                     gst_number=gst_number, pan_number=pan_number, notes=notes,
@@ -300,11 +323,14 @@ async def download_supplier_template():
     ws.title = "Supplier Template"
 
     headers = [
-        "VENDOR_NAME", "TYPE", "BRANCH", "CONTACT_NUMBER", "ALTERNATE_CONTACT_NO",
+        "VENDOR_NAME", "VENDOR_DISPLAY_NAME", "TYPE",
+        "BRANCHES",
+        "CONTACT_NUMBER", "ALTERNATE_CONTACT_NO",
         "CONTACT_EMAIL", "ALTERNATE_EMAIL", "GST_NUMBER", "PAN_NUMBER", "REMARKS",
     ]
     ws.append(headers)
-    ws.append([""] * len(headers))
+    # Sample row showing BRANCHES format
+    ws.append(["Sample Supplier", "Display Name", "Agent", "Delhi|DEL;Mumbai|BOM", "", "", "", "", "", "", ""])
 
     bio = BytesIO()
     wb.save(bio)
@@ -369,7 +395,9 @@ async def approve_supplier(
 
         target.name = approval.name
         target.vendor_type = approval.vendor_type
+        target.vendor_name = approval.vendor_name
         target.branch = approval.branch
+        target.branches = approval.branches
         target.contact_phone = approval.contact_phone
         target.alternate_phone = approval.alternate_phone
         target.contact_email = approval.contact_email
@@ -390,7 +418,8 @@ async def approve_supplier(
     code = await _generate_code(db)
     supplier = Supplier(
         name=approval.name, code=code,
-        vendor_type=approval.vendor_type, branch=approval.branch,
+        vendor_type=approval.vendor_type, vendor_name=approval.vendor_name,
+        branch=approval.branch, branches=approval.branches,
         contact_phone=approval.contact_phone, alternate_phone=approval.alternate_phone,
         contact_email=approval.contact_email, alternate_email=approval.alternate_email,
         gst_number=approval.gst_number, pan_number=approval.pan_number,
