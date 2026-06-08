@@ -110,13 +110,20 @@ def _flight_type_matches(segment_type: str | None, plb_flight_type: str | None) 
 
 
 
+_NORMAL_SALE_TYPES = {"sales", "sale", "invoice"}
+
+
 def _trigger_matches(invoice_type: str | None, trigger_type: str | None) -> bool:
     """Ticket invoice_type (Sales/Flown) vs deal trigger_type."""
     if not trigger_type:
         return True
     if not invoice_type:
         return True
-    return invoice_type.strip().lower() == trigger_type.strip().lower()
+    iv = invoice_type.strip().lower()
+    tt = trigger_type.strip().lower()
+    if iv in _NORMAL_SALE_TYPES and tt in _NORMAL_SALE_TYPES:
+        return True
+    return iv == tt
 
 
 def _plb_dates_match(travel_date: date, plb: dict) -> bool:
@@ -280,6 +287,7 @@ class DealMatchingService:
         ticket_departure_raw: str | None = None,
         ticket_airline_name: str | None = None,
         supplier_agency:     str | None = None,
+        tour_code:           str | None = None,
     ) -> list:
         """
         Return a full step-by-step diagnostic for every approved deal belonging to this
@@ -461,6 +469,7 @@ class DealMatchingService:
                         ticket_date_raw=ticket_date_raw,
                         departure_raw=ticket_departure_raw,
                         airline_name=ticket_airline_name or airline_name,
+                        tour_code=tour_code,
                     )
 
             # ── Inclusion For Payout diagnostic ───────────────────────────
@@ -475,6 +484,7 @@ class DealMatchingService:
                     ticket_date_raw=ticket_date_raw,
                     departure_raw=ticket_departure_raw,
                     airline_name=ticket_airline_name or airline_name,
+                    tour_code=tour_code,
                 )
 
             return DealDiagnostic(

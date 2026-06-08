@@ -7,7 +7,9 @@ class SupplierCreate(BaseModel):
     name: str
     code: Optional[str] = None
     vendor_type: Optional[str] = None
+    vendor_name: Optional[str] = None
     branch: Optional[str] = None
+    branches: Optional[list] = None   # [{name: str, iata_code: str}]
     contact_phone: Optional[str] = None
     alternate_phone: Optional[str] = None
     contact_email: Optional[str] = None
@@ -22,7 +24,9 @@ class SupplierCreate(BaseModel):
 class SupplierUpdate(BaseModel):
     name: Optional[str] = None
     vendor_type: Optional[str] = None
+    vendor_name: Optional[str] = None
     branch: Optional[str] = None
+    branches: Optional[list] = None
     contact_phone: Optional[str] = None
     alternate_phone: Optional[str] = None
     contact_email: Optional[str] = None
@@ -38,7 +42,9 @@ class SupplierRead(BaseModel):
     name: str
     code: str
     vendor_type: Optional[str]
+    vendor_name: Optional[str] = None
     branch: Optional[str]
+    branches: Optional[list] = None
     contact_phone: Optional[str]
     alternate_phone: Optional[str]
     contact_email: Optional[str]
@@ -63,7 +69,9 @@ class SupplierApprovalRead(BaseModel):
     id: int
     name: str
     vendor_type: Optional[str]
+    vendor_name: Optional[str] = None
     branch: Optional[str]
+    branches: Optional[list] = None
     contact_phone: Optional[str]
     alternate_phone: Optional[str]
     contact_email: Optional[str]
@@ -87,7 +95,9 @@ class SupplierApprovalRead(BaseModel):
             "id": obj.id,
             "name": obj.name,
             "vendor_type": obj.vendor_type,
+            "vendor_name": obj.vendor_name,
             "branch": obj.branch,
+            "branches": obj.branches,
             "contact_phone": obj.contact_phone,
             "alternate_phone": obj.alternate_phone,
             "contact_email": obj.contact_email,

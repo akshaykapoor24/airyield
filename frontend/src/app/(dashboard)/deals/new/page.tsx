@@ -558,182 +558,54 @@ function SectionCard({ title, children }: { title: string; children: React.React
 }
 
 // ── deal type selection screen ─────────────────────────────────────────────
-type WorkflowPreviewStep = { step_order: number; role: string; approvers: { id: number; full_name: string; email: string }[] };
-
-function DealTypeSelector({
-  onSelect,
-}: {
-  onSelect: (t: "airline" | "b2b", c: "proprietary" | "enterprise") => void;
-}) {
-  const [selectedType, setSelectedType] = useState<"airline" | "b2b" | null>(null);
-  const [selectedCategory, setSelectedCategory] = useState<"proprietary" | "enterprise">("enterprise");
-  const [workflowPreview, setWorkflowPreview] = useState<WorkflowPreviewStep[] | null>(null);
-  const [loadingPreview, setLoadingPreview] = useState(false);
-  const [modalOpen, setModalOpen] = useState(false);
-
-  useEffect(() => {
-    if (selectedCategory !== "enterprise") { setWorkflowPreview(null); return; }
-    setLoadingPreview(true);
-    api.get<WorkflowPreviewStep[]>("/approval-workflows/deals-preview")
-      .then(r => setWorkflowPreview(r.data))
-      .catch(() => setWorkflowPreview([]))
-      .finally(() => setLoadingPreview(false));
-  }, [selectedCategory]);
+function DealTypeSelector({ onSelect }: { onSelect: (t: "airline" | "b2b") => void }) {
+  const [selected, setSelected] = useState<"airline" | "b2b" | null>(null);
 
   return (
-    <>
-      <div className="min-h-[60vh] flex items-center justify-center">
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-10 w-full max-w-md">
-          <h1 className="text-base font-semibold text-gray-800 mb-1"> Deal Deatils</h1>
-          <p className="text-xs text-gray-400 mb-6">Choose the type of deal you want to create.</p>
+    <div className="min-h-[60vh] flex items-center justify-center">
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-10 w-full max-w-md">
+        <h1 className="text-base font-semibold text-gray-800 mb-1">Select Deal Type</h1>
+        <p className="text-xs text-gray-400 mb-6">Choose the type of deal you want to create.</p>
 
-          {/* ── Deal Category ── */}
-          <p className="text-xs font-semibold text-gray-700 mb-2">Deal Category</p>
-          <div className="flex gap-2 mb-2">
-            {([
-              { value: "enterprise"  as const, label: "Enterprise"  },
-              { value: "proprietary" as const, label: "Proprietary" },
-            ] as const).map(opt => (
-              <button
-                key={opt.value}
-                type="button"
-                onClick={() => setSelectedCategory(opt.value)}
-                className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border text-xs font-semibold transition-all ${
-                  selectedCategory === opt.value
-                    ? "border-[#1e3a5f] bg-[#1e3a5f] text-white"
-                    : "border-gray-200 bg-white text-gray-600 hover:border-gray-300"
-                }`}
-              >
-                <span className={`w-3 h-3 rounded-full border-2 flex items-center justify-center flex-shrink-0 ${
-                  selectedCategory === opt.value ? "border-white" : "border-gray-400"
-                }`}>
-                  {selectedCategory === opt.value && <span className="w-1.5 h-1.5 rounded-full bg-white block" />}
-                </span>
-                {opt.label}
-              </button>
-            ))}
-          </div>
-          {selectedCategory === "proprietary" && (
-            <p className="text-[10px] text-gray-400 mb-5">Deal will be auto-approved, bypassing the approval workflow.</p>
-          )}
-          {selectedCategory === "enterprise" && (
-            <div className="flex items-center justify-between mb-5">
-              <p className="text-[10px] text-gray-400">Deal will follow the approval workflow.</p>
-              <button type="button" onClick={() => setModalOpen(true)}
-                className="text-[10px] font-semibold text-[#1e3a5f] hover:underline flex-shrink-0 ml-2">
-                See workflow →
-              </button>
-            </div>
-          )}
-
-          {/* ── Deal Type ── */}
-          <p className="text-xs font-semibold text-gray-700 mb-2">Deal Type</p>
-          <div className="flex flex-col gap-3 mb-6">
-            {(["airline", "b2b"] as const).map(type => (
-              <label key={type}
-                className={`flex items-center gap-3 border rounded-lg px-4 py-3.5 cursor-pointer transition-colors ${
-                  selectedType === type
-                    ? "border-blue-500 bg-blue-50/60"
-                    : "border-gray-200 hover:border-gray-300 hover:bg-gray-50/60"
-                }`}>
-                <input
-                  type="radio"
-                  name="dealType"
-                  value={type}
-                  checked={selectedType === type}
-                  onChange={() => setSelectedType(type)}
-                  className="w-4 h-4 accent-blue-600"
-                />
-                <div>
-                  <span className="text-sm font-medium text-gray-800">
-                    {type === "airline" ? "Airline" : "B2B"}
-                  </span>
-                  <p className="text-[11px] text-gray-400 mt-0.5">
-                    {type === "airline"
-                      ? "Airline contract with full incentive and payout details"
-                      : "B2B deal without contract year, trigger type or payout type"}
-                  </p>
-                </div>
-              </label>
-            ))}
-          </div>
-
-          {/* Continue */}
-          <button
-            type="button"
-            disabled={!selectedType}
-            onClick={() => selectedType && onSelect(selectedType, selectedCategory)}
-            className="w-full py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
-            Continue →
-          </button>
-        </div>
-      </div>
-
-      {/* Workflow preview modal */}
-      {modalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setModalOpen(false)}>
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+        <div className="flex flex-col gap-3 mb-8">
+          {(["airline", "b2b"] as const).map(type => (
+            <label key={type}
+              className={`flex items-center gap-3 border rounded-lg px-4 py-3.5 cursor-pointer transition-colors ${
+                selected === type
+                  ? "border-blue-500 bg-blue-50/60"
+                  : "border-gray-200 hover:border-gray-300 hover:bg-gray-50/60"
+              }`}>
+              <input
+                type="radio"
+                name="dealType"
+                value={type}
+                checked={selected === type}
+                onChange={() => setSelected(type)}
+                className="w-4 h-4 accent-blue-600"
+              />
               <div>
-                <h2 className="text-sm font-bold text-gray-900">Approval Workflow</h2>
-                <p className="text-xs text-gray-400 mt-0.5">Steps your deal will go through before approval</p>
+                <span className="text-sm font-medium text-gray-800">
+                  {type === "airline" ? "Airline" : "B2B"}
+                </span>
+                <p className="text-[11px] text-gray-400 mt-0.5">
+                  {type === "airline"
+                    ? "Airline contract with full incentive and payout details"
+                    : "B2B deal without contract year, trigger type or payout type"}
+                </p>
               </div>
-              <button onClick={() => setModalOpen(false)} className="p-1.5 hover:bg-gray-100 rounded-lg">
-                <X className="w-4 h-4 text-gray-500" />
-              </button>
-            </div>
-            <div className="px-5 py-4">
-              {loadingPreview && (
-                <div className="flex items-center gap-2 text-sm text-gray-400 py-6 justify-center">
-                  <span className="w-4 h-4 border-2 border-gray-300 border-t-blue-500 rounded-full animate-spin" />
-                  <span>Loading workflow…</span>
-                </div>
-              )}
-              {!loadingPreview && (!workflowPreview || workflowPreview.length === 0) && (
-                <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2.5">
-                  <p className="text-xs text-amber-700">No approval workflow configured. Ask your Super Admin to set one up.</p>
-                </div>
-              )}
-              {!loadingPreview && workflowPreview && workflowPreview.length > 0 && (
-                <div>
-                  {workflowPreview.map((s, i) => (
-                    <div key={s.step_order} className="flex gap-4 pb-5 last:pb-0">
-                      <div className="flex flex-col items-center">
-                        <span className="w-7 h-7 rounded-full bg-[#1e3a5f] text-white flex items-center justify-center text-xs font-bold flex-shrink-0">{s.step_order}</span>
-                        {i < workflowPreview.length - 1 && <span className="flex-1 w-px bg-gray-200 mt-1" />}
-                      </div>
-                      <div className="flex-1 pt-0.5">
-                        <p className="text-xs font-semibold text-gray-800 capitalize">{s.role.replace(/_/g, " ")}</p>
-                        {s.approvers.length > 0 ? (
-                          <div className="mt-1.5 space-y-1">
-                            {s.approvers.map(a => (
-                              <div key={a.id} className="flex items-center gap-2">
-                                <span className="w-5 h-5 rounded-full bg-blue-100 text-[#1e3a5f] flex items-center justify-center text-[10px] font-bold flex-shrink-0">
-                                  {a.full_name.charAt(0).toUpperCase()}
-                                </span>
-                                <div>
-                                  <p className="text-[11px] font-medium text-gray-700">{a.full_name}</p>
-                                  <p className="text-[10px] text-gray-400">{a.email}</p>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        ) : (
-                          <p className="text-[11px] text-gray-400 mt-1">No approvers assigned</p>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-            <div className="px-5 py-3 border-t border-gray-100 flex justify-end">
-              <button onClick={() => setModalOpen(false)} className="px-4 py-1.5 rounded-lg text-xs font-semibold bg-[#1e3a5f] text-white hover:bg-[#16304f]">Close</button>
-            </div>
-          </div>
+            </label>
+          ))}
         </div>
-      )}
-    </>
+
+        <button
+          type="button"
+          disabled={!selected}
+          onClick={() => selected && onSelect(selected)}
+          className="w-full py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+          Continue →
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -741,8 +613,7 @@ function DealTypeSelector({
 export default function NewDealPage() {
   const router = useRouter();
 
-  const [dealType, setDealType]         = useState<"airline" | "b2b" | null>(null);
-  const [dealCategory, setDealCategory] = useState<"proprietary" | "enterprise">("enterprise");
+  const [dealType, setDealType] = useState<"airline" | "b2b" | null>(null);
 
   // airline contract
   const [airlineType, setAirlineType]     = useState("");
@@ -887,7 +758,6 @@ export default function NewDealPage() {
         login_id:       airlineType === "LCC" ? (loginId     || null) : null,
         remark:         remark       || null,
         deal_maker_name: dealMakerName || null,
-        deal_category:   dealCategory || "enterprise",
         incentive_types: selectedIncentives,
         incentive_data:  incentiveData,
         incl_excl_types: selectedInclExcl,
@@ -926,9 +796,7 @@ export default function NewDealPage() {
   // ── Step 0: deal-type + category selection ──────────────────────────────
   if (dealType === null) {
     return (
-      <DealTypeSelector
-        onSelect={(t, c) => { setDealType(t); setDealCategory(c); }}
-      />
+      <DealTypeSelector onSelect={setDealType} />
     );
   }
 
@@ -946,9 +814,6 @@ export default function NewDealPage() {
         <span className="text-gray-300 text-xs">|</span>
         <h1 className="text-sm font-semibold text-gray-700">
           Create Deal — <span className="text-blue-600">{dealType === "airline" ? "Airline" : "B2B"}</span>
-          <span className={`ml-2 text-[11px] font-semibold px-2 py-0.5 rounded-full border ${dealCategory === "proprietary" ? "bg-violet-50 text-violet-700 border-violet-200" : "bg-blue-50 text-blue-700 border-blue-200"}`}>
-            {dealCategory === "proprietary" ? "Proprietary" : "Enterprise"}
-          </span>
         </h1>
       </div>
 

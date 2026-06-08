@@ -8,7 +8,6 @@ class B2BDealCreate(BaseModel):
     source_agent: Optional[str] = None
     deal_maker_name: Optional[str] = None
     deal_tag: Optional[str] = "standard"
-    deal_category: Optional[str] = "enterprise"  # "proprietary" | "enterprise"
     supplier_name: Optional[str] = None
     remark: Optional[str] = None
     airline_type: str

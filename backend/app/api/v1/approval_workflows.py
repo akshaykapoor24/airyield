@@ -119,7 +119,8 @@ async def create_or_replace_workflow(
     current_user: User = Depends(_require_super_admin),
 ):
     module = _parse_module(payload.module)
-    if not payload.steps:
+    is_proprietary = payload.deal_category == "proprietary" and module == WorkflowModule.DEALS
+    if not is_proprietary and not payload.steps:
         raise HTTPException(status_code=400, detail="At least one step is required")
 
     # enforce unique step ordering
@@ -148,6 +149,7 @@ async def create_or_replace_workflow(
         tenant_id=current_user.tenant_id,
         module=module,
         is_active=True,
+        deal_category=payload.deal_category,
         created_by_id=current_user.id,
     )
     db.add(workflow)
@@ -195,6 +197,12 @@ async def update_workflow(
 
     if _parse_module(payload.module) != workflow.module:
         raise HTTPException(status_code=400, detail="Module cannot be changed")
+
+    is_proprietary = payload.deal_category == "proprietary" and workflow.module == WorkflowModule.DEALS
+    if not is_proprietary and not payload.steps:
+        raise HTTPException(status_code=400, detail="At least one step is required")
+
+    workflow.deal_category = payload.deal_category
 
     for step in list(workflow.steps):
         await db.delete(step)

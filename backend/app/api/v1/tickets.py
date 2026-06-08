@@ -263,6 +263,7 @@ async def confirm_ticket_upload(
             acc_code=row.acc_code,
             sold_to=row.sold_to,
             customer_name=row.customer_name,
+            tour_code=row.tour_code,
             airline_name=resolved_airline_name,
             split_type=row.split_type,
         )
@@ -409,6 +410,28 @@ def _parse_travel_date(departure_datetime: str | None, ticket_date: str | None) 
 _CANCELLED_INVOICE_TYPES = {"credit note", "refund"}
 
 
+async def _find_original_ticket(
+    ticket_number: str,
+    tenant_id: int,
+    current_batch_id: str,
+    db: AsyncSession,
+) -> UploadedTicket | None:
+    """Find the most recent prior ticket with the same ticket_number that had commission calculated."""
+    res = await db.execute(
+        select(UploadedTicket)
+        .where(
+            UploadedTicket.tenant_id == tenant_id,
+            UploadedTicket.ticket_number == ticket_number,
+            UploadedTicket.batch_id != current_batch_id,
+            UploadedTicket.calculated_incentive.isnot(None),
+            UploadedTicket.ticket_status.in_(["calculated", "included"]),
+        )
+        .order_by(UploadedTicket.created_at.desc())
+        .limit(1)
+    )
+    return res.scalar_one_or_none()
+
+
 async def _run_single(
     ticket: UploadedTicket,
     db: AsyncSession,
@@ -420,18 +443,50 @@ async def _run_single(
     ticket.ticket_status = "calculated"
 
     if ticket.invoice_type and ticket.invoice_type.strip().lower() in _CANCELLED_INVOICE_TYPES:
-        ticket.ticket_status        = "cancelled"
-        ticket.matched_deal_id      = None
-        ticket.matched_deal_type    = None
-        ticket.matched_deal_name    = None
-        ticket.calculated_incentive = None
-        ticket.exclusion_reason     = None
-        return RunCalculationResult(
-            ticket_id=ticket.id, matched=False, cancelled=True,
-            matched_deal_id=None, matched_deal_type=None,
-            matched_deal_name=None, calculated_incentive=None,
-            message=f"Skipped: invoice type '{ticket.invoice_type}' is a cancellation (credit note/refund).",
-        )
+        ticket.comm_sell = 0
+
+        original = None
+        if ticket.ticket_number:
+            original = await _find_original_ticket(ticket.ticket_number, tenant_id, ticket.batch_id, db)
+
+        if original and original.calculated_incentive:
+            reversal = -(float(original.calculated_incentive))
+            ticket.ticket_status        = "reversed"
+            ticket.matched_deal_id      = original.matched_deal_id
+            ticket.matched_deal_type    = original.matched_deal_type
+            ticket.matched_deal_name    = original.matched_deal_name
+            ticket.calculated_incentive = reversal
+            ticket.exclusion_reason     = (
+                f"Reversal of ticket {ticket.ticket_number} — "
+                f"original incentive {original.calculated_incentive} from statement {original.batch_id}"
+            )
+            return RunCalculationResult(
+                ticket_id=ticket.id, matched=True, reversed=True, cancelled=False,
+                matched_deal_id=original.matched_deal_id,
+                matched_deal_type=original.matched_deal_type,
+                matched_deal_name=original.matched_deal_name,
+                calculated_incentive=reversal,
+                message=(
+                    f"Commission reversed: original incentive ₹{original.calculated_incentive} "
+                    f"reversed from statement {original.batch_id}."
+                ),
+            )
+        else:
+            ticket.ticket_status        = "cancelled"
+            ticket.matched_deal_id      = None
+            ticket.matched_deal_type    = None
+            ticket.matched_deal_name    = None
+            ticket.calculated_incentive = 0
+            ticket.exclusion_reason     = None
+            return RunCalculationResult(
+                ticket_id=ticket.id, matched=False, cancelled=True,
+                matched_deal_id=None, matched_deal_type=None,
+                matched_deal_name=None, calculated_incentive=0,
+                message=(
+                    f"Refund/credit note: no prior commission found for ticket "
+                    f"{ticket.ticket_number or 'unknown'}."
+                ),
+            )
 
     if not ticket.airlines_code:
         ticket.matched_deal_id      = None
@@ -633,12 +688,14 @@ async def run_all_calculation(
     res = await db.execute(q)
     tickets = res.scalars().all()
 
-    processed = matched = unmatched = errors = excluded = cancelled = 0
+    processed = matched = unmatched = errors = excluded = cancelled = reversed_count = 0
     for ticket in tickets:
         try:
             result = await _run_single(ticket, db, current_user.tenant_id)
             processed += 1
-            if result.cancelled:
+            if result.reversed:
+                reversed_count += 1
+            elif result.cancelled:
                 cancelled += 1
             elif result.matched:
                 if ticket.ticket_status == "excluded":
@@ -658,6 +715,7 @@ async def run_all_calculation(
         errors=errors,
         excluded=excluded,
         cancelled=cancelled,
+        reversed=reversed_count,
     )
 
 
@@ -919,6 +977,7 @@ async def match_diagnosis(
         ticket_departure_raw=ticket.departure_datetime,
         ticket_airline_name=ticket.airline_name,
         supplier_agency=supplier_agency,
+        tour_code=ticket.tour_code,
     )
 
     return MatchDiagnosisResponse(

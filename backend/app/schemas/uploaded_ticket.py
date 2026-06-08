@@ -48,6 +48,7 @@ class TicketRow(BaseModel):
     acc_code:            Optional[str]   = None
     sold_to:             Optional[str]   = None   # 'customer' | 'agency'
     customer_name:       Optional[str]   = None
+    tour_code:           Optional[str]   = None
     split_type:            Optional[str]   = None   # "normal" | "split"
     # derived / calculation fields
     airline_name:          Optional[str]   = None
@@ -117,6 +118,7 @@ class RunCalculationResult(BaseModel):
     excluded:             bool = False
     cancelled:            bool = False
     included:             bool = False
+    reversed:             bool = False
     matched_deal_id:      Optional[int]
     matched_deal_type:    Optional[str]
     matched_deal_name:    Optional[str]
@@ -131,6 +133,7 @@ class BatchRunCalculationResult(BaseModel):
     errors:      int
     excluded:    int = 0
     cancelled:   int = 0
+    reversed:    int = 0
 
 
 class UploadedTicketUpdate(BaseModel):

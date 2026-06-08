@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import String, DateTime, Boolean, Text
+from sqlalchemy import String, DateTime, Boolean, Text, JSON
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
 
@@ -11,7 +11,9 @@ class Supplier(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     code: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
     vendor_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    vendor_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     branch: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    branches:    Mapped[list | None] = mapped_column(JSON, nullable=True)
     contact_phone: Mapped[str | None] = mapped_column(String(50), nullable=True)
     alternate_phone: Mapped[str | None] = mapped_column(String(50), nullable=True)
     contact_email: Mapped[str | None] = mapped_column(String(255), nullable=True)

@@ -541,6 +541,14 @@ async def get_airport_options(
         )
         return {"airports": [r[0] for r in res.all()]}
 
+    # Canonical base country groups — each airport record may store a combination
+    # like "MEAI/SAARC" meaning it belongs to both MEAI and SAARC.
+    # We expand those and return only the base canonical values.
+    _CANONICAL_GROUPS = [
+        "APAC", "EUROPEAN NATIONS", "GCC/MIDDLE EAST", "LATIN AMERICA",
+        "MEAI", "NAM", "OTHER", "SAARC",
+    ]
+
     cont_q = await db.execute(
         select(sql_distinct(Airport.continent))
         .where(Airport.continent.isnot(None), Airport.is_active == True)
@@ -549,9 +557,18 @@ async def get_airport_options(
         select(sql_distinct(Airport.categorization))
         .where(Airport.categorization.isnot(None), Airport.is_active == True)
     )
+    raw_cats = {r[0] for r in cat_q.all()}
+    # Keep a canonical group if it appears as a standalone value or as part of a
+    # slash-separated combination (e.g. "MEAI" matches "MEAI/SAARC").
+    # "GCC/MIDDLE EAST" is a single canonical name and must be matched as a whole.
+    expanded = sorted(
+        c for c in _CANONICAL_GROUPS
+        if any(c == r or r.startswith(c + "/") or ("/" + c) in r for r in raw_cats)
+    ) or _CANONICAL_GROUPS  # fall back to full list when DB is empty
+
     return {
         "continents":    sorted(r[0] for r in cont_q.all()),
-        "country_groups": sorted(r[0] for r in cat_q.all()),
+        "country_groups": expanded,
     }
 
 

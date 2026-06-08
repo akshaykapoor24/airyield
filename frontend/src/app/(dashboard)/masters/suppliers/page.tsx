@@ -10,12 +10,16 @@ import { canManageGlobalMasters, canSubmitMasterRequest, canViewMasterRequests }
 import { useAppSelector } from "@/store/hooks";
 import Pagination from "@/components/ui/Pagination";
 
+type SupplierBranch = { name: string; iata_code: string };
+
 type Supplier = {
   id: number;
   name: string;
   code: string;
   vendor_type: string | null;
+  vendor_name: string | null;
   branch: string | null;
+  branches: SupplierBranch[] | null;
   contact_phone: string | null;
   alternate_phone: string | null;
   contact_email: string | null;
@@ -32,7 +36,9 @@ type Approval = {
   id: number;
   name: string;
   vendor_type: string | null;
+  vendor_name: string | null;
   branch: string | null;
+  branches: SupplierBranch[] | null;
   contact_phone: string | null;
   alternate_phone: string | null;
   contact_email: string | null;
@@ -54,6 +60,7 @@ const VENDOR_TYPES = ["Agent", "Corporate", "OTA", "TMC", "GSA", "Other"];
 const emptyForm = {
   name: "",
   vendor_type: "",
+  vendor_name: "",
   branch: "",
   contact_phone: "",
   alternate_phone: "",
@@ -72,6 +79,7 @@ function AddSupplierModal({
   const [targetId, setTargetId] = useState<number | null>(null);
   const [existingSuppliers, setExistingSuppliers] = useState<Supplier[]>([]);
   const [form, setForm] = useState({ ...emptyForm });
+  const [branches, setBranches] = useState<SupplierBranch[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [file, setFile] = useState<File | null>(null);
@@ -79,6 +87,10 @@ function AddSupplierModal({
   const [uploading, setUploading] = useState(false);
 
   const set = <K extends keyof typeof emptyForm>(k: K, v: string) => setForm(p => ({ ...p, [k]: v }));
+  const addBranch = () => setBranches(p => [...p, { name: "", iata_code: "" }]);
+  const removeBranch = (i: number) => setBranches(p => p.filter((_, idx) => idx !== i));
+  const updateBranch = (i: number, k: keyof SupplierBranch, v: string) =>
+    setBranches(p => p.map((b, idx) => idx === i ? { ...b, [k]: v } : b));
 
   useEffect(() => {
     if (requestType === "update" && existingSuppliers.length === 0) {
@@ -93,6 +105,7 @@ function AddSupplierModal({
       setForm({
         name: s.name,
         vendor_type: s.vendor_type ?? "",
+        vendor_name: s.vendor_name ?? "",
         branch: s.branch ?? "",
         contact_phone: s.contact_phone ?? "",
         alternate_phone: s.alternate_phone ?? "",
@@ -102,6 +115,7 @@ function AddSupplierModal({
         pan_number: s.pan_number ?? "",
         notes: s.notes ?? "",
       });
+      setBranches(s.branches ?? []);
     }
   };
 
@@ -113,7 +127,9 @@ function AddSupplierModal({
       await api.post("/suppliers/", {
         name: form.name.trim(),
         vendor_type: form.vendor_type || null,
-        branch: form.branch || null,
+        vendor_name: form.vendor_name.trim() || null,
+        branch: null,
+        branches: branches.filter(b => b.name.trim()).map(b => ({ name: b.name.trim(), iata_code: b.iata_code.trim().toUpperCase() })),
         contact_phone: form.contact_phone || null,
         alternate_phone: form.alternate_phone || null,
         contact_email: form.contact_email || null,
@@ -213,7 +229,7 @@ function AddSupplierModal({
               <div className="flex gap-2">
                 {(["new", "update"] as const).map(rt => (
                   <button key={rt} type="button"
-                    onClick={() => { setRequestType(rt); setTargetId(null); setForm({ ...emptyForm }); }}
+                    onClick={() => { setRequestType(rt); setTargetId(null); setForm({ ...emptyForm }); setBranches([]); }}
                     className={`flex-1 py-1.5 rounded-lg text-xs font-semibold border transition-colors ${
                       requestType === rt
                         ? rt === "new" ? "bg-violet-600 text-white border-violet-600" : "bg-amber-500 text-white border-amber-500"
@@ -239,26 +255,50 @@ function AddSupplierModal({
                 </div>
               )}
 
-              <div>
-                <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Vendor Name *</label>
-                <input value={form.name} onChange={e => set("name", e.target.value)} placeholder="e.g. Gulf Travel Co."
-                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-400 bg-gray-50" />
-              </div>
-
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Type</label>
-                  <select value={form.vendor_type} onChange={e => set("vendor_type", e.target.value)}
-                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-400 bg-gray-50">
-                    <option value="">— Select —</option>
-                    {VENDOR_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Branch</label>
-                  <input value={form.branch} onChange={e => set("branch", e.target.value)} placeholder="e.g. Mumbai"
+                  <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Vendor Name *</label>
+                  <input value={form.name} onChange={e => set("name", e.target.value)} placeholder="e.g. Gulf Travel Co."
                     className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-400 bg-gray-50" />
                 </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Display Name</label>
+                  <input value={form.vendor_name} onChange={e => set("vendor_name", e.target.value)} placeholder="Short / trade name"
+                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-400 bg-gray-50" />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Type</label>
+                <select value={form.vendor_type} onChange={e => set("vendor_type", e.target.value)}
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-400 bg-gray-50">
+                  <option value="">— Select —</option>
+                  {VENDOR_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                </select>
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Branches</label>
+                  <button type="button" onClick={addBranch}
+                    className="text-[11px] text-violet-600 font-medium hover:text-violet-800">+ Add Branch</button>
+                </div>
+                {branches.map((b, i) => (
+                  <div key={i} className="flex gap-2 items-center mb-1.5">
+                    <input value={b.name} onChange={e => updateBranch(i, "name", e.target.value)} placeholder="City / Branch name"
+                      className="flex-1 border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-violet-400 bg-gray-50" />
+                    <input value={b.iata_code} onChange={e => updateBranch(i, "iata_code", e.target.value.toUpperCase().slice(0, 3))}
+                      placeholder="IATA" maxLength={3}
+                      className="w-16 border border-gray-200 rounded-lg px-2 py-1.5 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-violet-400 bg-gray-50 text-center uppercase" />
+                    <button type="button" onClick={() => removeBranch(i)}
+                      className="p-1 hover:bg-red-50 rounded text-gray-400 hover:text-red-500 flex-shrink-0">
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+                {branches.length === 0 && (
+                  <p className="text-[11px] text-gray-400 italic py-1">No branches added. Click &quot;+ Add Branch&quot; to add one.</p>
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-3">
@@ -313,7 +353,7 @@ function AddSupplierModal({
                 <div>
                   <p className="text-xs font-semibold text-violet-700">Download XLS Template</p>
                   <p className="text-[10px] text-violet-500 mt-0.5">
-                    Columns: VENDOR_NAME, TYPE, BRANCH, CONTACT_NUMBER, ALTERNATE_CONTACT_NO, CONTACT_EMAIL, ALTERNATE_EMAIL, GST_NUMBER, PAN_NUMBER, REMARKS
+                    Columns: VENDOR_NAME, VENDOR_DISPLAY_NAME, TYPE, BRANCHES (format: Delhi|DEL;Mumbai|BOM), CONTACT_NUMBER, …
                   </p>
                 </div>
                 <button type="button" onClick={handleTemplateDownload}
@@ -385,6 +425,7 @@ function EditSupplierModal({
   const [form, setForm] = useState({
     name: supplier.name,
     vendor_type: supplier.vendor_type ?? "",
+    vendor_name: supplier.vendor_name ?? "",
     branch: supplier.branch ?? "",
     contact_phone: supplier.contact_phone ?? "",
     alternate_phone: supplier.alternate_phone ?? "",
@@ -395,9 +436,14 @@ function EditSupplierModal({
     notes: supplier.notes ?? "",
     is_active: supplier.is_active,
   });
+  const [branches, setBranches] = useState<SupplierBranch[]>(supplier.branches ?? []);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const set = (k: keyof typeof form, v: string | boolean) => setForm(p => ({ ...p, [k]: v }));
+  const addBranch = () => setBranches(p => [...p, { name: "", iata_code: "" }]);
+  const removeBranch = (i: number) => setBranches(p => p.filter((_, idx) => idx !== i));
+  const updateBranch = (i: number, k: keyof SupplierBranch, v: string) =>
+    setBranches(p => p.map((b, idx) => idx === i ? { ...b, [k]: v } : b));
 
   const handleSave = async () => {
     if (!form.name.trim()) { setError("Vendor name is required."); return; }
@@ -406,7 +452,9 @@ function EditSupplierModal({
       await api.patch(`/suppliers/${supplier.id}`, {
         name: form.name.trim(),
         vendor_type: form.vendor_type || null,
-        branch: form.branch || null,
+        vendor_name: form.vendor_name.trim() || null,
+        branch: null,
+        branches: branches.filter(b => b.name.trim()).map(b => ({ name: b.name.trim(), iata_code: b.iata_code.trim().toUpperCase() })),
         contact_phone: form.contact_phone || null,
         alternate_phone: form.alternate_phone || null,
         contact_email: form.contact_email || null,
@@ -436,26 +484,52 @@ function EditSupplierModal({
           </button>
         </div>
         <div className="px-6 py-4 space-y-3">
-          <div>
-            <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Vendor Name *</label>
-            <input value={form.name} onChange={e => set("name", e.target.value)}
-              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-400 bg-gray-50" />
-          </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Type</label>
-              <select value={form.vendor_type} onChange={e => set("vendor_type", e.target.value)}
-                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-400 bg-gray-50">
-                <option value="">— Select —</option>
-                {VENDOR_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-              </select>
+              <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Vendor Name *</label>
+              <input value={form.name} onChange={e => set("name", e.target.value)}
+                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-400 bg-gray-50" />
             </div>
             <div>
-              <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Branch</label>
-              <input value={form.branch} onChange={e => set("branch", e.target.value)}
+              <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Display Name</label>
+              <input value={form.vendor_name} onChange={e => set("vendor_name", e.target.value)} placeholder="Short / trade name"
                 className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-400 bg-gray-50" />
             </div>
           </div>
+
+          <div>
+            <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Type</label>
+            <select value={form.vendor_type} onChange={e => set("vendor_type", e.target.value)}
+              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-400 bg-gray-50">
+              <option value="">— Select —</option>
+              {VENDOR_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Branches</label>
+              <button type="button" onClick={addBranch}
+                className="text-[11px] text-violet-600 font-medium hover:text-violet-800">+ Add Branch</button>
+            </div>
+            {branches.map((b, i) => (
+              <div key={i} className="flex gap-2 items-center mb-1.5">
+                <input value={b.name} onChange={e => updateBranch(i, "name", e.target.value)} placeholder="City / Branch name"
+                  className="flex-1 border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-violet-400 bg-gray-50" />
+                <input value={b.iata_code} onChange={e => updateBranch(i, "iata_code", e.target.value.toUpperCase().slice(0, 3))}
+                  placeholder="IATA" maxLength={3}
+                  className="w-16 border border-gray-200 rounded-lg px-2 py-1.5 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-violet-400 bg-gray-50 text-center uppercase" />
+                <button type="button" onClick={() => removeBranch(i)}
+                  className="p-1 hover:bg-red-50 rounded text-gray-400 hover:text-red-500 flex-shrink-0">
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            ))}
+            {branches.length === 0 && (
+              <p className="text-[11px] text-gray-400 italic py-1">No branches added.</p>
+            )}
+          </div>
+
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Contact Number</label>
@@ -561,8 +635,8 @@ function SupplierDiffModal({
 }: { approval: Approval; current: Supplier | null; loading: boolean; onClose: () => void }) {
   const fields: { label: string; ak: keyof Approval; ck: keyof Supplier }[] = [
     { label: "Vendor Name",        ak: "name",           ck: "name" },
+    { label: "Display Name",       ak: "vendor_name",    ck: "vendor_name" },
     { label: "Type",               ak: "vendor_type",    ck: "vendor_type" },
-    { label: "Branch",             ak: "branch",         ck: "branch" },
     { label: "Contact Number",     ak: "contact_phone",  ck: "contact_phone" },
     { label: "Alternate Contact",  ak: "alternate_phone",ck: "alternate_phone" },
     { label: "Contact Email",      ak: "contact_email",  ck: "contact_email" },
@@ -571,6 +645,8 @@ function SupplierDiffModal({
     { label: "PAN Number",         ak: "pan_number",     ck: "pan_number" },
     { label: "Remarks",            ak: "notes",          ck: "notes" },
   ];
+  const branchesStr = (bs: SupplierBranch[] | null | undefined) =>
+    (bs ?? []).map(b => `${b.name}${b.iata_code ? ` (${b.iata_code})` : ""}`).join(", ") || "—";
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-xl max-h-[90vh] overflow-y-auto">
@@ -613,6 +689,21 @@ function SupplierDiffModal({
                     </tr>
                   );
                 })}
+                {(() => {
+                  const cur = branchesStr(current.branches);
+                  const proposed = branchesStr(approval.branches);
+                  const changed = cur !== proposed;
+                  return (
+                    <tr className={`border-b border-gray-50 ${changed ? "bg-amber-50/60" : ""}`}>
+                      <td className="py-2 pr-3 font-semibold text-gray-600 text-[11px]">Branches</td>
+                      <td className="py-2 pr-3 text-gray-500">{cur}</td>
+                      <td className={`py-2 font-medium ${changed ? "text-amber-700" : "text-gray-700"}`}>
+                        {proposed}
+                        {changed && <span className="ml-1.5 text-[9px] bg-amber-200 text-amber-800 px-1 py-0.5 rounded font-bold">CHANGED</span>}
+                      </td>
+                    </tr>
+                  );
+                })()}
               </tbody>
             </table>
           )}
@@ -804,7 +895,7 @@ export default function SuppliersPage() {
               <thead>
                 <tr style={{ background: "#1e4d8c" }}>
                   {[
-                    "CODE", "VENDOR NAME", "TYPE", "BRANCH", "CONTACT", "EMAIL", "GST", "PAN", "STATUS",
+                    "CODE", "VENDOR NAME", "DISPLAY NAME", "TYPE", "BRANCHES", "CONTACT", "EMAIL", "GST", "PAN", "STATUS",
                     ...(isPlatformAdmin ? ["ACTIONS"] : []),
                   ].map(h => (
                     <th key={h} className="px-3 py-2.5 text-left text-[10px] font-semibold text-white uppercase tracking-wider whitespace-nowrap">{h}</th>
@@ -813,11 +904,11 @@ export default function SuppliersPage() {
               </thead>
               <tbody>
                 {loading ? (
-                  <tr><td colSpan={isPlatformAdmin ? 10 : 9} className="px-4 py-12 text-center text-xs text-gray-400">
+                  <tr><td colSpan={isPlatformAdmin ? 11 : 10} className="px-4 py-12 text-center text-xs text-gray-400">
                     <RefreshCw className="w-4 h-4 animate-spin mx-auto mb-2 text-gray-300" /> Loading suppliers...
                   </td></tr>
                 ) : suppliers.length === 0 ? (
-                  <tr><td colSpan={isPlatformAdmin ? 10 : 9} className="px-4 py-12 text-center text-xs text-gray-400">No suppliers found.</td></tr>
+                  <tr><td colSpan={isPlatformAdmin ? 11 : 10} className="px-4 py-12 text-center text-xs text-gray-400">No suppliers found.</td></tr>
                 ) : suppliers.map((s, idx) => (
                   <tr key={s.id}
                     className={`border-b border-gray-50 hover:bg-violet-50/30 transition-colors group ${idx % 2 === 0 ? "bg-white" : "bg-gray-50/30"}`}>
@@ -825,8 +916,19 @@ export default function SuppliersPage() {
                     <td className="px-3 py-2">
                       <span className="font-mono text-[11px] font-bold text-violet-600 bg-violet-50 px-2 py-0.5 rounded">{s.name}</span>
                     </td>
+                    <td className="px-3 py-2 text-[11px] text-gray-500">{s.vendor_name ?? "—"}</td>
                     <td className="px-3 py-2 text-[11px] text-gray-600">{s.vendor_type ?? "—"}</td>
-                    <td className="px-3 py-2 text-[11px] text-gray-600">{s.branch ?? "—"}</td>
+                    <td className="px-3 py-2">
+                      {s.branches && s.branches.length > 0 ? (
+                        <div className="flex flex-wrap gap-1">
+                          {s.branches.map((b, i) => (
+                            <span key={i} className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-50 text-blue-700 border border-blue-100">
+                              {b.name}{b.iata_code ? <span className="font-mono font-bold">{b.iata_code}</span> : null}
+                            </span>
+                          ))}
+                        </div>
+                      ) : <span className="text-[11px] text-gray-400">—</span>}
+                    </td>
                     <td className="px-3 py-2 text-[11px] text-gray-500">
                       <div>{s.contact_phone ?? "—"}</div>
                       {s.alternate_phone && <div className="text-gray-400 text-[10px]">{s.alternate_phone}</div>}
@@ -874,7 +976,7 @@ export default function SuppliersPage() {
               <thead>
                 <tr style={{ background: "#1e4d8c" }}>
                   {[
-                    "VENDOR NAME", "TYPE", "BRANCH", "CONTACT", "GST", "PAN", "REQUEST",
+                    "VENDOR NAME", "DISPLAY NAME", "TYPE", "BRANCHES", "CONTACT", "GST", "PAN", "REQUEST",
                     ...(isPlatformAdmin
                       ? ["SUBMITTED BY", "SUBMITTED AT", "ACTIONS"]
                       : ["STATUS", "SUBMITTED AT", "REASON"]),
@@ -891,8 +993,19 @@ export default function SuppliersPage() {
                 ) : approvals.map((a, idx) => (
                   <tr key={a.id} className={`border-b border-gray-50 ${idx % 2 === 0 ? "bg-white" : "bg-gray-50/30"}`}>
                     <td className="px-3 py-2 text-[11px] font-semibold text-gray-800">{a.name}</td>
+                    <td className="px-3 py-2 text-[11px] text-gray-500">{a.vendor_name ?? "—"}</td>
                     <td className="px-3 py-2 text-[11px] text-gray-600">{a.vendor_type ?? "—"}</td>
-                    <td className="px-3 py-2 text-[11px] text-gray-600">{a.branch ?? "—"}</td>
+                    <td className="px-3 py-2">
+                      {a.branches && a.branches.length > 0 ? (
+                        <div className="flex flex-wrap gap-1">
+                          {a.branches.map((b, i) => (
+                            <span key={i} className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-50 text-blue-700 border border-blue-100">
+                              {b.name}{b.iata_code ? <span className="font-mono font-bold"> {b.iata_code}</span> : null}
+                            </span>
+                          ))}
+                        </div>
+                      ) : <span className="text-[11px] text-gray-400">—</span>}
+                    </td>
                     <td className="px-3 py-2 text-[11px] text-gray-500">{a.contact_phone ?? "—"}</td>
                     <td className="px-3 py-2 text-[11px] font-mono text-gray-600">{a.gst_number ?? "—"}</td>
                     <td className="px-3 py-2 text-[11px] font-mono text-gray-600">{a.pan_number ?? "—"}</td>

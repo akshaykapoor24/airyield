@@ -31,7 +31,7 @@ TEMPLATE_HEADERS: list[str] = [
     "Excessbagage", "Meals", "RFD_SELL", "CAN_Charge", "Booking_Fee_Sell",
     "CGST_Sell", "SGST_Sell", "IGST_Sell", "Comm_Sell", "ADM",
     "Incentive_Sell", "DIS_Sell", "TDS_Sell", "TotalAmt", "PaidByCreditCard",
-    "Net_AMT", "CC", "AccCode", "SoldTo", "CustomerName", "AirlineName",
+    "Net_AMT", "CC", "AccCode", "SoldTo", "CustomerName", "AirlineName", "TourCode",
 ]
 
 # Threshold: if at least this many canonical fields are found, treat as a template match.
@@ -80,6 +80,7 @@ _COL_ALIASES: dict[str, list[str]] = {
     "airline_name":        ["airlinename", "airline_name", "airline name", "airline"],
     "sold_to":             ["soldto", "sold_to", "sold to", "soldtoparty"],
     "customer_name":       ["customername", "customer_name", "customer name", "name", "clientname", "client name"],
+    "tour_code":           ["tourcode", "tour_code", "tour code", "tourcd", "tour_cd"],
 }
 
 # Build reverse map: lowercase_alias → canonical

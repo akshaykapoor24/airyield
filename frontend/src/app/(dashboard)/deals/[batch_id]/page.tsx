@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import {
@@ -12,13 +12,14 @@ import api from "@/lib/api";
 
 // ── incl/excl option constants ─────────────────────────────────────────────
 const IE_CONTINENTS     = ["Africa","Asia","Europe","North America","Oceania","South America","Antarctica"];
-const IE_COUNTRY_GROUPS = ["APAC","EUROPEAN NATIONS","GCC/MIDDLE EAST","LATIN AMERICA","MEAI","MEAI/APAC","MEAI/SAARC","MEAI/SAARC/APAC","NAM","OTHER","SAARC","SAARC/APAC"];
+const IE_COUNTRY_GROUPS = ["APAC","EUROPEAN NATIONS","GCC/MIDDLE EAST","LATIN AMERICA","MEAI","NAM","OTHER","SAARC"];
 const IE_CITIES         = ["Delhi","Mumbai","Dubai","Doha","London","Frankfurt","New York","Singapore","Sydney"];
 const IE_FARE_TYPE_CATS = ["Normal","Group","Corporate","Excursion","Tour"];
-const IE_TOUR_CODES     = ["TC001","TC002","TC003","TC004"];
 const IE_DOMESTIC_CTRS  = ["India","UAE","UK","USA","Australia"];
 const IE_CLASS_OPTIONS  = ["All","Economy","Premium Economy","Business","First"];
 const IE_SOTO_OPTIONS   = ["SOTO All","SOTO within India","SOTO outside India"];
+
+type IEFieldValue = string | string[];
 
 // ── shared UI primitives ───────────────────────────────────────────────────
 function IESelectField({label,options,value,onChange}:{label?:string;options:string[];value:string;onChange:(v:string)=>void}){
@@ -66,6 +67,63 @@ function IEMultiCheckboxDropdown({label,placeholder="Select...",options,values,o
           </label>
         ))}
       </div>}
+    </div>
+  );
+}
+
+function IEMultiSearchSelectField({label,placeholder="Search and select",options,values,onChange}:{label?:string;placeholder?:string;options:string[];values:string[];onChange:(v:string[])=>void}){
+  const [open,setOpen]=useState(false);const [search,setSearch]=useState("");
+  const ref=useRef<HTMLDivElement>(null);
+  useEffect(()=>{const h=(e:MouseEvent)=>{if(ref.current&&!ref.current.contains(e.target as Node))setOpen(false);};document.addEventListener("mousedown",h);return()=>document.removeEventListener("mousedown",h);},[]);
+  const filtered=options.filter(o=>o.toLowerCase().includes(search.toLowerCase()));
+  const toggle=(opt:string)=>onChange(values.includes(opt)?values.filter(v=>v!==opt):[...values,opt]);
+  const display=values.length?values.join(", "):null;
+  return(
+    <div className="relative" ref={ref}>
+      {label&&<label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">{label}</label>}
+      <button type="button" onClick={()=>{setOpen(o=>!o);setSearch("");}} className="w-full flex items-start justify-between border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-white text-left focus:outline-none focus:ring-1 focus:ring-blue-400 min-h-[28px]">
+        <span className={display?"text-gray-800 whitespace-normal break-words leading-relaxed":"text-gray-400"}>{display||placeholder}</span>
+        <div className="flex items-center gap-0.5 flex-shrink-0 ml-1 mt-0.5">
+          {values.length>0&&<span onClick={e=>{e.stopPropagation();onChange([]);}} className="text-gray-300 hover:text-red-400"><X className="w-3 h-3"/></span>}
+          <ChevronDown className="w-3.5 h-3.5 text-gray-400"/>
+        </div>
+      </button>
+      {open&&<div className="absolute z-50 w-full mt-0.5 bg-white border border-gray-200 rounded-md shadow-lg">
+        <div className="p-1.5 border-b border-gray-100"><input autoFocus value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search..." className="w-full text-xs px-2 py-1 border border-gray-200 rounded focus:outline-none"/></div>
+        <div className="max-h-44 overflow-y-auto">
+          {filtered.length?filtered.map(opt=>(
+            <label key={opt} className="flex items-center gap-2 px-2.5 py-1.5 text-xs text-gray-700 hover:bg-blue-50 cursor-pointer">
+              <input type="checkbox" checked={values.includes(opt)} onChange={()=>toggle(opt)} className="w-3.5 h-3.5 rounded border-gray-300 accent-blue-600"/>
+              {opt}
+            </label>
+          )):<p className="px-2.5 py-1.5 text-xs text-gray-400">No results</p>}
+        </div>
+      </div>}
+    </div>
+  );
+}
+
+function IETagInput({label,placeholder="Type and press Enter",values,onChange}:{label?:string;placeholder?:string;values:string[];onChange:(v:string[])=>void}){
+  const [text,setText]=useState("");
+  const commit=()=>{const v=text.trim();if(v&&!values.includes(v)){onChange([...values,v]);}setText("");};
+  const handleKey=(e:React.KeyboardEvent<HTMLInputElement>)=>{
+    if(e.key==="Enter"||e.key===","){e.preventDefault();commit();}
+    if(e.key==="Backspace"&&!text&&values.length){onChange(values.slice(0,-1));}
+  };
+  return(
+    <div>
+      {label&&<label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">{label}</label>}
+      <div className="min-h-[28px] border border-gray-200 rounded-md px-2 py-1 flex flex-wrap gap-1 bg-white focus-within:ring-1 focus-within:ring-blue-400">
+        {values.map(v=>(
+          <span key={v} className="flex items-center gap-1 px-1.5 py-0.5 bg-blue-50 text-blue-700 border border-blue-200 rounded text-[10px] font-medium">
+            {v}<button type="button" onClick={()=>onChange(values.filter(x=>x!==v))} className="text-blue-400 hover:text-red-500 leading-none"><X className="w-2.5 h-2.5"/></button>
+          </span>
+        ))}
+        <input value={text} onChange={e=>setText(e.target.value)} onKeyDown={handleKey} onBlur={commit}
+          placeholder={values.length?"":placeholder}
+          className="flex-1 min-w-[80px] text-xs border-none outline-none bg-transparent py-0.5 text-gray-800 placeholder-gray-400"/>
+      </div>
+      <p className="text-[9px] text-gray-400 mt-0.5">Press Enter or comma to add a code</p>
     </div>
   );
 }
@@ -131,9 +189,8 @@ type DealRepositoryItem = {
   incentive_types: string[] | null;
   incentive_data:  Record<string, Record<string, string>> | null;
   incl_excl_types: string[] | null;
-  incl_excl_data:  Record<string, Record<string, string>> | null;
+  incl_excl_data:  Record<string, Record<string, IEFieldValue>> | null;
   deal_tag:              string | null;
-  deal_category:         string | null;
   status:                string;
   deal_lifecycle_status: string | null;
   created_at:            string;
@@ -233,6 +290,21 @@ function formatDateTime(d: string | null) {
   } catch { return d; }
 }
 
+function getDealClasses(d: DealRepositoryItem): string[] {
+  return [...new Set(
+    Object.values(d.incentive_data ?? {})
+      .map(v => (v as Record<string, string>)?.class)
+      .filter(Boolean) as string[]
+  )];
+}
+function getDealSegments(d: DealRepositoryItem): string[] {
+  return [...new Set(
+    Object.values(d.incentive_data ?? {})
+      .map(v => (v as Record<string, string>)?.flightType)
+      .filter(Boolean) as string[]
+  )];
+}
+
 function getDealTypeBadge(d: DealRepositoryItem) {
   if (d.deal_type !== "upload") return DEAL_TYPE_STYLE[d.deal_type];
   if (d.business_type) return DEAL_TYPE_STYLE.b2b;
@@ -240,7 +312,7 @@ function getDealTypeBadge(d: DealRepositoryItem) {
 }
 
 const TABLE_HEADERS = [
-  "Deal No", "Deal Type", "Deal Tag", "Deal Category", "Airline Name", "Airline Type", "Contract Year",
+  "Deal No", "Deal Type", "Deal Tag", "Airline Name", "Airline Type", "Contract Year",
   "Valid From", "Valid To",
   "Trigger Type", "Payout Type",
   "Business Type", "Entity (LCC)",
@@ -355,26 +427,20 @@ function IncentiveEditModal({ name, data, onSave, onClose }: {
   );
 }
 
-// ── InclExclEditModal ──────────────────────────────────────────────────────
-function InclExclEditModal({ name, data, onSave, onClose }: {
-  name: string;
-  data: Record<string, string>;
-  onSave: (updated: Record<string, string>) => Promise<void>;
-  onClose: () => void;
+// ── InclExclTypeForm — renders fields for one incl/excl type ──────────────
+function InclExclTypeForm({ typeName, form, onChange }: {
+  typeName: string;
+  form: Record<string, IEFieldValue>;
+  onChange: (updated: Record<string, IEFieldValue>) => void;
 }) {
-  const [form, setForm] = useState<Record<string,string>>({ ...data });
-  const [saving, setSaving] = useState(false);
-  const isExcl = name.startsWith("Exclusion");
+  const isExcl = typeName.startsWith("Exclusion");
   const suffix  = isExcl ? "for Exclusion" : "for Inclusion";
 
   const [continentOptions,    setContinentOptions]    = useState<string[]>(IE_CONTINENTS);
   const [countryGroupOptions, setCountryGroupOptions] = useState<string[]>(IE_COUNTRY_GROUPS);
-  const [originCountries, setOriginCountries] = useState<string[]>([]);
-  const [destCountries,   setDestCountries]   = useState<string[]>([]);
-  const [originAirports,  setOriginAirports]  = useState<string[]>([]);
-  const [destAirports,    setDestAirports]    = useState<string[]>([]);
-  const [allCountries,    setAllCountries]    = useState<string[]>([]);
-  const [allAirports,     setAllAirports]     = useState<string[]>([]);
+  const [allCountries,        setAllCountries]        = useState<string[]>([]);
+  const [allAirports,         setAllAirports]         = useState<string[]>([]);
+  const [allCities,           setAllCities]           = useState<string[]>([]);
 
   useEffect(()=>{
     api.get<{continents:string[];country_groups:string[]}>("/airports/options")
@@ -382,57 +448,29 @@ function InclExclEditModal({ name, data, onSave, onClose }: {
         if(r.data.continents?.length)     setContinentOptions(r.data.continents);
         if(r.data.country_groups?.length) setCountryGroupOptions(r.data.country_groups);
       }).catch(()=>{});
-    api.get<{iata_code:string;country:string|null}[]>("/airports/?limit=5000")
+    api.get<{iata_code:string;country:string|null;city_airport_name:string}[]>("/airports/?limit=5000")
       .then(r=>{
         setAllAirports(r.data.map(a=>a.iata_code).filter(Boolean));
         const countries=[...new Set(r.data.map(a=>a.country).filter(Boolean))] as string[];
         setAllCountries(countries.sort());
+        const cities=[...new Set(r.data.map(a=>a.city_airport_name).filter(Boolean))].sort();
+        setAllCities(cities);
       }).catch(()=>{});
   },[]);
 
-  const origContinent = form["originContinents"] ?? "";
-  const destContinent = form["destContinents"]   ?? "";
-  const origCountry   = form["originCountry"]    ?? "";
-  const destCountry   = form["destCountry"]      ?? "";
-
-  useEffect(()=>{
-    if(!origContinent){setOriginCountries([]);return;}
-    api.get<{countries:string[]}>(`/airports/options?continent=${encodeURIComponent(origContinent)}`)
-      .then(r=>setOriginCountries(r.data.countries??[])).catch(()=>setOriginCountries([]));
-  },[origContinent]);
-
-  useEffect(()=>{
-    if(!destContinent){setDestCountries([]);return;}
-    api.get<{countries:string[]}>(`/airports/options?continent=${encodeURIComponent(destContinent)}`)
-      .then(r=>setDestCountries(r.data.countries??[])).catch(()=>setDestCountries([]));
-  },[destContinent]);
-
-  useEffect(()=>{
-    if(!origCountry){setOriginAirports([]);return;}
-    api.get<{airports:string[]}>(`/airports/options?country=${encodeURIComponent(origCountry)}`)
-      .then(r=>setOriginAirports(r.data.airports??[])).catch(()=>setOriginAirports([]));
-  },[origCountry]);
-
-  useEffect(()=>{
-    if(!destCountry){setDestAirports([]);return;}
-    api.get<{airports:string[]}>(`/airports/options?country=${encodeURIComponent(destCountry)}`)
-      .then(r=>setDestAirports(r.data.airports??[])).catch(()=>setDestAirports([]));
-  },[destCountry]);
-
-  const handleChange=(k:string,v:string)=>{
-    setForm(p=>({...p,[k]:v}));
-  };
+  const getArr=(k:string):string[]=>{const v=form[k];if(!v)return[];return Array.isArray(v)?v:[v];};
+  const setArr=(k:string,vals:string[])=>onChange({...form,[k]:vals});
+  const setStr=(k:string,v:string)=>onChange({...form,[k]:v});
 
   const opts:Record<string,string[]>={
-    continents:continentOptions,           countryGroup:countryGroupOptions,
-    originContinents:continentOptions,     destContinents:continentOptions,
-    originCountryGroup:countryGroupOptions,destCountryGroup:countryGroupOptions,
-    originCountry:origContinent?originCountries:allCountries,
-    destCountry:destContinent?destCountries:allCountries,
-    originAirport:origCountry?originAirports:allAirports,
-    destAirport:destCountry?destAirports:allAirports,
-    city:IE_CITIES, fareTypeCategory:IE_FARE_TYPE_CATS,
-    class:IE_CLASS_OPTIONS, tourCode:IE_TOUR_CODES, domesticCountry:IE_DOMESTIC_CTRS,
+    continents:continentOptions,            countryGroup:countryGroupOptions,
+    originContinents:continentOptions,      destContinents:continentOptions,
+    originCountryGroup:countryGroupOptions, destCountryGroup:countryGroupOptions,
+    originCountry:allCountries,             destCountry:allCountries,
+    originAirport:allAirports,              destAirport:allAirports,
+    city:allCities.length?allCities:IE_CITIES, fareTypeCategory:IE_FARE_TYPE_CATS,
+    class:IE_CLASS_OPTIONS, soto:IE_SOTO_OPTIONS,
+    domesticCountry:allCountries.length?allCountries:IE_DOMESTIC_CTRS,
   };
 
   const dateExclusionValues=[
@@ -440,42 +478,93 @@ function InclExclEditModal({ name, data, onSave, onClose }: {
     ...(form["dateExclusionTravel"]==="true"?["Travel Date"]:[]),
   ];
   const handleDateExclusionChange=(selected:string[])=>{
-    setForm(p=>({...p,
+    onChange({...form,
       dateExclusionTicket:selected.includes("Ticket Date")?"true":"",
       dateExclusionTravel:selected.includes("Travel Date")?"true":"",
-    }));
+    });
   };
 
-  type IERow={key:string;label:string;isDate?:boolean;isSelect?:boolean;options?:string[];placeholder?:string};
+  type IERow={key:string;label:string;isDate?:boolean;isSearch?:boolean;isTag?:boolean;placeholder?:string};
   const rows:IERow[][]=[
     [{key:"validFrom",label:"Valid From",isDate:true},{key:"validTo",label:"Valid To",isDate:true}],
     [{key:"continents",label:`Continents ${suffix}`},{key:"countryGroup",label:`Country Group ${suffix}`}],
     [{key:"originContinents",label:`Origin Continents ${suffix}`},{key:"destContinents",label:`Destination Continents ${suffix}`}],
     [{key:"originCountryGroup",label:`Origin Country Group ${suffix}`},{key:"destCountryGroup",label:`Destination Country Group ${suffix}`}],
     [
-      {key:"originCountry",label:`Origin Country ${suffix}`,placeholder:origContinent?"Search and select":"Select origin continent first"},
-      {key:"destCountry",  label:`Destination Country ${suffix}`,placeholder:destContinent?"Search and select":"Select destination continent first"},
+      {key:"originCountry",label:`Origin Country ${suffix}`,isSearch:true,placeholder:"Search and select"},
+      {key:"destCountry",  label:`Destination Country ${suffix}`,isSearch:true,placeholder:"Search and select"},
     ],
     [
-      {key:"originAirport",label:`Origin Airport ${suffix}`,placeholder:origCountry?"Search and select":"Select origin country first"},
-      {key:"destAirport",  label:`Destination Airport ${suffix}`,placeholder:destCountry?"Search and select":"Select destination country first"},
+      {key:"originAirport",label:`Origin Airport ${suffix}`,isSearch:true,placeholder:"Search and select"},
+      {key:"destAirport",  label:`Destination Airport ${suffix}`,isSearch:true,placeholder:"Search and select"},
     ],
-    [{key:"city",label:`City ${suffix}`},{key:"fareTypeCategory",label:`Fare Type Category ${suffix}`}],
+    [{key:"city",label:`City ${suffix}`,isSearch:true,placeholder:"Search and select"},{key:"fareTypeCategory",label:`Fare Type Category ${suffix}`}],
     [
       {key:"class",label:`Class ${suffix}`},
       isExcl
-        ?{key:"soto",label:"SOTO for Exclusion",isSelect:true,options:IE_SOTO_OPTIONS}
-        :{key:"tourCode",label:`Tour Code ${suffix}`},
+        ?{key:"soto",label:"SOTO for Exclusion"}
+        :{key:"tourCode",label:`Tour Code ${suffix}`,isTag:true},
     ],
     ...(isExcl
-      ?[[{key:"tourCode",label:`Tour Code ${suffix}`},{key:"domesticCountry",label:`Domestic Country ${suffix}`}]]
-      :[[{key:"domesticCountry",label:`Domestic Country ${suffix}`}]]
+      ?[[{key:"tourCode",label:`Tour Code ${suffix}`,isTag:true},{key:"domesticCountry",label:`Domestic Country ${suffix}`,isSearch:true,placeholder:"Search and select"}]]
+      :[[{key:"domesticCountry",label:`Domestic Country ${suffix}`,isSearch:true,placeholder:"Search and select"}]]
     ),
   ];
 
+  return (
+    <div className="space-y-3">
+      <div className="grid gap-3 grid-cols-1 max-w-[50%]">
+        <IEMultiCheckboxDropdown
+          label="Date Exclusion"
+          placeholder="Select date exclusion"
+          options={["Ticket Date","Travel Date"]}
+          values={dateExclusionValues}
+          onChange={handleDateExclusionChange}
+        />
+      </div>
+      {rows.map((pair,ri)=>(
+        <div key={ri} className={`grid gap-3 ${pair.length===2?"grid-cols-2":"grid-cols-1 max-w-[50%]"}`}>
+          {pair.map(f=>(
+            <div key={f.key}>
+              {f.isDate?(
+                <div>
+                  <label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">{f.label}</label>
+                  <input type="date" value={(form[f.key] as string)??""} onChange={e=>setStr(f.key,e.target.value)}
+                    className="w-full border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 text-gray-800"/>
+                </div>
+              ):f.isTag?(
+                <IETagInput label={f.label} values={getArr(f.key)} onChange={v=>setArr(f.key,v)}/>
+              ):f.isSearch?(
+                <IEMultiSearchSelectField label={f.label} placeholder={f.placeholder} options={opts[f.key]??[]} values={getArr(f.key)} onChange={v=>setArr(f.key,v)}/>
+              ):(
+                <IEMultiCheckboxDropdown label={f.label} placeholder={`Select ${f.label.toLowerCase()}…`} options={opts[f.key]??[]} values={getArr(f.key)} onChange={v=>setArr(f.key,v)}/>
+              )}
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── InclExclEditModal ──────────────────────────────────────────────────────
+const IE_TYPES = ["Inclusion For Payout", "Exclusion For Payout"] as const;
+
+function InclExclEditModal({ allData, onSave, onClose }: {
+  allData: Record<string, Record<string, IEFieldValue>>;
+  onSave: (updated: Record<string, Record<string, IEFieldValue>>) => Promise<void>;
+  onClose: () => void;
+}) {
+  const [forms, setForms] = useState<Record<string, Record<string, IEFieldValue>>>({
+    "Inclusion For Payout":  { ...(allData["Inclusion For Payout"]  ?? {}) },
+    "Exclusion For Payout":  { ...(allData["Exclusion For Payout"]  ?? {}) },
+  });
+  const [activeTab, setActiveTab] = useState<typeof IE_TYPES[number]>("Inclusion For Payout");
+  const [saving, setSaving] = useState(false);
+
   const handleSave = async () => {
     setSaving(true);
-    try { await onSave(form); onClose(); }
+    try { await onSave(forms); onClose(); }
     finally { setSaving(false); }
   };
 
@@ -484,40 +573,36 @@ function InclExclEditModal({ name, data, onSave, onClose }: {
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col" onClick={e=>e.stopPropagation()}>
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
           <div>
-            <h2 className={`text-sm font-bold ${isExcl?"text-red-700":"text-green-700"}`}>{name}</h2>
-            <p className="text-[10px] text-gray-400 mt-0.5">{isExcl?"Exclusion":"Inclusion"} Rule — Details</p>
+            <h2 className="text-sm font-bold text-gray-900">Inclusions &amp; Exclusions</h2>
+            <p className="text-[10px] text-gray-400 mt-0.5">All fields support multiple values. Fields are independent.</p>
           </div>
           <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-lg"><X className="w-4 h-4 text-gray-500"/></button>
         </div>
-        <div className="overflow-y-auto flex-1 px-5 py-4 space-y-3">
-          <div className="grid gap-3 grid-cols-1 max-w-[50%]">
-            <IEMultiCheckboxDropdown
-              label="Date Exclusion"
-              placeholder="Select date exclusion"
-              options={["Ticket Date","Travel Date"]}
-              values={dateExclusionValues}
-              onChange={handleDateExclusionChange}
-            />
+        {/* Tabs */}
+        <div className="flex items-center justify-between border-b border-gray-100 px-5">
+          <div className="flex">
+            {IE_TYPES.map(t=>(
+              <button key={t} type="button" onClick={()=>setActiveTab(t)}
+                className={`px-4 py-2.5 text-xs font-semibold border-b-2 transition-colors ${activeTab===t?"border-[#1e3a5f] text-[#1e3a5f]":"border-transparent text-gray-400 hover:text-gray-600"}`}>
+                {t.includes("Exclusion") ? "Exclusion For Payout" : "Inclusion For Payout"}
+              </button>
+            ))}
           </div>
-          {rows.map((pair,ri)=>(
-            <div key={ri} className={`grid gap-3 ${pair.length===2?"grid-cols-2":"grid-cols-1 max-w-[50%]"}`}>
-              {pair.map(f=>(
-                <div key={f.key}>
-                  {f.isDate?(
-                    <div>
-                      <label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">{f.label}</label>
-                      <input type="date" value={form[f.key]??""} onChange={e=>handleChange(f.key,e.target.value)}
-                        className="w-full border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 text-gray-800"/>
-                    </div>
-                  ):f.isSelect?(
-                    <IESelectField label={f.label} options={f.options??[]} value={form[f.key]??""} onChange={v=>handleChange(f.key,v)}/>
-                  ):(
-                    <IESearchSelectField label={f.label} placeholder={f.placeholder} options={opts[f.key]??[]} value={form[f.key]??""} onChange={v=>handleChange(f.key,v)}/>
-                  )}
-                </div>
-              ))}
-            </div>
-          ))}
+          <button
+            type="button"
+            onClick={()=>setForms(p=>({...p,[activeTab]:{}}))}
+            className="flex items-center gap-1 text-[11px] font-medium text-red-500 hover:text-red-700 hover:bg-red-50 px-2.5 py-1 rounded-md transition-colors"
+          >
+            <X className="w-3 h-3"/>Clear All
+          </button>
+        </div>
+        <div className="overflow-y-auto flex-1 px-5 py-4">
+          <InclExclTypeForm
+            key={activeTab}
+            typeName={activeTab}
+            form={forms[activeTab]}
+            onChange={updated=>setForms(p=>({...p,[activeTab]:updated}))}
+          />
         </div>
         <div className="px-5 pb-4 pt-3 border-t border-gray-100 flex gap-2">
           <button onClick={handleSave} disabled={saving}
@@ -787,6 +872,19 @@ export default function DealBatchPage() {
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo,   setDateTo]   = useState("");
 
+  const [filterAirline,        setFilterAirline]        = useState("");
+  const [filterAirlineType,    setFilterAirlineType]    = useState("");
+  const [filterApprovalStatus, setFilterApprovalStatus] = useState("");
+  const [filterDealStatus,     setFilterDealStatus]     = useState("");
+  const [filterClass,          setFilterClass]          = useState("");
+  const [filterSegment,        setFilterSegment]        = useState("");
+
+  const filterOptions = useMemo(() => ({
+    airlines: [...new Set(deals.map(d => d.airline_name).filter(Boolean))] as string[],
+    classes:  [...new Set(deals.flatMap(getDealClasses))].sort(),
+    segments: [...new Set(deals.flatMap(getDealSegments))].sort(),
+  }), [deals]);
+
   // ── Pagination ─────────────────────────────────────────────────────────
   const [page,    setPage]    = useState(1);
   const [perPage, setPerPage] = useState(25);
@@ -810,7 +908,7 @@ export default function DealBatchPage() {
     name: string; data: Record<string, string>; dealId: number; dealType: DealType;
   } | null>(null);
   const [inclExclPopup, setInclExclPopup] = useState<{
-    name: string; data: Record<string, string>; dealId: number; dealType: DealType;
+    dealId: number; dealType: DealType;
   } | null>(null);
 
   const fetchAll = useCallback(async () => {
@@ -881,13 +979,10 @@ export default function DealBatchPage() {
     await patchDeal(incentivePopup.dealId, incentivePopup.dealType, { incentive_data: newIncentiveData });
   }, [incentivePopup, deals, patchDeal]);
 
-  const handleInclExclSave = useCallback(async (updatedData: Record<string, string>) => {
+  const handleInclExclSave = useCallback(async (allData: Record<string, Record<string, IEFieldValue>>) => {
     if (!inclExclPopup) return;
-    const deal = deals.find(d => d.id === inclExclPopup.dealId && d.deal_type === inclExclPopup.dealType);
-    if (!deal) return;
-    const newInclExclData = { ...(deal.incl_excl_data ?? {}), [inclExclPopup.name]: updatedData };
-    await patchDeal(inclExclPopup.dealId, inclExclPopup.dealType, { incl_excl_data: newInclExclData });
-  }, [inclExclPopup, deals, patchDeal]);
+    await patchDeal(inclExclPopup.dealId, inclExclPopup.dealType, { incl_excl_data: allData });
+  }, [inclExclPopup, patchDeal]);
 
   const handleDeleteDeal = useCallback(async () => {
     if (!deleteTarget) return;
@@ -914,6 +1009,12 @@ export default function DealBatchPage() {
     }
     if (dateFrom && d.valid_from && d.valid_from < dateFrom) return false;
     if (dateTo   && d.valid_to   && d.valid_to   > dateTo)   return false;
+    if (filterAirline        && d.airline_name !== filterAirline)                                              return false;
+    if (filterAirlineType    && d.airline_type !== filterAirlineType)                                          return false;
+    if (filterApprovalStatus && d.status !== filterApprovalStatus)                                             return false;
+    if (filterDealStatus     && d.deal_lifecycle_status !== filterDealStatus)                                  return false;
+    if (filterClass   && !getDealClasses(d).some(c => c.toLowerCase() === filterClass.toLowerCase()))          return false;
+    if (filterSegment && !getDealSegments(d).some(s => s.toLowerCase() === filterSegment.toLowerCase()))       return false;
     return true;
   });
 
@@ -1051,14 +1152,85 @@ export default function DealBatchPage() {
               title="Valid To — on or before"
               className="py-1.5 px-2.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400"
             />
-            {(search || dateFrom || dateTo) && (
+            {(search || dateFrom || dateTo || filterAirline || filterAirlineType || filterApprovalStatus || filterDealStatus || filterClass || filterSegment) && (
               <button
-                onClick={() => { setSearch(""); setDateFrom(""); setDateTo(""); setPage(1); }}
-                className="p-1.5 hover:bg-gray-100 rounded-lg text-gray-400"
-                title="Clear filters"
+                onClick={() => { setSearch(""); setDateFrom(""); setDateTo(""); setFilterAirline(""); setFilterAirlineType(""); setFilterApprovalStatus(""); setFilterDealStatus(""); setFilterClass(""); setFilterSegment(""); setPage(1); }}
+                className="flex items-center gap-1 px-2.5 py-1.5 text-xs text-red-500 hover:bg-red-50 border border-red-200 rounded-lg"
               >
-                <X className="w-3.5 h-3.5" />
+                <X className="w-3 h-3" /> Clear All
               </button>
+            )}
+          </div>
+
+          {/* row 3: dropdown filters */}
+          <div className="flex items-center gap-2 flex-wrap pt-1">
+            {/* Airline Name */}
+            <select
+              value={filterAirline}
+              onChange={e => { setFilterAirline(e.target.value); setPage(1); }}
+              className={`py-1.5 px-2.5 text-xs border rounded-lg bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 ${filterAirline ? "border-blue-400 ring-1 ring-blue-400" : "border-gray-200"}`}
+            >
+              <option value="">All Airlines</option>
+              {filterOptions.airlines.map(a => <option key={a} value={a}>{a}</option>)}
+            </select>
+
+            {/* Airline Type */}
+            <select
+              value={filterAirlineType}
+              onChange={e => { setFilterAirlineType(e.target.value); setPage(1); }}
+              className={`py-1.5 px-2.5 text-xs border rounded-lg bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 ${filterAirlineType ? "border-blue-400 ring-1 ring-blue-400" : "border-gray-200"}`}
+            >
+              <option value="">All Types</option>
+              <option value="GDS">GDS</option>
+              <option value="LCC">LCC</option>
+            </select>
+
+            {/* Approval Status */}
+            <select
+              value={filterApprovalStatus}
+              onChange={e => { setFilterApprovalStatus(e.target.value); setPage(1); }}
+              className={`py-1.5 px-2.5 text-xs border rounded-lg bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 ${filterApprovalStatus ? "border-blue-400 ring-1 ring-blue-400" : "border-gray-200"}`}
+            >
+              <option value="">All Approval Status</option>
+              <option value="pending_approval">Pending Approval</option>
+              <option value="approved">Approved</option>
+              <option value="rejected">Rejected</option>
+            </select>
+
+            {/* Deal Status (lifecycle) */}
+            <select
+              value={filterDealStatus}
+              onChange={e => { setFilterDealStatus(e.target.value); setPage(1); }}
+              className={`py-1.5 px-2.5 text-xs border rounded-lg bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 ${filterDealStatus ? "border-blue-400 ring-1 ring-blue-400" : "border-gray-200"}`}
+            >
+              <option value="">All Deal Status</option>
+              <option value="draft">Draft</option>
+              <option value="active">Active</option>
+              <option value="closed">Closed</option>
+            </select>
+
+            {/* Class */}
+            {filterOptions.classes.length > 0 && (
+              <select
+                value={filterClass}
+                onChange={e => { setFilterClass(e.target.value); setPage(1); }}
+                className={`py-1.5 px-2.5 text-xs border rounded-lg bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 ${filterClass ? "border-blue-400 ring-1 ring-blue-400" : "border-gray-200"}`}
+              >
+                <option value="">All Classes</option>
+                {filterOptions.classes.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            )}
+
+            {/* Segment */}
+            {filterOptions.segments.length > 0 && (
+              <select
+                value={filterSegment}
+                onChange={e => { setFilterSegment(e.target.value); setPage(1); }}
+                className={`py-1.5 px-2.5 text-xs border rounded-lg bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 ${filterSegment ? "border-blue-400 ring-1 ring-blue-400" : "border-gray-200"}`}
+              >
+                <option value="">All Segments</option>
+                {filterOptions.segments.map(s => <option key={s} value={s}>{s}</option>)}
+              </select>
             )}
           </div>
         </div>
@@ -1107,13 +1279,6 @@ export default function DealBatchPage() {
                     <td className="px-2 py-1.5 whitespace-nowrap">
                       <span className={`px-2 py-0.5 rounded-full text-[9px] font-semibold border ${(d.deal_tag||"standard")==="adhoc"?"bg-amber-50 text-amber-700 border-amber-200":"bg-slate-50 text-slate-600 border-slate-200"}`}>
                         {(d.deal_tag||"standard")==="adhoc"?"Adhoc":"Standard"}
-                      </span>
-                    </td>
-
-                    {/* Deal Category */}
-                    <td className="px-2 py-1.5 whitespace-nowrap">
-                      <span className={`px-2 py-0.5 rounded-full text-[9px] font-semibold border ${(d.deal_category||"enterprise")==="proprietary"?"bg-violet-50 text-violet-700 border-violet-200":"bg-blue-50 text-blue-700 border-blue-200"}`}>
-                        {(d.deal_category||"enterprise")==="proprietary"?"Proprietary":"Enterprise"}
                       </span>
                     </td>
 
@@ -1186,24 +1351,27 @@ export default function DealBatchPage() {
                     </td>
 
                     <td className="px-2 py-1.5 min-w-28">
-                      {(d.incl_excl_types ?? []).length > 0 ? (
-                        <div className="flex flex-wrap gap-0.5">
-                          {(d.incl_excl_types ?? []).map(t => {
-                            const isExcl = t.toLowerCase().includes("exclusion");
-                            return (
-                              <button key={t}
-                                onClick={() => setInclExclPopup({ name: t, data: d.incl_excl_data?.[t] ?? {}, dealId: d.id, dealType: d.deal_type })}
-                                className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border whitespace-nowrap cursor-pointer transition-colors ${
+                      <button
+                        onClick={() => setInclExclPopup({ dealId: d.id, dealType: d.deal_type })}
+                        className="text-left group"
+                      >
+                        {(d.incl_excl_types ?? []).length > 0 ? (
+                          <div className="flex flex-wrap gap-0.5">
+                            {(d.incl_excl_types ?? []).map(t => {
+                              const isExcl = t.toLowerCase().includes("exclusion");
+                              return (
+                                <span key={t} className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border whitespace-nowrap ${
                                   isExcl
-                                    ? "bg-red-50 text-red-600 border-red-200 hover:bg-red-100"
-                                    : "bg-green-50 text-green-700 border-green-200 hover:bg-green-100"
-                                }`}>
-                                {t}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      ) : <span className="text-[11px] text-gray-300">—</span>}
+                                    ? "bg-red-50 text-red-600 border-red-200 group-hover:bg-red-100"
+                                    : "bg-green-50 text-green-700 border-green-200 group-hover:bg-green-100"
+                                }`}>{t}</span>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <span className="text-[11px] text-gray-300 group-hover:text-gray-400">+ Add</span>
+                        )}
+                      </button>
                     </td>
 
                     <td className="px-2 py-1.5 min-w-28">
@@ -1337,14 +1505,16 @@ export default function DealBatchPage() {
       )}
 
       {/* ── Incl/Excl edit popup ── */}
-      {inclExclPopup && (
-        <InclExclEditModal
-          name={inclExclPopup.name}
-          data={inclExclPopup.data}
-          onSave={handleInclExclSave}
-          onClose={() => setInclExclPopup(null)}
-        />
-      )}
+      {inclExclPopup && (() => {
+        const deal = deals.find(d => d.id === inclExclPopup.dealId && d.deal_type === inclExclPopup.dealType);
+        return (
+          <InclExclEditModal
+            allData={deal?.incl_excl_data ?? {}}
+            onSave={handleInclExclSave}
+            onClose={() => setInclExclPopup(null)}
+          />
+        );
+      })()}
 
       {/* ── Delete Confirm Modal ── */}
       {deleteTarget && (

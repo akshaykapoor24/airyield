@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import {
@@ -162,10 +162,12 @@ const TICKET_STATUS_STYLE: Record<string, string> = {
   reviewed:   "bg-blue-50 text-blue-600",
   excluded:   "bg-red-50 text-red-600 border border-red-200",
   cancelled:  "bg-orange-50 text-orange-600 border border-orange-200",
+  reversed:   "bg-purple-50 text-purple-600 border border-purple-200",
 };
 const TICKET_STATUS_LABEL: Record<string, string> = {
   draft: "Draft", calculated: "Calculated", included: "Included",
   reviewed: "Reviewed", excluded: "Excluded", cancelled: "Cancelled",
+  reversed: "Reversed",
 };
 
 function getStatusDisplay(status: string, exclusionReason: string | null): { style: string; label: string } {
@@ -311,6 +313,24 @@ export default function StatementDetailPage() {
   const [search,     setSearch]     = useState("");
   const [dateFrom,   setDateFrom]   = useState("");
   const [dateTo,     setDateTo]     = useState("");
+
+  const [filterAirlineCode, setFilterAirlineCode] = useState("");
+  const [filterAirline,     setFilterAirline]     = useState("");
+  const [filterSegment,     setFilterSegment]     = useState("");
+  const [filterInvType,     setFilterInvType]     = useState("");
+  const [filterClass,       setFilterClass]       = useState("");
+
+  const filterOptions = useMemo(() => {
+    const uniq = <T,>(arr: (T | null | undefined)[]): T[] =>
+      [...new Set(arr.filter(Boolean) as T[])].sort();
+    return {
+      airlineCodes: uniq(tickets.map(t => t.airlines_code)),
+      airlines:     uniq(tickets.map(t => t.airline_name)),
+      segments:     uniq(tickets.map(t => t.segment_type)),
+      invTypes:     uniq(tickets.map(t => t.invoice_type)),
+      classes:      uniq(tickets.map(t => t.booking_class)),
+    };
+  }, [tickets]);
   const [page,       setPage]       = useState(1);
   const [pageSize,   setPageSize]   = useState<25|50|100>(25);
 
@@ -385,6 +405,11 @@ export default function StatementDetailPage() {
     }
     if (dateFrom && t.ticket_date && t.ticket_date < dateFrom) return false;
     if (dateTo   && t.ticket_date && t.ticket_date > dateTo)   return false;
+    if (filterAirlineCode && t.airlines_code  !== filterAirlineCode) return false;
+    if (filterAirline     && t.airline_name   !== filterAirline)     return false;
+    if (filterSegment     && t.segment_type   !== filterSegment)     return false;
+    if (filterInvType     && t.invoice_type   !== filterInvType)     return false;
+    if (filterClass       && t.booking_class  !== filterClass)       return false;
     return true;
   });
   const totalPages = Math.ceil(filtered.length / pageSize);
@@ -662,9 +687,13 @@ export default function StatementDetailPage() {
         <span className="text-xs text-gray-400">to</span>
         <input type="date" value={dateTo} onChange={e => { setDateTo(e.target.value); setPage(1); }}
           className="py-2 px-2.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400" />
-        {(search || dateFrom || dateTo) && (
-          <button onClick={() => { setSearch(""); setDateFrom(""); setDateTo(""); setPage(1); }}
-            className="p-2 hover:bg-gray-100 rounded-lg text-gray-400"><X className="w-3.5 h-3.5" /></button>
+        {(search || dateFrom || dateTo || filterAirlineCode || filterAirline || filterSegment || filterInvType || filterClass) && (
+          <button
+            onClick={() => { setSearch(""); setDateFrom(""); setDateTo(""); setFilterAirlineCode(""); setFilterAirline(""); setFilterSegment(""); setFilterInvType(""); setFilterClass(""); setPage(1); }}
+            className="flex items-center gap-1 px-2.5 py-1.5 text-xs text-red-500 hover:bg-red-50 border border-red-200 rounded-lg"
+          >
+            <X className="w-3 h-3" /> Clear All
+          </button>
         )}
 
         <div className="ml-auto flex items-center gap-2">
@@ -690,6 +719,65 @@ export default function StatementDetailPage() {
               : <><Calculator className="w-3.5 h-3.5" /> {selected.size > 0 ? `Run (${selected.size})` : "Run All"}</>}
           </button>
         </div>
+      </div>
+
+      {/* ── Filter bar ───────────────────────────────────────────────────── */}
+      <div className="flex items-center gap-2 flex-wrap">
+        {/* Airline Code */}
+        <select
+          value={filterAirlineCode}
+          onChange={e => { setFilterAirlineCode(e.target.value); setPage(1); }}
+          className={`py-1.5 px-2.5 text-xs border rounded-lg bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 ${filterAirlineCode ? "border-blue-400 ring-1 ring-blue-400" : "border-gray-200"}`}
+        >
+          <option value="">All Airline Codes</option>
+          {filterOptions.airlineCodes.map(c => <option key={c} value={c}>{c}</option>)}
+        </select>
+
+        {/* Airline */}
+        <select
+          value={filterAirline}
+          onChange={e => { setFilterAirline(e.target.value); setPage(1); }}
+          className={`py-1.5 px-2.5 text-xs border rounded-lg bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 ${filterAirline ? "border-blue-400 ring-1 ring-blue-400" : "border-gray-200"}`}
+        >
+          <option value="">All Airlines</option>
+          {filterOptions.airlines.map(a => <option key={a} value={a}>{a}</option>)}
+        </select>
+
+        {/* Segment */}
+        {filterOptions.segments.length > 0 && (
+          <select
+            value={filterSegment}
+            onChange={e => { setFilterSegment(e.target.value); setPage(1); }}
+            className={`py-1.5 px-2.5 text-xs border rounded-lg bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 ${filterSegment ? "border-blue-400 ring-1 ring-blue-400" : "border-gray-200"}`}
+          >
+            <option value="">All Segments</option>
+            {filterOptions.segments.map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
+        )}
+
+        {/* Inv. Type */}
+        {filterOptions.invTypes.length > 0 && (
+          <select
+            value={filterInvType}
+            onChange={e => { setFilterInvType(e.target.value); setPage(1); }}
+            className={`py-1.5 px-2.5 text-xs border rounded-lg bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 ${filterInvType ? "border-blue-400 ring-1 ring-blue-400" : "border-gray-200"}`}
+          >
+            <option value="">All Inv. Types</option>
+            {filterOptions.invTypes.map(v => <option key={v} value={v}>{v}</option>)}
+          </select>
+        )}
+
+        {/* Class */}
+        {filterOptions.classes.length > 0 && (
+          <select
+            value={filterClass}
+            onChange={e => { setFilterClass(e.target.value); setPage(1); }}
+            className={`py-1.5 px-2.5 text-xs border rounded-lg bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 ${filterClass ? "border-blue-400 ring-1 ring-blue-400" : "border-gray-200"}`}
+          >
+            <option value="">All Classes</option>
+            {filterOptions.classes.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        )}
       </div>
 
       {/* batch result */}
