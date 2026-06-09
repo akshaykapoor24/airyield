@@ -6,7 +6,7 @@ import Link from "next/link";
 import {
   ChevronLeft, Search, RefreshCw, FileSpreadsheet, Calculator,
   CheckCircle2, Pencil, Trash2, X, Save, AlertTriangle,
-  FileSearch, ChevronDown, ChevronRight, Building2, Calendar, Hash,
+  FileSearch, ChevronDown, ChevronRight, Building2, Calendar, Hash, FileText,
   AlertCircle, TrendingUp,
 } from "lucide-react";
 import api from "@/lib/api";
@@ -21,6 +21,7 @@ type TicketStatement = {
   valid_from:     string;
   valid_to:       string;
   file_name:      string;
+  file_url:       string | null;
   ticket_count:   number;
   created_at:     string;
 };
@@ -77,6 +78,7 @@ type UploadedTicket = {
   ticket_status: string;
   split_type: string | null;
   exclusion_reason: string | null;
+  adm_acm_ra: string | null;
   created_at: string;
   created_by_id: number;
 };
@@ -189,6 +191,7 @@ const TEXT_HEADERS: { key: keyof UploadedTicket; label: string }[] = [
   { key: "booking_ref",        label: "Booking Ref"   },
   { key: "segment_type",       label: "Segment"       },
   { key: "invoice_type",       label: "Inv. Type"     },
+  { key: "adm_acm_ra",         label: "ADM/ACM/RA"    },
   { key: "invoice_no",         label: "Inv. No"       },
   { key: "last_name",          label: "Last Name"     },
   { key: "first_name",         label: "First Name"    },
@@ -643,7 +646,22 @@ export default function StatementDetailPage() {
             </div>
             <div className="text-center">
               <p className="text-[11px] text-white/50 uppercase tracking-wide mb-0.5">File</p>
-              <span className="text-sm font-semibold text-white truncate max-w-40 block">{statement.file_name}</span>
+              {statement.file_url ? (
+                <button
+                  onClick={async () => {
+                    try {
+                      const { data } = await api.get<{ url: string; file_type: string }>(`/tickets/statements/${statement.batch_id}/file-url`);
+                      window.open(`https://view.officeapps.live.com/op/view.aspx?src=${encodeURIComponent(data.url)}`, "_blank");
+                    } catch { /* silent */ }
+                  }}
+                  className="text-sm font-semibold text-white truncate max-w-40 block hover:underline text-left"
+                  title={statement.file_name}
+                >
+                  {statement.file_name}
+                </button>
+              ) : (
+                <span className="text-sm font-semibold text-white truncate max-w-40 block">{statement.file_name}</span>
+              )}
             </div>
           </div>
         </div>

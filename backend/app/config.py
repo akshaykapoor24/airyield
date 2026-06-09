@@ -30,6 +30,13 @@ class Settings(BaseSettings):
     # OpenAI
     OPENAI_API_KEY: str = ""
 
+    # GCP Cloud Storage
+    GCS_DEALS_BUCKET_NAME: str = ""
+    GCS_TICKETS_BUCKET_NAME: str = ""
+    GCS_SERVICE_ACCOUNT_EMAIL: str = ""
+    GCS_SERVICE_ACCOUNT_PRIVATE_KEY: str = ""
+    GCS_PROJECT_ID: str = ""
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

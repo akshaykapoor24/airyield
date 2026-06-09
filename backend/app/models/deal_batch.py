@@ -16,6 +16,7 @@ class DealBatch(Base):
     supplier_name: Mapped[str | None] = mapped_column(String(300), nullable=True)
     file_name: Mapped[str | None] = mapped_column(String(500), nullable=True)
     file_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    file_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     incentive_types: Mapped[list | None] = mapped_column(JSON, nullable=True)
     valid_from: Mapped[date | None] = mapped_column(Date, nullable=True)
     valid_to: Mapped[date | None] = mapped_column(Date, nullable=True)

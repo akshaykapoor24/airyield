@@ -920,6 +920,7 @@ async def list_deal_batches(
             supplier_name=b.supplier_name,
             file_name=b.file_name,
             file_type=b.file_type,
+            file_url=b.file_url,
             incentive_types=b.incentive_types or [],
             valid_from=b.valid_from,
             valid_to=b.valid_to,
@@ -971,6 +972,7 @@ async def get_deal_batch(
         supplier_name=batch.supplier_name,
         file_name=batch.file_name,
         file_type=batch.file_type,
+        file_url=batch.file_url,
         incentive_types=batch.incentive_types or [],
         valid_from=batch.valid_from,
         valid_to=batch.valid_to,
@@ -1895,3 +1897,79 @@ async def bulk_approve_deals(
             await db.rollback()
             failed.append({"deal_id": approval_id, "reason": str(exc.detail)})
     return BulkApproveResult(approved=approved, failed=failed)
+
+
+# ── GCS file upload & preview ─────────────────────────────────────────────────
+
+@router.post("/batches/{batch_id}/file")
+async def upload_batch_file(
+    batch_id: str,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Upload the source file for a deal batch to GCS. Called right after confirm."""
+    import logging, mimetypes
+    from app.services import gcs as gcs_service
+    from app.config import settings
+    log = logging.getLogger(__name__)
+
+    log.info("[DEAL FILE UPLOAD] batch_id=%s | filename=%s | tenant=%s",
+             batch_id, file.filename, current_user.tenant_id)
+
+    batch = await db.scalar(
+        select(DealBatch).where(
+            DealBatch.batch_id == batch_id,
+            DealBatch.tenant_id == current_user.tenant_id,
+        )
+    )
+    if not batch:
+        log.error("[DEAL FILE UPLOAD] Batch not found: %s", batch_id)
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    log.info("[DEAL FILE UPLOAD] Batch found. Reading file content...")
+    bucket_name = settings.GCS_DEALS_BUCKET_NAME
+    log.info("[DEAL FILE UPLOAD] GCS_DEALS_BUCKET_NAME=%r", bucket_name)
+
+    content = await file.read()
+    log.info("[DEAL FILE UPLOAD] File read complete | size=%d bytes", len(content))
+
+    ct = mimetypes.guess_type(file.filename or "")[0] or "application/octet-stream"
+    blob_name = f"deals/{current_user.tenant_id}/{batch_id}/{file.filename}"
+    log.info("[DEAL FILE UPLOAD] Uploading to GCS | blob=%s | content_type=%s", blob_name, ct)
+
+    try:
+        await gcs_service.upload_bytes(content, blob_name, ct, bucket_name)
+        log.info("[DEAL FILE UPLOAD] GCS upload SUCCESS | blob=%s", blob_name)
+    except Exception as e:
+        log.error("[DEAL FILE UPLOAD] GCS upload FAILED: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"GCS upload failed: {e}")
+
+    batch.file_url = blob_name
+    await db.commit()
+    log.info("[DEAL FILE UPLOAD] DB updated with file_url | batch_id=%s", batch_id)
+    return {"file_url": blob_name}
+
+
+@router.get("/batches/{batch_id}/file-url")
+async def get_batch_file_url(
+    batch_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return a short-lived signed URL for previewing the batch source file."""
+    from app.services import gcs as gcs_service
+    from app.config import settings
+
+    batch = await db.scalar(
+        select(DealBatch).where(
+            DealBatch.batch_id == batch_id,
+            DealBatch.tenant_id == current_user.tenant_id,
+        )
+    )
+    if not batch or not batch.file_url:
+        raise HTTPException(status_code=404, detail="No file attached to this batch")
+    bucket_name = settings.GCS_DEALS_BUCKET_NAME
+    is_pdf = (batch.file_type or "").lower() == "pdf"
+    url = await gcs_service.generate_signed_url(batch.file_url, bucket_name, expiry_minutes=60, inline=is_pdf)
+    return {"url": url, "file_type": batch.file_type or ""}

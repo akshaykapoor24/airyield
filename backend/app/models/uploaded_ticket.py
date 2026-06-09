@@ -73,5 +73,6 @@ class UploadedTicket(Base):
     ticket_status:         Mapped[str]          = mapped_column(String(10), nullable=False, server_default="draft")
     split_type:            Mapped[str | None]   = mapped_column(String(10), nullable=True)
     exclusion_reason:      Mapped[str | None]   = mapped_column(String(500), nullable=True)
+    adm_acm_ra:            Mapped[str | None]   = mapped_column(String(10), nullable=True)   # 'ADM' | 'ACM' | 'RA'
 
     created_by: Mapped["User"] = relationship("User")  # noqa: F821

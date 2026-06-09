@@ -162,6 +162,7 @@ type DealBatch = {
   supplier_name:   string | null;
   file_name:       string | null;
   file_type:       string | null;
+  file_url:        string | null;
   incentive_types: string[];
   valid_from:      string | null;
   valid_to:        string | null;
@@ -1089,7 +1090,26 @@ export default function DealBatchPage() {
                 </div>
                 <div className="flex items-center gap-1.5">
                   <FileIcon className="w-3.5 h-3.5 text-gray-400" />
-                  <span className="truncate max-w-40" title={batch.file_name ?? undefined}>{batch.file_name || "—"}</span>
+                  {batch.file_url ? (
+                    <button
+                      onClick={async () => {
+                        try {
+                          const { data } = await api.get<{ url: string; file_type: string }>(`/deals/batches/${batch.batch_id}/file-url`);
+                          if (data.file_type === "excel") {
+                            window.open(`https://view.officeapps.live.com/op/view.aspx?src=${encodeURIComponent(data.url)}`, "_blank");
+                          } else {
+                            window.open(data.url, "_blank");
+                          }
+                        } catch { /* silent */ }
+                      }}
+                      className="truncate max-w-40 text-blue-600 hover:underline text-left"
+                      title={batch.file_name ?? undefined}
+                    >
+                      {batch.file_name || "—"}
+                    </button>
+                  ) : (
+                    <span className="truncate max-w-40" title={batch.file_name ?? undefined}>{batch.file_name || "—"}</span>
+                  )}
                 </div>
                 <div className="flex items-center gap-1.5">
                   <Hash className="w-3.5 h-3.5 text-gray-400" />
