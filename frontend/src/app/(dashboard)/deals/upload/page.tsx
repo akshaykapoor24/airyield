@@ -1552,6 +1552,21 @@ export default function UploadDealPage(){
         }
       );
       setSavedBatchId(confirmData.batch_id ?? null);
+      if (file && confirmData.batch_id) {
+        console.log("[GCS] Uploading deal file to bucket | batch_id=", confirmData.batch_id, "| file=", file.name, "| size=", file.size);
+        try {
+          const fd = new FormData();
+          fd.append("file", file);
+          const res = await api.post(`/deals/batches/${confirmData.batch_id}/file`, fd, {
+            headers: { "Content-Type": "multipart/form-data" },
+          });
+          console.log("[GCS] Deal file upload SUCCESS | response=", res.data);
+        } catch (uploadErr) {
+          console.error("[GCS] Deal file upload FAILED:", uploadErr);
+        }
+      } else {
+        console.warn("[GCS] Skipping file upload | file=", file, "| batch_id=", confirmData.batch_id);
+      }
       setStep(4);
     }catch(err:unknown){
       const msg=(err as {response?:{data?:{detail?:string}}})?.response?.data?.detail;

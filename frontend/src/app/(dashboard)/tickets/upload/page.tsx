@@ -653,6 +653,21 @@ export default function UploadTicketsPage() {
         },
       );
       setBatchId(data.batch_id);
+      if (storedFile && data.batch_id) {
+        console.log("[GCS] Uploading ticket file to bucket | batch_id=", data.batch_id, "| file=", storedFile.name, "| size=", storedFile.size);
+        try {
+          const fd = new FormData();
+          fd.append("file", storedFile);
+          const res = await api.post(`/tickets/statements/${data.batch_id}/file`, fd, {
+            headers: { "Content-Type": "multipart/form-data" },
+          });
+          console.log("[GCS] Ticket file upload SUCCESS | response=", res.data);
+        } catch (uploadErr) {
+          console.error("[GCS] Ticket file upload FAILED:", uploadErr);
+        }
+      } else {
+        console.warn("[GCS] Skipping file upload | storedFile=", storedFile, "| batch_id=", data.batch_id);
+      }
       setStep("done");
     } catch (e: unknown) {
       const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;

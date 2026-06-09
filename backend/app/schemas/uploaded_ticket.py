@@ -50,6 +50,7 @@ class TicketRow(BaseModel):
     customer_name:       Optional[str]   = None
     tour_code:           Optional[str]   = None
     split_type:            Optional[str]   = None   # "normal" | "split"
+    adm_acm_ra:            Optional[str]   = None   # "ADM" | "ACM" | "RA"
     # derived / calculation fields
     airline_name:          Optional[str]   = None
     matched_deal_id:       Optional[int]   = None
@@ -87,6 +88,7 @@ class TicketStatementRead(BaseModel):
     valid_from:       date
     valid_to:         date
     file_name:        str
+    file_url:         Optional[str] = None
     ticket_count:     int
     created_by_name:  Optional[str] = None
     created_at:       datetime
@@ -182,6 +184,7 @@ class UploadedTicketUpdate(BaseModel):
     ticket_status:       Optional[str]   = None
     split_type:          Optional[str]   = None
     exclusion_reason:    Optional[str]   = None
+    adm_acm_ra:          Optional[str]   = None
 
     model_config = ConfigDict(extra="ignore")
 

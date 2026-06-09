@@ -207,6 +207,7 @@ class DealBatchRead(BaseModel):
     valid_to:         Optional[date]
     deal_count:       int
     lifecycle_counts: dict[str, int] = {}
+    file_url:         Optional[str] = None
     created_by_name:  Optional[str]
     created_at:       datetime
 

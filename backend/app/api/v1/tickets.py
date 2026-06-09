@@ -40,6 +40,31 @@ from app.services.ticket_extraction import TicketExtractionService, TEMPLATE_HEA
 
 router = APIRouter()
 
+_CREDIT_TYPES = {"credit note", "refund"}
+
+
+def _classify_ticket(ticket_number: str | None, invoice_type: str | None) -> tuple[str | None, str | None]:
+    """Classify ticket by number prefix. Returns (adm_acm_ra, invoice_type_override).
+    invoice_type_override is None when no change is needed (already Credit Note / Refund).
+    Rules:
+      starts with 400              → RA
+      stripped leading-zeros → 6   → ADM
+      stripped leading-zeros → 8   → ACM
+    """
+    if not ticket_number:
+        return None, None
+    tn_norm = ticket_number.lstrip("0") or "0"
+    if ticket_number.startswith("400"):
+        category = "RA"
+    elif tn_norm.startswith("6"):
+        category = "ADM"
+    elif tn_norm.startswith("8"):
+        category = "ACM"
+    else:
+        return None, None
+    already_credit = (invoice_type or "").strip().lower() in _CREDIT_TYPES
+    return category, (None if already_credit else "Credit Note")
+
 
 class DealMatchSummary(BaseModel):
     deal_id:              int
@@ -217,6 +242,8 @@ async def confirm_ticket_upload(
         resolved_airline_name = row.airline_name or (matched.name if matched else None)
         resolved_airline_code = row.airlines_code or (matched.iata_code if matched else None)
 
+        adm_acm_ra, invoice_override = _classify_ticket(row.ticket_number, row.invoice_type)
+
         ticket = UploadedTicket(
             batch_id=batch_id,
             file_name=payload.file_name,
@@ -225,7 +252,7 @@ async def confirm_ticket_upload(
             created_at=now,
             booking_ref=row.booking_ref,
             segment_type=row.segment_type,
-            invoice_type=row.invoice_type,
+            invoice_type=invoice_override if invoice_override is not None else row.invoice_type,
             invoice_no=row.invoice_no,
             ticket_date=row.ticket_date,
             last_name=row.last_name,
@@ -266,6 +293,7 @@ async def confirm_ticket_upload(
             tour_code=row.tour_code,
             airline_name=resolved_airline_name,
             split_type=row.split_type,
+            adm_acm_ra=adm_acm_ra,
         )
         db.add(ticket)
 
@@ -309,6 +337,7 @@ async def list_ticket_statements(
             valid_from=stmt.valid_from,
             valid_to=stmt.valid_to,
             file_name=stmt.file_name,
+            file_url=stmt.file_url,
             ticket_count=int(count),
             created_by_name=created_by_name,
             created_at=stmt.created_at,
@@ -349,6 +378,7 @@ async def get_ticket_statement(
         valid_from=stmt.valid_from,
         valid_to=stmt.valid_to,
         file_name=stmt.file_name,
+        file_url=stmt.file_url,
         ticket_count=int(ticket_count),
         created_at=stmt.created_at,
     )
@@ -1002,3 +1032,79 @@ async def match_diagnosis(
         matched_count=sum(1 for d in deals if d.overall_match),
         deals=deals,
     )
+
+
+# ── GCS file upload & preview ─────────────────────────────────────────────────
+
+@router.post("/statements/{batch_id}/file")
+async def upload_statement_file(
+    batch_id: str,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Upload the source XLS for a ticket statement to GCS. Called right after confirm."""
+    import logging, mimetypes
+    from app.services import gcs as gcs_service
+    from app.config import settings
+    log = logging.getLogger(__name__)
+
+    log.info("[TICKET FILE UPLOAD] batch_id=%s | filename=%s | tenant=%s",
+             batch_id, file.filename, current_user.tenant_id)
+
+    stmt = await db.scalar(
+        select(TicketStatement).where(
+            TicketStatement.batch_id == batch_id,
+            TicketStatement.tenant_id == current_user.tenant_id,
+        )
+    )
+    if not stmt:
+        log.error("[TICKET FILE UPLOAD] Statement not found: %s", batch_id)
+        raise HTTPException(status_code=404, detail="Statement not found")
+
+    log.info("[TICKET FILE UPLOAD] Statement found. Reading file content...")
+    bucket_name = settings.GCS_TICKETS_BUCKET_NAME
+    log.info("[TICKET FILE UPLOAD] GCS_TICKETS_BUCKET_NAME=%r", bucket_name)
+
+    content = await file.read()
+    log.info("[TICKET FILE UPLOAD] File read complete | size=%d bytes", len(content))
+
+    ct = mimetypes.guess_type(file.filename or "")[0] or "application/octet-stream"
+    blob_name = f"tickets/{current_user.tenant_id}/{batch_id}/{file.filename}"
+    log.info("[TICKET FILE UPLOAD] Uploading to GCS | blob=%s | content_type=%s", blob_name, ct)
+
+    try:
+        await gcs_service.upload_bytes(content, blob_name, ct, bucket_name)
+        log.info("[TICKET FILE UPLOAD] GCS upload SUCCESS | blob=%s", blob_name)
+    except Exception as e:
+        log.error("[TICKET FILE UPLOAD] GCS upload FAILED: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"GCS upload failed: {e}")
+
+    stmt.file_url = blob_name
+    await db.commit()
+    log.info("[TICKET FILE UPLOAD] DB updated with file_url | batch_id=%s", batch_id)
+    return {"file_url": blob_name}
+
+
+@router.get("/statements/{batch_id}/file-url")
+async def get_statement_file_url(
+    batch_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return a short-lived signed URL for previewing the statement source file."""
+    from app.services import gcs as gcs_service
+    from app.config import settings
+
+    stmt = await db.scalar(
+        select(TicketStatement).where(
+            TicketStatement.batch_id == batch_id,
+            TicketStatement.tenant_id == current_user.tenant_id,
+        )
+    )
+    if not stmt or not stmt.file_url:
+        raise HTTPException(status_code=404, detail="No file attached to this statement")
+    bucket_name = settings.GCS_TICKETS_BUCKET_NAME
+    # Tickets are always XLS — no inline flag needed
+    url = await gcs_service.generate_signed_url(stmt.file_url, bucket_name, expiry_minutes=60, inline=False)
+    return {"url": url, "file_type": "excel"}

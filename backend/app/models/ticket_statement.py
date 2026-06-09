@@ -17,5 +17,6 @@ class TicketStatement(Base):
     valid_from:     Mapped[date]     = mapped_column(Date, nullable=False)
     valid_to:       Mapped[date]     = mapped_column(Date, nullable=False)
     file_name:      Mapped[str]      = mapped_column(String(500), nullable=False)
+    file_url:       Mapped[str | None] = mapped_column(String(1000), nullable=True)
     created_by_id:  Mapped[int]      = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     created_at:     Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
