@@ -1492,6 +1492,7 @@ async def approvals_inbox(
                 entity_lcc=deal.entity_lcc,
                 remark=deal.remark,
                 deal_no=f"AIR-{deal.id:04d}",
+                batch_id=deal.batch_id,
             ))
         elif approval.deal_type == "b2b":
             deal_b2b = b2b_map.get(approval.deal_id)
@@ -1515,6 +1516,7 @@ async def approvals_inbox(
                 entity_lcc=deal_b2b.entity_lcc,
                 remark=deal_b2b.remark,
                 deal_no=f"B2B-{deal_b2b.id:04d}",
+                batch_id=deal_b2b.batch_id,
             ))
         else:
             deal_up = upload_map.get(approval.deal_id)

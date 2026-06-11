@@ -102,6 +102,7 @@ class ApprovalInboxItem(BaseModel):
     entity_lcc:      Optional[str] = None
     remark:          Optional[str] = None
     deal_no:         Optional[str] = None
+    batch_id:        Optional[str] = None
 
 
 class BulkApprovePayload(BaseModel):

@@ -4,10 +4,12 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Eye, EyeOff } from "lucide-react";
-import { setToken, setUser } from "@/lib/auth";
+import { useAppDispatch } from "@/store/hooks";
+import { login } from "@/store/slices/authSlice";
 
 export default function LoginPage() {
-  const router = useRouter();
+  const router   = useRouter();
+  const dispatch = useAppDispatch();
   const [email, setEmail]       = useState("");
   const [password, setPassword] = useState("");
   const [showPw, setShowPw]     = useState(false);
@@ -19,25 +21,13 @@ export default function LoginPage() {
     setError("");
     if (!email || !password) { setError("Please enter email and password."); return; }
     setLoading(true);
-    try {
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1"}/auth/login`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setError(data.detail ?? "Login failed. Please try again.");
-        return;
-      }
-      setToken(data.access_token);
-      setUser(data.user);
-      router.push("/");
-    } catch {
-      setError("Cannot reach server. Make sure the backend is running.");
-    } finally {
-      setLoading(false);
+    const result = await dispatch(login({ username: email, password }));
+    setLoading(false);
+    if (login.rejected.match(result)) {
+      setError((result.payload as string) ?? "Login failed. Please try again.");
+      return;
     }
+    router.push("/");
   };
 
   return (

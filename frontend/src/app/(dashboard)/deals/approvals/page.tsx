@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { CheckCircle, XCircle, RefreshCw, AlertCircle, MinusCircle, User, Eye, X } from "lucide-react";
+import { CheckCircle, XCircle, RefreshCw, AlertCircle, MinusCircle, User, Eye, X, FileText } from "lucide-react";
 import api from "@/lib/api";
 
 type InboxDeal = {
@@ -27,6 +27,7 @@ type InboxDeal = {
   entity_lcc:      string | null;
   remark:          string | null;
   deal_no:         string | null;
+  batch_id:        string | null;
 };
 
 type DealHistoryStep = {
@@ -125,6 +126,24 @@ function DealApprovalModal({ deal, history, remark, onRemarkChange, onApprove, o
   rejectError: string;
   closingDeals: ClosingDealSummary[];
 }) {
+  const [sourceFetching, setSourceFetching] = useState(false);
+
+  const handleViewSource = async () => {
+    if (!deal.batch_id) return;
+    setSourceFetching(true);
+    try {
+      const { data } = await api.get<{ url: string; file_type: string }>(
+        `/deals/batches/${deal.batch_id}/file-url`
+      );
+      const target = data.file_type === "excel"
+        ? `https://view.officeapps.live.com/op/view.aspx?src=${encodeURIComponent(data.url)}`
+        : data.url;
+      window.open(target, "_blank", "noopener,noreferrer");
+    } finally {
+      setSourceFetching(false);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
       <div className="bg-white rounded-xl shadow-2xl w-full max-w-3xl max-h-[90vh] flex flex-col">
@@ -147,9 +166,21 @@ function DealApprovalModal({ deal, history, remark, onRemarkChange, onApprove, o
               )}
             </div>
           </div>
-          <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-lg">
-            <X className="w-4 h-4 text-gray-500" />
-          </button>
+          <div className="flex items-center gap-1">
+            {deal.batch_id && (
+              <button
+                onClick={handleViewSource}
+                disabled={sourceFetching}
+                title="View Source File"
+                className="p-1.5 hover:bg-gray-100 rounded-lg disabled:opacity-50"
+              >
+                <FileText className="w-4 h-4 text-gray-500" />
+              </button>
+            )}
+            <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-lg">
+              <X className="w-4 h-4 text-gray-500" />
+            </button>
+          </div>
         </div>
 
         <div className="overflow-y-auto flex-1 px-5 py-4 space-y-5">
