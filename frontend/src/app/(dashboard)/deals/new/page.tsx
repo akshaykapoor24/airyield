@@ -246,7 +246,7 @@ export default function NewDealPage() {
       valid_to:         validTo,
       entity:           airlineType === "GDS" ? (entity       || null) : null,
       iata_number:      airlineType === "GDS" ? (iataNumber   || null) : null,
-      business_type:    airlineType === "LCC" ? (businessType || null) : null,
+      business_type:    (dealType === "b2b" || airlineType === "LCC") ? (businessType || null) : null,
       entity_lcc:       airlineType === "LCC" ? (entityLCC    || null) : null,
       login_id:         airlineType === "LCC" ? (loginId      || null) : null,
       remark:           remark        || null,
@@ -266,6 +266,7 @@ export default function NewDealPage() {
     }
     if (dealType === "b2b") {
       payload.supplier_name = supplierName || null;
+      payload.contract_year = contractYear || null;
     }
     return payload;
   };
@@ -306,7 +307,7 @@ export default function NewDealPage() {
 
   // ── Step 0: deal-type selection ──────────────────────────────────────────
   if (dealType === null) {
-    return <DealTypeSelector onSelect={(t, tag) => { setDealType(t); setDealTag(tag); }} />;
+    return <DealTypeSelector onSelect={(t, tag) => { setDealType(t); setDealTag(tag); setBusinessType(t === "b2b" ? "B2B" : ""); }} />;
   }
 
   // ── Step 1: two-tab form ─────────────────────────────────────────────────
@@ -388,13 +389,13 @@ export default function NewDealPage() {
                 />
               )}
 
-              {/* [4] Contract Year — Airline only */}
-              {dealType === "airline" && (
+              {/* [4] Contract Year — Airline and B2B */}
+              {(dealType === "airline" || dealType === "b2b") && (
                 <SelectField label="Contract Year" options={CONTRACT_YEARS} value={contractYear} onChange={setContractYear} />
               )}
 
-              {/* [5] Business Type — LCC only (fills grid slot) */}
-              {airlineType === "LCC"
+              {/* [5] Business Type — always for B2B (defaults to B2B), and for LCC airline */}
+              {(dealType === "b2b" || airlineType === "LCC")
                 ? <SearchSelectField label="Business Type" options={BUSINESS_TYPES} value={businessType} onChange={setBusinessType} />
                 : <div />}
 

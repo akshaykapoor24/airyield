@@ -323,7 +323,7 @@ const EDITABLE_FIELDS: { key: keyof UploadedTicket; label: string; type: "text"|
   { key: "airlines_code",      label: "Airline Code",        type: "text"   },
   { key: "gds_pnr",            label: "GDS PNR",             type: "text"   },
   { key: "ticket_date",        label: "Ticket Date",         type: "date"   },
-  { key: "departure_datetime", label: "Departure",           type: "text"   },
+  { key: "departure_datetime", label: "Departure",           type: "date"   },
   { key: "segment_type",       label: "Segment Type",        type: "text"   },
   { key: "invoice_type",       label: "Invoice Type",        type: "text"   },
   { key: "invoice_no",         label: "Invoice No",          type: "text"   },
@@ -1186,6 +1186,7 @@ export default function StatementDetailPage() {
                                   ? (e.target.value === "" ? null : parseFloat(e.target.value))
                                   : (e.target.value || null),
                               }))}
+                              onClick={f.type === "date" ? e => { try { (e.target as HTMLInputElement).showPicker(); } catch {} } : undefined}
                               className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400"
                             />
                           )}

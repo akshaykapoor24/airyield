@@ -9,7 +9,7 @@ import {
   FileText, FileSpreadsheet, Building2, Calendar, Hash, ChevronDown, Search,
 } from "lucide-react";
 import api from "@/lib/api";
-import { IncentiveTabContent } from "@/components/deals/IncentiveInclExclShared";
+import { IncentiveTabContent, IncentiveRulesModal } from "@/components/deals/IncentiveInclExclShared";
 
 // ── incl/excl option constants ─────────────────────────────────────────────
 const IE_CONTINENTS     = ["Africa","Asia","Europe","North America","Oceania","South America","Antarctica"];
@@ -410,7 +410,7 @@ const TABLE_HEADERS = [
   "Valid From", "Valid To",
   "Trigger Type", "Payout Type",
   "Business Type", "Entity (LCC)",
-  "Incentive Types", "Incl / Excl",
+  "Incentive & Rules",
   "Deal Maker", "Approval Status", "Deal Status", "Actions",
 ];
 
@@ -1015,13 +1015,9 @@ export default function DealBatchPage() {
   const [deleteTarget,  setDeleteTarget]  = useState<DealRepositoryItem | null>(null);
   const [deleteLoading, setDeleteLoading] = useState(false);
 
-  // incentive / incl-excl popups
-  const [incentivePopup, setIncentivePopup] = useState<{
-    name: string; entry: IncentiveEntry; dealId: number; dealType: DealType;
-  } | null>(null);
-  const [inclExclPopup, setInclExclPopup] = useState<{
-    dealId: number; dealType: DealType; incentiveTypes: string[];
-    initialRuleType?: RuleType;
+  // combined incentive + incl/excl popup
+  const [incentiveRulesPopup, setIncentiveRulesPopup] = useState<{
+    deal: DealRepositoryItem; initialIncType?: string;
   } | null>(null);
 
   const fetchAll = useCallback(async () => {
@@ -1084,19 +1080,15 @@ export default function DealBatchPage() {
     setEditDeal(null);
   }, [editDeal, patchDeal, fetchAll]);
 
-  const handleInclExclSave = useCallback(async (updated: Record<string, unknown>) => {
-    if (!inclExclPopup) return;
-    await patchDeal(inclExclPopup.dealId, inclExclPopup.dealType, { incl_excl_data: updated });
-  }, [inclExclPopup, patchDeal]);
-
-  const handleIncentiveSave = useCallback(async (name: string, updatedEntry: IncentiveEntry) => {
-    if (!incentivePopup) return;
-    const deal = deals.find(d => d.id === incentivePopup.dealId && d.deal_type === incentivePopup.dealType);
-    if (!deal) return;
-    await patchDeal(incentivePopup.dealId, incentivePopup.dealType, {
-      incentive_data: { ...(deal.incentive_data ?? {}), [name]: updatedEntry },
-    });
-  }, [incentivePopup, deals, patchDeal]);
+  const handleIncentiveRulesSave = useCallback(async (
+    incData: Record<string, Record<string, string>>,
+    ieData: Record<string, Record<string, Record<string, IEFieldValue>>>,
+  ) => {
+    if (!incentiveRulesPopup) return;
+    const { deal } = incentiveRulesPopup;
+    // One PATCH writes both incentive payout data and per-incentive incl/excl rules.
+    await patchDeal(deal.id, deal.deal_type, { incentive_data: incData, incl_excl_data: ieData });
+  }, [incentiveRulesPopup, patchDeal]);
 
   const handleDeleteDeal = useCallback(async () => {
     if (!deleteTarget) return;
@@ -1474,48 +1466,14 @@ export default function DealBatchPage() {
                         <div className="flex flex-wrap gap-0.5">
                           {(d.incentive_types ?? []).map(t => (
                             <button key={t}
-                              onClick={() => setIncentivePopup({ name: t, entry: d.incentive_data?.[t] ?? {}, dealId: d.id, dealType: d.deal_type })}
+                              onClick={() => setIncentiveRulesPopup({ deal: d, initialIncType: t })}
+                              title="Edit incentive details & inclusion/exclusion rules"
                               className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-blue-50 text-blue-700 border border-blue-200 whitespace-nowrap hover:bg-blue-100 cursor-pointer transition-colors">
                               {t}
                             </button>
                           ))}
                         </div>
                       ) : <span className="text-[11px] text-gray-300">—</span>}
-                    </td>
-
-                    <td className="px-2 py-1.5 min-w-28">
-                      {(d.incl_excl_types ?? []).length > 0 ? (
-                        <div className="flex flex-wrap gap-0.5">
-                          {(d.incl_excl_types ?? []).map(t => {
-                            const isExcl = t.toLowerCase().includes("exclusion");
-                            return (
-                              <button
-                                key={t}
-                                onClick={() => setInclExclPopup({
-                                  dealId: d.id,
-                                  dealType: d.deal_type,
-                                  incentiveTypes: d.incentive_types ?? [],
-                                  initialRuleType: t as RuleType,
-                                })}
-                                className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border whitespace-nowrap transition-colors ${
-                                  isExcl
-                                    ? "bg-red-50 text-red-600 border-red-200 hover:bg-red-100"
-                                    : "bg-green-50 text-green-700 border-green-200 hover:bg-green-100"
-                                }`}
-                              >
-                                {t}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      ) : (
-                        <button
-                          onClick={() => setInclExclPopup({ dealId: d.id, dealType: d.deal_type, incentiveTypes: d.incentive_types ?? [] })}
-                          className="text-[11px] text-gray-300 hover:text-gray-400"
-                        >
-                          + Add
-                        </button>
-                      )}
                     </td>
 
                     <td className="px-2 py-1.5 min-w-28">
@@ -1638,30 +1596,17 @@ export default function DealBatchPage() {
         />
       )}
 
-      {/* ── Incentive edit popup ── */}
-      {incentivePopup && (
-        <IncentiveEditModal
-          name={incentivePopup.name}
-          entry={incentivePopup.entry}
-          onSave={handleIncentiveSave}
-          onClose={() => setIncentivePopup(null)}
+      {/* ── Combined Incentive + Incl/Excl edit popup ── */}
+      {incentiveRulesPopup && (
+        <IncentiveRulesModal
+          incentiveTypes={incentiveRulesPopup.deal.incentive_types ?? []}
+          incentiveData={(incentiveRulesPopup.deal.incentive_data ?? {}) as Record<string, Record<string, unknown>>}
+          inclExclData={(incentiveRulesPopup.deal.incl_excl_data ?? {}) as Record<string, Record<string, Record<string, IEFieldValue>>>}
+          initialIncType={incentiveRulesPopup.initialIncType}
+          onSave={handleIncentiveRulesSave}
+          onClose={() => setIncentiveRulesPopup(null)}
         />
       )}
-
-      {/* ── Incl/Excl edit popup ── */}
-      {inclExclPopup && (() => {
-        const deal = deals.find(d => d.id === inclExclPopup.dealId && d.deal_type === inclExclPopup.dealType);
-        return (
-          <InclExclEditModal
-            rawData={(deal?.incl_excl_data ?? {}) as Record<string, unknown>}
-            dealType={inclExclPopup.dealType}
-            incentiveTypes={inclExclPopup.incentiveTypes}
-            initialRuleType={inclExclPopup.initialRuleType}
-            onSave={handleInclExclSave}
-            onClose={() => setInclExclPopup(null)}
-          />
-        );
-      })()}
 
       {/* ── Delete Confirm Modal ── */}
       {deleteTarget && (

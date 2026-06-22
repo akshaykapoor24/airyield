@@ -158,7 +158,7 @@ const TICKET_COL_GROUPS: TColGroup[] = [
   { label:"Flight Info", color:"#4f46e5", cols:[
     { key:"sector",              label:"Sector",        type:"text"   },
     { key:"booking_class",       label:"Class",         type:"text"   },
-    { key:"departure_datetime",  label:"Departure",     type:"text"   },
+    { key:"departure_datetime",  label:"Departure",     type:"date"   },
     { key:"gds_pnr",             label:"GDS PNR",       type:"text"   },
     { key:"airlines_code",       label:"Airline Code",  type:"text"   },
     { key:"airline_name",        label:"Airline Name",  type:"text"   },
@@ -286,7 +286,7 @@ function TicketReviewTable({
                   return(
                     <td key={col.key} className="px-1 py-1 border-l border-gray-100">
                       {col.type==="date"?(
-                        <input type="date" className={inp} value={val} onChange={e=>onChange(idx,col.key,e.target.value)}/>
+                        <input type="date" className={inp} value={val} onChange={e=>onChange(idx,col.key,e.target.value)} onClick={e=>{try{(e.target as HTMLInputElement).showPicker()}catch{}}}/>
                       ):col.type==="number"?(
                         <input type="number" className={inp} value={val} onChange={e=>onChange(idx,col.key,e.target.value)} placeholder="—"/>
                       ):(
@@ -496,6 +496,7 @@ function StatementFormPanel({
             type="date"
             value={validFrom}
             onChange={e => setValidFrom(e.target.value)}
+            onClick={e => { try { (e.target as HTMLInputElement).showPicker(); } catch {} }}
             className={fieldCls(validFrom)}
           />
           {touched && !validFrom && (
@@ -514,6 +515,7 @@ function StatementFormPanel({
             value={validTo}
             min={validFrom || undefined}
             onChange={e => setValidTo(e.target.value)}
+            onClick={e => { try { (e.target as HTMLInputElement).showPicker(); } catch {} }}
             className={dateError ? "w-full border border-red-300 bg-red-50 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" : fieldCls(validTo)}
           />
           {touched && !validTo && (

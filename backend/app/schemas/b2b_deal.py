@@ -14,7 +14,8 @@ class B2BDealCreate(BaseModel):
     airline_name: str
     valid_from: str
     valid_to: str
-    # No contract_year, trigger_type, payout_type for B2B
+    contract_year: Optional[str] = None
+    # No trigger_type, payout_type for B2B
     entity: Optional[str] = None
     iata_number: Optional[str] = None
     business_type: Optional[str] = None
@@ -40,6 +41,7 @@ class B2BDealResponse(BaseModel):
     airline_name: Optional[str]
     valid_from: Optional[date]
     valid_to: Optional[date]
+    contract_year: Optional[str] = None
     entity: Optional[str]
     iata_number: Optional[str]
     business_type: Optional[str]

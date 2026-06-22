@@ -251,6 +251,21 @@ def _to_str(val: Any) -> str | None:
     return s if s and s not in ("-", "--", "nan") else None
 
 
+def _normalize_date(val: Any) -> str | None:
+    """Normalize any common date string to YYYY-MM-DD for <input type='date'>."""
+    s = _to_str(val)
+    if not s:
+        return None
+    # Already YYYY-MM-DD
+    if len(s) == 10 and s[4] == "-" and s[7] == "-":
+        return s
+    try:
+        from dateutil import parser as dp
+        return dp.parse(s, dayfirst=True).strftime("%Y-%m-%d")
+    except Exception:
+        return s  # return as-is so user can fix in preview
+
+
 def _build_col_map(df_columns: list[str]) -> dict[str, str]:
     """Map DataFrame column names → canonical field names."""
     mapping: dict[str, str] = {}
@@ -447,6 +462,10 @@ class TicketExtractionService:
                         s = s.strip().lower()
                     row[canon] = s
 
+            # Normalize ticket_date to YYYY-MM-DD so <input type="date"> can display it
+            if row.get("ticket_date"):
+                row["ticket_date"] = _normalize_date(row["ticket_date"])
+
             if is_airline:
                 # ── Tax breakup from Tax_Type/Tax pairs ───────────────────
                 tax_breakup = _build_tax_breakup(raw, xls_columns, raw)
@@ -514,6 +533,10 @@ class TicketExtractionService:
 
             else:
                 row.setdefault("statement_type", "B2B")
+
+            # Normalize departure_datetime to YYYY-MM-DD (drop time)
+            if row.get("departure_datetime"):
+                row["departure_datetime"] = _normalize_date(row["departure_datetime"])
 
             rows.append(row)
 
