@@ -436,7 +436,7 @@ export default function CustomDashboardPage() {
     return (
       <div className="flex flex-col items-center justify-center h-64 gap-3">
         <p className="text-gray-500 text-sm">Dashboard not found.</p>
-        <button onClick={() => router.replace("/")} className="text-blue-600 text-sm hover:underline">Go home</button>
+        <button onClick={() => router.replace("/dashboard")} className="text-blue-600 text-sm hover:underline">Go home</button>
       </div>
     );
   }
@@ -472,7 +472,7 @@ export default function CustomDashboardPage() {
 
   const deleteDashboard = () => {
     saveDashboards(loadDashboards().filter(d => d.id !== dashboard.id));
-    router.replace("/");
+    router.replace("/dashboard");
   };
 
   const categories = ["KPI", "Charts", "Tables"];

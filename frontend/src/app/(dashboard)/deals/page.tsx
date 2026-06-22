@@ -1,10 +1,11 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Plus, Upload, Search, RefreshCw, X, CheckCircle, XCircle, AlertCircle, MinusCircle, User, Save, Trash2, FileText, FileSpreadsheet, ChevronRight, Building2, Calendar, Hash } from "lucide-react";
+import { Plus, Upload, Search, RefreshCw, X, CheckCircle, XCircle, AlertCircle, MinusCircle, User, Save, Trash2, FileText, FileSpreadsheet, ChevronRight, Building2, Calendar, Hash, History, Pencil, Plane, List } from "lucide-react";
 import api from "@/lib/api";
+import { IncentiveTabContent, InclExclTabContent, IEFieldValue, CONTINENTS, COUNTRY_GROUPS } from "@/components/deals/IncentiveInclExclShared";
 
 // ── types ── batch ─────────────────────────────────────────────────────────
 type DealBatch = {
@@ -36,7 +37,7 @@ const SECTION_TABS = [
 ];
 
 // ── types ──────────────────────────────────────────────────────────────────
-type DealType = "upload" | "airline" | "b2b";
+type DealType = "upload" | "airline" | "b2b" | "unified";
 
 type DealRepositoryItem = {
   id:              number;
@@ -57,12 +58,14 @@ type DealRepositoryItem = {
   incentive_types: string[] | null;
   incentive_data:  Record<string, Record<string, string>> | null;
   incl_excl_types: string[] | null;
-  incl_excl_data:  Record<string, Record<string, string>> | null;
+  incl_excl_data:  Record<string, unknown> | null;
   deal_tag:              string | null;
   status:                string;
   deal_lifecycle_status: string | null;
   created_at:            string;
   file_type:             string | null;
+  batch_id:              string | null;
+  supplier_name:         string | null;
 };
 
 type DealHistoryStep = {
@@ -83,6 +86,9 @@ type DealHistoryData = {
   status:           string;
   steps:            DealHistoryStep[];
 };
+
+const ALL_RULE_TYPES = ["Inclusion For Trigger", "Exclusion For Trigger", "Inclusion For Payout", "Exclusion For Payout"] as const;
+type RuleType = typeof ALL_RULE_TYPES[number];
 
 // ── helpers ────────────────────────────────────────────────────────────────
 const STATUS_STYLE: Record<string, string> = {
@@ -124,12 +130,21 @@ const LIFECYCLE_LABEL: Record<string, string> = {
 };
 
 const DEAL_TYPE_STYLE: Record<string, { label: string; cls: string }> = {
-  airline: { label: "Airline", cls: "bg-sky-50 text-sky-700 border-sky-200" },
-  b2b:     { label: "B2B",     cls: "bg-violet-50 text-violet-700 border-violet-200" },
-  upload:  { label: "Upload",  cls: "bg-teal-50 text-teal-700 border-teal-200" },
+  airline: { label: "Airline",     cls: "bg-sky-50 text-sky-700 border-sky-200"         },
+  b2b:     { label: "B2B",         cls: "bg-violet-50 text-violet-700 border-violet-200" },
+  upload:  { label: "Upload",      cls: "bg-teal-50 text-teal-700 border-teal-200"       },
+  unified: { label: "Airline/B2B", cls: "bg-indigo-50 text-indigo-700 border-indigo-200" },
 };
 
 function getDealTypeBadge(d: DealRepositoryItem) {
+  if (d.deal_type === "unified") {
+    // The deal KIND (B2B vs Airline) is encoded in the deal_no prefix the backend
+    // builds from Deal.deal_type — the same signal the statement view shows. Don't
+    // use business_type (B2B/B2C/B2E/MICE), which is optional and may be empty on a
+    // B2B-kind deal, otherwise the badge disagrees with the statement.
+    const isB2b = d.deal_no?.startsWith("B2B") ?? !!d.business_type;
+    return isB2b ? DEAL_TYPE_STYLE.b2b : DEAL_TYPE_STYLE.airline;
+  }
   if (d.deal_type !== "upload") return DEAL_TYPE_STYLE[d.deal_type];
   if (d.business_type) return DEAL_TYPE_STYLE.b2b;
   return DEAL_TYPE_STYLE.airline;
@@ -164,6 +179,47 @@ function formatDateTime(d: string | null) {
   } catch { return d; }
 }
 
+// ── normalizeIncentiveEntry ────────────────────────────────────────────────
+// Converts raw incentive_data entry (which may contain legacy `slabs[]` arrays
+// from uploaded/airline deals) into the flat Record<string,string> that
+// IncentiveTabContent expects (amountSlabs/segmentSlabs as JSON strings).
+function normalizeIncentiveEntry(raw: Record<string, unknown>): Record<string, string> {
+  const form: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (k === "slabs") continue;
+    if (v !== null && v !== undefined && !Array.isArray(v) && typeof v !== "object") {
+      form[k] = String(v);
+    }
+  }
+  // Deals carry slabs as a single SlabRow[] under the "slabs" key. Convert to the
+  // amountSlabs / segmentSlabs / siSlabs JSON strings the SlabGrid renders, routing
+  // by slabType so Segment Incentive rows are not misrouted and dropped on save.
+  const slabs = raw["slabs"] as Array<Record<string, unknown>> | undefined;
+  if (slabs && slabs.length > 0) {
+    const groups: Record<string, Record<string, string>[]> = { amount: [], segment: [], si: [] };
+    slabs.forEach((s, i) => {
+      const row: Record<string, string> = { id: `r${i}` };
+      if (s.quarterlyFreq)        row.quarterlyFreq    = String(s.quarterlyFreq);
+      if (s.halfYearlyFreq)       row.halfYearlyFreq   = String(s.halfYearlyFreq);
+      if (s.baseTargetAmtNumPct)  row.baseTargetNumPct = String(s.baseTargetAmtNumPct);
+      if (s.baseTargetAmount)     row.baseTargetAmount = String(s.baseTargetAmount);
+      if (s.targetFrom)           row.targetFrom       = String(s.targetFrom);
+      if (s.targetTo)             row.targetTo         = String(s.targetTo);
+      if (s.segment)              row.segment          = String(s.segment);
+      if (s.class)                row.class            = String(s.class);
+      for (const [vk, vv] of Object.entries((s.values as Record<string, unknown>) ?? {})) {
+        row[vk] = vv != null ? String(vv) : "";
+      }
+      const st = String(s.slabType ?? "amount").toLowerCase();
+      (groups[st] ?? groups.amount).push(row);
+    });
+    if (groups.amount.length && !form.amountSlabs)   form.amountSlabs = JSON.stringify(groups.amount);
+    if (groups.segment.length && !form.segmentSlabs) form.segmentSlabs = JSON.stringify(groups.segment);
+    if (groups.si.length && !form.siSlabs)           form.siSlabs = JSON.stringify(groups.si);
+  }
+  return form;
+}
+
 // ── IncentiveEditModal ─────────────────────────────────────────────────────
 function IncentiveEditModal({ name, data, onSave, onClose }: {
   name: string;
@@ -171,52 +227,36 @@ function IncentiveEditModal({ name, data, onSave, onClose }: {
   onSave: (updated: Record<string, string>) => Promise<void>;
   onClose: () => void;
 }) {
-  const [fields, setFields] = useState<Record<string, string>>({ ...data });
+  const [formData, setFormData] = useState<Record<string, string>>({ ...data });
   const [saving, setSaving] = useState(false);
 
   const handleSave = async () => {
     setSaving(true);
-    try { await onSave(fields); onClose(); }
+    try { await onSave(formData); onClose(); }
     finally { setSaving(false); }
   };
 
   return (
     <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={onClose}>
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md" onClick={e => e.stopPropagation()}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
           <div>
             <h2 className="text-sm font-bold text-gray-900">{name}</h2>
-            <p className="text-[10px] text-gray-400 mt-0.5">Incentive Type — Edit Details</p>
+            <p className="text-[10px] text-gray-400 mt-0.5">Edit incentive details · changes are saved to the deal</p>
           </div>
           <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-lg"><X className="w-4 h-4 text-gray-500" /></button>
         </div>
-        <div className="px-5 py-4 max-h-[60vh] overflow-y-auto">
-          {Object.keys(fields).length === 0 ? (
-            <p className="text-xs text-gray-400 py-2">No fields recorded for this incentive.</p>
-          ) : (
-            <div className="space-y-3">
-              {Object.entries(fields).map(([k, v]) => (
-                <div key={k}>
-                  <label className="block text-[9px] font-semibold text-gray-400 uppercase tracking-wide mb-1">
-                    {k.replace(/([A-Z])/g, " $1").trim()}
-                  </label>
-                  <input
-                    type="text"
-                    value={v}
-                    onChange={e => setFields(prev => ({ ...prev, [k]: e.target.value }))}
-                    className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400"
-                  />
-                </div>
-              ))}
-            </div>
-          )}
+        <div className="overflow-y-auto flex-1">
+          <IncentiveTabContent
+            name={name}
+            data={formData}
+            onChange={(k, v) => setFormData(prev => ({ ...prev, [k]: v }))}
+          />
         </div>
-        <div className="px-5 pb-4 flex gap-2">
-          <button
-            onClick={handleSave}
-            disabled={saving}
+        <div className="px-5 pb-4 pt-3 border-t border-gray-100 flex gap-2">
+          <button onClick={handleSave} disabled={saving}
             className="flex-1 flex items-center justify-center gap-1.5 bg-[#1e3a5f] text-white rounded-lg py-2 text-sm font-medium hover:bg-[#16304f] disabled:opacity-50">
-            <Save className="w-3.5 h-3.5" />{saving ? "Saving..." : "Save"}
+            <Save className="w-3.5 h-3.5" />{saving ? "Saving..." : "Save Changes"}
           </button>
           <button onClick={onClose} className="flex-1 border border-gray-200 rounded-lg py-2 text-sm text-gray-600 hover:bg-gray-50">Cancel</button>
         </div>
@@ -226,59 +266,152 @@ function IncentiveEditModal({ name, data, onSave, onClose }: {
 }
 
 // ── InclExclEditModal ──────────────────────────────────────────────────────
-function InclExclEditModal({ name, data, onSave, onClose }: {
-  name: string;
-  data: Record<string, string>;
-  onSave: (updated: Record<string, string>) => Promise<void>;
+function InclExclEditModal({ rawData, dealType, incentiveTypes, initialRuleType, onSave, onClose }: {
+  rawData: Record<string, unknown>;
+  dealType: DealType;
+  incentiveTypes: string[];
+  initialRuleType?: RuleType;
+  onSave: (updated: Record<string, unknown>) => Promise<void>;
   onClose: () => void;
 }) {
-  const [fields, setFields] = useState<Record<string, string>>({ ...data });
+  const isPerIncentive = dealType === "unified" && incentiveTypes.length > 0;
+
+  const [forms, setForms] = useState<Record<string, Record<string, Record<string, IEFieldValue>>>>(() => {
+    if (isPerIncentive) {
+      const init: Record<string, Record<string, Record<string, IEFieldValue>>> = {};
+      for (const incType of incentiveTypes) {
+        const incData = (rawData[incType] ?? {}) as Record<string, Record<string, IEFieldValue>>;
+        init[incType] = {};
+        for (const rt of ALL_RULE_TYPES) {
+          init[incType][rt] = { ...(incData[rt] ?? {}) };
+        }
+      }
+      return init;
+    } else {
+      const flatData = rawData as Record<string, Record<string, IEFieldValue>>;
+      const init: Record<string, Record<string, Record<string, IEFieldValue>>> = { "": {} };
+      for (const rt of ALL_RULE_TYPES) {
+        init[""][rt] = { ...(flatData[rt] ?? {}) };
+      }
+      return init;
+    }
+  });
+
+  const [activeIncType, setActiveIncType] = useState<string>(isPerIncentive ? (incentiveTypes[0] ?? "") : "");
+  const [activeRuleType, setActiveRuleType] = useState<RuleType>(initialRuleType ?? "Inclusion For Payout");
+  const [continentOptions, setContinentOptions] = useState<string[]>(CONTINENTS);
+  const [countryGroupOptions, setCountryGroupOptions] = useState<string[]>(COUNTRY_GROUPS);
   const [saving, setSaving] = useState(false);
-  const isExcl = name.toLowerCase().includes("exclusion");
+
+  useEffect(() => {
+    api.get<{ continents: string[]; country_groups: string[] }>("/airports/options")
+      .then(r => {
+        if (r.data.continents?.length) setContinentOptions(r.data.continents);
+        if (r.data.country_groups?.length) setCountryGroupOptions(r.data.country_groups);
+      }).catch(() => {});
+  }, []);
+
+  const formKey = isPerIncentive ? activeIncType : "";
+  const currentForm = forms[formKey]?.[activeRuleType] ?? {};
+
+  const handleFormChange = (k: string, v: IEFieldValue) => {
+    setForms(prev => ({
+      ...prev,
+      [formKey]: {
+        ...(prev[formKey] ?? {}),
+        [activeRuleType]: { ...(prev[formKey]?.[activeRuleType] ?? {}), [k]: v },
+      },
+    }));
+  };
+
+  const handleClear = () => {
+    setForms(prev => ({
+      ...prev,
+      [formKey]: { ...(prev[formKey] ?? {}), [activeRuleType]: {} },
+    }));
+  };
 
   const handleSave = async () => {
     setSaving(true);
-    try { await onSave(fields); onClose(); }
-    finally { setSaving(false); }
+    try {
+      let updated: Record<string, unknown>;
+      if (isPerIncentive) {
+        updated = {};
+        for (const incType of incentiveTypes) {
+          updated[incType] = forms[incType] ?? {};
+        }
+      } else {
+        updated = { ...(forms[""] ?? {}) };
+      }
+      await onSave(updated);
+      onClose();
+    } finally {
+      setSaving(false);
+    }
   };
+
+  const isExcl = activeRuleType.toLowerCase().includes("exclusion");
+  const suffix = isExcl ? "for Exclusion" : "for Inclusion";
+  const viceVersa = currentForm["viceVersa"] === "true";
+  const handleViceVersa = () => handleFormChange("viceVersa", viceVersa ? "" : "true");
 
   return (
     <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={onClose}>
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md" onClick={e => e.stopPropagation()}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
           <div>
-            <h2 className={`text-sm font-bold ${isExcl ? "text-red-700" : "text-green-700"}`}>{name}</h2>
-            <p className="text-[10px] text-gray-400 mt-0.5">{isExcl ? "Exclusion" : "Inclusion"} Rule — Edit Details</p>
+            <h2 className="text-sm font-bold text-gray-900">Inclusions &amp; Exclusions</h2>
+            <p className="text-[10px] text-gray-400 mt-0.5">
+              {isPerIncentive ? "Per incentive type — select incentive then rule type" : "All fields support multiple values."}
+            </p>
           </div>
           <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-lg"><X className="w-4 h-4 text-gray-500" /></button>
         </div>
-        <div className="px-5 py-4 max-h-[60vh] overflow-y-auto">
-          {Object.keys(fields).length === 0 ? (
-            <p className="text-xs text-gray-400 py-2">No fields recorded for this rule.</p>
-          ) : (
-            <div className="space-y-3">
-              {Object.entries(fields).map(([k, v]) => (
-                <div key={k}>
-                  <label className="block text-[9px] font-semibold text-gray-400 uppercase tracking-wide mb-1">
-                    {k.replace(/([A-Z])/g, " $1").trim()}
-                  </label>
-                  <input
-                    type="text"
-                    value={v}
-                    onChange={e => setFields(prev => ({ ...prev, [k]: e.target.value }))}
-                    className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400"
-                  />
-                </div>
-              ))}
-            </div>
-          )}
+
+        {isPerIncentive && incentiveTypes.length > 1 && (
+          <div className="flex gap-1 px-5 pt-3 pb-0">
+            {incentiveTypes.map(t => (
+              <button key={t} type="button" onClick={() => setActiveIncType(t)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${activeIncType === t ? "bg-[#1e3a5f] text-white" : "bg-gray-100 text-gray-500 hover:bg-gray-200"}`}>
+                {t}
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div className="flex items-center justify-between border-b border-gray-100 px-5 mt-1">
+          <div className="flex">
+            {ALL_RULE_TYPES.map(rt => (
+              <button key={rt} type="button" onClick={() => setActiveRuleType(rt)}
+                className={`px-4 py-2.5 text-xs font-semibold border-b-2 transition-colors whitespace-nowrap ${activeRuleType === rt ? "border-[#1e3a5f] text-[#1e3a5f]" : "border-transparent text-gray-400 hover:text-gray-600"}`}>
+                {rt}
+              </button>
+            ))}
+          </div>
+          <button type="button" onClick={handleClear}
+            className="flex items-center gap-1 text-[11px] font-medium text-red-500 hover:text-red-700 hover:bg-red-50 px-2.5 py-1 rounded-md transition-colors">
+            <X className="w-3 h-3" />Clear
+          </button>
         </div>
-        <div className="px-5 pb-4 flex gap-2">
-          <button
-            onClick={handleSave}
-            disabled={saving}
+
+        <div className="overflow-y-auto flex-1">
+          <InclExclTabContent
+            key={`${formKey}:${activeRuleType}`}
+            suffix={suffix}
+            isExclusion={isExcl}
+            data={currentForm}
+            onChange={handleFormChange}
+            viceVersa={viceVersa}
+            onViceVersa={handleViceVersa}
+            continentOptions={continentOptions}
+            countryGroupOptions={countryGroupOptions}
+          />
+        </div>
+
+        <div className="px-5 pb-4 pt-3 border-t border-gray-100 flex gap-2">
+          <button onClick={handleSave} disabled={saving}
             className="flex-1 flex items-center justify-center gap-1.5 bg-[#1e3a5f] text-white rounded-lg py-2 text-sm font-medium hover:bg-[#16304f] disabled:opacity-50">
-            <Save className="w-3.5 h-3.5" />{saving ? "Saving..." : "Save"}
+            <Save className="w-3.5 h-3.5" />{saving ? "Saving..." : "Save Changes"}
           </button>
           <button onClick={onClose} className="flex-1 border border-gray-200 rounded-lg py-2 text-sm text-gray-600 hover:bg-gray-50">Cancel</button>
         </div>
@@ -576,6 +709,134 @@ function DealEditPanel({ deal, onSave, onClose }: {
   );
 }
 
+// ── DealFlatTable ──────────────────────────────────────────────────────────
+// Shared row rendering for the "All Deal" and "Airline Wise" repository views.
+function DealFlatTable({ deals, showAirlineCol = true, onOpenHistory, onEdit, onDelete, onOpenIncentive, onOpenInclExcl }: {
+  deals: DealRepositoryItem[];
+  showAirlineCol?: boolean;
+  onOpenHistory: (d: DealRepositoryItem) => void;
+  onEdit: (d: DealRepositoryItem) => void;
+  onDelete: (d: DealRepositoryItem) => void;
+  onOpenIncentive: (d: DealRepositoryItem, name: string) => void;
+  onOpenInclExcl: (d: DealRepositoryItem, name: string) => void;
+}) {
+  if (deals.length === 0) {
+    return <p className="px-4 py-10 text-center text-xs text-gray-400">No deals match the filters.</p>;
+  }
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full">
+        <thead>
+          <tr style={{ background: "#1e3a5f" }}>
+            <th className="px-4 py-2.5 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Deal No</th>
+            <th className="px-3 py-2.5 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Deal Type</th>
+            {showAirlineCol && (
+              <th className="px-3 py-2.5 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Airline / Maker</th>
+            )}
+            <th className="px-3 py-2.5 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Valid Period</th>
+            <th className="px-3 py-2.5 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Incentive Types</th>
+            <th className="px-3 py-2.5 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Incl / Excl</th>
+            <th className="px-3 py-2.5 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Approval Status</th>
+            <th className="px-3 py-2.5 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Deal Status</th>
+            <th className="px-3 py-2.5 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Actions</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-gray-100">
+          {deals.map(d => {
+            const dtStyle = getDealTypeBadge(d);
+            const canEdit = d.status === "approved" || d.status === "rejected";
+            return (
+              <tr key={`${d.deal_type}-${d.id}`} className="hover:bg-blue-50/30 transition-colors">
+                <td className="px-4 py-2.5 text-xs font-semibold text-gray-800 whitespace-nowrap">{d.deal_no}</td>
+                <td className="px-3 py-2.5">
+                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase border whitespace-nowrap ${dtStyle.cls}`}>
+                    {dtStyle.label}
+                  </span>
+                </td>
+                {showAirlineCol && (
+                  <td className="px-3 py-2.5 text-xs text-gray-700 max-w-[160px] truncate" title={d.airline_name ?? d.deal_maker_name ?? undefined}>
+                    {d.airline_name || d.deal_maker_name || d.supplier_name || "—"}
+                  </td>
+                )}
+                <td className="px-3 py-2.5 whitespace-nowrap">
+                  <span className="text-xs text-gray-700">{formatDate(d.valid_from)}</span>
+                  <span className="text-gray-400 mx-1">→</span>
+                  <span className="text-xs text-gray-700">{formatDate(d.valid_to)}</span>
+                </td>
+                <td className="px-3 py-2.5">
+                  <div className="flex flex-wrap gap-0.5 max-w-[200px]">
+                    {(d.incentive_types ?? []).length > 0
+                      ? d.incentive_types!.map(t => (
+                          <button key={t} onClick={() => onOpenIncentive(d, t)}
+                            className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 whitespace-nowrap">
+                            {t}
+                          </button>
+                        ))
+                      : <span className="text-xs text-gray-400">—</span>}
+                  </div>
+                </td>
+                <td className="px-3 py-2.5">
+                  <div className="flex flex-wrap gap-0.5 max-w-[200px]">
+                    {(d.incl_excl_types ?? []).length > 0
+                      ? d.incl_excl_types!.map(t => {
+                          const isExcl = t.toLowerCase().includes("exclusion");
+                          return (
+                            <button key={t} onClick={() => onOpenInclExcl(d, t)}
+                              className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border hover:opacity-80 whitespace-nowrap ${
+                                isExcl ? "bg-red-50 text-red-600 border-red-200" : "bg-green-50 text-green-700 border-green-200"
+                              }`}>
+                              {t}
+                            </button>
+                          );
+                        })
+                      : <span className="text-xs text-gray-400">—</span>}
+                  </div>
+                </td>
+                <td className="px-3 py-2.5">
+                  <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border whitespace-nowrap ${STATUS_STYLE[d.status] ?? "bg-gray-50 text-gray-500 border-gray-200"}`}>
+                    <span className={`w-1.5 h-1.5 rounded-full ${STATUS_DOT[d.status] ?? "bg-gray-400"}`} />
+                    {STATUS_LABEL[d.status] ?? d.status}
+                  </span>
+                </td>
+                <td className="px-3 py-2.5">
+                  <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border whitespace-nowrap ${LIFECYCLE_STYLE[d.deal_lifecycle_status ?? "draft"] ?? LIFECYCLE_STYLE.draft}`}>
+                    <span className={`w-1.5 h-1.5 rounded-full ${LIFECYCLE_DOT[d.deal_lifecycle_status ?? "draft"] ?? LIFECYCLE_DOT.draft}`} />
+                    {LIFECYCLE_LABEL[d.deal_lifecycle_status ?? "draft"] ?? "Draft"}
+                  </span>
+                </td>
+                <td className="px-2 py-2.5 whitespace-nowrap">
+                  <div className="flex items-center gap-1">
+                    <button onClick={() => onOpenHistory(d)}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium border border-gray-200 text-gray-600 hover:bg-gray-50 hover:border-gray-300 transition-colors">
+                      <History className="w-3 h-3" /> History
+                    </button>
+                    <button
+                      onClick={() => canEdit && onEdit(d)}
+                      disabled={!canEdit || d.deal_lifecycle_status === "closed"}
+                      title={d.status === "rejected" ? "Edit and resubmit for approval" : !canEdit ? "Only approved or rejected deals can be edited" : undefined}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium border border-blue-200 text-blue-600 hover:bg-blue-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent">
+                      {d.status === "rejected"
+                        ? <><RefreshCw className="w-3 h-3" /> Edit &amp; Resubmit</>
+                        : <><Pencil className="w-3 h-3" /> Edit</>}
+                    </button>
+                    <button
+                      onClick={() => d.status === "approved" && onDelete(d)}
+                      disabled={d.status !== "approved"}
+                      title={d.status !== "approved" ? "Only approved deals can be deleted" : undefined}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium border border-red-200 text-red-500 hover:bg-red-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent">
+                      <Trash2 className="w-3 h-3" /> Delete
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 // ── main page ──────────────────────────────────────────────────────────────
 export default function DealsPage() {
   const router = useRouter();
@@ -587,6 +848,7 @@ export default function DealsPage() {
   const [search,     setSearch]     = useState("");
   const [dealTypeFilter, setDealTypeFilter] = useState<"all" | DealType>("all");
   const [page,       setPage]       = useState(1);
+  const [repoView,   setRepoView]   = useState<"statement" | "airline" | "all">("statement"); // default to first tab
 
   // history panel
   const [historyDealId,   setHistoryDealId]   = useState<number | null>(null);
@@ -602,12 +864,13 @@ export default function DealsPage() {
   const [deleteTarget,    setDeleteTarget]    = useState<DealRepositoryItem | null>(null);
   const [deleteLoading,   setDeleteLoading]   = useState(false);
 
-  // detail / edit popups (keyed by deal + incentive/incl name)
+  // detail / edit popups
   const [incentivePopup, setIncentivePopup] = useState<{
     name: string; data: Record<string, string>; dealId: number; dealType: DealType;
   } | null>(null);
   const [inclExclPopup, setInclExclPopup] = useState<{
-    name: string; data: Record<string, string>; dealId: number; dealType: DealType;
+    dealId: number; dealType: DealType; incentiveTypes: string[];
+    rawData: Record<string, unknown>; initialRuleType?: RuleType;
   } | null>(null);
 
   const fetchDeals = useCallback(async () => {
@@ -681,13 +944,10 @@ export default function DealsPage() {
     await patchDeal(incentivePopup.dealId, incentivePopup.dealType, { incentive_data: newIncentiveData });
   }, [incentivePopup, deals, patchDeal]);
 
-  const handleInclExclSave = useCallback(async (updatedData: Record<string, string>) => {
+  const handleInclExclSave = useCallback(async (updated: Record<string, unknown>) => {
     if (!inclExclPopup) return;
-    const deal = deals.find(d => d.id === inclExclPopup.dealId && d.deal_type === inclExclPopup.dealType);
-    if (!deal) return;
-    const newInclExclData = { ...(deal.incl_excl_data ?? {}), [inclExclPopup.name]: updatedData };
-    await patchDeal(inclExclPopup.dealId, inclExclPopup.dealType, { incl_excl_data: newInclExclData });
-  }, [inclExclPopup, deals, patchDeal]);
+    await patchDeal(inclExclPopup.dealId, inclExclPopup.dealType, { incl_excl_data: updated });
+  }, [inclExclPopup, patchDeal]);
 
   const handleDeleteDeal = useCallback(async () => {
     if (!deleteTarget) return;
@@ -702,6 +962,21 @@ export default function DealsPage() {
       setDeleteLoading(false);
     }
   }, [deleteTarget]);
+
+  const openIncentivePopup = useCallback((d: DealRepositoryItem, name: string) => {
+    const raw = ((d.incentive_data ?? {}) as Record<string, Record<string, unknown>>)[name] ?? {};
+    setIncentivePopup({ name, data: normalizeIncentiveEntry(raw), dealId: d.id, dealType: d.deal_type });
+  }, []);
+
+  const openInclExclPopup = useCallback((d: DealRepositoryItem, initialRuleType: string) => {
+    setInclExclPopup({
+      dealId: d.id,
+      dealType: d.deal_type,
+      incentiveTypes: d.incentive_types ?? [],
+      rawData: (d.incl_excl_data ?? {}) as Record<string, unknown>,
+      initialRuleType: initialRuleType as RuleType,
+    });
+  }, []);
 
   // ── stat counts ───────────────────────────────────────────────────────
   const totalDeals     = batches.reduce((s, b) => s + b.deal_count, 0);
@@ -718,6 +993,30 @@ export default function DealsPage() {
       (b.file_name     ?? "").toLowerCase().includes(q) ||
       (b.created_by_name ?? "").toLowerCase().includes(q);
   });
+
+  // ── filtered deals (All Deal + Airline Wise views) ─────────────────────
+  const filteredDeals = useMemo(() => deals.filter(d => {
+    if (dealTypeFilter !== "all") {
+      const dType = d.deal_type === "unified" ? (d.business_type ? "b2b" : "airline") : d.deal_type;
+      if (dType !== dealTypeFilter) return false;
+    }
+    const q = search.toLowerCase();
+    return !q ||
+      (d.airline_name     ?? "").toLowerCase().includes(q) ||
+      (d.deal_maker_name   ?? "").toLowerCase().includes(q) ||
+      (d.supplier_name     ?? "").toLowerCase().includes(q) ||
+      d.deal_no.toLowerCase().includes(q);
+  }), [deals, dealTypeFilter, search]);
+
+  const dealsByAirline = useMemo(() => {
+    const map = new Map<string, DealRepositoryItem[]>();
+    for (const d of filteredDeals) {
+      const key = d.airline_name || "Unspecified Airline";
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(d);
+    }
+    return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  }, [filteredDeals]);
 
   return (
     <div className="space-y-3">
@@ -771,6 +1070,22 @@ export default function DealsPage() {
             </div>
           </div>
 
+          {/* ── Repository view switcher ──────────────────────────────────── */}
+          <div className="flex items-center gap-1 bg-white border border-gray-200 rounded-xl p-1 w-fit">
+            {([
+              { key: "statement", label: "Statement/Agency Wise", icon: Building2 },
+              { key: "airline",   label: "Airline Wise",          icon: Plane },
+              { key: "all",       label: "All Deals",             icon: List },
+            ] as const).map(v => (
+              <button key={v.key} onClick={() => setRepoView(v.key)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                  repoView === v.key ? "bg-[#1e3a5f] text-white" : "text-gray-500 hover:bg-gray-50"
+                }`}>
+                <v.icon className="w-3.5 h-3.5" /> {v.label}
+              </button>
+            ))}
+          </div>
+
           {/* ── Stats bar ───────────────────────────────────────────────── */}
           <div className="grid grid-cols-6 gap-2">
             {[
@@ -793,7 +1108,7 @@ export default function DealsPage() {
             <div className="relative flex-1">
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
               <input value={search} onChange={e => { setSearch(e.target.value); setPage(1); }}
-                placeholder="Search by supplier, file name, uploaded by..."
+                placeholder={repoView === "statement" ? "Search by supplier, file name, uploaded by..." : "Search by deal no, airline, deal maker..."}
                 className="w-full pl-8 pr-3 py-1.5 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-1 focus:ring-blue-400" />
             </div>
             <select value={dealTypeFilter} onChange={e => { setDealTypeFilter(e.target.value as "all" | DealType); setPage(1); }}
@@ -803,11 +1118,14 @@ export default function DealsPage() {
               <option value="b2b">B2B</option>
             </select>
             <span className="text-[11px] text-gray-400 ml-auto whitespace-nowrap">
-              {filteredBatches.length} batch{filteredBatches.length !== 1 ? "es" : ""}
+              {repoView === "statement"
+                ? `${filteredBatches.length} batch${filteredBatches.length !== 1 ? "es" : ""}`
+                : `${filteredDeals.length} deal${filteredDeals.length !== 1 ? "s" : ""}`}
             </span>
           </div>
 
-          {/* ── Batch list table ─────────────────────────────────────────── */}
+          {/* ── Statement/Agency Wise: batch list table ────────────────────── */}
+          {repoView === "statement" && (
           <div className="bg-white rounded-xl border border-gray-200 overflow-hidden overflow-x-auto">
             {/* summary bar */}
             <div className="px-5 py-3 border-b border-gray-100 bg-gray-50/40 flex items-center justify-between">
@@ -980,6 +1298,70 @@ export default function DealsPage() {
               </tbody>
             </table>
           </div>
+          )}
+
+          {/* ── All Deal: flat per-deal table ───────────────────────────────── */}
+          {repoView === "all" && (
+            <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+              <div className="px-5 py-3 border-b border-gray-100 bg-gray-50/40">
+                <p className="text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                  {loading ? "Loading deals..." : `${filteredDeals.length} Deal${filteredDeals.length !== 1 ? "s" : ""}`}
+                </p>
+              </div>
+              {loading ? (
+                <div className="px-4 py-12 text-center text-xs text-gray-400">
+                  <RefreshCw className="w-4 h-4 animate-spin mx-auto mb-2 text-gray-300" /> Loading deals...
+                </div>
+              ) : apiError ? (
+                <p className="px-4 py-10 text-center text-xs text-red-400">{apiError}</p>
+              ) : (
+                <DealFlatTable
+                  deals={filteredDeals}
+                  onOpenHistory={openHistory}
+                  onEdit={setEditDeal}
+                  onDelete={setDeleteTarget}
+                  onOpenIncentive={openIncentivePopup}
+                  onOpenInclExcl={openInclExclPopup}
+                />
+              )}
+            </div>
+          )}
+
+          {/* ── Airline Wise: deals grouped by airline ──────────────────────── */}
+          {repoView === "airline" && (
+            <div className="space-y-3">
+              {loading ? (
+                <div className="bg-white rounded-xl border border-gray-200 px-4 py-12 text-center text-xs text-gray-400">
+                  <RefreshCw className="w-4 h-4 animate-spin mx-auto mb-2 text-gray-300" /> Loading deals...
+                </div>
+              ) : apiError ? (
+                <div className="bg-white rounded-xl border border-gray-200 px-4 py-10 text-center text-xs text-red-400">{apiError}</div>
+              ) : dealsByAirline.length === 0 ? (
+                <div className="bg-white rounded-xl border border-gray-200 px-4 py-10 text-center text-xs text-gray-400">No deals match the filters.</div>
+              ) : (
+                dealsByAirline.map(([airline, airlineDeals]) => (
+                  <details key={airline} open className="bg-white rounded-xl border border-gray-200 overflow-hidden group">
+                    <summary className="px-5 py-3 border-b border-gray-100 bg-gray-50/40 flex items-center gap-2 cursor-pointer list-none">
+                      <Plane className="w-3.5 h-3.5 text-blue-500" />
+                      <p className="text-xs font-semibold text-gray-700">{airline}</p>
+                      <span className="ml-auto inline-flex items-center justify-center px-2 py-0.5 rounded-full bg-[#1e3a5f]/10 text-[#1e3a5f] text-[11px] font-semibold">
+                        {airlineDeals.length} deal{airlineDeals.length !== 1 ? "s" : ""}
+                      </span>
+                    </summary>
+                    <DealFlatTable
+                      deals={airlineDeals}
+                      showAirlineCol={false}
+                      onOpenHistory={openHistory}
+                      onEdit={setEditDeal}
+                      onDelete={setDeleteTarget}
+                      onOpenIncentive={openIncentivePopup}
+                      onOpenInclExcl={openInclExclPopup}
+                    />
+                  </details>
+                ))
+              )}
+            </div>
+          )}
         </>
       )}
 
@@ -1017,8 +1399,10 @@ export default function DealsPage() {
       {/* ── Incl / Excl edit popup ───────────────────────────────────────── */}
       {inclExclPopup && (
         <InclExclEditModal
-          name={inclExclPopup.name}
-          data={inclExclPopup.data}
+          rawData={inclExclPopup.rawData}
+          dealType={inclExclPopup.dealType}
+          incentiveTypes={inclExclPopup.incentiveTypes}
+          initialRuleType={inclExclPopup.initialRuleType}
           onSave={handleInclExclSave}
           onClose={() => setInclExclPopup(null)}
         />

@@ -63,7 +63,7 @@ export default function SignupPage() {
       }
       setToken(data.access_token);
       setUser(data.user);
-      router.push("/");
+      router.push("/dashboard");
     } catch {
       setError("Cannot reach server. Make sure the backend is running.");
     } finally {

@@ -16,7 +16,8 @@ import Pagination from "@/components/ui/Pagination";
 
 type TicketStatement = {
   batch_id:       string;
-  statement_name: string;
+  statement_name: string | null;
+  statement_type: "B2B" | "AIRLINE";
   agency:         string;
   valid_from:     string;
   valid_to:       string;
@@ -75,13 +76,50 @@ type UploadedTicket = {
   matched_deal_type: string | null;
   matched_deal_name: string | null;
   calculated_incentive: number | null;
+  incentive_breakdown: Record<string, number> | null;
   ticket_status: string;
   split_type: string | null;
   exclusion_reason: string | null;
   adm_acm_ra: string | null;
   created_at: string;
   created_by_id: number;
+  // Airline-specific
+  statement_type: string | null;
+  pax_name: string | null;
+  air_pnr: string | null;
+  pcc: string | null;
+  transaction_type: string | null;
+  fare_basis: string | null;
+  fop: string | null;
+  fop_details: string | null;
+  flight_no: string | null;
+  travel_dt: string | null;
+  wo_tax: number | null;
+  other_tax: number | null;
+  comm_percent: number | null;
+  net_fare: number | null;
+  invoice_fare: number | null;
+  roe: number | null;
+  nuc: number | null;
+  gstn: string | null;
+  business_phone: string | null;
+  business_email: string | null;
+  tax_breakup: Record<string, number> | null;
 };
+
+const INCENTIVE_TYPE_COLS = [
+  { key: "PLB",                    label: "PLB Inc."       },
+  { key: "Super PLB",              label: "Super PLB"      },
+  { key: "Transaction Fee",        label: "Trans. Fee"     },
+  { key: "Deposit Incentive (DI)", label: "DI Inc."        },
+  { key: "Marketing Fund",         label: "Mktg Fund"      },
+  { key: "Ancillary",              label: "Ancillary Inc." },
+  { key: "Frontend",               label: "Frontend Inc."  },
+  { key: "Backend",                label: "Backend Inc."   },
+  { key: "Cashback",               label: "Cashback"       },
+  { key: "Segment Incentive",      label: "Seg. Inc."      },
+  { key: "Push Action",            label: "Push Act."      },
+] as const;
 
 type RunCalcResult = {
   ticket_id: number;
@@ -93,6 +131,7 @@ type RunCalcResult = {
   matched_deal_type: string | null;
   matched_deal_name: string | null;
   calculated_incentive: number | null;
+  incentive_breakdown: Record<string, number> | null;
   message: string;
 };
 
@@ -111,7 +150,21 @@ type DealMatchSummary = {
 };
 
 type MatchStep = { step: string; passed: boolean; ticket_value: string; deal_value: string; detail: string };
-type IncentiveBreakdown = { targetCalcCols: string[] | string; sell_fare: number | null; sell_tax_yq_added: boolean; sale_yr_added: boolean; base_total: number; incentiveAmtPct: number; formula: string; result: number };
+type IncentiveBreakdown = {
+  incentive_type: string;
+  target_based: string;
+  targetCalcCols: string;
+  sell_fare: number | null;
+  sell_tax_yq_added: boolean;
+  sell_tax_yq_value: number | null;
+  sale_yr_added: boolean;
+  sale_yr_value: number | null;
+  base_total: number;
+  incentiveAmtPct: number | null;
+  incentive_num_pct: string;
+  formula: string;
+  result: number | null;
+};
 type PLBDiagnostic = { plb_key: string; raw_plb: Record<string, unknown>; steps: MatchStep[]; incentive_breakdown: IncentiveBreakdown | null; plb_overall_match: boolean };
 type ExclusionRuleStep = { field: string; rule_value: string; ticket_value: string; matched: boolean };
 type ExclusionRuleDiagnostic = { rule_name: string; is_excluded: boolean; reason: string; steps: ExclusionRuleStep[] };
@@ -234,6 +287,29 @@ const EXTRA_TEXT_HEADERS: { key: keyof UploadedTicket; label: string }[] = [
   { key: "acc_code",      label: "Acc Code" },
   { key: "sold_to",       label: "Sold To"  },
   { key: "customer_name", label: "Name"     },
+];
+
+const AIRLINE_TEXT_HEADERS: { key: keyof UploadedTicket; label: string }[] = [
+  { key: "pax_name",        label: "Pax Name"     },
+  { key: "air_pnr",         label: "Air PNR"      },
+  { key: "pcc",             label: "PCC"          },
+  { key: "transaction_type",label: "Txn Type"     },
+  { key: "fare_basis",      label: "Fare Basis"   },
+  { key: "fop",             label: "FOP"          },
+  { key: "fop_details",     label: "FOP Details"  },
+  { key: "flight_no",       label: "Flight No"    },
+  { key: "travel_dt",       label: "Travel Dt"    },
+  { key: "gstn",            label: "GSTN"         },
+];
+
+const AIRLINE_NUM_HEADERS: { key: keyof UploadedTicket; label: string }[] = [
+  { key: "wo_tax",      label: "WO Tax"    },
+  { key: "other_tax",   label: "Other Tax" },
+  { key: "comm_percent",label: "Comm %"    },
+  { key: "net_fare",    label: "Net Fare"  },
+  { key: "invoice_fare",label: "Inv Fare"  },
+  { key: "roe",         label: "ROE"       },
+  { key: "nuc",         label: "NUC"       },
 ];
 
 const EDITABLE_FIELDS: { key: keyof UploadedTicket; label: string; type: "text"|"date"|"number"|"select"; options?: string[] }[] = [
@@ -441,10 +517,11 @@ export default function StatementDetailPage() {
       const { data } = await api.patch<RunCalcResult>(`/tickets/uploads/${t.id}/run-calculation`);
       setTickets(prev => prev.map(x => x.id !== t.id ? x : {
         ...x,
-        matched_deal_id: data.matched_deal_id,
-        matched_deal_type: data.matched_deal_type,
-        matched_deal_name: data.matched_deal_name,
+        matched_deal_id:      data.matched_deal_id,
+        matched_deal_type:    data.matched_deal_type,
+        matched_deal_name:    data.matched_deal_name,
         calculated_incentive: data.calculated_incentive,
+        incentive_breakdown:  data.incentive_breakdown ?? null,
         ticket_status: data.cancelled ? "cancelled" : data.excluded ? "excluded" : data.included ? "included" : "calculated",
         exclusion_reason: data.excluded ? (data.message || null) : null,
       }));
@@ -487,6 +564,7 @@ export default function StatementDetailPage() {
             matched_deal_type:    r.matched_deal_type,
             matched_deal_name:    r.matched_deal_name,
             calculated_incentive: r.calculated_incentive,
+            incentive_breakdown:  r.incentive_breakdown ?? null,
             ticket_status:        r.cancelled ? "cancelled" : r.excluded ? "excluded" : "calculated",
             exclusion_reason:     r.excluded ? (r.message || null) : null,
           };
@@ -609,7 +687,9 @@ export default function StatementDetailPage() {
           <ChevronLeft className="w-4 h-4" /> Ticket Repository
         </Link>
         <ChevronRight className="w-3.5 h-3.5 text-gray-300" />
-        <span className="text-gray-700 font-medium truncate max-w-xs">{statement.statement_name}</span>
+        <span className="text-gray-700 font-medium truncate max-w-xs">
+          {statement.statement_name ?? `${statement.statement_type} · ${statement.agency}`}
+        </span>
       </div>
 
       {/* Statement metadata card */}
@@ -620,7 +700,18 @@ export default function StatementDetailPage() {
               <FileSpreadsheet className="w-5 h-5 text-white" />
             </div>
             <div>
-              <h1 className="text-lg font-bold text-white">{statement.statement_name}</h1>
+              <div className="flex items-center gap-2">
+                <h1 className="text-lg font-bold text-white">
+                  {statement.statement_name ?? `${statement.statement_type} · ${statement.agency}`}
+                </h1>
+                <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                  (statement.statement_type ?? "B2B") === "AIRLINE"
+                    ? "bg-blue-400/30 text-blue-100"
+                    : "bg-purple-400/30 text-purple-100"
+                }`}>
+                  {statement.statement_type ?? "B2B"}
+                </span>
+              </div>
               <p className="text-xs text-white/60 mt-0.5 font-mono">{statement.batch_id}</p>
             </div>
           </div>
@@ -839,9 +930,14 @@ export default function StatementDetailPage() {
                 <th colSpan={NUM_HEADERS.length} className="px-3 py-2.5 text-[10px] font-bold text-white uppercase tracking-wider text-left border-l border-white/20" style={{background:"#334d6e"}}>
                   Financial
                 </th>
-                <th colSpan={10} className="px-3 py-2.5 text-[10px] font-bold text-white uppercase tracking-wider text-left border-l border-white/20 whitespace-nowrap" style={{background:"#1e3a5f"}}>
+                <th colSpan={EXTRA_TEXT_HEADERS.length + INCENTIVE_TYPE_COLS.length + 5} className="px-3 py-2.5 text-[10px] font-bold text-white uppercase tracking-wider text-left border-l border-white/20 whitespace-nowrap" style={{background:"#1e3a5f"}}>
                   Additional
                 </th>
+                {statement.statement_type === "AIRLINE" && (
+                  <th colSpan={AIRLINE_TEXT_HEADERS.length + AIRLINE_NUM_HEADERS.length + 1} className="px-3 py-2.5 text-[10px] font-bold text-white uppercase tracking-wider text-left border-l border-white/20 whitespace-nowrap" style={{background:"#1a4070"}}>
+                    BSP / Airline
+                  </th>
+                )}
                 <th className="px-3 py-2.5 sticky right-0 z-20" style={{background:"#1e3a5f"}} />
               </tr>
               <tr style={{background:"#2d4f7c"}}>
@@ -855,12 +951,23 @@ export default function StatementDetailPage() {
                 {EXTRA_TEXT_HEADERS.map(h => (
                   <th key={h.key} className="px-2.5 py-2 text-left text-[10px] font-semibold text-white/80 whitespace-nowrap border-l border-white/10">{h.label}</th>
                 ))}
-                <th className="px-2.5 py-2 text-right text-[10px] font-semibold text-white/80 whitespace-nowrap border-l border-white/10">Calc. Inc.</th>
+                {INCENTIVE_TYPE_COLS.map(col => (
+                  <th key={col.key} className="px-2.5 py-2 text-right text-[10px] font-semibold text-white/80 whitespace-nowrap border-l border-white/10">{col.label}</th>
+                ))}
                 <th className="px-2.5 py-2 text-right text-[10px] font-semibold text-white/80 whitespace-nowrap border-l border-white/10">Delta Comm</th>
                 <th className="px-2.5 py-2 text-left text-[10px] font-semibold text-white/80 whitespace-nowrap border-l border-white/10">Status</th>
                 <th className="px-2.5 py-2 text-left text-[10px] font-semibold text-white/80 whitespace-nowrap border-l border-white/10">Type</th>
                 <th className="px-2.5 py-2 text-left text-[10px] font-semibold text-white/80 whitespace-nowrap border-l border-white/10">Matched Deal</th>
                 <th className="px-2.5 py-2 text-left text-[10px] font-semibold text-white/80 whitespace-nowrap border-l border-white/10">Uploaded At</th>
+                {statement.statement_type === "AIRLINE" && (<>
+                  {AIRLINE_TEXT_HEADERS.map(h => (
+                    <th key={h.key} className="px-2.5 py-2 text-left text-[10px] font-semibold text-white/80 whitespace-nowrap border-l border-white/10">{h.label}</th>
+                  ))}
+                  {AIRLINE_NUM_HEADERS.map(h => (
+                    <th key={h.key} className="px-2.5 py-2 text-right text-[10px] font-semibold text-white/80 whitespace-nowrap border-l border-white/10">{h.label}</th>
+                  ))}
+                  <th className="px-2.5 py-2 text-left text-[10px] font-semibold text-white/80 whitespace-nowrap border-l border-white/10">Tax Breakup</th>
+                </>)}
                 <th className="px-2 py-2 sticky right-0 z-20" style={{background:"#2d4f7c"}} />
               </tr>
             </thead>
@@ -901,12 +1008,17 @@ export default function StatementDetailPage() {
                       </td>
                     ))}
 
-                    {/* Calc. Incentive */}
-                    <td className="px-2.5 py-2 text-xs text-right font-mono whitespace-nowrap border-l border-gray-100">
-                      {t.calculated_incentive != null
-                        ? <span className="text-amber-600 font-semibold">₹{t.calculated_incentive.toLocaleString("en-IN", { minimumFractionDigits: 2 })}</span>
-                        : <span className="text-gray-300">—</span>}
-                    </td>
+                    {/* Per-incentive-type columns */}
+                    {INCENTIVE_TYPE_COLS.map(col => {
+                      const val = t.incentive_breakdown?.[col.key] ?? null;
+                      return (
+                        <td key={col.key} className="px-2.5 py-2 text-xs text-right font-mono whitespace-nowrap border-l border-gray-100">
+                          {val != null
+                            ? <span className="text-amber-600 font-semibold">₹{val.toLocaleString("en-IN", { minimumFractionDigits: 2 })}</span>
+                            : <span className="text-gray-300">—</span>}
+                        </td>
+                      );
+                    })}
 
                     {/* Delta Comm = comm_sell - calculated_incentive */}
                     <td className="px-2.5 py-2 text-xs text-right font-mono whitespace-nowrap border-l border-gray-100">
@@ -961,6 +1073,32 @@ export default function StatementDetailPage() {
                     <td className="px-2.5 py-2 text-xs text-gray-500 whitespace-nowrap border-l border-gray-100">
                       {formatDate(t.created_at)}
                     </td>
+
+                    {/* Airline-specific columns */}
+                    {statement.statement_type === "AIRLINE" && (<>
+                      {AIRLINE_TEXT_HEADERS.map(h => (
+                        <td key={h.key} className="px-2.5 py-2 text-xs text-gray-700 whitespace-nowrap border-l border-gray-100">
+                          {String(t[h.key] ?? "—")}
+                        </td>
+                      ))}
+                      {AIRLINE_NUM_HEADERS.map(h => (
+                        <td key={h.key} className="px-2.5 py-2 text-xs text-right text-gray-700 whitespace-nowrap border-l border-gray-100 font-mono">
+                          {fmt(t[h.key] as number | null)}
+                        </td>
+                      ))}
+                      {/* Tax Breakup */}
+                      <td className="px-2.5 py-2 border-l border-gray-100 min-w-[160px]">
+                        {t.tax_breakup && Object.keys(t.tax_breakup).length > 0 ? (
+                          <div className="flex flex-wrap gap-1">
+                            {Object.entries(t.tax_breakup).map(([k, v]) => (
+                              <span key={k} className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 text-[10px] font-mono whitespace-nowrap">
+                                {k}:<b>{v.toLocaleString("en-IN")}</b>
+                              </span>
+                            ))}
+                          </div>
+                        ) : <span className="text-gray-300 text-xs">—</span>}
+                      </td>
+                    </>)}
 
                     {/* Actions */}
                     <td className={`px-2 py-2 sticky right-0 ${isSel ? "bg-blue-50" : "bg-white group-hover:bg-gray-50/60"}`}>
@@ -1297,23 +1435,29 @@ export default function StatementDetailPage() {
                                 );
                               })()}
 
-                              {/* PLBs */}
+                              {/* Incentive config rows (PLB, Super PLB, Trans Fee, etc.) */}
                               {d.plbs.map(plb => {
                                 const plbKey = `${d.deal_id}-${plb.plb_key}`;
                                 const rawVisible = rawPLBVisible.has(plbKey);
+                                const ib = plb.incentive_breakdown;
+                                const isPercentage = ib ? !ib.incentive_num_pct?.toLowerCase().includes("number") : true;
                                 return (
                                   <div key={plb.plb_key} className="border border-gray-100 rounded-lg overflow-hidden">
-                                    {/* PLB header */}
+                                    {/* Header: incentive type label + status */}
                                     <div className="flex items-center px-3 py-2.5 bg-gray-50 gap-2">
-                                      <span className="px-2 py-0.5 rounded bg-gray-200 text-gray-700 text-[10px] font-semibold shrink-0">PLB</span>
+                                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold shrink-0 ${plb.plb_overall_match ? "bg-emerald-100 text-emerald-700" : "bg-gray-200 text-gray-600"}`}>
+                                        {plb.plb_key}
+                                      </span>
                                       <span className={`text-[11px] flex-1 ${plb.plb_overall_match ? "text-emerald-600 font-semibold" : "text-gray-500"}`}>
-                                        {plb.plb_overall_match ? "All filters passed" : "One or more filters failed"}
+                                        {plb.plb_overall_match
+                                          ? `All filters passed${ib?.result != null ? ` → ₹${ib.result.toLocaleString("en-IN", { minimumFractionDigits: 2 })}` : ""}`
+                                          : "One or more filters failed"}
                                       </span>
                                       <button
                                         onClick={() => setRawPLBVisible(prev => { const n = new Set(prev); n.has(plbKey) ? n.delete(plbKey) : n.add(plbKey); return n; })}
                                         className="text-[10px] text-blue-500 hover:text-blue-700 shrink-0"
                                       >
-                                        {rawVisible ? "Hide" : "View"} raw PLB JSON
+                                        {rawVisible ? "Hide" : "View"} raw JSON
                                       </button>
                                     </div>
                                     {rawVisible && (
@@ -1321,37 +1465,54 @@ export default function StatementDetailPage() {
                                         {JSON.stringify(plb.raw_plb, null, 2)}
                                       </pre>
                                     )}
-                                    {/* PLB steps — always visible */}
+                                    {/* Filter steps */}
                                     <div className="px-3 py-2 space-y-1.5">
                                       {plb.steps.map((s, si) => (
                                         <div key={si} className={`flex items-center gap-2 px-2.5 py-2 rounded-lg ${s.passed ? "bg-emerald-50" : "bg-red-50"}`}>
                                           <span className={`font-bold text-sm shrink-0 ${s.passed ? "text-emerald-500" : "text-red-500"}`}>{s.passed ? "✓" : "✗"}</span>
                                           <span className="font-semibold text-gray-700 flex-1 text-[11px]">{s.step}</span>
-                                          {s.ticket_value && <span className="px-2 py-0.5 rounded bg-white border border-gray-200 text-gray-700 text-[11px] font-mono shrink-0 max-w-32 truncate" title={s.ticket_value}>{s.ticket_value}</span>}
-                                          {s.deal_value   && <><span className="text-gray-400 shrink-0">→</span><span className="px-2 py-0.5 rounded bg-white border border-gray-200 text-gray-700 text-[11px] font-mono shrink-0 max-w-32 truncate" title={s.deal_value}>{s.deal_value}</span></>}
+                                          {s.ticket_value && <span className="px-2 py-0.5 rounded bg-white border border-gray-200 text-gray-700 text-[11px] font-mono shrink-0 max-w-36 truncate" title={s.ticket_value}>{s.ticket_value}</span>}
+                                          {s.deal_value   && <><span className="text-gray-400 shrink-0">→</span><span className="px-2 py-0.5 rounded bg-white border border-gray-200 text-gray-700 text-[11px] font-mono shrink-0 max-w-36 truncate" title={s.deal_value}>{s.deal_value}</span></>}
                                           <ChevronRight className="w-3.5 h-3.5 text-gray-300 shrink-0" />
                                         </div>
                                       ))}
+
                                       {/* Incentive Calculation */}
-                                      {plb.incentive_breakdown && (
-                                        <div className="mt-2 pt-2.5 space-y-1.5">
+                                      {ib && (
+                                        <div className="mt-2 pt-2.5 border-t border-gray-100 space-y-1.5">
                                           <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide">
                                             Incentive Calculation{!plb.plb_overall_match ? " (Hypothetical — Filters Did Not Pass)" : ""}
                                           </p>
+                                          {/* Target / Mode row */}
+                                          <div className="flex gap-2 flex-wrap pb-1">
+                                            <span className="px-1.5 py-0.5 rounded bg-blue-50 text-blue-600 text-[10px] font-semibold">{ib.target_based ?? "Fixed"}</span>
+                                            <span className="px-1.5 py-0.5 rounded bg-purple-50 text-purple-600 text-[10px] font-semibold">{ib.targetCalcCols}</span>
+                                            {ib.incentive_num_pct && <span className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-600 text-[10px] font-semibold">{ib.incentive_num_pct}</span>}
+                                          </div>
+                                          {/* Base fare build-up */}
                                           {([
-                                            ["targetCalcCols", Array.isArray(plb.incentive_breakdown.targetCalcCols) ? plb.incentive_breakdown.targetCalcCols.join("+") : String(plb.incentive_breakdown.targetCalcCols)],
-                                            ["sell_fare",      `₹ ${(plb.incentive_breakdown.sell_fare ?? 0).toLocaleString("en-IN")}`],
-                                            ...(plb.incentive_breakdown.sell_tax_yq_added ? [["+ sell_tax_yq", `₹ ${(diagnosis.sell_tax_yq ?? 0).toLocaleString("en-IN")}`]] : []),
-                                            ...(plb.incentive_breakdown.sale_yr_added     ? [["+ sale_yr",     `₹ ${(diagnosis.sale_yr ?? 0).toLocaleString("en-IN")}`]]     : []),
-                                            ["base total",     `₹ ${plb.incentive_breakdown.base_total.toLocaleString("en-IN")}`],
-                                            ["incentiveAmtPct",`${plb.incentive_breakdown.incentiveAmtPct}%`],
+                                            ["Sell Fare",    `₹ ${(ib.sell_fare ?? 0).toLocaleString("en-IN")}`],
+                                            ...(ib.sell_tax_yq_added ? [["+ YQ Tax", `₹ ${(ib.sell_tax_yq_value ?? 0).toLocaleString("en-IN")}`]] : []),
+                                            ...(ib.sale_yr_added     ? [["+ YR",     `₹ ${(ib.sale_yr_value    ?? 0).toLocaleString("en-IN")}`]] : []),
+                                            ["Base Total",  `₹ ${(ib.base_total ?? 0).toLocaleString("en-IN")}`],
+                                            ...(ib.incentiveAmtPct != null
+                                              ? [[isPercentage ? "Rate" : "Amount", isPercentage ? `${ib.incentiveAmtPct}%` : `₹ ${ib.incentiveAmtPct}`]]
+                                              : []),
                                           ] as [string, string][]).map(([k, v]) => (
                                             <div key={k} className="flex items-baseline justify-between gap-4">
-                                              <span className={`text-[11px] ${k === "base total" ? "font-bold text-gray-700" : "text-gray-500"}`}>{k}</span>
-                                              <span className={`text-[11px] font-mono ${k === "base total" ? "font-bold text-gray-700" : "text-gray-600"}`}>{v}</span>
+                                              <span className={`text-[11px] ${k === "Base Total" ? "font-bold text-gray-700" : "text-gray-500"}`}>{k}</span>
+                                              <span className={`text-[11px] font-mono ${k === "Base Total" ? "font-bold text-gray-700" : "text-gray-600"}`}>{v}</span>
                                             </div>
                                           ))}
-                                          <p className="text-[11px] text-gray-400 italic pt-1">{plb.incentive_breakdown.formula} = {plb.incentive_breakdown.result?.toLocaleString("en-IN", { minimumFractionDigits: 2 })}</p>
+                                          {/* Formula + result */}
+                                          <div className="pt-1 flex items-center justify-between gap-2">
+                                            <p className="text-[11px] text-gray-400 italic flex-1">{ib.formula}</p>
+                                            {ib.result != null && (
+                                              <span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 text-[11px] font-bold font-mono shrink-0">
+                                                ₹ {ib.result.toLocaleString("en-IN", { minimumFractionDigits: 2 })}
+                                              </span>
+                                            )}
+                                          </div>
                                         </div>
                                       )}
                                     </div>

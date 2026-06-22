@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime
 from sqlalchemy import String, DateTime, ForeignKey, Numeric, Integer, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
+from typing import Any
 
 
 class UploadedTicket(Base):
@@ -12,12 +14,13 @@ class UploadedTicket(Base):
     """
     __tablename__ = "uploaded_tickets"
 
-    id:           Mapped[int]      = mapped_column(primary_key=True)
-    batch_id:     Mapped[str]      = mapped_column(String(100), nullable=False, index=True)
-    file_name:    Mapped[str]      = mapped_column(String(500), nullable=False)
-    tenant_id:    Mapped[int]      = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    created_by_id: Mapped[int]    = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
-    created_at:   Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    id:             Mapped[int]      = mapped_column(primary_key=True)
+    batch_id:       Mapped[str]      = mapped_column(String(100), nullable=False, index=True)
+    file_name:      Mapped[str]      = mapped_column(String(500), nullable=False)
+    tenant_id:      Mapped[int]      = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    created_by_id:  Mapped[int]      = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at:     Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    statement_type: Mapped[str | None] = mapped_column(String(10), nullable=True)
 
     # ── XLS columns ───────────────────────────────────────────────────────
     booking_ref:         Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -64,12 +67,74 @@ class UploadedTicket(Base):
     customer_name:       Mapped[str | None]   = mapped_column(String(300), nullable=True)
     tour_code:           Mapped[str | None]   = mapped_column(String(100), nullable=True)
 
+    # ── Airline: passenger ────────────────────────────────────────────────────
+    pax_name:              Mapped[str | None]   = mapped_column(String(300), nullable=True)
+    air_pnr:               Mapped[str | None]   = mapped_column(String(50),  nullable=True)
+
+    # ── Airline: BSP booking metadata ─────────────────────────────────────────
+    pcc:                   Mapped[str | None]   = mapped_column(String(20),  nullable=True)
+    booking_signon:        Mapped[str | None]   = mapped_column(String(50),  nullable=True)
+    booking_pcc:           Mapped[str | None]   = mapped_column(String(20),  nullable=True)
+    booking_agency_name:   Mapped[str | None]   = mapped_column(String(200), nullable=True)
+    ticketing_signon:      Mapped[str | None]   = mapped_column(String(50),  nullable=True)
+
+    # ── Airline: document / trip ──────────────────────────────────────────────
+    document_type:         Mapped[str | None]   = mapped_column(String(50),  nullable=True)
+    fare_basis:            Mapped[str | None]   = mapped_column(String(100), nullable=True)
+    fare_const_type:       Mapped[str | None]   = mapped_column(String(50),  nullable=True)
+    base_fare_currency:    Mapped[str | None]   = mapped_column(String(10),  nullable=True)
+    transaction_type:      Mapped[str | None]   = mapped_column(String(20),  nullable=True)
+    exchanged_for:         Mapped[str | None]   = mapped_column(String(100), nullable=True)
+    stock_control_no:      Mapped[str | None]   = mapped_column(String(100), nullable=True)
+    stp_no:                Mapped[str | None]   = mapped_column(String(100), nullable=True)
+    void_date:             Mapped[str | None]   = mapped_column(String(50),  nullable=True)
+    coupon_status:         Mapped[str | None]   = mapped_column(String(200), nullable=True)
+    refund_type:           Mapped[str | None]   = mapped_column(String(50),  nullable=True)
+    trip_id:               Mapped[str | None]   = mapped_column(String(100), nullable=True)
+    ai_code:               Mapped[str | None]   = mapped_column(String(50),  nullable=True)
+    value_code:            Mapped[str | None]   = mapped_column(String(100), nullable=True)
+    multiple_receivables:  Mapped[str | None]   = mapped_column(String(100), nullable=True)
+
+    # ── Airline: financials ───────────────────────────────────────────────────
+    wo_tax:                Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    other_tax:             Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    comm_percent:          Mapped[float | None] = mapped_column(Numeric(8,  4), nullable=True)
+    net_remit:             Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    net_fare:              Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    invoice_fare:          Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    total_refund_amount:   Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    roe:                   Mapped[float | None] = mapped_column(Numeric(14, 6), nullable=True)
+    nuc:                   Mapped[float | None] = mapped_column(Numeric(14, 6), nullable=True)
+
+    # ── Airline: form of payment ──────────────────────────────────────────────
+    fop:                   Mapped[str | None]   = mapped_column(String(20),  nullable=True)
+    fop_details:           Mapped[str | None]   = mapped_column(String(200), nullable=True)
+    cc_auth:               Mapped[str | None]   = mapped_column(String(100), nullable=True)
+    cc_do_expiry:          Mapped[str | None]   = mapped_column(String(50),  nullable=True)
+
+    # ── Airline: flight details ───────────────────────────────────────────────
+    flight_no:             Mapped[str | None]   = mapped_column(String(200), nullable=True)
+    travel_dt:             Mapped[str | None]   = mapped_column(String(100), nullable=True)
+    fare_ladder:           Mapped[str | None]   = mapped_column(Text,        nullable=True)
+
+    # ── Airline: customer / GST ───────────────────────────────────────────────
+    gstn:                  Mapped[str | None]   = mapped_column(String(50),  nullable=True)
+    business_phone:        Mapped[str | None]   = mapped_column(String(50),  nullable=True)
+    business_email:        Mapped[str | None]   = mapped_column(String(200), nullable=True)
+    entity_address:        Mapped[str | None]   = mapped_column(String(500), nullable=True)
+
+    # ── JSONB ─────────────────────────────────────────────────────────────────
+    tax_breakup:           Mapped[dict | None]  = mapped_column(JSONB, nullable=True)
+    segments:              Mapped[list | None]  = mapped_column(JSONB, nullable=True)
+    raw_data:              Mapped[dict | None]  = mapped_column(JSONB, nullable=True)
+
     # ── Derived / calculation columns ─────────────────────────────────────────
     airline_name:          Mapped[str | None]   = mapped_column(String(200), nullable=True)
     matched_deal_id:       Mapped[int | None]   = mapped_column(Integer, nullable=True)
     matched_deal_type:     Mapped[str | None]   = mapped_column(String(20), nullable=True)   # 'airline' | 'b2b'
     matched_deal_name:     Mapped[str | None]   = mapped_column(String(300), nullable=True)
     calculated_incentive:  Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    incentive_breakdown:   Mapped[dict | None]  = mapped_column(JSONB, nullable=True)
     ticket_status:         Mapped[str]          = mapped_column(String(10), nullable=False, server_default="draft")
     split_type:            Mapped[str | None]   = mapped_column(String(10), nullable=True)
     exclusion_reason:      Mapped[str | None]   = mapped_column(String(500), nullable=True)

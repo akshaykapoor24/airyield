@@ -37,7 +37,7 @@ class Ticket(Base):
     currency: Mapped[str] = mapped_column(String(3), default="USD")
 
     # Matched deal
-    matched_deal_id: Mapped[int | None] = mapped_column(ForeignKey("deals.id"), nullable=True)
+    matched_deal_id: Mapped[int | None] = mapped_column(ForeignKey("legacy_deals.id"), nullable=True)
     is_manually_matched: Mapped[bool] = mapped_column(Boolean, default=False)
 
     upload_batch_id: Mapped[str | None] = mapped_column(String(100), nullable=True)  # group uploads together

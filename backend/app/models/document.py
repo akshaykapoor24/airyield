@@ -25,7 +25,7 @@ class Document(Base):
     category: Mapped[DocumentCategory] = mapped_column(SAEnum(DocumentCategory), default=DocumentCategory.OTHER)
 
     # Optional links
-    deal_id: Mapped[int | None] = mapped_column(ForeignKey("deals.id"), nullable=True)
+    deal_id: Mapped[int | None] = mapped_column(ForeignKey("legacy_deals.id"), nullable=True)
     ticket_batch_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     description: Mapped[str | None] = mapped_column(Text, nullable=True)

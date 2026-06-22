@@ -20,7 +20,7 @@ class UploadedDealSourceType(str, enum.Enum):
 
 
 class UploadedDeal(Base):
-    __tablename__ = "deals"
+    __tablename__ = "legacy_deals"
 
     id:           Mapped[int]                  = mapped_column(primary_key=True)
     source_type:  Mapped[UploadedDealSourceType] = mapped_column(
@@ -104,10 +104,10 @@ class UploadedDeal(Base):
 
 
 class DealIncentive(Base):
-    __tablename__ = "deal_incentives"
+    __tablename__ = "legacy_deal_incentives"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    deal_id: Mapped[int] = mapped_column(Integer, ForeignKey("deals.id", ondelete="CASCADE"), nullable=False)
+    deal_id: Mapped[int] = mapped_column(Integer, ForeignKey("legacy_deals.id", ondelete="CASCADE"), nullable=False)
     incentive_type: Mapped[str] = mapped_column(String(100), nullable=False)
     data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
@@ -118,7 +118,7 @@ class DealInclusionExclusion(Base):
     __tablename__ = "deal_incl_excl_rules"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    deal_id: Mapped[int] = mapped_column(Integer, ForeignKey("deals.id", ondelete="CASCADE"), nullable=False)
+    deal_id: Mapped[int] = mapped_column(Integer, ForeignKey("legacy_deals.id", ondelete="CASCADE"), nullable=False)
     rule_type: Mapped[str] = mapped_column(String(100), nullable=False)
     data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     vice_versa: Mapped[bool] = mapped_column(Boolean, default=False)

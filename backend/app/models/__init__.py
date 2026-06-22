@@ -30,9 +30,29 @@ from app.models.airline_class_master import AirlineClassMaster
 from app.models.class_approval import ClassApproval
 from app.models.uploaded_ticket import UploadedTicket
 from app.models.ticket_statement import TicketStatement
+from app.models.ticket_calculation import TicketCalculation
 from app.models.airline_deal import AirlineDeal, ManualDealStatus
 from app.models.b2b_deal import B2BDeal
 from app.models.deal_batch import DealBatch
+from app.models.deal import (
+    DealStatement,
+    Deal,
+    DealIncentiveConfig,
+    DealIncentiveSlab,
+    DealIncentiveSlabValue,
+    DealRule,
+    DealRuleCondition,
+    DealSourceType,
+    DealKind,
+    DealTagType,
+    DealCategoryType,
+    DealStatusType,
+    DealLifecycleType,
+    SlabTypeEnum,
+    SlabValueTypeEnum,
+    RuleOperatorEnum,
+    build_rule_dict,
+)
 
 __all__ = [
     "Tenant",
@@ -50,6 +70,15 @@ __all__ = [
     "AirlineClassMaster", "ClassApproval",
     "UploadedTicket",
     "TicketStatement",
+    "TicketCalculation",
     "AirlineDeal", "B2BDeal", "ManualDealStatus",
     "DealBatch",
+    # New unified deal schema
+    "DealStatement", "Deal",
+    "DealIncentiveConfig", "DealIncentiveSlab", "DealIncentiveSlabValue",
+    "DealRule", "DealRuleCondition",
+    "DealSourceType", "DealKind", "DealTagType", "DealCategoryType",
+    "DealStatusType", "DealLifecycleType",
+    "SlabTypeEnum", "SlabValueTypeEnum", "RuleOperatorEnum",
+    "build_rule_dict",
 ]

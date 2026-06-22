@@ -107,6 +107,19 @@ class ExtractedRow(BaseModel):
     valid_to:         Optional[str] = None
     validity_raw:     str        = ""
     remarks:          str        = ""
+    # Per-row deal-header fields. Used by the multi-tab workbook upload, where every
+    # deal (joined by "Deal No" across sheets) carries its own header. All default to
+    # None so the single-sheet / AI / manual paths fall back to the deal-level payload.
+    incentive_types:  list       = []
+    airline_type:     Optional[str] = None
+    business_type:    Optional[str] = None
+    entity_lcc:       Optional[str] = None
+    login_id:         Optional[str] = None
+    deal_maker_name:  Optional[str] = None
+    supplier_name:    Optional[str] = None
+    contract_year:    Optional[str] = None
+    trigger_type:     Optional[str] = None
+    payout_type:      Optional[str] = None
     # per-row incentive data (each deal row has its own class, %, dates etc.)
     incentive_data:   dict       = {}
     # per-row inclusions / exclusions (set by user in review step)
@@ -155,6 +168,9 @@ class DealRepositoryItem(BaseModel):
     created_at:           datetime
     # upload-table only
     file_type:            Optional[str]  = None  # pdf/excel/word/image/manual
+    # grouping/context fields (statement-wise + agency-wise repository views)
+    batch_id:             Optional[str]  = None
+    supplier_name:        Optional[str]  = None
 
 
 # ── AI Extraction schemas ──────────────────────────────────────────────────────
