@@ -9,6 +9,12 @@ import {
 import * as XLSX from "xlsx";
 import api from "@/lib/api";
 import { useRouter } from "next/navigation";
+import {
+  IEFieldValue,
+  CONTINENTS, COUNTRY_GROUPS,
+  INCENTIVE_FIELDS, FIELD_OPTIONS, ANCILLARY_ITEMS,
+  TabBar, IncentiveTabContent, InclExclTabContent,
+} from "@/components/deals/IncentiveInclExclShared";
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CONSTANTS
@@ -31,31 +37,6 @@ const INCLUSIONS_EXCLUSIONS = [
   "Inclusion For Trigger","Exclusion For Trigger",
   "Inclusion For Payout","Exclusion For Payout",
 ];
-
-const CONTINENTS         = ["Africa","Asia","Europe","North America","Oceania","South America","Antarctica"];
-const COUNTRY_GROUPS     = ["APAC","EUROPEAN NATIONS","GCC/MIDDLE EAST","LATIN AMERICA","MEAI","NAM","OTHER","SAARC"];
-const CITIES             = ["Delhi","Mumbai","Dubai","Doha","London","Frankfurt","New York","Singapore","Sydney"];
-const FARE_TYPE_CATS     = ["Normal","Group","Corporate","Excursion","Tour"];
-const TOUR_CODES         = ["TC001","TC002","TC003","TC004"];
-const DOMESTIC_CTRS      = ["India","UAE","UK","USA","Australia"];
-const INCL_CLASS_OPTIONS = ["All","Economy","Premium Economy","Business","First"];
-const SOTO_OPTIONS       = ["SOTO All","SOTO within India","SOTO outside India  "];
-
-const FREQUENCY_OPTIONS    = ["Quarterly","Half Yearly","Yearly"];
-const FLIGHT_TYPE_OPTIONS  = ["International","Domestic","Both"];
-const CLASS_OPTIONS        = ["All","Economy","Premium","Business"];
-const TARGET_CALC_OPTIONS  = ["Basic","Basic + YQ","Basic + YQ +YR","Basic + YR"];
-const PAYOUT_CALC_OPTIONS  = ["Basic","Basic + YQ","Basic + YQ +YR","Basic + YR"];
-const TARGET_BASED_OPTIONS = ["Amount Based","Segment Based"];
-
-const FIELD_OPTIONS: Record<string,string[]> = {
-  frequency:FREQUENCY_OPTIONS, flightType:FLIGHT_TYPE_OPTIONS,
-  class:CLASS_OPTIONS,
-  targetCalcCols:TARGET_CALC_OPTIONS, payoutCalcCols:PAYOUT_CALC_OPTIONS,
-  targetBased:TARGET_BASED_OPTIONS,
-  amountBasedType:["Fixed","Slab Based"], segmentBasedType:["Fixed","Slab Based"],
-  incentiveNumPct:["Number","Percentage"],
-};
 
 const NORMALIZE_ALIASES: Record<string,string> = {
   "yearly":"Yearly","yealy":"Yearly","annual":"Yearly","annually":"Yearly",
@@ -103,22 +84,7 @@ function normalizeSelectValue(raw:string,options:string[]):string{
 
 type FieldConfig = {key:string;label:string;type:"date"|"select"|"search"|"number";condition?:{field:string;value:string}};
 
-function payoutFields(n:string):FieldConfig[]{return[
-  {key:"amountBasedType",    label:`Amount Based for ${n}`,                    type:"select",condition:{field:"targetBased",value:"Amount Based"}},
-  {key:"baseTargetAmount",   label:`Base Target Amount for ${n}`,              type:"number",condition:{field:"targetBased",value:"Amount Based"}},
-  {key:"segmentBasedType",   label:`Segment Based for ${n}`,                   type:"select",condition:{field:"targetBased",value:"Segment Based"}},
-  {key:"baseTargetSegments", label:`Base Target Segments for ${n}`,            type:"number",condition:{field:"targetBased",value:"Segment Based"}},
-  {key:"incentiveNumPct",    label:`Incentive in Number or Percentage for ${n}`,type:"select",condition:{field:"targetBased",value:"__set__"}},
-  {key:"incentiveAmtPct",    label:`Incentive Percentage or Amount for ${n}`,  type:"number",condition:{field:"targetBased",value:"__set__"}},
-  {key:"cappedIncentive",    label:`Capped Incentive for ${n}`,                type:"number",condition:{field:"targetBased",value:"__set__"}},
-];}
-function payoutCalcFields(n:string):FieldConfig[]{return[
-  {key:"incentiveNumPct",label:`Incentive in Number or Percentage for ${n}`,type:"select",condition:{field:"payoutCalcCols",value:"__set__"}},
-  {key:"incentiveAmtPct",label:`Incentive Percentage or Amount for ${n}`,   type:"number",condition:{field:"payoutCalcCols",value:"__set__"}},
-  {key:"cappedIncentive",label:`Capped Incentive for ${n}`,                 type:"number",condition:{field:"payoutCalcCols",value:"__set__"}},
-];}
-
-// Matches every field in InclExclDetailModal (Exclusion + Inclusion).
+// Matches every field in InclExclRuleModal (Exclusion + Inclusion).
 // key "_dateExclusion" is a synthetic XLS-only field; extraction expands it to
 // dateExclusionTicket / dateExclusionTravel based on the cell value.
 const INCL_EXCL_FIELDS: FieldConfig[] = [
@@ -143,20 +109,8 @@ const INCL_EXCL_FIELDS: FieldConfig[] = [
   {key:"domesticCountry",    label:"Domestic Country",         type:"search"},
 ];
 
-const INCENTIVE_FIELDS:Record<string,FieldConfig[]> = {
-  "PLB":[{key:"validFrom",label:"Contract Valid from for PLB",type:"date"},{key:"validTo",label:"Contract Valid to for PLB",type:"date"},{key:"frequency",label:"Frequency for PLB",type:"select"},{key:"flightType",label:"Flight Type for PLB",type:"select"},{key:"class",label:"Class for PLB",type:"search"},{key:"targetCalcCols",label:"Target Calc Columns for PLB",type:"select"},{key:"payoutCalcCols",label:"Payout Calc Columns for PLB",type:"select"},{key:"targetBased",label:"Target Based for PLB",type:"select"},...payoutFields("PLB")],
-  "Super PLB":[{key:"validFrom",label:"Contract Valid from for Super PLB",type:"date"},{key:"validTo",label:"Contract Valid to for Super PLB",type:"date"},{key:"frequency",label:"Frequency for Super PLB",type:"select"},{key:"flightType",label:"Flight Type for Super PLB",type:"select"},{key:"class",label:"Class for Super PLB",type:"search"},{key:"targetBased",label:"Target Based for Super PLB",type:"select"},{key:"targetCalcCols",label:"Target Calc Columns for Super PLB",type:"select"},...payoutFields("Super PLB")],
-  "Transaction Fee":[{key:"validFrom",label:"Contract Valid from for Transaction Fee",type:"date"},{key:"validTo",label:"Contract Valid to for Transaction Fee",type:"date"},{key:"frequency",label:"Frequency for Transaction Fee",type:"select"},{key:"flightType",label:"Flight Type for Transaction Fee",type:"select"},{key:"class",label:"Class for Transaction Fee",type:"search"},{key:"payoutCalcCols",label:"Payout Calc Columns for Transaction Fee",type:"select"},...payoutCalcFields("Transaction Fee")],
-  "Deposit Incentive (DI)":[{key:"validFrom",label:"Contract Valid from for DI",type:"date"},{key:"validTo",label:"Contract Valid to for DI",type:"date"},{key:"frequency",label:"Frequency for DI",type:"select"},{key:"flightType",label:"Flight Type for DI",type:"select"},{key:"targetBased",label:"Target Based for DI",type:"select"},...payoutFields("Deposit Incentive (DI)")],
-  "Marketing Fund":[{key:"validFrom",label:"Contract Valid from for Marketing Fund",type:"date"},{key:"validTo",label:"Contract Valid to for Marketing Fund",type:"date"},{key:"frequency",label:"Frequency for Marketing Fund",type:"select"},{key:"flightType",label:"Flight Type for Marketing Fund",type:"select"},{key:"class",label:"Class for Marketing Fund",type:"search"},{key:"payoutCalcCols",label:"Payout Calc Columns for Marketing Fund",type:"select"},...payoutCalcFields("Marketing Fund")],
-  "Ancillary":[{key:"validFrom",label:"Contract Valid from for Ancillary",type:"date"},{key:"validTo",label:"Contract Valid to for Ancillary",type:"date"},{key:"flightType",label:"Flight Type for Ancillary",type:"select"},{key:"payoutCalcCols",label:"Payout Calc Columns for Ancillary",type:"select"},...payoutCalcFields("Ancillary")],
-  "Frontend":[{key:"validFrom",label:"Contract Valid from for Frontend",type:"date"},{key:"validTo",label:"Contract Valid to for Frontend",type:"date"},{key:"frequency",label:"Frequency for Frontend",type:"select"},{key:"class",label:"Class for Frontend",type:"search"},{key:"targetCalcCols",label:"Target Calc Columns for Frontend",type:"select"},{key:"payoutCalcCols",label:"Payout Calc Columns for Frontend",type:"select"},...payoutCalcFields("Frontend")],
-  "Backend":[{key:"validFrom",label:"Contract Valid from for Backend",type:"date"},{key:"validTo",label:"Contract Valid to for Backend",type:"date"},{key:"frequency",label:"Frequency for Backend",type:"select"},{key:"class",label:"Class for Backend",type:"search"},{key:"targetCalcCols",label:"Target Calc Columns for Backend",type:"select"},{key:"payoutCalcCols",label:"Payout Calc Columns for Backend",type:"select"},...payoutCalcFields("Backend")],
-  "Cashback":[{key:"validFrom",label:"Contract Valid from for Cashback",type:"date"},{key:"validTo",label:"Contract Valid to for Cashback",type:"date"},{key:"frequency",label:"Frequency for Cashback",type:"select"},{key:"flightType",label:"Flight Type for Cashback",type:"select"},{key:"targetBased",label:"Target Based for Cashback",type:"select"},...payoutFields("Cashback")],
-  "Segment Incentive":[{key:"validFrom",label:"Contract Valid from for Segment Incentive",type:"date"},{key:"validTo",label:"Contract Valid to for Segment Incentive",type:"date"},{key:"frequency",label:"Frequency for Segment Incentive",type:"select"},{key:"class",label:"Class for Segment Incentive",type:"search"},{key:"targetCalcCols",label:"Target Calc Columns for Segment Incentive",type:"select"},{key:"payoutCalcCols",label:"Payout Calc Columns for Segment Incentive",type:"select"},...payoutCalcFields("Segment Incentive")],
-  "Push Action":[{key:"validFrom",label:"Contract Valid from for Push Action",type:"date"},{key:"validTo",label:"Contract Valid to for Push Action",type:"date"},{key:"frequency",label:"Frequency for Push Action",type:"select"},{key:"flightType",label:"Flight Type for Push Action",type:"select"},{key:"targetBased",label:"Target Based for Push Action",type:"select"},...payoutFields("Push Action")],
-};
-
+// INCENTIVE_FIELDS now imported from the shared module (same field set the manual
+// create-deal form uses) — ensures upload and manual stay in lockstep by construction.
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // COLUMN DEFINITIONS
@@ -192,6 +146,97 @@ function inclExclMapCols(type:string){
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// MULTI-TAB (TABBED) TEMPLATE — one sheet per incentive, joined by "Deal No"
+// ═══════════════════════════════════════════════════════════════════════════════
+const MT_CONTRACT_SHEET = "Airline Contract Details";
+
+// Header-sheet columns. Keys mirror the upload field keys (c__*) so the existing
+// review/confirm path consumes them unchanged. The full superset is used when
+// parsing (maps whatever columns are present); generation filters per deal type
+// (B2B hides Contract Year / Trigger / Payout, like the single-sheet flow).
+const MT_CONTRACT_COLS_ALL: {key:string;label:string}[] = [
+  {key:"__dealno",           label:"Deal No"},
+  {key:"c__airline_type",    label:"Airline Type"},
+  {key:"c__airline_name",    label:"Airline Name"},
+  {key:"c__contract_year",   label:"Contract Year"},
+  {key:"c__business_type",   label:"Business Type"},
+  {key:"c__valid_from",      label:"Contract Valid From"},
+  {key:"c__valid_to",        label:"Contract Valid To"},
+  {key:"c__trigger_type",    label:"Trigger Type"},
+  {key:"c__payout_type",     label:"Payout Type"},
+  {key:"c__entity_lcc",      label:"Entity"},
+  {key:"c__login_id",        label:"Login ID"},
+  {key:"c__supplier_name",   label:"Supplier"},
+  {key:"c__deal_maker_name", label:"Deal Maker"},
+  {key:"r__remarks",         label:"Remarks"},
+];
+const MT_B2B_HIDDEN = new Set(["c__contract_year","c__trigger_type","c__payout_type"]);
+function mtContractCols(dealType:string){
+  // Supplier is already picked in Deal Details (Step 1), so it never goes in the sheet.
+  return MT_CONTRACT_COLS_ALL.filter(c=>{
+    if(c.key==="c__supplier_name") return false;
+    if(dealType==="b2b" && MT_B2B_HIDDEN.has(c.key)) return false;
+    return true;
+  });
+}
+const mtContractSample=(key:string):string=>({
+  __dealno:"1", c__airline_type:"GDS", c__airline_name:"Air France",
+  c__contract_year:"Calendar year", c__business_type:"B2B",
+  c__valid_from:"2026-01-01", c__valid_to:"2026-12-31",
+  c__trigger_type:"Sales", c__payout_type:"Sales", c__entity_lcc:"ATB",
+}[key] ?? "");
+
+// Ancillary & Segment Incentive aren't in INCENTIVE_FIELDS (custom-rendered), so list
+// their FIXED columns explicitly (slab columns are intentionally omitted everywhere).
+const ANCILLARY_FIXED_COLS: {key:string;label:string}[] = ANCILLARY_ITEMS.flatMap(it=>[
+  {key:it.key,       label:it.label},
+  {key:it.numPctKey, label:`${it.label} Number or Percentage`},
+  {key:it.amtKey,    label:`${it.label} Amount`},
+]);
+const SI_FIXED_COLS: {key:string;label:string}[] = [
+  {key:"siPeriodFrom",  label:"Period From for Segment Incentive"},
+  {key:"siPeriodTo",    label:"Period To for Segment Incentive"},
+  {key:"siTargetType",  label:"Target in Percent or Amount for Segment Incentive"},
+  {key:"siTargetValue", label:"Target Percent or Amount for Segment Incentive"},
+  {key:"siClass",       label:"Class for Segment Incentive"},
+  {key:"siFlightType",  label:"Flight Type for Segment Incentive"},
+];
+
+function incentiveFixedCols(inc:string): {key:string;label:string}[] {
+  if(inc==="Ancillary")          return ANCILLARY_FIXED_COLS;
+  if(inc==="Segment Incentive")  return SI_FIXED_COLS;
+  return (INCENTIVE_FIELDS[inc]??[]).map(f=>({key:f.key,label:f.label}));
+}
+
+// Option lists used to normalize select cells while parsing (fuzzy-matched).
+const MT_SELECT_OPTIONS: Record<string,string[]> = {
+  ...FIELD_OPTIONS,
+  c__airline_type:  ["GDS","LCC"],
+  c__business_type: BUSINESS_TYPES,
+  c__entity_lcc:    ENTITIES,
+  siTargetType:     ["Amount","Percentage"],
+  siClass:          ["All","Economy","Premium","Business"],
+  siFlightType:     ["All","Domestic","International"],
+  ...Object.fromEntries(ANCILLARY_ITEMS.flatMap(it=>[
+    [it.key,       [it.withValue, it.withoutValue]],
+    [it.numPctKey, ["Number","Percentage"]],
+  ])),
+};
+
+// Normalize a cell value to YYYY-MM-DD for date columns (module-level twin of the
+// ColumnMappingStep's local toDateStr, usable from the multi-tab parser).
+function mtDateStr(v:string):string{
+  if(!v) return v;
+  const t=v.trim();
+  if(/^\d{4}-\d{2}-\d{2}$/.test(t)) return t;
+  const m=t.match(/^(\d{4}-\d{2}-\d{2})[T ]?/);
+  if(m) return m[1];
+  try{const d=new Date(t);if(!isNaN(d.getTime()))return d.toISOString().split("T")[0];}catch{}
+  return t;
+}
+const mtIsDateLabel=(label:string)=>/valid from|valid to|period from|period to/.test(label);
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // TYPES
 // ═══════════════════════════════════════════════════════════════════════════════
 type ReviewRow = {
@@ -202,11 +247,12 @@ type ReviewRow = {
   extra: Record<string,string>;
 };
 
-type IEFieldValue = string | string[];
+// ruleType -> incentiveType -> field -> value (each incentive type on a row gets
+// its own independent rule set, mirroring the manual create-deal form)
 type RowInclExcl = {
   types:     string[];
-  data:      Record<string, Record<string, IEFieldValue>>;
-  viceVersa: Record<string, boolean>;
+  data:      Record<string, Record<string, Record<string, IEFieldValue>>>;
+  viceVersa: Record<string, Record<string, boolean>>;
 };
 
 type ExtractionPreview = {
@@ -222,17 +268,7 @@ type AIDeal = {
   contract_valid_from: string | null;
   contract_valid_to: string | null;
   incentive_types: string[];
-  incentive_data: {
-    PLB?: {
-      validFrom: string | null; validTo: string | null;
-      frequency: string; flightType: string; class: string;
-      targetCalcCols: string; payoutCalcCols: string;
-      targetBased: string | null;
-      amountBasedType: string | null; baseTargetAmount: number | null;
-      segmentBasedType: string | null; baseTargetSegments: number | null;
-      incentiveNumPct: string; incentiveAmtPct: number; cappedIncentive: number | null;
-    };
-  };
+  incentive_data: Record<string, Record<string, string | number | null> | undefined>;
   remark: string;
 };
 
@@ -245,28 +281,18 @@ type AIExtractResponse = {
 
 function convertAIDealsToRows(deals: AIDeal[]): ReviewRow[] {
   return deals.map((deal, idx) => {
-    const plb = deal.incentive_data?.PLB;
     const extra: Record<string, string> = {};
-    if (deal.airline_type)          extra["c__airline_type"] = deal.airline_type;
-    if (deal.airline_name)          extra["c__airline_name"]  = deal.airline_name;
-    if (deal.contract_valid_from)   extra["c__valid_from"]    = deal.contract_valid_from;
-    if (deal.contract_valid_to)     extra["c__valid_to"]      = deal.contract_valid_to;
-    if (plb) {
-      if (plb.validFrom)           extra["inc::PLB::validFrom"]          = plb.validFrom;
-      if (plb.validTo)             extra["inc::PLB::validTo"]            = plb.validTo;
-      if (plb.frequency)           extra["inc::PLB::frequency"]          = plb.frequency;
-      if (plb.flightType)          extra["inc::PLB::flightType"]         = plb.flightType;
-      if (plb.class)               extra["inc::PLB::class"]              = plb.class;
-      if (plb.targetCalcCols)      extra["inc::PLB::targetCalcCols"]     = plb.targetCalcCols;
-      if (plb.payoutCalcCols)      extra["inc::PLB::payoutCalcCols"]     = plb.payoutCalcCols;
-      if (plb.targetBased)         extra["inc::PLB::targetBased"]        = plb.targetBased;
-      if (plb.amountBasedType)     extra["inc::PLB::amountBasedType"]    = plb.amountBasedType;
-      if (plb.baseTargetAmount != null) extra["inc::PLB::baseTargetAmount"]  = String(plb.baseTargetAmount);
-      if (plb.segmentBasedType)    extra["inc::PLB::segmentBasedType"]   = plb.segmentBasedType;
-      if (plb.baseTargetSegments != null) extra["inc::PLB::baseTargetSegments"] = String(plb.baseTargetSegments);
-      if (plb.incentiveNumPct)     extra["inc::PLB::incentiveNumPct"]    = plb.incentiveNumPct;
-      if (plb.incentiveAmtPct)     extra["inc::PLB::incentiveAmtPct"]   = String(plb.incentiveAmtPct);
-      if (plb.cappedIncentive != null) extra["inc::PLB::cappedIncentive"] = String(plb.cappedIncentive);
+    if (deal.airline_type)        extra["c__airline_type"] = deal.airline_type;
+    if (deal.airline_name)        extra["c__airline_name"]  = deal.airline_name;
+    if (deal.contract_valid_from) extra["c__valid_from"]    = deal.contract_valid_from;
+    if (deal.contract_valid_to)   extra["c__valid_to"]      = deal.contract_valid_to;
+    for (const [incType, incFields] of Object.entries(deal.incentive_data ?? {})) {
+      if (!incFields) continue;
+      for (const [field, value] of Object.entries(incFields)) {
+        if (value != null && value !== "") {
+          extra[`inc::${incType}::${field}`] = String(value);
+        }
+      }
     }
     return {
       row_order: idx,
@@ -334,100 +360,8 @@ function SearchSelectField({label,placeholder="Search and select",options,value,
   );
 }
 
-function MultiCheckboxDropdown({label,placeholder="Select...",options,values,onChange}:{label?:string;placeholder?:string;options:string[];values:string[];onChange:(v:string[])=>void}){
-  const [open,setOpen]=useState(false);
-  const ref=useRef<HTMLDivElement>(null);
-  useEffect(()=>{const h=(e:MouseEvent)=>{if(ref.current&&!ref.current.contains(e.target as Node))setOpen(false);};document.addEventListener("mousedown",h);return()=>document.removeEventListener("mousedown",h);},[]);
-  const toggle=(opt:string)=>onChange(values.includes(opt)?values.filter(v=>v!==opt):[...values,opt]);
-  const display=values.length?values.join(", "):null;
-  return(
-    <div className="relative" ref={ref}>
-      {label&&<label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">{label}</label>}
-      <button type="button" onClick={()=>setOpen(o=>!o)} className="w-full flex items-center justify-between border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-white text-left focus:outline-none focus:ring-1 focus:ring-blue-400">
-        <span className={display?"text-gray-800":"text-gray-400"}>{display||placeholder}</span>
-        <div className="flex items-center gap-0.5">
-          {values.length>0&&<span onClick={e=>{e.stopPropagation();onChange([]);}} className="text-gray-300 hover:text-red-400"><X className="w-3 h-3"/></span>}
-          <ChevronDown className="w-3.5 h-3.5 text-gray-400"/>
-        </div>
-      </button>
-      {open&&<div className="absolute z-50 w-full mt-0.5 bg-white border border-gray-200 rounded-md shadow-lg">
-        {options.map(opt=>(
-          <label key={opt} className="flex items-center gap-2 px-2.5 py-1.5 text-xs text-gray-700 hover:bg-blue-50 cursor-pointer">
-            <input type="checkbox" checked={values.includes(opt)} onChange={()=>toggle(opt)} className="w-3.5 h-3.5 rounded border-gray-300 accent-blue-600"/>
-            {opt}
-          </label>
-        ))}
-      </div>}
-    </div>
-  );
-}
-
-function MultiSearchSelectField({label,placeholder="Search and select",options,values,onChange}:{label?:string;placeholder?:string;options:string[];values:string[];onChange:(v:string[])=>void}){
-  const [open,setOpen]=useState(false);const [search,setSearch]=useState("");
-  const ref=useRef<HTMLDivElement>(null);
-  useEffect(()=>{const h=(e:MouseEvent)=>{if(ref.current&&!ref.current.contains(e.target as Node))setOpen(false);};document.addEventListener("mousedown",h);return()=>document.removeEventListener("mousedown",h);},[]);
-  const filtered=options.filter(o=>o.toLowerCase().includes(search.toLowerCase()));
-  const toggle=(opt:string)=>onChange(values.includes(opt)?values.filter(v=>v!==opt):[...values,opt]);
-  const display=values.length?values.join(", "):null;
-  return(
-    <div className="relative" ref={ref}>
-      {label&&<label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">{label}</label>}
-      <button type="button" onClick={()=>{setOpen(o=>!o);setSearch("");}} className="w-full flex items-start justify-between border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-white text-left focus:outline-none focus:ring-1 focus:ring-blue-400 min-h-[28px]">
-        <span className={display?"text-gray-800 whitespace-normal break-words leading-relaxed":"text-gray-400"}>{display||placeholder}</span>
-        <div className="flex items-center gap-0.5 flex-shrink-0 ml-1 mt-0.5">
-          {values.length>0&&<span onClick={e=>{e.stopPropagation();onChange([]);}} className="text-gray-300 hover:text-red-400"><X className="w-3 h-3"/></span>}
-          <ChevronDown className="w-3.5 h-3.5 text-gray-400"/>
-        </div>
-      </button>
-      {open&&<div className="absolute z-50 w-full mt-0.5 bg-white border border-gray-200 rounded-md shadow-lg">
-        <div className="p-1.5 border-b border-gray-100"><input autoFocus value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search..." className="w-full text-xs px-2 py-1 border border-gray-200 rounded focus:outline-none"/></div>
-        <div className="max-h-44 overflow-y-auto">
-          {filtered.length?filtered.map(opt=>(
-            <label key={opt} className="flex items-center gap-2 px-2.5 py-1.5 text-xs text-gray-700 hover:bg-blue-50 cursor-pointer">
-              <input type="checkbox" checked={values.includes(opt)} onChange={()=>toggle(opt)} className="w-3.5 h-3.5 rounded border-gray-300 accent-blue-600"/>
-              {opt}
-            </label>
-          )):<p className="px-2.5 py-1.5 text-xs text-gray-400">No results</p>}
-        </div>
-      </div>}
-    </div>
-  );
-}
-
-function TagInput({label,placeholder="Type and press Enter",values,onChange}:{label?:string;placeholder?:string;values:string[];onChange:(v:string[])=>void}){
-  const [text,setText]=useState("");
-  const commit=()=>{
-    const v=text.trim();
-    if(v&&!values.includes(v)){onChange([...values,v]);}
-    setText("");
-  };
-  const handleKey=(e:React.KeyboardEvent<HTMLInputElement>)=>{
-    if(e.key==="Enter"||e.key===","){e.preventDefault();commit();}
-    if(e.key==="Backspace"&&!text&&values.length){onChange(values.slice(0,-1));}
-  };
-  return(
-    <div>
-      {label&&<label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">{label}</label>}
-      <div className="min-h-[28px] border border-gray-200 rounded-md px-2 py-1 flex flex-wrap gap-1 bg-white focus-within:ring-1 focus-within:ring-blue-400">
-        {values.map(v=>(
-          <span key={v} className="flex items-center gap-1 px-1.5 py-0.5 bg-blue-50 text-blue-700 border border-blue-200 rounded text-[10px] font-medium">
-            {v}
-            <button type="button" onClick={()=>onChange(values.filter(x=>x!==v))} className="text-blue-400 hover:text-red-500 leading-none"><X className="w-2.5 h-2.5"/></button>
-          </span>
-        ))}
-        <input
-          value={text}
-          onChange={e=>setText(e.target.value)}
-          onKeyDown={handleKey}
-          onBlur={commit}
-          placeholder={values.length?"":placeholder}
-          className="flex-1 min-w-[80px] text-xs border-none outline-none bg-transparent py-0.5 text-gray-800 placeholder-gray-400"
-        />
-      </div>
-      <p className="text-[9px] text-gray-400 mt-0.5">Press Enter or comma to add a code</p>
-    </div>
-  );
-}
+// MultiCheckboxDropdown / MultiSearchSelectField / TagInput now come from the shared
+// module via InclExclTabContent — InclExclRuleModal below uses that directly.
 
 function SectionCard({title,children}:{title:string;children:React.ReactNode}){
   return(
@@ -507,29 +441,33 @@ function MultiSelectDropdown({label,options,selected,onChange}:{label?:string;op
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// INCL/EXCL DETAIL MODAL
+// INCL/EXCL RULE MODAL — reuses the shared InclExclTabContent (multi-value, same
+// component the manual create-deal form uses), with one sub-tab per incentive type
+// on the row so each incentive type gets its own independent rule set.
 // ═══════════════════════════════════════════════════════════════════════════════
-function InclExclDetailModal({
-  type,
-  initialData,
-  onSave,
-  onClose,
+function InclExclRuleModal({
+  type, incentiveTypes, selectedRows, rowIdx,
+  getData, onFieldChange, getViceVersa, onToggleViceVersa,
+  onCopyToSelected, onClose,
 }:{
   type:string;
-  initialData: Record<string, IEFieldValue>;
-  onSave:(data:Record<string, IEFieldValue>)=>void;
+  incentiveTypes:string[];
+  selectedRows:Set<number>;
+  rowIdx:number;
+  getData:(incType:string)=>Record<string,IEFieldValue>;
+  onFieldChange:(incType:string,key:string,value:IEFieldValue)=>void;
+  getViceVersa:(incType:string)=>boolean;
+  onToggleViceVersa:(incType:string)=>void;
+  onCopyToSelected:()=>void;
   onClose:()=>void;
 }){
-  const [form, setForm] = useState<Record<string, IEFieldValue>>(initialData);
-  const isExcl = type.startsWith("Exclusion");
-  const suffix  = isExcl ? "for Exclusion" : "for Inclusion";
+  const [activeIncType, setActiveIncType] = useState(incentiveTypes[0] ?? "");
+  const incType = incentiveTypes.includes(activeIncType) ? activeIncType : (incentiveTypes[0] ?? "");
+  const isExclusion = type.startsWith("Exclusion");
+  const suffix = isExclusion ? "for Exclusion" : "for Inclusion";
 
-  // Load all options once — no dependencies between fields
-  const [continentOptions,    setContinentOptions]    = useState<string[]>(CONTINENTS);
+  const [continentOptions, setContinentOptions] = useState<string[]>(CONTINENTS);
   const [countryGroupOptions, setCountryGroupOptions] = useState<string[]>(COUNTRY_GROUPS);
-  const [allCountries,        setAllCountries]        = useState<string[]>([]);
-  const [allAirports,         setAllAirports]         = useState<string[]>([]);
-  const [allCities,           setAllCities]           = useState<string[]>([]);
 
   useEffect(()=>{
     api.get<{continents:string[];country_groups:string[]}>("/airports/options")
@@ -538,75 +476,9 @@ function InclExclDetailModal({
         if(r.data.country_groups?.length) setCountryGroupOptions(r.data.country_groups);
       })
       .catch(()=>{});
-    api.get<{iata_code:string;country:string|null;city_airport_name:string}[]>("/airports/?limit=5000")
-      .then(r=>{
-        setAllAirports(r.data.map(a=>a.iata_code).filter(Boolean));
-        const countries=[...new Set(r.data.map(a=>a.country).filter(Boolean))] as string[];
-        setAllCountries(countries.sort());
-        const cities=[...new Set(r.data.map(a=>a.city_airport_name).filter(Boolean))].sort();
-        setAllCities(cities);
-      })
-      .catch(()=>{});
   },[]);
 
-  // Helpers to read/write multi-value fields
-  const getArr=(k:string):string[]=>{
-    const v=form[k];
-    if(!v)return[];
-    return Array.isArray(v)?v:[v];
-  };
-  const setArr=(k:string,vals:string[])=>setForm(p=>({...p,[k]:vals}));
-
-  const dateExclusionValues=[
-    ...(form["dateExclusionTicket"]==="true"?["Ticket Date"]:[]),
-    ...(form["dateExclusionTravel"]==="true"?["Travel Date"]:[]),
-  ];
-  const handleDateExclusionChange=(selected:string[])=>{
-    setForm(p=>({...p,
-      dateExclusionTicket:selected.includes("Ticket Date")?"true":"",
-      dateExclusionTravel:selected.includes("Travel Date")?"true":"",
-    }));
-  };
-
-  const opts:Record<string,string[]>={
-    continents:continentOptions,            countryGroup:countryGroupOptions,
-    originContinents:continentOptions,      destContinents:continentOptions,
-    originCountryGroup:countryGroupOptions, destCountryGroup:countryGroupOptions,
-    originCountry:allCountries,             destCountry:allCountries,
-    originAirport:allAirports,              destAirport:allAirports,
-    city:allCities.length?allCities:CITIES, fareTypeCategory:FARE_TYPE_CATS,
-    class:INCL_CLASS_OPTIONS, soto:SOTO_OPTIONS,
-    domesticCountry:allCountries.length?allCountries:DOMESTIC_CTRS,
-  };
-
-  // All non-date fields use the same multi-select component
-  // Date fields remain single-value
-  type IERow={key:string;label:string;isDate?:boolean;isSearch?:boolean;isTag?:boolean;placeholder?:string};
-  const rows:IERow[][]=[
-    [{key:"validFrom",label:"Valid From",isDate:true},{key:"validTo",label:"Valid To",isDate:true}],
-    [{key:"continents",label:`Continents ${suffix}`},{key:"countryGroup",label:`Country Group ${suffix}`}],
-    [{key:"originContinents",label:`Origin Continents ${suffix}`},{key:"destContinents",label:`Destination Continents ${suffix}`}],
-    [{key:"originCountryGroup",label:`Origin Country Group ${suffix}`},{key:"destCountryGroup",label:`Destination Country Group ${suffix}`}],
-    [
-      {key:"originCountry",label:`Origin Country ${suffix}`,isSearch:true,placeholder:"Search and select"},
-      {key:"destCountry",  label:`Destination Country ${suffix}`,isSearch:true,placeholder:"Search and select"},
-    ],
-    [
-      {key:"originAirport",label:`Origin Airport ${suffix}`,isSearch:true,placeholder:"Search and select"},
-      {key:"destAirport",  label:`Destination Airport ${suffix}`,isSearch:true,placeholder:"Search and select"},
-    ],
-    [{key:"city",label:`City ${suffix}`,isSearch:true,placeholder:"Search and select"},{key:"fareTypeCategory",label:`Fare Type Category ${suffix}`}],
-    [
-      {key:"class",label:`Class ${suffix}`},
-      isExcl
-        ?{key:"soto",label:"SOTO for Exclusion"}
-        :{key:"tourCode",label:`Tour Code ${suffix}`,isTag:true},
-    ],
-    ...(isExcl
-      ?[[{key:"tourCode",label:`Tour Code ${suffix}`,isTag:true},{key:"domesticCountry",label:`Domestic Country ${suffix}`,isSearch:true,placeholder:"Search and select"}]]
-      :[[{key:"domesticCountry",label:`Domestic Country ${suffix}`,isSearch:true,placeholder:"Search and select"}]]
-    ),
-  ];
+  const otherSelectedCount = [...selectedRows].filter(i=>i!==rowIdx).length;
 
   return(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
@@ -614,45 +486,160 @@ function InclExclDetailModal({
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
           <div>
             <h2 className="text-sm font-bold text-gray-900">Configure — {type}</h2>
-            <p className="text-xs text-gray-400 mt-0.5">All fields support multiple selections. Fields are independent of each other.</p>
+            <p className="text-xs text-gray-400 mt-0.5">Each incentive type gets its own independent rule set. All fields support multiple selections.</p>
           </div>
           <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-lg"><X className="w-4 h-4 text-gray-500"/></button>
         </div>
-        <div className="overflow-y-auto flex-1 p-5 space-y-3">
-          <div className="grid gap-3 grid-cols-1 max-w-[50%]">
-            <MultiCheckboxDropdown
-              label="Date Exclusion"
-              placeholder="Select date exclusion"
-              options={["Ticket Date","Travel Date"]}
-              values={dateExclusionValues}
-              onChange={handleDateExclusionChange}
-            />
-          </div>
-          {rows.map((pair,ri)=>(
-            <div key={ri} className={`grid gap-3 ${pair.length===2?"grid-cols-2":"grid-cols-1 max-w-[50%]"}`}>
-              {pair.map(f=>(
-                <div key={f.key}>
-                  {f.isDate?(
-                    <div>
-                      <label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">{f.label}</label>
-                      <input type="date" value={(form[f.key] as string)??""} onChange={e=>setForm(p=>({...p,[f.key]:e.target.value}))}
-                        className="w-full border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 text-gray-800"/>
-                    </div>
-                  ):f.isTag?(
-                    <TagInput label={f.label} values={getArr(f.key)} onChange={v=>setArr(f.key,v)}/>
-                  ):f.isSearch?(
-                    <MultiSearchSelectField label={f.label} placeholder={f.placeholder} options={opts[f.key]??[]} values={getArr(f.key)} onChange={v=>setArr(f.key,v)}/>
-                  ):(
-                    <MultiCheckboxDropdown label={f.label} placeholder={`Select ${f.label.toLowerCase()}…`} options={opts[f.key]??[]} values={getArr(f.key)} onChange={v=>setArr(f.key,v)}/>
-                  )}
-                </div>
-              ))}
+        {incentiveTypes.length===0?(
+          <p className="px-5 py-8 text-xs text-gray-400 text-center">Select at least one Incentive Type first.</p>
+        ):(
+          <>
+            {incentiveTypes.length>1&&(
+              <TabBar tabs={incentiveTypes} active={incType} onSelect={setActiveIncType}/>
+            )}
+            <div className="overflow-y-auto flex-1">
+              {incType&&(
+                <InclExclTabContent
+                  suffix={suffix}
+                  isExclusion={isExclusion}
+                  data={getData(incType)}
+                  onChange={(k,v)=>onFieldChange(incType,k,v)}
+                  viceVersa={getViceVersa(incType)}
+                  onViceVersa={()=>onToggleViceVersa(incType)}
+                  continentOptions={continentOptions}
+                  countryGroupOptions={countryGroupOptions}
+                />
+              )}
             </div>
-          ))}
+          </>
+        )}
+        <div className="flex items-center justify-between gap-3 px-5 py-3.5 border-t border-gray-100">
+          <button
+            onClick={onCopyToSelected}
+            disabled={otherSelectedCount===0}
+            className="text-xs text-blue-600 hover:text-blue-700 font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Copy this row&apos;s Incl/Excl to {otherSelectedCount} selected row{otherSelectedCount!==1?"s":""}
+          </button>
+          <button onClick={onClose} className="bg-[#1e3a5f] text-white rounded-lg px-5 py-2 text-sm font-semibold hover:bg-[#16304f]">Done</button>
         </div>
-        <div className="flex gap-3 px-5 py-3.5 border-t border-gray-100">
-          <button onClick={onClose} className="flex-1 border border-gray-200 text-gray-600 rounded-lg py-2 text-sm font-medium hover:bg-gray-50">Cancel</button>
-          <button onClick={()=>onSave(form)} className="flex-1 bg-[#1e3a5f] text-white rounded-lg py-2 text-sm font-semibold hover:bg-[#16304f]">Save →</button>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INCENTIVE & RULES ROW MODAL — one tab per incentive type. Each tab shows the
+// shared IncentiveTabContent (payout fields, same as the manual create-deal form)
+// AND that incentive's inclusion/exclusion rules (4 rule sub-tabs) below it, so
+// everything for one incentive is edited in a single place.
+// ═══════════════════════════════════════════════════════════════════════════════
+function IncentiveDataRowModal({
+  rowIdx, incentiveTypes, selectedRows,
+  getData, onFieldChange,
+  getInclExclData, onInclExclChange, getInclExclViceVersa, onInclExclViceVersa,
+  onCopyToSelected, onClose,
+}:{
+  rowIdx:number;
+  incentiveTypes:string[];
+  selectedRows:Set<number>;
+  getData:(incType:string)=>Record<string,string>;
+  onFieldChange:(incType:string,key:string,value:string)=>void;
+  getInclExclData:(incType:string,ruleType:string)=>Record<string,IEFieldValue>;
+  onInclExclChange:(incType:string,ruleType:string,key:string,value:IEFieldValue)=>void;
+  getInclExclViceVersa:(incType:string,ruleType:string)=>boolean;
+  onInclExclViceVersa:(incType:string,ruleType:string)=>void;
+  onCopyToSelected:()=>void;
+  onClose:()=>void;
+}){
+  const [activeIncType, setActiveIncType] = useState(incentiveTypes[0] ?? "");
+  // Land on the first rule type that already has data so parsed rules are visible.
+  const [activeRuleType, setActiveRuleType] = useState(
+    INCLUSIONS_EXCLUSIONS.find(rt=>Object.keys(getInclExclData(incentiveTypes[0]??"",rt)).length>0) ?? INCLUSIONS_EXCLUSIONS[0]
+  );
+  const incType = incentiveTypes.includes(activeIncType) ? activeIncType : (incentiveTypes[0] ?? "");
+  const otherSelectedCount = [...selectedRows].filter(i=>i!==rowIdx).length;
+
+  const [continentOptions, setContinentOptions] = useState<string[]>(CONTINENTS);
+  const [countryGroupOptions, setCountryGroupOptions] = useState<string[]>(COUNTRY_GROUPS);
+  useEffect(()=>{
+    api.get<{continents:string[];country_groups:string[]}>("/airports/options")
+      .then(r=>{
+        if(r.data.continents?.length)     setContinentOptions(r.data.continents);
+        if(r.data.country_groups?.length) setCountryGroupOptions(r.data.country_groups);
+      })
+      .catch(()=>{});
+  },[]);
+
+  const isExclusion = activeRuleType.startsWith("Exclusion");
+  const ieSuffix = isExclusion ? "for Exclusion" : "for Inclusion";
+
+  return(
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-3xl max-h-[90vh] flex flex-col">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+          <div>
+            <h2 className="text-sm font-bold text-gray-900">Incentive &amp; Rules — Row {rowIdx+1}</h2>
+            <p className="text-xs text-gray-400 mt-0.5">Per incentive type: payout details and its inclusion / exclusion rules, all in one place.</p>
+          </div>
+          <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-lg"><X className="w-4 h-4 text-gray-500"/></button>
+        </div>
+        {incentiveTypes.length===0?(
+          <p className="px-5 py-8 text-xs text-gray-400 text-center">Select at least one Incentive Type first.</p>
+        ):(
+          <>
+            <TabBar tabs={incentiveTypes} active={incType} onSelect={setActiveIncType}/>
+            <div className="overflow-y-auto flex-1">
+              {incType&&(
+                <>
+                  <IncentiveTabContent
+                    name={incType}
+                    data={getData(incType)}
+                    onChange={(k,v)=>onFieldChange(incType,k,v)}
+                  />
+
+                  {/* Inclusion / Exclusion rules for THIS incentive type */}
+                  <div className="border-t border-gray-100 mt-1 pt-3">
+                    <h3 className="px-4 text-[11px] font-bold text-gray-500 uppercase tracking-wide">Inclusion / Exclusion Rules</h3>
+                    <div className="px-4 mt-2">
+                      <div className="flex gap-1 border-b border-gray-100 flex-wrap">
+                        {INCLUSIONS_EXCLUSIONS.map(rt=>{
+                          const hasVals=Object.keys(getInclExclData(incType,rt)).length>0;
+                          return(
+                            <button key={rt} type="button" onClick={()=>setActiveRuleType(rt)}
+                              className={`px-3 py-2 text-xs font-semibold border-b-2 -mb-px transition-colors whitespace-nowrap ${activeRuleType===rt?"border-[#1e3a5f] text-[#1e3a5f]":"border-transparent text-gray-400 hover:text-gray-600"}`}>
+                              {rt}{hasVals&&<span className="ml-1 inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 align-middle"/>}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    <InclExclTabContent
+                      key={`${incType}:${activeRuleType}`}
+                      suffix={ieSuffix}
+                      isExclusion={isExclusion}
+                      data={getInclExclData(incType,activeRuleType)}
+                      onChange={(k,v)=>onInclExclChange(incType,activeRuleType,k,v)}
+                      viceVersa={getInclExclViceVersa(incType,activeRuleType)}
+                      onViceVersa={()=>onInclExclViceVersa(incType,activeRuleType)}
+                      continentOptions={continentOptions}
+                      countryGroupOptions={countryGroupOptions}
+                    />
+                  </div>
+                </>
+              )}
+            </div>
+          </>
+        )}
+        <div className="flex items-center justify-between gap-3 px-5 py-3.5 border-t border-gray-100">
+          <button
+            onClick={onCopyToSelected}
+            disabled={otherSelectedCount===0}
+            className="text-xs text-blue-600 hover:text-blue-700 font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Copy this row to {otherSelectedCount} selected row{otherSelectedCount!==1?"s":""}
+          </button>
+          <button onClick={onClose} className="bg-[#1e3a5f] text-white rounded-lg px-5 py-2 text-sm font-semibold hover:bg-[#16304f]">Done</button>
         </div>
       </div>
     </div>
@@ -689,17 +676,18 @@ function InclExclPopup({
       <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wide mb-2">Inclusions &amp; Exclusions</p>
       {INCLUSIONS_EXCLUSIONS.map(type=>{
         const isSelected=rowState.types.includes(type);
-        const typeData=rowState.data[type]??{};
-        // Collect all filled values for this type as human-readable chips
-        const valueSummary=Object.entries(typeData)
-          .filter(([k])=>!["dateExclusionTicket","dateExclusionTravel"].includes(k))
-          .flatMap(([,v])=>Array.isArray(v)?v:[v])
-          .filter(Boolean);
-        const dateExclParts=[
-          typeData["dateExclusionTicket"]==="true"?"Ticket Date":null,
-          typeData["dateExclusionTravel"]==="true"?"Travel Date":null,
-        ].filter(Boolean) as string[];
-        const allValues=[...dateExclParts,...valueSummary];
+        const byIncType=rowState.data[type]??{};
+        // Collect all filled values across every incentive type's rule set as chips
+        const valueSummary=Object.values(byIncType).flatMap(typeData=>
+          Object.entries(typeData??{})
+            .filter(([k])=>!["dateExclusionTicket","dateExclusionTravel"].includes(k))
+            .flatMap(([,v])=>Array.isArray(v)?v:[v])
+        ).filter(Boolean);
+        const dateExclParts=Object.values(byIncType).flatMap(typeData=>[
+          typeData?.["dateExclusionTicket"]==="true"?"Ticket Date":null,
+          typeData?.["dateExclusionTravel"]==="true"?"Travel Date":null,
+        ]).filter(Boolean) as string[];
+        const allValues=[...new Set([...dateExclParts,...valueSummary])];
         return(
           <div key={type} className="px-2 py-1.5 rounded-lg hover:bg-blue-50">
             <div className="flex items-center gap-1">
@@ -799,36 +787,46 @@ function ColumnMappingStep({
       const remVal=remDc&&rawRow?cellVal(rawRow,remDc):base.remarks;
       return{...base,row_order:i,remarks:remVal||base.remarks,extra};
     });
-    // Extract incl/excl column values per row from XLS
+    // Extract incl/excl column values per row from XLS (flat per rule type, then
+    // duplicated across every selected incentive type so each starts with the same
+    // data — independently editable afterward via the per-row Incl/Excl modal)
     const rowInclExclFromXLS:Record<number,RowInclExcl>={};
     for(let i=0;i<rowCount;i++){
       const rawRow=rawRows[i];
       if(!rawRow)continue;
-      const inclExclData:Record<string,Record<string,IEFieldValue>>={};
+      const flatByType:Record<string,Record<string,IEFieldValue>>={};
       for(const type of selectedInclExcl){
         for(const f of INCL_EXCL_FIELDS){
           const colKey=`ie__${type}__${f.key}`;
           const dc=columnMap[colKey];
           if(dc){let v=cellVal(rawRow,dc);if(v){
             if(f.type==="date")v=toDateStr(v);
-            if(!inclExclData[type])inclExclData[type]={};
+            if(!flatByType[type])flatByType[type]={};
             if(f.key==="_dateExclusion"){
               // Expand combined column into two bool flags
               const lower=v.toLowerCase();
-              if(lower.includes("ticket"))inclExclData[type]["dateExclusionTicket"]="true";
-              if(lower.includes("travel"))inclExclData[type]["dateExclusionTravel"]="true";
+              if(lower.includes("ticket"))flatByType[type]["dateExclusionTicket"]="true";
+              if(lower.includes("travel"))flatByType[type]["dateExclusionTravel"]="true";
             }else if(f.type==="date"){
-              inclExclData[type][f.key]=v;
+              flatByType[type][f.key]=v;
             }else{
               // Split pipe-separated multi-values (e.g. "Asia|Europe")
               const parts=v.split("|").map((s:string)=>s.trim()).filter(Boolean);
-              inclExclData[type][f.key]=parts.length>1?parts:parts[0];
+              flatByType[type][f.key]=parts.length>1?parts:parts[0];
             }
           }}
         }
       }
-      const types=Object.keys(inclExclData).filter(t=>Object.keys(inclExclData[t]).length>0);
-      if(types.length>0)rowInclExclFromXLS[i]={types,data:inclExclData,viceVersa:{}};
+      const types=Object.keys(flatByType).filter(t=>Object.keys(flatByType[t]).length>0);
+      if(types.length>0){
+        const incTypesForRow=selectedIncentives.length?selectedIncentives:["_default"];
+        const data:Record<string,Record<string,Record<string,IEFieldValue>>>={};
+        for(const type of types){
+          data[type]={};
+          for(const inc of incTypesForRow)data[type][inc]=flatByType[type];
+        }
+        rowInclExclFromXLS[i]={types,data,viceVersa:{}};
+      }
     }
     onConfirm(contract,rows,rowInclExclFromXLS);
   };
@@ -925,25 +923,6 @@ const CONTRACT_COL_OPTIONS: Record<string, string[]> = {
   "c__business_type": BUSINESS_TYPES,
 };
 
-// Render config for incentive sub-field cells (keyed by field key inside inc::{})
-const INC_FIELD_CELL: Record<string, {type:"select"|"number"|"date"; options?:string[]}> = {
-  validFrom:          {type:"date"},
-  validTo:            {type:"date"},
-  frequency:          {type:"select", options:FREQUENCY_OPTIONS},
-  flightType:         {type:"select", options:FLIGHT_TYPE_OPTIONS},
-  class:              {type:"select", options:CLASS_OPTIONS},
-  targetCalcCols:     {type:"select", options:TARGET_CALC_OPTIONS},
-  payoutCalcCols:     {type:"select", options:PAYOUT_CALC_OPTIONS},
-  targetBased:        {type:"select", options:TARGET_BASED_OPTIONS},
-  amountBasedType:    {type:"select", options:["Fixed","Slab Based"]},
-  baseTargetAmount:   {type:"number"},
-  segmentBasedType:   {type:"select", options:["Fixed","Slab Based"]},
-  baseTargetSegments: {type:"number"},
-  incentiveNumPct:    {type:"select", options:["Number","Percentage"]},
-  incentiveAmtPct:    {type:"number"},
-  cappedIncentive:    {type:"number"},
-};
-
 const CELL_PLACEHOLDER: Record<string, string> = {
   "c__airline_type":  "GDS / LCC",
   "c__airline_name":  "e.g. Emirates (EK)",
@@ -972,26 +951,22 @@ function getColMeta(key:string):{type:"date"|"select"|"number"|"text";options?:s
   if(key==="c__valid_from"||key==="c__valid_to")return{type:"date"};
   if(key==="c__entity_lcc")return{type:"select",options:ENTITIES};
   if(CONTRACT_COL_OPTIONS[key])return{type:"select",options:CONTRACT_COL_OPTIONS[key]};
-  if(key.startsWith("inc::")){const fk=key.split("::")[2];const cfg=INC_FIELD_CELL[fk];if(cfg)return{type:cfg.type,options:cfg.options};}
   return{type:"text"};
 }
 
-function buildColGroups(selectedIncentives:string[], dealType:string):ColGroup[]{
+// Incentive sub-fields (slabs, matrices, DI tree, etc.) are no longer expanded into
+// flat table columns — they're configured per row via the Incentive Data modal
+// (IncentiveDataRowModal), which reuses the same IncentiveTabContent the manual
+// create-deal form uses, so they get full slab/matrix/dependency support.
+function buildColGroups(dealType:string):ColGroup[]{
   const contractCols = getContractCols(dealType);
   const groups:ColGroup[]=[
     {label:"Airline Contract Details",color:"#1e3a5f",cols:[{key:"c__deal_tag",label:"Deal Tag"},...contractCols]},
   ];
-  for(const inc of selectedIncentives){
-    groups.push({
-      label:`Incentive Types — ${inc}`,color:"#4f46e5",
-      cols:(INCENTIVE_FIELDS[inc]??[]).map(f=>({
-        key:`inc::${inc}::${f.key}`,
-        label:f.label.replace(` for ${inc}`,"").replace(/ for .*/,"").replace(/ \(.*\)/,""),
-      })),
-    });
-  }
   groups.push({label:"Remarks",color:"#64748b",cols:[{key:"remarks",label:"Remarks"}]});
-  groups.push({label:"Incl / Excl",color:"#059669",cols:[{key:"__incl_excl__",label:"Incl / Excl"}]});
+  // Single column for both the incentive payout fields AND their inclusion/exclusion
+  // rules — configured together per incentive type in one popup.
+  groups.push({label:"Incentive & Rules",color:"#4f46e5",cols:[{key:"__incentive_data__",label:"Incentive & Rules"}]});
   return groups;
 }
 
@@ -999,6 +974,7 @@ function ReviewTable({
   rows, colGroups, onChange, onDelete, onAdd,
   rowInclExcl, inclExclPopup, setInclExclPopup, onToggleInclExclType,
   onOpenInclExclType, onRemoveInclExclType,
+  selectedIncentives, onOpenIncentiveData,
   filterText, selectedRows, onToggleRow, onToggleAllFiltered,
 }:{
   rows:ReviewRow[];
@@ -1007,6 +983,8 @@ function ReviewTable({
   onDelete:(idx:number)=>void;
   onAdd:()=>void;
   rowInclExcl:Record<number,RowInclExcl>;
+  selectedIncentives:string[];
+  onOpenIncentiveData:(idx:number)=>void;
   inclExclPopup:number|null;
   setInclExclPopup:(idx:number|null)=>void;
   onToggleInclExclType:(rowIdx:number,type:string)=>void;
@@ -1054,6 +1032,23 @@ function ReviewTable({
       );
     }
 
+    // Special: Incentive Data column
+    if(colKey==="__incentive_data__"){
+      const hasData=Object.entries(row.extra).some(([k,v])=>k.startsWith("inc::")&&v)
+        || ((rowInclExcl[idx]?.types?.length??0)>0);
+      return(
+        <td key={colKey} className="px-1 py-1 border-l border-gray-100">
+          <button
+            onClick={()=>onOpenIncentiveData(idx)}
+            disabled={selectedIncentives.length===0}
+            className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${hasData?"bg-indigo-100 text-indigo-700 border-indigo-300":"bg-gray-100 text-gray-500 border-gray-200 hover:border-indigo-300 hover:text-indigo-700"}`}
+          >
+            {hasData?<><Check className="w-2.5 h-2.5"/>Configured</>:<><Settings2 className="w-2.5 h-2.5"/>Configure ({selectedIncentives.length})</>}
+          </button>
+        </td>
+      );
+    }
+
     const sel = "w-full bg-transparent text-[11px] text-gray-800 focus:outline-none focus:bg-blue-50 rounded px-1 py-0.5 min-w-[80px] border-0";
     const val = getCellValue(row,colKey);
     const change = (v:string)=>onChange(idx,colKey,v);
@@ -1089,32 +1084,6 @@ function ReviewTable({
           <input type="date" className={inp} value={val} onChange={e=>change(e.target.value)}/>
         </td>
       );
-    }
-
-    // Incentive sub-field cells: inc::{IncName}::{fieldKey}
-    if(colKey.startsWith("inc::")){
-      const fieldKey = colKey.split("::")[2];
-      const cfg = INC_FIELD_CELL[fieldKey];
-      if(cfg){
-        if(cfg.type==="date") return(
-          <td key={colKey} className="px-1 py-1 border-l border-gray-100">
-            <input type="date" className={inp} value={val} onChange={e=>change(e.target.value)}/>
-          </td>
-        );
-        if(cfg.type==="number") return(
-          <td key={colKey} className="px-1 py-1 border-l border-gray-100">
-            <input type="number" className={inp} value={val} onChange={e=>change(e.target.value)} placeholder="0"/>
-          </td>
-        );
-        if(cfg.type==="select"&&cfg.options) return(
-          <td key={colKey} className="px-1 py-1 border-l border-gray-100">
-            <select value={val} onChange={e=>change(e.target.value)} className={sel}>
-              <option value="">—</option>
-              {cfg.options.map(o=><option key={o} value={o}>{o}</option>)}
-            </select>
-          </td>
-        );
-      }
     }
 
     // Default text input
@@ -1206,33 +1175,165 @@ function ReviewTable({
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// XLS TEMPLATE GENERATOR
+// XLS TEMPLATE GENERATOR — tab-wise workbook (one sheet per incentive type)
 // ═══════════════════════════════════════════════════════════════════════════════
-// Template uses CONTRACT_COLS_ALL labels exactly + full incentive labels (e.g. "Contract Valid from for PLB")
-// so that initColumnMap can auto-match them without case-insensitive collisions.
-function downloadXLSTemplate(incentiveTypes: string[], inclExclTypes: string[]){
-  const contractHeaders = CONTRACT_COLS_ALL.map(c => c.label);
-  // Use FULL INCENTIVE_FIELDS labels (not stripped) to avoid collision with contract col labels
-  const incentiveHeaders = incentiveTypes.flatMap(inc =>
-    (INCENTIVE_FIELDS[inc]??[]).map(f => f.label)
-  );
-  const inclExclHeaders = inclExclTypes.flatMap(type =>
-    INCL_EXCL_FIELDS.map(f => `${f.label} for ${type}`)
-  );
-  const headers = [...contractHeaders, ...incentiveHeaders, ...inclExclHeaders, REMARKS_COL.label];
+// ── Multi-tab (tabbed) template: 1 contract sheet + 1 sheet per incentive type ──
+// Each incentive sheet = "Deal No" + that incentive's FIXED fields + the selected
+// incl/excl rule blocks. Sheets join on "Deal No". The template reflects the Step-1
+// selection: only the chosen incentive types get a sheet, and only the chosen
+// inclusion/exclusion rule types become columns. Empty selection ⇒ everything.
+function downloadMultiTabTemplate(dealType:string, incentiveTypes:string[], inclExclTypes:string[]){
+  const incs = incentiveTypes.length ? incentiveTypes : INCENTIVE_TYPES;
+  const ies  = inclExclTypes.length  ? inclExclTypes  : INCLUSIONS_EXCLUSIONS;
 
-  const sampleRow = [
-    "GDS","Airline Name","Calendar year","B2C",
-    "2025-01-01","2025-12-31","Sales","Sales","ATB","",
-    ...incentiveTypes.flatMap(inc => (INCENTIVE_FIELDS[inc]??[]).map(() => "")),
-    ...inclExclTypes.flatMap(() => INCL_EXCL_FIELDS.map(() => "")),
-    "",
-  ];
-  const ws = XLSX.utils.aoa_to_sheet([headers, sampleRow]);
-  ws["!cols"] = headers.map(h => ({ wch: Math.max(h.length + 2, 14) }));
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, "Deal Template");
+  const addSheet=(name:string, headers:string[], sample:string[])=>{
+    const ws = XLSX.utils.aoa_to_sheet([headers, sample]);
+    ws["!cols"] = headers.map(h => ({ wch: Math.max(h.length + 2, 14) }));
+    // Excel sheet names: max 31 chars, no []:*?/\
+    XLSX.utils.book_append_sheet(wb, ws, name.replace(/[[\]:*?/\\]/g,"").slice(0,31));
+  };
+
+  // Sheet 1 — contract header (columns vary by deal type)
+  const cCols = mtContractCols(dealType);
+  addSheet(MT_CONTRACT_SHEET, cCols.map(c=>c.label), cCols.map(c=>mtContractSample(c.key)));
+
+  // One sheet per selected incentive type
+  for(const inc of incs){
+    const fixed = incentiveFixedCols(inc).map(c=>c.label);
+    const ie = ies.flatMap(rt => INCL_EXCL_FIELDS.map(f=>`${f.label} for ${rt}`));
+    const headers = ["Deal No", ...fixed, ...ie];
+    const sample  = ["1", ...headers.slice(1).map(()=>"")];
+    addSheet(inc, headers, sample);
+  }
+
   XLSX.writeFile(wb, "deal_template.xlsx");
+}
+
+// Parse a filled multi-tab workbook entirely in the browser: read all sheets, join
+// rows by "Deal No", and assemble the same ReviewRow[] + rowInclExcl the Step-3
+// review uses. Returns unions of incentive/rule types for grid visibility.
+function parseMultiTabWorkbook(wb: XLSX.WorkBook, dealType:string): {
+  rows: ReviewRow[];
+  rowInclExcl: Record<number, RowInclExcl>;
+  incentiveUnion: string[];
+  inclExclUnion: string[];
+}{
+  const json=(name:string)=>XLSX.utils.sheet_to_json<Record<string,string>>(wb.Sheets[name], {defval:"", raw:false});
+
+  // ── Contract sheet → Map<dealNo, contract extra> (order preserved) ──
+  const contractRev=new Map<string,string>();
+  for(const c of MT_CONTRACT_COLS_ALL) contractRev.set(c.label.toLowerCase(), c.key);
+
+  const dealOrder:string[]=[];
+  const contractByDeal=new Map<string,Record<string,string>>();
+  for(const row of json(MT_CONTRACT_SHEET)){
+    const dealNo=String(row["Deal No"]??"").trim();
+    if(!dealNo) continue;
+    if(contractByDeal.has(dealNo)) continue;
+    const extra:Record<string,string>={};
+    for(const [label,raw] of Object.entries(row)){
+      const key=contractRev.get(label.toLowerCase().trim());
+      if(!key||key==="__dealno") continue;
+      let v=String(raw??"").trim();
+      if(!v) continue;
+      if(key==="c__valid_from"||key==="c__valid_to") v=mtDateStr(v);
+      else { const opts=MT_SELECT_OPTIONS[key]; if(opts) v=normalizeSelectValue(v,opts); }
+      extra[key]=v;
+    }
+    if(!extra["c__business_type"] && dealType==="b2b") extra["c__business_type"]="B2B";
+    extra["c__deal_tag"]="Standard";
+    contractByDeal.set(dealNo, extra);
+    dealOrder.push(dealNo);
+  }
+
+  // ── Incl/Excl header reverse map: "<field> for <ruleType>" → {rt, key} ──
+  const ieRev=new Map<string,{rt:string;key:string}>();
+  for(const rt of INCLUSIONS_EXCLUSIONS)
+    for(const f of INCL_EXCL_FIELDS)
+      ieRev.set(`${f.label} for ${rt}`.toLowerCase(), {rt, key:f.key});
+
+  // ── Each incentive sheet → per-deal incentive data + incl/excl ──
+  const incExtraByDeal=new Map<string,Record<string,string>>();
+  const incTypesByDeal=new Map<string,Set<string>>();
+  const ieByDeal=new Map<string,{types:Set<string>;data:Record<string,Record<string,Record<string,IEFieldValue>>>}>();
+
+  for(const inc of INCENTIVE_TYPES.filter(i=>wb.SheetNames.includes(i))){
+    const fixedRev=new Map<string,string>();
+    for(const c of incentiveFixedCols(inc)) fixedRev.set(c.label.toLowerCase(), c.key);
+
+    for(const row of json(inc)){
+      const dealNo=String(row["Deal No"]??"").trim();
+      if(!dealNo||!contractByDeal.has(dealNo)) continue;
+      const incExtra=incExtraByDeal.get(dealNo)??{};
+      const ie=ieByDeal.get(dealNo)??{types:new Set<string>(),data:{}};
+      let hasFixed=false;
+
+      for(const [label,raw] of Object.entries(row)){
+        const lab=label.toLowerCase().trim();
+        if(lab==="deal no") continue;
+        const v0=String(raw??"").trim();
+        if(!v0) continue;
+
+        const fkey=fixedRev.get(lab);
+        if(fkey){
+          let v=v0;
+          if(mtIsDateLabel(lab)) v=mtDateStr(v);
+          else { const opts=MT_SELECT_OPTIONS[fkey]; if(opts) v=normalizeSelectValue(v,opts); }
+          incExtra[`inc::${inc}::${fkey}`]=v;
+          hasFixed=true;
+          continue;
+        }
+
+        const ier=ieRev.get(lab);
+        if(ier){
+          if(!ie.data[ier.rt]) ie.data[ier.rt]={};
+          if(!ie.data[ier.rt][inc]) ie.data[ier.rt][inc]={};
+          const tgt=ie.data[ier.rt][inc];
+          if(ier.key==="_dateExclusion"){
+            const lower=v0.toLowerCase();
+            if(lower.includes("ticket")) tgt["dateExclusionTicket"]="true";
+            if(lower.includes("travel")) tgt["dateExclusionTravel"]="true";
+          } else if(mtIsDateLabel(lab)){
+            tgt[ier.key]=mtDateStr(v0);
+          } else {
+            const parts=v0.split("|").map(s=>s.trim()).filter(Boolean);
+            tgt[ier.key]=parts.length>1?parts:parts[0];
+          }
+          ie.types.add(ier.rt);
+        }
+      }
+
+      incExtraByDeal.set(dealNo, incExtra);
+      ieByDeal.set(dealNo, ie);
+      if(hasFixed){ const s=incTypesByDeal.get(dealNo)??new Set<string>(); s.add(inc); incTypesByDeal.set(dealNo,s); }
+    }
+  }
+
+  // ── Assemble rows in contract-sheet order ──
+  const rows:ReviewRow[]=[];
+  const rowInclExcl:Record<number,RowInclExcl>={};
+  const incentiveUnion=new Set<string>();
+  const inclExclUnion=new Set<string>();
+
+  dealOrder.forEach((dealNo,i)=>{
+    const cExtra=contractByDeal.get(dealNo)??{};
+    const incExtra=incExtraByDeal.get(dealNo)??{};
+    (incTypesByDeal.get(dealNo)??new Set<string>()).forEach(t=>incentiveUnion.add(t));
+    rows.push({
+      row_order:i, airline_name:"", iata_code:"",
+      eco_commission:"", peco_commission:"", bus_commission:"",
+      valid_on:"", validity_raw:"", remarks:cExtra["r__remarks"]??"",
+      extra:{...cExtra, ...incExtra},
+    });
+    const ie=ieByDeal.get(dealNo);
+    if(ie && ie.types.size>0){
+      [...ie.types].forEach(t=>inclExclUnion.add(t));
+      rowInclExcl[i]={types:[...ie.types], data:ie.data, viceVersa:{}};
+    }
+  });
+
+  return {rows, rowInclExcl, incentiveUnion:[...incentiveUnion], inclExclUnion:[...inclExclUnion]};
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1309,6 +1410,7 @@ export default function UploadDealPage(){
   const [rowInclExcl,   setRowInclExcl]   = useState<Record<number,RowInclExcl>>({});
   const [inclExclPopup, setInclExclPopup] = useState<number|null>(null);
   const [inclExclModal, setInclExclModal] = useState<{rowIdx:number;type:string}|null>(null);
+  const [incentiveDataModal, setIncentiveDataModal] = useState<number|null>(null);
   const [saving,        setSaving]        = useState(false);
   const [saveError,     setSaveError]     = useState("");
   const [filterText,    setFilterText]    = useState("");
@@ -1316,6 +1418,7 @@ export default function UploadDealPage(){
   const [bulkColKey,    setBulkColKey]    = useState("");
   const [bulkColValue,  setBulkColValue]  = useState("");
   const [savedBatchId,  setSavedBatchId]  = useState<string|null>(null);
+  const [isMultiTab,    setIsMultiTab]    = useState(false);   // multi-tab workbook upload
 
   useEffect(()=>{
     api.get<{id:number;name:string}[]>("/suppliers/?limit=5000")
@@ -1323,7 +1426,7 @@ export default function UploadDealPage(){
       .catch(()=>{});
   },[]);
 
-  const colGroups = buildColGroups(selectedIncentives, dealType);
+  const colGroups = buildColGroups(dealType);
 
   // ── Row incl/excl helpers ──────────────────────────────────────────────────
   const getOrInitRowInclExcl=(idx:number):RowInclExcl=>(
@@ -1352,15 +1455,40 @@ export default function UploadDealPage(){
   // eslint-disable-next-line react-hooks/exhaustive-deps
   },[rowInclExcl]);
 
-  const handleInclExclModalSave=(data:Record<string, IEFieldValue>)=>{
-    if(!inclExclModal)return;
-    const {rowIdx,type}=inclExclModal;
+  // Live per-field update for the InclExclRuleModal (mirrors setInclExclField in the
+  // manual create-deal form): ruleType -> incentiveType -> field -> value.
+  const handleInclExclFieldChange=useCallback((rowIdx:number,type:string,incType:string,key:string,value:IEFieldValue)=>{
     setRowInclExcl(p=>{
       const state=p[rowIdx]??{types:[],data:{},viceVersa:{}};
-      return{...p,[rowIdx]:{...state,data:{...state.data,[type]:data}}};
+      // Editing a rule type's field in the combined modal marks it active (so it's
+      // sent on confirm) — there's no separate "add rule type" step anymore.
+      const types=state.types.includes(type)?state.types:[...state.types,type];
+      return{
+        ...p,
+        [rowIdx]:{
+          ...state,
+          types,
+          data:{
+            ...state.data,
+            [type]:{ ...(state.data[type]??{}), [incType]:{ ...(state.data[type]?.[incType]??{}), [key]:value } },
+          },
+        },
+      };
     });
-    setInclExclModal(null);
-  };
+  },[]);
+
+  const handleInclExclViceVersaToggle=useCallback((rowIdx:number,type:string,incType:string)=>{
+    setRowInclExcl(p=>{
+      const state=p[rowIdx]??{types:[],data:{},viceVersa:{}};
+      return{
+        ...p,
+        [rowIdx]:{
+          ...state,
+          viceVersa:{ ...state.viceVersa, [type]:{ ...(state.viceVersa[type]??{}), [incType]: !(state.viceVersa[type]?.[incType]) } },
+        },
+      };
+    });
+  },[]);
 
   const handleOpenInclExclType=useCallback((rowIdx:number,type:string)=>{
     setInclExclPopup(null);
@@ -1375,6 +1503,44 @@ export default function UploadDealPage(){
       return{...p,[rowIdx]:next};
     });
   },[]);
+
+  const handleCopyInclExclToSelected=useCallback((sourceIdx:number)=>{
+    setRowInclExcl(prev=>{
+      const source=prev[sourceIdx];
+      if(!source)return prev;
+      const next={...prev};
+      selectedRows.forEach(i=>{ if(i!==sourceIdx) next[i]=structuredClone(source); });
+      return next;
+    });
+  },[selectedRows]);
+
+  // ── Row incentive-data helpers ──────────────────────────────────────────────
+  // Adapter over the row's existing flat "inc::{inc}::{field}" extra keys — the same
+  // storage handleConfirm() already reads — so IncentiveTabContent (shared with the
+  // manual form) gets a clean per-incentive-type Record<field,string> slice.
+  const getRowIncentiveData=useCallback((idx:number,inc:string):Record<string,string>=>{
+    const row=rows[idx]; if(!row)return{};
+    const prefix=`inc::${inc}::`;
+    const out:Record<string,string>={};
+    for(const [k,v] of Object.entries(row.extra)) if(k.startsWith(prefix)) out[k.slice(prefix.length)]=v;
+    return out;
+  },[rows]);
+
+  const handleIncentiveFieldChange=useCallback((idx:number,inc:string,field:string,value:string)=>{
+    setRows(prev=>prev.map((r,i)=>i===idx?{...r,extra:{...r.extra,[`inc::${inc}::${field}`]:value}}:r));
+  },[]);
+
+  const handleCopyIncentiveDataToSelected=useCallback((sourceIdx:number)=>{
+    setRows(prev=>{
+      const sourceRow=prev[sourceIdx]; if(!sourceRow)return prev;
+      const sourceIncExtra=Object.fromEntries(Object.entries(sourceRow.extra).filter(([k])=>k.startsWith("inc::")));
+      return prev.map((r,i)=>{
+        if(i===sourceIdx||!selectedRows.has(i))return r;
+        const keptExtra=Object.fromEntries(Object.entries(r.extra).filter(([k])=>!k.startsWith("inc::")));
+        return{...r,extra:{...keptExtra,...sourceIncExtra}};
+      });
+    });
+  },[selectedRows]);
 
   // ── Table row helpers ──────────────────────────────────────────────────────
   const handleRowChange=useCallback((idx:number,key:string,val:string)=>{
@@ -1417,7 +1583,7 @@ export default function UploadDealPage(){
     if(!file){setUploadError("Please select a file.");return;}
     if(!dealType){setUploadError("Please select a deal type.");return;}
     if(dealType==="b2b"&&!supplierName){setUploadError("Please select a supplier name for B2B deal.");return;}
-    setUploading(true);setUploadError("");
+    setUploading(true);setUploadError("");setIsMultiTab(false);
     try{
       const form=new FormData();form.append("file",file);
       if(aiMode){
@@ -1425,13 +1591,14 @@ export default function UploadDealPage(){
         const {data}=await api.post<AIExtractResponse>("/deals/upload/ai-extract",form,{headers:{"Content-Type":"multipart/form-data"}});
         const converted=convertAIDealsToRows(data.deals);
         converted.forEach(r=>{
-          if(!r.extra["c__valid_from"] && validFromDate)     r.extra["c__valid_from"]          = validFromDate;
-          if(!r.extra["inc::PLB::validFrom"] && validFromDate) r.extra["inc::PLB::validFrom"]  = validFromDate;
-          if(!r.extra["c__business_type"] && dealType==="b2b") r.extra["c__business_type"]     = "B2B";
+          if(!r.extra["c__valid_from"] && validFromDate) r.extra["c__valid_from"] = validFromDate;
+          selectedIncentives.forEach(incType=>{
+            if(!r.extra[`inc::${incType}::validFrom`] && validFromDate) r.extra[`inc::${incType}::validFrom`] = validFromDate;
+          });
+          if(!r.extra["c__business_type"] && dealType==="b2b") r.extra["c__business_type"] = "B2B";
           r.extra["c__deal_tag"] = dealTag==="adhoc"?"Adhoc":"Standard";
         });
         setRows(converted);
-        setSelectedIncentives(["PLB"]);
         if(selectedInclExcl.length>0){
           const initRIE:Record<number,RowInclExcl>={};
           converted.forEach((_,i)=>{initRIE[i]={types:selectedInclExcl,data:{},viceVersa:{}};});
@@ -1442,6 +1609,32 @@ export default function UploadDealPage(){
         setFilterText("");setSelectedRows(new Set());setBulkColKey("");setBulkColValue("");
         setStep(3);
       }else{
+        // Multi-tab workbook? Parse all sheets in-browser, join by Deal No, skip Step 2.
+        if(/\.xlsx?$/i.test(file.name)){
+          const wb=XLSX.read(new Uint8Array(await file.arrayBuffer()),{type:"array"});
+          if(wb.SheetNames.includes(MT_CONTRACT_SHEET)){
+            const parsed=parseMultiTabWorkbook(wb, dealType);
+            if(parsed.rows.length===0){
+              setUploadError(`No deals found — fill the "Deal No" column on the "${MT_CONTRACT_SHEET}" sheet.`);
+              return;
+            }
+            // Pre-fill Contract Valid From from the Step-1 date when a row left it blank
+            if(validFromDate){
+              parsed.rows.forEach(r=>{ if(!r.extra["c__valid_from"]) r.extra["c__valid_from"]=validFromDate; });
+            }
+            setIsMultiTab(true);
+            // Keep the Step-1 selection visible in review, plus anything found in the file.
+            // (Incentives with no data simply aren't saved — confirm derives types from
+            // the actual filled values.)
+            setSelectedIncentives(prev=>[...new Set([...prev, ...parsed.incentiveUnion])]);
+            setSelectedInclExcl(prev=>[...new Set([...prev, ...parsed.inclExclUnion])]);
+            setRows(parsed.rows);
+            setRowInclExcl(parsed.rowInclExcl);
+            setFilterText("");setSelectedRows(new Set());setBulkColKey("");setBulkColValue("");
+            setStep(3);
+            return;
+          }
+        }
         const {data}=await api.post<ExtractionPreview>("/deals/upload/extract",form,{headers:{"Content-Type":"multipart/form-data"}});
         initColumnMap(data);
         setStep(2);
@@ -1534,6 +1727,17 @@ export default function UploadDealPage(){
             return{
               row_order:i,
               airline_name:r.extra["c__airline_name"]||r.airline_name||null,
+              // Per-deal header fields — used by multi-tab uploads; for the single-sheet
+              // path these equal the deal-level values (the backend falls back on null).
+              airline_type:   r.extra["c__airline_type"]||null,
+              business_type:  r.extra["c__business_type"]||null,
+              entity_lcc:     r.extra["c__entity_lcc"]||null,
+              login_id:       r.extra["c__login_id"]||null,
+              deal_maker_name:r.extra["c__deal_maker_name"]||null,
+              supplier_name:  r.extra["c__supplier_name"]||null,
+              contract_year:  r.extra["c__contract_year"]||null,
+              trigger_type:   r.extra["c__trigger_type"]||null,
+              payout_type:    r.extra["c__payout_type"]||null,
               valid_from:  r.extra["c__valid_from"]||null,
               valid_to:    r.extra["c__valid_to"]||null,
               iata_code:r.iata_code,
@@ -1543,6 +1747,8 @@ export default function UploadDealPage(){
               valid_on:r.valid_on,
               validity_raw:r.validity_raw,
               remarks:r.remarks,
+              // Multi-tab: each deal keeps only the incentives it actually filled.
+              incentive_types: isMultiTab ? Object.keys(rowIncData) : [],
               incentive_data:  rowIncData,
               incl_excl_types: ie.types,
               incl_excl_data:  ie.data,
@@ -1590,7 +1796,7 @@ export default function UploadDealPage(){
           <button onClick={()=>router.push(`/deals/${savedBatchId}`)} className="bg-[#1e3a5f] text-white px-5 py-2 rounded-lg text-sm font-medium hover:bg-[#16304f]">View Batch</button>
         )}
         <button onClick={()=>router.push("/deals")} className="border border-[#1e3a5f] text-[#1e3a5f] px-5 py-2 rounded-lg text-sm font-medium hover:bg-blue-50">View All Deals</button>
-        <button onClick={()=>{setStep(1);setFile(null);setPreview(null);setRows([]);setDealType("");setSupplierName("");setValidFromDate("");setColumnMap({});setSelectedIncentives([]);setSelectedInclExcl([]);setRowInclExcl({});setAiMode(false);setAiFileName("");setAiConfidence(0);setSavedBatchId(null);setCopyPrevInclExcl(true);}}
+        <button onClick={()=>{setStep(1);setFile(null);setPreview(null);setRows([]);setDealType("");setSupplierName("");setValidFromDate("");setColumnMap({});setSelectedIncentives([]);setSelectedInclExcl([]);setRowInclExcl({});setAiMode(false);setAiFileName("");setAiConfidence(0);setSavedBatchId(null);setCopyPrevInclExcl(true);setIsMultiTab(false);}}
           className="border border-gray-200 text-gray-700 px-5 py-2 rounded-lg text-sm font-medium hover:bg-gray-50">Upload Another</button>
       </div>
     </div>
@@ -1598,13 +1804,20 @@ export default function UploadDealPage(){
 
   return(
     <div className="space-y-4">
-      {/* Incl/Excl Detail Modal */}
-      {inclExclModal&&(
-        <InclExclDetailModal
-          type={inclExclModal.type}
-          initialData={rowInclExcl[inclExclModal.rowIdx]?.data[inclExclModal.type]??{}}
-          onSave={handleInclExclModalSave}
-          onClose={()=>setInclExclModal(null)}
+      {/* Incentive & Rules Modal — incentive fields + incl/excl rules per incentive type */}
+      {incentiveDataModal!==null&&(
+        <IncentiveDataRowModal
+          rowIdx={incentiveDataModal}
+          incentiveTypes={selectedIncentives}
+          selectedRows={selectedRows}
+          getData={(inc)=>getRowIncentiveData(incentiveDataModal,inc)}
+          onFieldChange={(inc,field,value)=>handleIncentiveFieldChange(incentiveDataModal,inc,field,value)}
+          getInclExclData={(inc,rt)=>(rowInclExcl[incentiveDataModal]?.data?.[rt]?.[inc]??{})}
+          onInclExclChange={(inc,rt,k,v)=>handleInclExclFieldChange(incentiveDataModal,rt,inc,k,v)}
+          getInclExclViceVersa={(inc,rt)=>!!rowInclExcl[incentiveDataModal]?.viceVersa?.[rt]?.[inc]}
+          onInclExclViceVersa={(inc,rt)=>handleInclExclViceVersaToggle(incentiveDataModal,rt,inc)}
+          onCopyToSelected={()=>{handleCopyIncentiveDataToSelected(incentiveDataModal);handleCopyInclExclToSelected(incentiveDataModal);}}
+          onClose={()=>setIncentiveDataModal(null)}
         />
       )}
 
@@ -1650,7 +1863,7 @@ export default function UploadDealPage(){
                 />
                 {selectedIncentives.length>0&&(
                   <p className="text-[10px] text-blue-600">
-                    {selectedIncentives.join(", ")} — column mapping in Step 2, editable in Step 3.
+                    {selectedIncentives.join(", ")} — one sheet each in the tabbed template, editable in Review.
                   </p>
                 )}
                 <MultiSelectDropdown
@@ -1661,7 +1874,7 @@ export default function UploadDealPage(){
                 />
                 {selectedInclExcl.length>0&&(
                   <p className="text-[10px] text-emerald-600">
-                    {selectedInclExcl.join(", ")} — columns in XLS template, editable in Step 3.
+                    {selectedInclExcl.join(", ")} — columns inside every incentive sheet, editable in Review.
                   </p>
                 )}
                 <SelectField
@@ -1693,10 +1906,10 @@ export default function UploadDealPage(){
                   <span className="text-[11px] text-gray-400">PDF · Excel · Word · Image</span>
                   <button
                     type="button"
-                    onClick={()=>downloadXLSTemplate(selectedIncentives,selectedInclExcl)}
+                    onClick={()=>downloadMultiTabTemplate(dealType,selectedIncentives,selectedInclExcl)}
                     className="flex items-center gap-1 text-[11px] text-blue-600 hover:text-blue-800 hover:underline font-medium"
                   >
-                    <FileSpreadsheet className="w-3 h-3"/>Download XLS Template
+                    <FileSpreadsheet className="w-3 h-3"/>Download Tabbed Template
                   </button>
                 </div>
               </div>
@@ -1807,20 +2020,22 @@ export default function UploadDealPage(){
       )}
 
       {/* ══ STEP 3 ══ */}
-      {step===3&&(preview||aiMode)&&(
+      {step===3&&(preview||aiMode||isMultiTab)&&(
         <div className="space-y-3">
           {/* File summary bar */}
           <div className="bg-white rounded-xl border border-gray-200 px-4 py-2.5 flex items-center gap-4 flex-wrap">
             <div className="flex items-center gap-2.5">
-              <FileIcon name={aiMode?(aiFileName||file?.name||""):(preview?.file_name??"")}/>
+              <FileIcon name={aiMode?(aiFileName||file?.name||""):(preview?.file_name??file?.name??"")}/>
               <div>
-                <p className="text-sm font-semibold text-gray-800">{aiMode?(aiFileName||file?.name):(preview?.file_name)}</p>
-                <p className="text-xs text-gray-400">{aiMode?"AI-extracted · PLB per class":(dealType==="b2b"?supplierName:"Airline upload")}</p>
+                <p className="text-sm font-semibold text-gray-800">{aiMode?(aiFileName||file?.name):(preview?.file_name??file?.name)}</p>
+                <p className="text-xs text-gray-400">{aiMode?"AI-extracted · PLB per class":isMultiTab?"Tabbed template · joined by Deal No":(dealType==="b2b"?supplierName:"Airline upload")}</p>
               </div>
             </div>
-            <span className={`px-2.5 py-1 rounded-full text-[11px] font-semibold border ${confColor(aiMode?aiConfidence:(preview?.confidence??0))}`}>
-              {Math.round((aiMode?aiConfidence:(preview?.confidence??0))*100)}% confidence
-            </span>
+            {!isMultiTab&&(
+              <span className={`px-2.5 py-1 rounded-full text-[11px] font-semibold border ${confColor(aiMode?aiConfidence:(preview?.confidence??0))}`}>
+                {Math.round((aiMode?aiConfidence:(preview?.confidence??0))*100)}% confidence
+              </span>
+            )}
             <span className="px-2.5 py-1 rounded-full text-[11px] font-semibold border bg-blue-50 text-blue-700 border-blue-200">{rows.length} rows</span>
             {aiMode
               ?<span className="px-2.5 py-1 rounded-full text-[11px] font-semibold border bg-purple-50 text-purple-700 border-purple-200">AI Extraction</span>
@@ -1870,9 +2085,9 @@ export default function UploadDealPage(){
                   className="border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400 text-gray-700"
                 >
                   <option value="">Column to edit…</option>
-                  {colGroups.filter(g=>g.label!=="Incl / Excl").map(g=>(
+                  {colGroups.filter(g=>g.label!=="Incl / Excl"&&g.label!=="Incentive Data").map(g=>(
                     <optgroup key={g.label} label={g.label}>
-                      {g.cols.filter(c=>c.key!=="__incl_excl__").map(c=>(
+                      {g.cols.filter(c=>c.key!=="__incl_excl__"&&c.key!=="__incentive_data__").map(c=>(
                         <option key={c.key} value={c.key}>{c.label}</option>
                       ))}
                     </optgroup>
@@ -1936,6 +2151,8 @@ export default function UploadDealPage(){
               onToggleInclExclType={handleToggleInclExclType}
               onOpenInclExclType={handleOpenInclExclType}
               onRemoveInclExclType={handleRemoveInclExclType}
+              selectedIncentives={selectedIncentives}
+              onOpenIncentiveData={setIncentiveDataModal}
               filterText={filterText}
               selectedRows={selectedRows}
               onToggleRow={handleToggleRow}

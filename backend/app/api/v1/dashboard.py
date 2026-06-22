@@ -143,7 +143,10 @@ async def get_summary(
     tid = current_user.tenant_id
 
     tickets_res = await db.execute(
-        select(UploadedTicket).where(UploadedTicket.tenant_id == tid)
+        select(UploadedTicket).where(
+            UploadedTicket.tenant_id == tid,
+            UploadedTicket.created_by_id == current_user.id,
+        )
     )
     tickets = tickets_res.scalars().all()
 
@@ -153,13 +156,17 @@ async def get_summary(
     active_deals_res = await db.execute(
         select(func.count(UploadedDeal.id)).where(
             UploadedDeal.tenant_id == tid,
+            UploadedDeal.created_by_id == current_user.id,
             UploadedDeal.status == UploadedDealStatus.APPROVED,
         )
     )
     active_deals = active_deals_res.scalar_one() or 0
 
     pending_res = await db.execute(
-        select(func.count(DealApproval.id)).where(DealApproval.status == ApprovalActionStatus.PENDING)
+        select(func.count(DealApproval.id)).where(
+            DealApproval.status == ApprovalActionStatus.PENDING,
+            DealApproval.submitted_by_id == current_user.id,
+        )
     )
     pending_deals = pending_res.scalar_one() or 0
     unmatched_count = sum(1 for t in tickets if t.matched_deal_id is None)
@@ -240,7 +247,10 @@ async def get_income_summary(
     class_type: str | None = Query(default=None),
 ):
     tid = current_user.tenant_id
-    filters = [UploadedTicket.tenant_id == tid]
+    filters = [
+        UploadedTicket.tenant_id == tid,
+        UploadedTicket.created_by_id == current_user.id,
+    ]
 
     if airline:
         filters.append(UploadedTicket.airline_name == airline)
@@ -334,7 +344,10 @@ async def get_pending_actions(
 
     # --- Deal Approvals (pending) ---
     approvals_res = await db.execute(
-        select(DealApproval).where(DealApproval.status == ApprovalActionStatus.PENDING)
+        select(DealApproval).where(
+            DealApproval.status == ApprovalActionStatus.PENDING,
+            DealApproval.submitted_by_id == current_user.id,
+        )
     )
     pending_approvals = approvals_res.scalars().all()
 
@@ -373,6 +386,7 @@ async def get_pending_actions(
     review_res = await db.execute(
         select(UploadedDeal).where(
             UploadedDeal.tenant_id == tid,
+            UploadedDeal.created_by_id == current_user.id,
             UploadedDeal.status.in_([
                 UploadedDealStatus.EXTRACTED,
                 UploadedDealStatus.PENDING_APPROVAL,
@@ -395,6 +409,7 @@ async def get_pending_actions(
     unmatched_res = await db.execute(
         select(UploadedTicket).where(
             UploadedTicket.tenant_id == tid,
+            UploadedTicket.created_by_id == current_user.id,
             UploadedTicket.matched_deal_id.is_(None),
         ).order_by(UploadedTicket.created_at.desc()).limit(50)
     )
@@ -427,7 +442,10 @@ async def get_supplier_comparison(
 
     # All deals for this tenant grouped by source_agent
     deals_res = await db.execute(
-        select(UploadedDeal).where(UploadedDeal.tenant_id == tid)
+        select(UploadedDeal).where(
+            UploadedDeal.tenant_id == tid,
+            UploadedDeal.created_by_id == current_user.id,
+        )
     )
     all_deals = deals_res.scalars().all()
 
@@ -442,7 +460,10 @@ async def get_supplier_comparison(
 
     # All tickets for this tenant
     tickets_res = await db.execute(
-        select(UploadedTicket).where(UploadedTicket.tenant_id == tid)
+        select(UploadedTicket).where(
+            UploadedTicket.tenant_id == tid,
+            UploadedTicket.created_by_id == current_user.id,
+        )
     )
     tickets = tickets_res.scalars().all()
 

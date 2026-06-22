@@ -9,7 +9,7 @@ class IncomeRecord(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     ticket_id: Mapped[int] = mapped_column(ForeignKey("tickets.id"), unique=True, nullable=False)
-    deal_id: Mapped[int] = mapped_column(ForeignKey("deals.id"), nullable=False)
+    deal_id: Mapped[int] = mapped_column(ForeignKey("legacy_deals.id"), nullable=False)
 
     base_fare: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
 

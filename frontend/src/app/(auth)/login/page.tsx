@@ -27,7 +27,7 @@ export default function LoginPage() {
       setError((result.payload as string) ?? "Login failed. Please try again.");
       return;
     }
-    router.push("/");
+    router.push("/dashboard");
   };
 
   return (

@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import String, DateTime, ForeignKey, Integer, Enum as SAEnum, Boolean, Text, UniqueConstraint, Index
+from sqlalchemy import String, DateTime, ForeignKey, Integer, BigInteger, Enum as SAEnum, Boolean, Text, UniqueConstraint, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -98,9 +98,11 @@ class DealApproval(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    # Polymorphic reference: 'upload' → deals table, 'airline' → airline_deals, 'b2b' → b2b_deals
+    # Polymorphic reference: 'upload'|'airline'|'b2b' → legacy tables, 'unified' → new deals table
     deal_type: Mapped[str] = mapped_column(String(20), nullable=False, server_default="upload")
     deal_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    # Phase 4 FK: populated when deal_type='unified'; will replace deal_type+deal_id in Phase 5
+    unified_deal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("deals.id", ondelete="SET NULL"), nullable=True, index=True)
     workflow_id: Mapped[int] = mapped_column(Integer, ForeignKey("approval_workflows.id", ondelete="CASCADE"), nullable=False)
     current_step_order: Mapped[int] = mapped_column(Integer, default=1)
     status: Mapped[ApprovalActionStatus] = mapped_column(

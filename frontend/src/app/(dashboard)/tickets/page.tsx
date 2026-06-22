@@ -9,9 +9,12 @@ import {
 } from "lucide-react";
 import api from "@/lib/api";
 
+type StatementType = "B2B" | "AIRLINE";
+
 type TicketStatement = {
   batch_id:        string;
-  statement_name:  string;
+  statement_name:  string | null;
+  statement_type:  StatementType;
   agency:          string;
   valid_from:      string;
   valid_to:        string;
@@ -31,10 +34,11 @@ function formatDateTime(d: string) {
   return new Date(d).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
 }
 
-const AGENCY_OPTIONS = [
-  "IndiGo Travel Agency", "Air India GDS", "MakeMyTrip B2B",
-  "EaseMyTrip Corporate", "Yatra Corporate", "Thomas Cook India",
-];
+function TypeBadge({ type }: { type: StatementType }) {
+  return type === "AIRLINE"
+    ? <span className="inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700 uppercase tracking-wide">Airline</span>
+    : <span className="inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold bg-purple-100 text-purple-700 uppercase tracking-wide">B2B</span>;
+}
 
 export default function TicketRepositoryPage() {
   const router = useRouter();
@@ -43,6 +47,7 @@ export default function TicketRepositoryPage() {
   const [error,      setError]      = useState<string | null>(null);
   const [filterName,   setFilterName]   = useState("");
   const [filterAgency, setFilterAgency] = useState("");
+  const [filterType,   setFilterType]   = useState<"" | StatementType>("");
   const [filterFrom,   setFilterFrom]   = useState("");
   const [filterTo,     setFilterTo]     = useState("");
 
@@ -61,13 +66,18 @@ export default function TicketRepositoryPage() {
 
   useEffect(() => { fetchStatements(); }, []);
 
+  const allAgencies = Array.from(new Set(statements.map(s => s.agency))).sort();
+
   const filtered = statements.filter(s => {
-    if (filterName && !s.statement_name.toLowerCase().includes(filterName.toLowerCase())) return false;
+    if (filterName && !(s.statement_name ?? "").toLowerCase().includes(filterName.toLowerCase())) return false;
     if (filterAgency && s.agency !== filterAgency) return false;
+    if (filterType && s.statement_type !== filterType) return false;
     if (filterFrom && s.valid_to < filterFrom) return false;
     if (filterTo   && s.valid_from > filterTo)   return false;
     return true;
   });
+
+  const hasFilter = filterName || filterAgency || filterType || filterFrom || filterTo;
 
   return (
     <div className="space-y-5">
@@ -107,21 +117,35 @@ export default function TicketRepositoryPage() {
               className="pl-8 pr-3 py-2 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400 w-52"
             />
           </div>
+
+          {/* Type filter */}
+          <select
+            value={filterType} onChange={e => setFilterType(e.target.value as "" | StatementType)}
+            className="py-2 px-2.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400 text-gray-600 bg-white"
+          >
+            <option value="">All Types</option>
+            <option value="B2B">B2B</option>
+            <option value="AIRLINE">Airline</option>
+          </select>
+
+          {/* Agency filter — derived from loaded data */}
           <select
             value={filterAgency} onChange={e => setFilterAgency(e.target.value)}
             className="py-2 px-2.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400 text-gray-600 bg-white"
           >
             <option value="">All Agencies</option>
-            {AGENCY_OPTIONS.map(a => <option key={a} value={a}>{a}</option>)}
+            {allAgencies.map(a => <option key={a} value={a}>{a}</option>)}
           </select>
+
           <input type="date" value={filterFrom} onChange={e => setFilterFrom(e.target.value)}
             title="Valid from" className="py-2 px-2.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400" />
           <span className="text-xs text-gray-400">–</span>
           <input type="date" value={filterTo} onChange={e => setFilterTo(e.target.value)}
             title="Valid to" className="py-2 px-2.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400" />
-          {(filterName || filterAgency || filterFrom || filterTo) && (
+
+          {hasFilter && (
             <button
-              onClick={() => { setFilterName(""); setFilterAgency(""); setFilterFrom(""); setFilterTo(""); }}
+              onClick={() => { setFilterName(""); setFilterAgency(""); setFilterType(""); setFilterFrom(""); setFilterTo(""); }}
               className="p-2 hover:bg-gray-100 rounded-lg text-gray-400" title="Clear filters"
             >
               <X className="w-3.5 h-3.5" />
@@ -180,6 +204,7 @@ export default function TicketRepositoryPage() {
           <table className="w-full">
             <thead>
               <tr style={{background:"#1e3a5f"}}>
+                <th className="px-4 py-2 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide">Type</th>
                 <th className="px-4 py-2 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide">Statement Name</th>
                 <th className="px-4 py-2 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide">
                   <span className="flex items-center gap-1"><Building2 className="w-3.5 h-3.5" /> Agency</span>
@@ -199,7 +224,7 @@ export default function TicketRepositoryPage() {
             <tbody className="divide-y divide-gray-100">
               {filtered.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="px-4 py-10 text-center text-xs text-gray-400">
+                  <td colSpan={9} className="px-4 py-10 text-center text-xs text-gray-400">
                     No statements match the current filters.
                   </td>
                 </tr>
@@ -209,18 +234,20 @@ export default function TicketRepositoryPage() {
                   onClick={() => router.push(`/tickets/${stmt.batch_id}`)}
                   className="hover:bg-blue-50/40 cursor-pointer transition-colors group"
                 >
+                  {/* Type badge */}
+                  <td className="px-4 py-2">
+                    <TypeBadge type={stmt.statement_type ?? "B2B"} />
+                  </td>
+
                   {/* Statement Name */}
                   <td className="px-4 py-2">
                     <div className="flex items-center gap-2.5">
                       <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center shrink-0">
                         <FileSpreadsheet className="w-4 h-4 text-blue-500" />
                       </div>
-                      <div>
-                        <p className="text-sm font-semibold text-gray-800 group-hover:text-[#1e3a5f]">
-                          {stmt.statement_name}
-                        </p>
-                        {/* <p className="text-[11px] text-gray-400 font-mono truncate max-w-50">{stmt.batch_id.slice(0, 8)}…</p> */}
-                      </div>
+                      <p className="text-sm font-semibold text-gray-800 group-hover:text-[#1e3a5f]">
+                        {stmt.statement_name ?? `${stmt.statement_type} · ${stmt.agency}`}
+                      </p>
                     </div>
                   </td>
 

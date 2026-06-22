@@ -351,7 +351,7 @@ export default function ApprovalMatrixPage() {
 
   useEffect(() => {
     if (!isPlatformAdmin) {
-      router.replace("/");
+      router.replace("/dashboard");
       return;
     }
     fetchApprovals();

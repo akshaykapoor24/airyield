@@ -53,6 +53,13 @@ from app.schemas.approval_workflow import (
 )
 from app.services.deal_extraction import DealExtractionService
 from app.services.ai_deal_extraction import AIDealExtractionService
+import json as _json
+from app.models.deal import (
+    DealStatement, Deal as UnifiedDeal, DealIncentiveConfig,
+    DealIncentiveSlab, DealIncentiveSlabValue, DealRule, DealRuleCondition,
+    DealSourceType, DealKind, DealTagType, DealStatusType, DealLifecycleType,
+    SlabTypeEnum, SlabValueTypeEnum, RuleOperatorEnum,
+)
 
 router = APIRouter()
 
@@ -309,7 +316,7 @@ async def ai_confirm_deals(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Bulk-create AirlineDeal records from AI-extracted deals.
+    Bulk-create unified Deal records from AI-extracted deals.
     One record per deal object (i.e. one per airline × class).
     """
     batch_id = payload.batch_id or str(uuid.uuid4())
@@ -328,31 +335,53 @@ async def ai_confirm_deals(
     db.add(batch)
     await db.flush()
 
-    created_ids: list[int] = []
-    for deal in payload.deals:
-        vf = date.fromisoformat(deal.contract_valid_from) if deal.contract_valid_from else None
-        vt = date.fromisoformat(deal.contract_valid_to) if deal.contract_valid_to else None
+    statement = DealStatement(
+        tenant_id=current_user.tenant_id,
+        source_type=DealSourceType.UPLOAD,
+        deal_type=DealKind.AIRLINE,
+        deal_tag=DealTagType(payload.deal_tag or "standard"),
+        file_name=payload.file_name or None,
+        file_type=payload.file_type or "pdf",
+        batch_id=batch_id,
+        supplier_name=payload.supplier_name or None,
+        created_by_id=current_user.id,
+    )
+    db.add(statement)
+    await db.flush()
 
-        db_deal = AirlineDeal(
+    created_ids: list[int] = []
+    for ai_deal in payload.deals:
+        vf = date.fromisoformat(ai_deal.contract_valid_from) if ai_deal.contract_valid_from else None
+        vt = date.fromisoformat(ai_deal.contract_valid_to) if ai_deal.contract_valid_to else None
+
+        deal = UnifiedDeal(
+            statement_id=statement.id,
             tenant_id=current_user.tenant_id,
-            created_by_id=current_user.id,
-            status=ManualDealStatus.PENDING_APPROVAL,
-            deal_lifecycle_status=DealLifecycleStatus.DRAFT,
-            deal_tag=payload.deal_tag or "standard",
+            deal_type=DealKind.AIRLINE,
             source_agent="ai_extraction",
-            airline_type=deal.airline_type or None,
-            airline_name=deal.airline_name or None,
+            airline_type=ai_deal.airline_type or None,
+            airline_name=ai_deal.airline_name or None,
             valid_from=vf,
             valid_to=vt,
-            incentive_types=deal.incentive_types or [],
-            incentive_data=deal.incentive_data or {},
-            remark=deal.remark or None,
-            batch_id=batch_id,
+            remark=ai_deal.remark or None,
+            status=DealStatusType.PENDING_APPROVAL,
+            deal_lifecycle_status=DealLifecycleType.DRAFT,
+            created_by_id=current_user.id,
         )
-        db.add(db_deal)
+        db.add(deal)
         await db.flush()
-        await _seed_approval_for_deal(db_deal.id, current_user, db, deal_type="airline")
-        created_ids.append(db_deal.id)
+
+        await _attach_unified_deal_relations(
+            deal_id=deal.id,
+            incentive_types=ai_deal.incentive_types or [],
+            incentive_data=ai_deal.incentive_data or {},
+            incl_excl_types=[],
+            incl_excl_data={},
+            vice_versa={},
+            db=db,
+        )
+        await _seed_approval_unified(deal, current_user, db)
+        created_ids.append(deal.id)
 
     await db.commit()
     return UploadConfirmResult(created_count=len(created_ids), created_ids=created_ids, batch_id=batch_id)
@@ -376,6 +405,7 @@ async def _find_prev_incl_excl(
     segment_type: str | None,
     use_b2b: bool,
     tenant_id: int,
+    created_by_id: int,
     db: AsyncSession,
 ) -> tuple[list, dict, dict] | None:
     """Return (incl_excl_types, incl_excl_data, vice_versa) from the most recent
@@ -390,6 +420,7 @@ async def _find_prev_incl_excl(
             select(B2BDeal)
             .where(
                 B2BDeal.tenant_id == tenant_id,
+                B2BDeal.created_by_id == created_by_id,
                 func.lower(B2BDeal.airline_name) == airline_lower,
                 B2BDeal.incl_excl_types.isnot(None),
             )
@@ -403,6 +434,7 @@ async def _find_prev_incl_excl(
             select(AirlineDeal)
             .where(
                 AirlineDeal.tenant_id == tenant_id,
+                AirlineDeal.created_by_id == created_by_id,
                 func.lower(AirlineDeal.airline_name) == airline_lower,
                 AirlineDeal.incl_excl_types.isnot(None),
             )
@@ -423,6 +455,561 @@ async def _find_prev_incl_excl(
     return None
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# UNIFIED DEAL HELPERS — write to new normalized tables
+# ══════════════════════════════════════════════════════════════════════════════
+
+_RULE_CAT_MAP = {
+    "Inclusion For Trigger": "trigger_inclusion",
+    "Exclusion For Trigger": "trigger_exclusion",
+    "Inclusion For Payout":  "payout_inclusion",
+    "Exclusion For Payout":  "payout_exclusion",
+}
+
+_SLAB_META_KEYS = frozenset({
+    "quarterlyFreq", "halfYearlyFreq",
+    "baseTargetNumPct", "baseTargetAmtNumPct", "baseTargetAmount",
+    "targetFrom", "targetTo",
+    "segment", "class", "slabClass",
+})
+
+
+_REVERSE_RULE_CAT = {v: k for k, v in _RULE_CAT_MAP.items()}
+
+
+def _resolve_rule_payload(incl_excl_data: dict, vice_versa: dict, rule_type: str, inc_type: str) -> tuple[dict, bool]:
+    """Resolve a rule's condition fields + vice_versa flag for one incentive type.
+
+    Supports both the legacy flat shape (one shared field-set per rule_type,
+    used by upload routes) and the per-incentive-type nested shape sent by the
+    manual create form (incl_excl_data[rule_type][inc_type] = {field: value}).
+    """
+    raw = incl_excl_data.get(rule_type) or {}
+    if raw and all(isinstance(v, dict) for v in raw.values()):
+        fields = raw.get(inc_type) or {}
+    else:
+        fields = raw
+
+    vv_raw = vice_versa.get(rule_type)
+    vv = bool(vv_raw.get(inc_type, False)) if isinstance(vv_raw, dict) else bool(vv_raw or False)
+    return fields, vv
+
+
+def _build_inc_data_from_configs(
+    incentives: list,
+) -> tuple[list[str], dict]:
+    """Reconstruct (incentive_types, incentive_data) from DealIncentiveConfig rows.
+    Includes slab rows and slab values so the frontend can render slab tables.
+    """
+    inc_types = [i.incentive_type for i in sorted(incentives, key=lambda x: x.incentive_order)]
+    inc_data: dict = {}
+    for inc in incentives:
+        d: dict = {k: v for k, v in {
+            "validFrom":             inc.contract_valid_from.isoformat() if inc.contract_valid_from else None,
+            "validTo":               inc.contract_valid_to.isoformat() if inc.contract_valid_to else None,
+            "frequency":             inc.frequency,
+            "flightType":            inc.flight_type,
+            "class":                 inc.class_,
+            "routeType":             inc.route_type,
+            "triggerBased":          inc.trigger_based,
+            "targetBased":           inc.target_based,
+            "targetCalcCols":        inc.target_calc_cols,
+            "payoutCalcCols":        inc.payout_calc_cols,
+            "amountBasedType":       inc.amount_based_type,
+            "baseTargetAmount":      str(inc.base_target_amount) if inc.base_target_amount is not None else None,
+            "incentiveNumPct":       inc.incentive_num_pct,
+            "incentiveAmtPct":       str(inc.incentive_amt_pct) if inc.incentive_amt_pct is not None else None,
+            "cappedIncentive":       str(inc.capped_incentive) if inc.capped_incentive is not None else None,
+            "cappedIncentiveAmount": str(inc.capped_incentive_amount) if inc.capped_incentive_amount is not None else None,
+            "marketFundType":        inc.market_fund_type,
+            "exchangeRate":          str(inc.exchange_rate) if inc.exchange_rate is not None else None,
+            "cashbackTargetType":    inc.cashback_target_type,
+            "diType":                inc.di_type,
+            "ancillaryItems":        inc.ancillary_items,
+        }.items() if v is not None}
+
+        # Append slab rows (populated when slabs relationship is eager-loaded)
+        slabs = getattr(inc, "slabs", None) or []
+        if slabs:
+            slab_list = []
+            for slab in sorted(slabs, key=lambda s: s.slab_order):
+                slab_d: dict = {k: v for k, v in {
+                    "slabType":           slab.slab_type.value if hasattr(slab.slab_type, "value") else str(slab.slab_type),
+                    "slabOrder":          slab.slab_order,
+                    "quarterlyFreq":      slab.quarterly_freq,
+                    "halfYearlyFreq":     slab.half_yearly_freq,
+                    "baseTargetAmtNumPct": slab.base_target_amt_num_pct,
+                    "baseTargetAmount":   str(slab.base_target_amount) if slab.base_target_amount is not None else None,
+                    "targetFrom":         slab.target_from.isoformat() if slab.target_from else None,
+                    "targetTo":           slab.target_to.isoformat() if slab.target_to else None,
+                    "segment":            slab.segment,
+                    "class":              slab.class_,
+                }.items() if v is not None}
+                values: dict = {}
+                for sv in (getattr(slab, "values", None) or []):
+                    values[sv.value_key] = float(sv.value) if sv.value is not None else None
+                if values:
+                    slab_d["values"] = values
+                slab_list.append(slab_d)
+            d["slabs"] = slab_list
+
+        inc_data[inc.incentive_type] = d
+    return inc_types, inc_data
+
+
+def _build_ie_from_rules(rules: list) -> tuple[list[str], dict, dict]:
+    """Reconstruct (incl_excl_types, incl_excl_data, vice_versa) from DealRule rows."""
+    ie_types: list[str] = []
+    ie_data:  dict = {}
+    ie_vv:    dict = {}
+    for rule in sorted(rules, key=lambda x: x.rule_order):
+        rt = _REVERSE_RULE_CAT.get(rule.rule_category, rule.rule_category)
+        ie_types.append(rt)
+        ie_vv[rt] = rule.vice_versa
+        conds: dict = {}
+        for cond in sorted(rule.conditions, key=lambda x: x.condition_order):
+            if cond.operator in ("in", "not_in"):
+                conds[cond.condition_field] = cond.value_list or []
+            elif cond.operator == "between":
+                conds[cond.condition_field + "From"] = cond.value_from
+                conds[cond.condition_field + "To"]   = cond.value_to
+            else:
+                conds[cond.condition_field] = cond.value_text
+        ie_data[rt] = conds
+    return ie_types, ie_data, ie_vv
+
+
+def _sd(s) -> "date | None":
+    if not s:
+        return None
+    try:
+        return date.fromisoformat(str(s)[:10])
+    except (ValueError, TypeError):
+        return None
+
+
+def _sn(v) -> "float | None":
+    if v is None or v == "":
+        return None
+    try:
+        return float(v)
+    except (ValueError, TypeError):
+        return None
+
+
+# Ancillary sub-types: (parent flat key, num/pct flat key, amount flat key, label).
+# Mirrors ANCILLARY_ITEMS in the frontend's IncentiveInclExclShared.tsx.
+_ANCILLARY_FLAT = [
+    ("baggageType",  "baggageNumPct",  "baggageAmt",   "Baggage Type"),
+    ("meals",        "mealsNumPct",    "mealsAmt",     "Meals"),
+    ("seatFees",     "seatFeesNumPct", "seatFeesAmt",  "Seat Fees"),
+    ("transport",    "transportNumPct","transportAmt", "Transport"),
+    ("groupBooking", "groupNumPct",    "groupAmt",     "Group Booking Fee"),
+    ("loungeAccess", "loungeNumPct",   "loungeAmt",    "Lounge Access"),
+    ("cabFacility",  "cabNumPct",      "cabAmt",       "Cab Facility"),
+]
+
+
+def _ancillary_from_flat(d: dict) -> dict | None:
+    """Assemble the ancillary_items JSON blob from the flat baggage*/meals*/… keys
+    that the manual create form and the multi-tab upload both send. Returns None when
+    no ancillary sub-type was filled, so deals without ancillary stay untouched."""
+    out: dict = {}
+    for parent, numpct, amt, label in _ANCILLARY_FLAT:
+        with_type = d.get(parent)
+        num_pct   = d.get(numpct)
+        amount    = d.get(amt)
+        if with_type or num_pct or amount:
+            out[label] = {
+                "withType": with_type or None,
+                "numPct":   num_pct or None,
+                "amount":   _sn(amount),
+            }
+    return out or None
+
+
+def _build_inc_config(deal_id: int, inc_type: str, d: dict, order: int) -> DealIncentiveConfig:
+    return DealIncentiveConfig(
+        deal_id=deal_id,
+        incentive_type=inc_type,
+        incentive_order=order,
+        contract_valid_from=_sd(d.get("validFrom")),
+        contract_valid_to=_sd(d.get("validTo")),
+        frequency=d.get("frequency") or None,
+        flight_type=d.get("flightType") or None,
+        class_=d.get("class") or None,
+        route_type=d.get("routeType") or None,
+        trigger_based=d.get("triggerBased") or None,
+        target_based=d.get("targetBased") or None,
+        target_calc_cols=d.get("targetCalcCols") or None,
+        payout_calc_cols=d.get("payoutCalcCols") or None,
+        amount_based_type=d.get("amountBasedType") or None,
+        base_target_amount=_sn(d.get("baseTargetAmount")),
+        incentive_num_pct=d.get("incentiveNumPct") or None,
+        incentive_amt_pct=_sn(d.get("incentiveAmtPct")),
+        capped_incentive=_sn(d.get("cappedIncentive")),
+        capped_incentive_amount=_sn(d.get("cappedIncentiveAmount")),
+        market_fund_type=d.get("marketFundType") or None,
+        exchange_rate=_sn(d.get("exchangeRate")),
+        cashback_period_from=_sd(d.get("periodFrom")),
+        cashback_period_to=_sd(d.get("periodTo")),
+        cashback_target_type=d.get("cashbackTargetType") or None,
+        cashback_target_value=_sn(d.get("cashbackTargetValue")),
+        di_type=d.get("diType") or None,
+        di_currency=(
+            d.get("diCurrencySingle")
+            or d.get("diCurrencyTranche")
+            or d.get("diCurrencyBank")
+            or d.get("diCurrencyCard")
+        ) or None,
+        bulk_deposit_type=d.get("bulkDepositType") or None,
+        bulk_single_num_pct=_sn(d.get("bulkSingleNumPct")),
+        bulk_single_amt=_sn(d.get("bulkSingleAmt")),
+        bulk_single_capped=_sn(d.get("bulkSingleCapped")),
+        bulk_tranches=d.get("bulkTranches") or None,
+        normal_deposit_type=d.get("normalDepositType") or None,
+        bank_transfer_num_pct=_sn(d.get("bankTransferNumPct")),
+        bank_transfer_amt=_sn(d.get("bankTransferAmt")),
+        credit_card_type=d.get("creditCardType") or None,
+        bank_name=d.get("bankName") or None,
+        credit_card_num_pct=_sn(d.get("creditCardNumPct")),
+        credit_card_amt=_sn(d.get("creditCardAmt")),
+        ancillary_items=d.get("ancillaryItems") or _ancillary_from_flat(d),
+    )
+
+
+def _parse_slab_list(raw) -> list[dict]:
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        try:
+            parsed = _json.loads(raw)
+            return parsed if isinstance(parsed, list) else []
+        except Exception:
+            return []
+    return raw if isinstance(raw, list) else []
+
+
+async def _add_slabs_for_inc(incentive_id: int, d: dict, db: AsyncSession) -> None:
+    """Create DealIncentiveSlab + DealIncentiveSlabValue rows for one incentive config.
+
+    Reads the form-shaped slab keys (amountSlabs / segmentSlabs / siSlabs). Use
+    _normalize_inc_entry_slabs first when feeding repository-shaped data (which
+    carries a single ``slabs`` array instead).
+    """
+    for slab_key, slab_type_val in [
+        ("amountSlabs", SlabTypeEnum.AMOUNT),
+        ("segmentSlabs", SlabTypeEnum.SEGMENT),
+        ("siSlabs", SlabTypeEnum.SI),
+    ]:
+        for slab_order, row in enumerate(_parse_slab_list(d.get(slab_key))):
+            slab = DealIncentiveSlab(
+                incentive_id=incentive_id,
+                slab_type=slab_type_val,
+                slab_order=slab_order,
+                quarterly_freq=row.get("quarterlyFreq") or None,
+                half_yearly_freq=row.get("halfYearlyFreq") or None,
+                base_target_amt_num_pct=row.get("baseTargetNumPct") or row.get("baseTargetAmtNumPct") or None,
+                base_target_amount=_sn(row.get("baseTargetAmount")),
+                target_from=_sd(row.get("targetFrom")),
+                target_to=_sd(row.get("targetTo")),
+                segment=row.get("segment") or None,
+                class_=row.get("class") or row.get("slabClass") or None,
+            )
+            db.add(slab)
+            await db.flush()
+
+            for key, val in row.items():
+                if key in _SLAB_META_KEYS:
+                    continue
+                fval = _sn(val)
+                if fval is None:
+                    continue
+                db.add(DealIncentiveSlabValue(
+                    slab_id=slab.id,
+                    value_key=key,
+                    value_type=SlabValueTypeEnum.NUMBER,
+                    value=fval,
+                ))
+
+
+async def _add_conditions(rule_id: int, fields: dict, db: AsyncSession) -> None:
+    """Create DealRuleCondition rows for one rule. Skips empty values."""
+    cond_order = 0
+    for field, val in fields.items():
+        if val is None or val == "" or val == []:
+            continue
+        if isinstance(val, list):
+            operator, kw = RuleOperatorEnum.IN, {"value_list": val}
+        elif isinstance(val, bool):
+            operator, kw = RuleOperatorEnum.EQUALS, {"value_text": str(val).lower()}
+        else:
+            operator, kw = RuleOperatorEnum.EQUALS, {"value_text": str(val)}
+        db.add(DealRuleCondition(
+            rule_id=rule_id,
+            condition_field=field,
+            operator=operator,
+            condition_order=cond_order,
+            **kw,
+        ))
+        cond_order += 1
+
+
+async def _attach_unified_deal_relations(
+    deal_id: int,
+    incentive_types: list[str],
+    incentive_data: dict,
+    incl_excl_types: list[str],
+    incl_excl_data: dict,
+    vice_versa: dict,
+    db: AsyncSession,
+) -> None:
+    """Create DealIncentiveConfig + slabs + slab_values + rules + conditions for a unified deal."""
+    for order, inc_type in enumerate(incentive_types):
+        d = incentive_data.get(inc_type) or {}
+
+        inc_obj = _build_inc_config(deal_id, inc_type, d, order)
+        db.add(inc_obj)
+        await db.flush()
+
+        await _add_slabs_for_inc(inc_obj.id, d, db)
+
+        for rule_order, rule_type in enumerate(incl_excl_types):
+            category = _RULE_CAT_MAP.get(rule_type, rule_type.lower().replace(" ", "_"))
+            fields, rule_vv = _resolve_rule_payload(incl_excl_data, vice_versa, rule_type, inc_type)
+            rule = DealRule(
+                incentive_id=inc_obj.id,
+                rule_category=category,
+                vice_versa=rule_vv,
+                rule_order=rule_order,
+            )
+            db.add(rule)
+            await db.flush()
+            await _add_conditions(rule.id, fields, db)
+
+
+def _normalize_inc_entry_slabs(entry: dict) -> dict:
+    """Convert a repository-shaped incentive entry (one ``slabs`` array of
+    {slabType, ...values}) into the form-shaped amountSlabs / segmentSlabs /
+    siSlabs lists that _add_slabs_for_inc consumes.
+
+    Form-shaped entries (which already carry amountSlabs/segmentSlabs/siSlabs)
+    pass through unchanged. This lets the repository round-trip its own output
+    on edit, even when only one incentive in a deal was modified.
+    """
+    slabs = entry.get("slabs")
+    if not slabs:
+        return entry
+    e = dict(entry)
+    grouped: dict[str, list] = {"amount": [], "segment": [], "si": []}
+    for s in slabs:
+        st = (s.get("slabType") or "amount").lower()
+        row = {k: v for k, v in s.items() if k not in ("slabType", "slabOrder", "values")}
+        for vk, vv in (s.get("values") or {}).items():
+            row[vk] = vv
+        grouped.get(st, grouped["amount"]).append(row)
+    if grouped["amount"] and not e.get("amountSlabs"):
+        e["amountSlabs"] = grouped["amount"]
+    if grouped["segment"] and not e.get("segmentSlabs"):
+        e["segmentSlabs"] = grouped["segment"]
+    if grouped["si"] and not e.get("siSlabs"):
+        e["siSlabs"] = grouped["si"]
+    e.pop("slabs", None)
+    return e
+
+
+async def _rebuild_unified_relations(
+    deal_id: int,
+    incentive_types: list[str],
+    incentive_data: dict,
+    incl_excl_data: dict,
+    db: AsyncSession,
+) -> None:
+    """Recreate all incentive/slab/rule rows for a unified deal from repository-
+    shaped data (what GET /repository returns and the edit popups send back).
+
+    incentive_data: {inc_type: {fields..., slabs:[...] | amountSlabs:[...]}}
+    incl_excl_data: {inc_type: {rule_type: {field: value}}}  (per-incentive), or
+                    {rule_type: {field: value}}  (flat — applied to every incentive)
+
+    Caller is responsible for deleting the deal's existing incentives first.
+    Only rule types that carry at least one non-empty condition produce a rule,
+    so cleared rule types disappear from the Incl/Excl column.
+    """
+    flat_ie = bool(incl_excl_data) and any(k in _RULE_CAT_MAP for k in incl_excl_data)
+
+    for order, inc_type in enumerate(incentive_types):
+        d = _normalize_inc_entry_slabs(incentive_data.get(inc_type) or {})
+
+        inc_obj = _build_inc_config(deal_id, inc_type, d, order)
+        db.add(inc_obj)
+        await db.flush()
+
+        await _add_slabs_for_inc(inc_obj.id, d, db)
+
+        inc_rules = incl_excl_data if flat_ie else (incl_excl_data.get(inc_type) or {})
+        rule_order = 0
+        for rule_type, conds in inc_rules.items():
+            fields = {k: v for k, v in (conds or {}).items() if v not in (None, "", [])}
+            if not fields:
+                continue
+            category = _RULE_CAT_MAP.get(rule_type, rule_type.lower().replace(" ", "_"))
+            rule = DealRule(
+                incentive_id=inc_obj.id,
+                rule_category=category,
+                vice_versa=False,
+                rule_order=rule_order,
+            )
+            db.add(rule)
+            await db.flush()
+            await _add_conditions(rule.id, fields, db)
+            rule_order += 1
+
+
+def _unified_deal_to_repo_item(d: UnifiedDeal) -> DealRepositoryItem:
+    """Serialize a unified Deal (with incentives/slabs/rules eager-loaded) into a
+    DealRepositoryItem. Shared by the repository list and the update endpoint so
+    both always reconstruct the normalized incentive/incl-excl data identically.
+    """
+    inc_types, inc_data = _build_inc_data_from_configs(d.incentives)
+    # Build per-incentive incl/excl: {inc_type: {rule_type: conditions}}
+    all_ie_types: list[str] = []
+    all_ie_data: dict = {}
+    for inc in (d.incentives or []):
+        if getattr(inc, "rules", None):
+            _types, _data, _ = _build_ie_from_rules(inc.rules)
+            if _types:
+                all_ie_data[inc.incentive_type] = _data
+                for rt in _types:
+                    if rt not in all_ie_types:
+                        all_ie_types.append(rt)
+    is_b2b = d.deal_type == DealKind.B2B
+    prefix = "B2B" if is_b2b else "AIR"
+    return DealRepositoryItem(
+        id=d.id,
+        deal_no=f"{prefix}-{d.id:06d}",
+        deal_type="unified",
+        source_agent=d.source_agent,
+        airline_type=d.airline_type,
+        airline_name=d.airline_name,
+        contract_year=d.contract_year,
+        valid_from=d.valid_from,
+        valid_to=d.valid_to,
+        trigger_type=d.trigger_type,
+        payout_type=d.payout_type,
+        business_type=d.business_type,
+        entity_lcc=d.entity_lcc,
+        remark=d.remark,
+        deal_maker_name=d.deal_maker_name,
+        incentive_types=inc_types,
+        incentive_data=inc_data,
+        incl_excl_types=all_ie_types,
+        incl_excl_data=all_ie_data,
+        deal_tag=d.statement.deal_tag.value if d.statement and hasattr(d.statement.deal_tag, "value") else "standard",
+        status=d.status.value if hasattr(d.status, "value") else str(d.status),
+        deal_lifecycle_status=d.deal_lifecycle_status.value if hasattr(d.deal_lifecycle_status, "value") else str(d.deal_lifecycle_status or "draft"),
+        created_at=d.created_at,
+        file_type=None,
+        batch_id=d.statement.batch_id if d.statement else None,
+        supplier_name=d.supplier_name,
+    )
+
+
+async def _seed_approval_unified(
+    deal: UnifiedDeal,
+    current_user: User,
+    db: AsyncSession,
+) -> None:
+    """Route a unified Deal through the tenant approval workflow."""
+    workflow_result = await db.execute(
+        select(ApprovalWorkflow)
+        .options(selectinload(ApprovalWorkflow.steps).selectinload(ApprovalWorkflowStep.approvers))
+        .where(
+            ApprovalWorkflow.tenant_id == current_user.tenant_id,
+            ApprovalWorkflow.module == WorkflowModule.DEALS,
+            ApprovalWorkflow.is_active == True,  # noqa: E712
+        )
+    )
+    workflow = workflow_result.scalar_one_or_none()
+    if not workflow:
+        raise HTTPException(
+            status_code=400,
+            detail="Deals approval workflow is not configured. Ask Super Admin to configure it first.",
+        )
+
+    if workflow.deal_category == "proprietary":
+        deal.status = DealStatusType.APPROVED
+        deal.deal_lifecycle_status = DealLifecycleType.ACTIVE
+        await _close_matching_unified_deals(deal, db)
+        return
+
+    if not workflow.steps:
+        raise HTTPException(
+            status_code=400,
+            detail="Deals approval workflow has no steps configured. Ask Super Admin to add approval steps.",
+        )
+
+    deal_approval = DealApproval(
+        deal_type="unified",
+        deal_id=deal.id,
+        unified_deal_id=deal.id,
+        workflow_id=workflow.id,
+        current_step_order=min(s.step_order for s in workflow.steps),
+        status=ApprovalActionStatus.PENDING,
+        submitted_by_id=current_user.id,
+    )
+    db.add(deal_approval)
+    await db.flush()
+
+    for s in sorted(workflow.steps, key=lambda x: x.step_order):
+        for approver in s.approvers or []:
+            db.add(DealApprovalStep(
+                deal_approval_id=deal_approval.id,
+                step_order=s.step_order,
+                role=s.role,
+                assigned_user_id=approver.user_id,
+                status=ApprovalActionStatus.PENDING,
+            ))
+
+
+async def _close_matching_unified_deals(
+    new_deal: UnifiedDeal,
+    db: AsyncSession,
+) -> None:
+    """Close active unified deals that conflict with the newly approved deal."""
+    inc_result = await db.execute(
+        select(DealIncentiveConfig)
+        .where(DealIncentiveConfig.deal_id == new_deal.id)
+        .order_by(DealIncentiveConfig.incentive_order)
+        .limit(1)
+    )
+    primary = inc_result.scalar_one_or_none()
+    new_flight_type = primary.flight_type if primary else None
+    new_class = primary.class_ if primary else None
+
+    result = await db.execute(
+        select(UnifiedDeal)
+        .options(selectinload(UnifiedDeal.incentives))
+        .where(
+            UnifiedDeal.tenant_id == new_deal.tenant_id,
+            UnifiedDeal.created_by_id == new_deal.created_by_id,
+            UnifiedDeal.deal_lifecycle_status == DealLifecycleType.ACTIVE,
+            UnifiedDeal.deal_maker_name == new_deal.deal_maker_name,
+            UnifiedDeal.airline_name == new_deal.airline_name,
+            UnifiedDeal.airline_type == new_deal.airline_type,
+            UnifiedDeal.id != new_deal.id,
+        )
+    )
+    for d in result.scalars().all():
+        d_primary = d.incentives[0] if d.incentives else None
+        if (
+            d_primary
+            and d_primary.flight_type == new_flight_type
+            and d_primary.class_ == new_class
+        ):
+            d.deal_lifecycle_status = DealLifecycleType.CLOSED
+
+
 @router.post("/upload/confirm", response_model=UploadConfirmResult, status_code=status.HTTP_201_CREATED)
 async def confirm_upload(
     payload: ConfirmUploadPayload,
@@ -434,7 +1021,7 @@ async def confirm_upload(
 ):
     """
     Step 2 — User has reviewed / edited the extracted rows and confirms.
-    Routes each row to airline_deals or b2b_deals depending on deal type.
+    Writes to unified deal_statements → deals → deal_incentives chain.
     """
     vf_deal = date.fromisoformat(payload.valid_from) if payload.valid_from else None
     vt_deal = date.fromisoformat(payload.valid_to)   if payload.valid_to   else None
@@ -445,8 +1032,9 @@ async def confirm_upload(
         rows = [ExtractedRow()]
 
     use_b2b = bool(payload.business_type)
-
     batch_id = str(uuid.uuid4())
+
+    # Keep DealBatch for /batches endpoint backward compat
     batch = DealBatch(
         batch_id=batch_id,
         tenant_id=current_user.tenant_id,
@@ -463,6 +1051,22 @@ async def confirm_upload(
     db.add(batch)
     await db.flush()
 
+    # One DealStatement per upload session
+    statement = DealStatement(
+        tenant_id=current_user.tenant_id,
+        source_type=DealSourceType.UPLOAD,
+        deal_type=DealKind.B2B if use_b2b else DealKind.AIRLINE,
+        deal_tag=DealTagType(payload.deal_tag or "standard"),
+        file_name=file_name or None,
+        file_type=file_type or None,
+        batch_id=batch_id,
+        column_map=payload.column_map or None,
+        supplier_name=supplier_name or None,
+        created_by_id=current_user.id,
+    )
+    db.add(statement)
+    await db.flush()
+
     created_ids: list[int] = []
 
     for r in rows:
@@ -471,13 +1075,11 @@ async def confirm_upload(
         effective_vf = row_vf or vf_deal
         effective_vt = row_vt or vt_deal
 
-        ie_types   = (r.incl_excl_types if r.incl_excl_types else None) or payload.incl_excl_types or []
-        ie_data    = (r.incl_excl_data  if r.incl_excl_data  else None) or payload.incl_excl_data  or {}
-        ie_vv      = (r.vice_versa      if r.vice_versa       else None) or payload.vice_versa      or {}
-        # Use per-row incentive_data if provided; fall back to payload-level only when absent
+        ie_types = (r.incl_excl_types if r.incl_excl_types else None) or payload.incl_excl_types or []
+        ie_data  = (r.incl_excl_data  if r.incl_excl_data  else None) or payload.incl_excl_data  or {}
+        ie_vv    = (r.vice_versa      if r.vice_versa       else None) or payload.vice_versa      or {}
         row_inc_data = r.incentive_data if r.incentive_data else (payload.incentive_data or {})
 
-        # If toggle is on and this row has no incl/excl, copy from previous matching deal
         if payload.copy_prev_incl_excl and not ie_types:
             row_segment = _get_deal_segment(row_inc_data)
             prev = await _find_prev_incl_excl(
@@ -486,73 +1088,57 @@ async def confirm_upload(
                 segment_type=row_segment,
                 use_b2b=use_b2b,
                 tenant_id=current_user.tenant_id,
+                created_by_id=current_user.id,
                 db=db,
             )
             if prev:
                 ie_types, ie_data, ie_vv = prev
 
-        if use_b2b:
-            deal: B2BDeal | AirlineDeal = B2BDeal(
-                tenant_id=current_user.tenant_id,
-                created_by_id=current_user.id,
-                status=ManualDealStatus.PENDING_APPROVAL,
-                deal_lifecycle_status=DealLifecycleStatus.DRAFT,
-                deal_tag=payload.deal_tag or "standard",
-                source_agent=source_agent,
-                deal_maker_name=payload.deal_maker_name or None,
-                supplier_name=supplier_name or None,
-                remark=(r.remarks or payload.remark) or None,
-                airline_type=payload.airline_type or None,
-                airline_name=(r.airline_name or payload.airline_name) or None,
-                valid_from=effective_vf,
-                valid_to=effective_vt,
-                entity=payload.entity or None,
-                iata_number=(r.iata_code or payload.iata_number) or None,
-                business_type=payload.business_type or None,
-                entity_lcc=payload.entity_lcc or None,
-                login_id=payload.login_id or None,
-                incentive_types=payload.incentive_types or [],
-                incentive_data=row_inc_data,
-                incl_excl_types=ie_types,
-                incl_excl_data=ie_data,
-                vice_versa=ie_vv,
-                batch_id=batch_id,
-            )
-            deal_type_key = "b2b"
-        else:
-            deal = AirlineDeal(
-                tenant_id=current_user.tenant_id,
-                created_by_id=current_user.id,
-                status=ManualDealStatus.PENDING_APPROVAL,
-                deal_lifecycle_status=DealLifecycleStatus.DRAFT,
-                deal_tag=payload.deal_tag or "standard",
-                source_agent=source_agent,
-                deal_maker_name=payload.deal_maker_name or None,
-                remark=(r.remarks or payload.remark) or None,
-                airline_type=payload.airline_type or None,
-                airline_name=(r.airline_name or payload.airline_name) or None,
-                contract_year=payload.contract_year or None,
-                valid_from=effective_vf,
-                valid_to=effective_vt,
-                trigger_type=payload.trigger_type or None,
-                payout_type=payload.payout_type or None,
-                entity=payload.entity or None,
-                iata_number=(r.iata_code or payload.iata_number) or None,
-                business_type=payload.business_type or None,
-                entity_lcc=payload.entity_lcc or None,
-                login_id=payload.login_id or None,
-                incentive_types=payload.incentive_types or [],
-                incentive_data=row_inc_data,
-                incl_excl_types=ie_types,
-                incl_excl_data=ie_data,
-                vice_versa=ie_vv,
-                batch_id=batch_id,
-            )
-            deal_type_key = "airline"
-
+        # Multi-tab workbooks carry per-deal headers on each row; single-sheet / AI /
+        # manual paths leave these None and fall back to the deal-level payload.
+        deal = UnifiedDeal(
+            statement_id=statement.id,
+            tenant_id=current_user.tenant_id,
+            deal_type=DealKind.B2B if use_b2b else DealKind.AIRLINE,
+            source_agent=source_agent,
+            deal_maker_name=(r.deal_maker_name or payload.deal_maker_name) or None,
+            supplier_name=(r.supplier_name or supplier_name) if use_b2b else None,
+            remark=(r.remarks or payload.remark) or None,
+            airline_type=(r.airline_type or payload.airline_type) or None,
+            airline_name=(r.airline_name or payload.airline_name) or None,
+            contract_year=None if use_b2b else (r.contract_year or payload.contract_year or None),
+            valid_from=effective_vf,
+            valid_to=effective_vt,
+            trigger_type=None if use_b2b else (r.trigger_type or payload.trigger_type or None),
+            payout_type=None if use_b2b else (r.payout_type or payload.payout_type or None),
+            entity=payload.entity or None,
+            iata_number=(r.iata_code or payload.iata_number) or None,
+            business_type=(r.business_type or payload.business_type) or None,
+            entity_lcc=(r.entity_lcc or payload.entity_lcc) or None,
+            login_id=(r.login_id or payload.login_id) or None,
+            variant=r.variant or None,
+            eco_commission=r.eco_commission or None,
+            peco_commission=r.peco_commission or None,
+            bus_commission=r.bus_commission or None,
+            base_type=r.base_type or None,
+            valid_on=r.valid_on or None,
+            status=DealStatusType.PENDING_APPROVAL,
+            deal_lifecycle_status=DealLifecycleType.DRAFT,
+            created_by_id=current_user.id,
+        )
         db.add(deal)
         await db.flush()
-        await _seed_approval_for_deal(deal.id, deal, current_user, db, deal_type=deal_type_key)
+
+        await _attach_unified_deal_relations(
+            deal_id=deal.id,
+            incentive_types=(r.incentive_types or payload.incentive_types or []),
+            incentive_data=row_inc_data,
+            incl_excl_types=ie_types,
+            incl_excl_data=ie_data,
+            vice_versa=ie_vv,
+            db=db,
+        )
+        await _seed_approval_unified(deal, current_user, db)
         created_ids.append(deal.id)
 
     await db.commit()
@@ -627,7 +1213,7 @@ async def create_manual_deal(
     db.add(deal)
     await db.flush()
     _attach_deal_relations(deal.id, payload, db)
-    await _seed_approval_for_deal(deal.id, current_user, db, deal_type="upload")
+    await _seed_approval_for_deal(deal.id, deal, current_user, db, deal_type="upload")
     await db.commit()
     result = await db.execute(
         select(UploadedDeal)
@@ -649,12 +1235,40 @@ async def create_airline_deal(
 ):
     vf = date.fromisoformat(payload.valid_from) if payload.valid_from else None
     vt = date.fromisoformat(payload.valid_to) if payload.valid_to else None
+    batch_id = str(uuid.uuid4())
 
-    deal = AirlineDeal(
+    batch = DealBatch(
+        batch_id=batch_id,
         tenant_id=current_user.tenant_id,
+        deal_type="airline",
+        deal_tag=payload.deal_tag or "standard",
+        supplier_name=payload.airline_name or payload.deal_maker_name or None,
+        file_name="manual",
+        file_type="manual",
+        incentive_types=payload.incentive_types or [],
+        valid_from=vf,
+        valid_to=vt,
         created_by_id=current_user.id,
-        status=ManualDealStatus.PENDING_APPROVAL,
-        deal_lifecycle_status=DealLifecycleStatus.DRAFT,
+    )
+    db.add(batch)
+    await db.flush()
+
+    statement = DealStatement(
+        tenant_id=current_user.tenant_id,
+        source_type=DealSourceType.MANUAL,
+        deal_type=DealKind.AIRLINE,
+        deal_tag=DealTagType(payload.deal_tag or "standard"),
+        file_type="manual",
+        batch_id=batch_id,
+        created_by_id=current_user.id,
+    )
+    db.add(statement)
+    await db.flush()
+
+    deal = UnifiedDeal(
+        statement_id=statement.id,
+        tenant_id=current_user.tenant_id,
+        deal_type=DealKind.AIRLINE,
         source_agent=payload.source_agent or "manual",
         deal_maker_name=payload.deal_maker_name or None,
         remark=payload.remark or None,
@@ -670,18 +1284,53 @@ async def create_airline_deal(
         business_type=payload.business_type or None,
         entity_lcc=payload.entity_lcc or None,
         login_id=payload.login_id or None,
+        status=DealStatusType.PENDING_APPROVAL,
+        deal_lifecycle_status=DealLifecycleType.DRAFT,
+        created_by_id=current_user.id,
+    )
+    db.add(deal)
+    await db.flush()
+
+    await _attach_unified_deal_relations(
+        deal_id=deal.id,
         incentive_types=payload.incentive_types or [],
         incentive_data=payload.incentive_data or {},
         incl_excl_types=payload.incl_excl_types or [],
         incl_excl_data=payload.incl_excl_data or {},
         vice_versa=payload.vice_versa or {},
+        db=db,
     )
-    db.add(deal)
-    await db.flush()
-    await _seed_approval_for_deal(deal.id, deal, current_user, db, deal_type="airline")
+    await _seed_approval_unified(deal, current_user, db)
     await db.commit()
-    result = await db.execute(select(AirlineDeal).where(AirlineDeal.id == deal.id))
-    return result.scalar_one()
+
+    return {
+        "id": deal.id,
+        "status": deal.status,
+        "deal_lifecycle_status": deal.deal_lifecycle_status,
+        "deal_tag": payload.deal_tag or "standard",
+        "source_agent": deal.source_agent,
+        "deal_maker_name": deal.deal_maker_name,
+        "remark": deal.remark,
+        "airline_type": deal.airline_type,
+        "airline_name": deal.airline_name,
+        "contract_year": deal.contract_year,
+        "valid_from": deal.valid_from,
+        "valid_to": deal.valid_to,
+        "trigger_type": deal.trigger_type,
+        "payout_type": deal.payout_type,
+        "entity": deal.entity,
+        "iata_number": deal.iata_number,
+        "business_type": deal.business_type,
+        "entity_lcc": deal.entity_lcc,
+        "login_id": deal.login_id,
+        "incentive_types": payload.incentive_types or [],
+        "incentive_data": payload.incentive_data or {},
+        "incl_excl_types": payload.incl_excl_types or [],
+        "incl_excl_data": payload.incl_excl_data or {},
+        "vice_versa": payload.vice_versa or {},
+        "tenant_id": deal.tenant_id,
+        "created_at": deal.created_at,
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -696,12 +1345,41 @@ async def create_b2b_deal(
 ):
     vf = date.fromisoformat(payload.valid_from) if payload.valid_from else None
     vt = date.fromisoformat(payload.valid_to) if payload.valid_to else None
+    batch_id = str(uuid.uuid4())
 
-    deal = B2BDeal(
+    batch = DealBatch(
+        batch_id=batch_id,
         tenant_id=current_user.tenant_id,
+        deal_type="b2b",
+        deal_tag=payload.deal_tag or "standard",
+        supplier_name=payload.supplier_name or None,
+        file_name="manual",
+        file_type="manual",
+        incentive_types=payload.incentive_types or [],
+        valid_from=vf,
+        valid_to=vt,
         created_by_id=current_user.id,
-        status=ManualDealStatus.PENDING_APPROVAL,
-        deal_lifecycle_status=DealLifecycleStatus.DRAFT,
+    )
+    db.add(batch)
+    await db.flush()
+
+    statement = DealStatement(
+        tenant_id=current_user.tenant_id,
+        source_type=DealSourceType.MANUAL,
+        deal_type=DealKind.B2B,
+        deal_tag=DealTagType(payload.deal_tag or "standard"),
+        file_type="manual",
+        batch_id=batch_id,
+        supplier_name=payload.supplier_name or None,
+        created_by_id=current_user.id,
+    )
+    db.add(statement)
+    await db.flush()
+
+    deal = UnifiedDeal(
+        statement_id=statement.id,
+        tenant_id=current_user.tenant_id,
+        deal_type=DealKind.B2B,
         source_agent=payload.source_agent or "manual",
         deal_maker_name=payload.deal_maker_name or None,
         supplier_name=payload.supplier_name or None,
@@ -715,18 +1393,51 @@ async def create_b2b_deal(
         business_type=payload.business_type or None,
         entity_lcc=payload.entity_lcc or None,
         login_id=payload.login_id or None,
+        status=DealStatusType.PENDING_APPROVAL,
+        deal_lifecycle_status=DealLifecycleType.DRAFT,
+        created_by_id=current_user.id,
+    )
+    db.add(deal)
+    await db.flush()
+
+    await _attach_unified_deal_relations(
+        deal_id=deal.id,
         incentive_types=payload.incentive_types or [],
         incentive_data=payload.incentive_data or {},
         incl_excl_types=payload.incl_excl_types or [],
         incl_excl_data=payload.incl_excl_data or {},
         vice_versa=payload.vice_versa or {},
+        db=db,
     )
-    db.add(deal)
-    await db.flush()
-    await _seed_approval_for_deal(deal.id, deal, current_user, db, deal_type="b2b")
+    await _seed_approval_unified(deal, current_user, db)
     await db.commit()
-    result = await db.execute(select(B2BDeal).where(B2BDeal.id == deal.id))
-    return result.scalar_one()
+
+    return {
+        "id": deal.id,
+        "status": deal.status,
+        "deal_lifecycle_status": deal.deal_lifecycle_status,
+        "deal_tag": payload.deal_tag or "standard",
+        "source_agent": deal.source_agent,
+        "deal_maker_name": deal.deal_maker_name,
+        "supplier_name": deal.supplier_name,
+        "remark": deal.remark,
+        "airline_type": deal.airline_type,
+        "airline_name": deal.airline_name,
+        "valid_from": deal.valid_from,
+        "valid_to": deal.valid_to,
+        "entity": deal.entity,
+        "iata_number": deal.iata_number,
+        "business_type": deal.business_type,
+        "entity_lcc": deal.entity_lcc,
+        "login_id": deal.login_id,
+        "incentive_types": payload.incentive_types or [],
+        "incentive_data": payload.incentive_data or {},
+        "incl_excl_types": payload.incl_excl_types or [],
+        "incl_excl_data": payload.incl_excl_data or {},
+        "vice_versa": payload.vice_versa or {},
+        "tenant_id": deal.tenant_id,
+        "created_at": deal.created_at,
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -739,14 +1450,38 @@ async def get_deal_repository(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Return all deals for the tenant from upload, airline_deals, and b2b_deals tables."""
+    """Return all deals for the tenant from new unified table and legacy tables."""
     items: list[DealRepositoryItem] = []
 
-    # 1. Upload-table deals (file uploads + legacy manual)
+    # 1. Unified deals (new schema — all manual + upload created after migration)
+    unified_q = (
+        select(UnifiedDeal)
+        .options(
+            selectinload(UnifiedDeal.statement),
+            selectinload(UnifiedDeal.incentives).selectinload(DealIncentiveConfig.slabs).selectinload(DealIncentiveSlab.values),
+            selectinload(UnifiedDeal.incentives).selectinload(DealIncentiveConfig.rules).selectinload(DealRule.conditions),
+        )
+        .where(
+            UnifiedDeal.tenant_id == current_user.tenant_id,
+            UnifiedDeal.created_by_id == current_user.id,
+        )
+    )
+    if batch_id:
+        unified_q = unified_q.join(DealStatement, DealStatement.id == UnifiedDeal.statement_id).where(
+            DealStatement.batch_id == batch_id
+        )
+    unified_result = await db.execute(unified_q)
+    for d in unified_result.scalars().all():
+        items.append(_unified_deal_to_repo_item(d))
+
+    # 2. Legacy upload-table deals (pre-migration rows)
     upload_q = (
         select(UploadedDeal)
         .options(selectinload(UploadedDeal.incentives), selectinload(UploadedDeal.incl_excl_rules))
-        .where(UploadedDeal.tenant_id == current_user.tenant_id)
+        .where(
+            UploadedDeal.tenant_id == current_user.tenant_id,
+            UploadedDeal.created_by_id == current_user.id,
+        )
     )
     upload_result = await db.execute(upload_q)
     for d in upload_result.scalars().all():
@@ -777,8 +1512,11 @@ async def get_deal_repository(
             file_type=d.file_type,
         ))
 
-    # 2. Airline deals
-    airline_q = select(AirlineDeal).where(AirlineDeal.tenant_id == current_user.tenant_id)
+    # 3. Legacy airline deals (pre-migration rows)
+    airline_q = select(AirlineDeal).where(
+        AirlineDeal.tenant_id == current_user.tenant_id,
+        AirlineDeal.created_by_id == current_user.id,
+    )
     if batch_id:
         airline_q = airline_q.where(AirlineDeal.batch_id == batch_id)
     airline_result = await db.execute(airline_q)
@@ -808,10 +1546,15 @@ async def get_deal_repository(
             deal_lifecycle_status=d.deal_lifecycle_status.value if hasattr(d.deal_lifecycle_status, "value") else str(d.deal_lifecycle_status or "draft"),
             created_at=d.created_at,
             file_type=None,
+            batch_id=d.batch_id,
+            supplier_name=None,
         ))
 
-    # 3. B2B deals
-    b2b_q = select(B2BDeal).where(B2BDeal.tenant_id == current_user.tenant_id)
+    # 4. Legacy B2B deals (pre-migration rows)
+    b2b_q = select(B2BDeal).where(
+        B2BDeal.tenant_id == current_user.tenant_id,
+        B2BDeal.created_by_id == current_user.id,
+    )
     if batch_id:
         b2b_q = b2b_q.where(B2BDeal.batch_id == batch_id)
     b2b_result = await db.execute(b2b_q)
@@ -841,6 +1584,8 @@ async def get_deal_repository(
             deal_lifecycle_status=d.deal_lifecycle_status.value if hasattr(d.deal_lifecycle_status, "value") else str(d.deal_lifecycle_status or "draft"),
             created_at=d.created_at,
             file_type=None,
+            batch_id=d.batch_id,
+            supplier_name=d.supplier_name,
         ))
 
     items.sort(key=lambda x: x.created_at, reverse=True)
@@ -860,36 +1605,53 @@ async def list_deal_batches(
     from app.models.user import User as UserModel
     batches_result = await db.execute(
         select(DealBatch)
-        .where(DealBatch.tenant_id == current_user.tenant_id)
+        .where(
+            DealBatch.tenant_id == current_user.tenant_id,
+            DealBatch.created_by_id == current_user.id,
+        )
         .order_by(DealBatch.created_at.desc())
     )
     batches = batches_result.scalars().all()
 
     airline_counts_result = await db.execute(
         select(AirlineDeal.batch_id, func.count(AirlineDeal.id))
-        .where(AirlineDeal.tenant_id == current_user.tenant_id, AirlineDeal.batch_id != None)  # noqa: E711
+        .where(AirlineDeal.tenant_id == current_user.tenant_id, AirlineDeal.created_by_id == current_user.id, AirlineDeal.batch_id != None)  # noqa: E711
         .group_by(AirlineDeal.batch_id)
     )
     b2b_counts_result = await db.execute(
         select(B2BDeal.batch_id, func.count(B2BDeal.id))
-        .where(B2BDeal.tenant_id == current_user.tenant_id, B2BDeal.batch_id != None)  # noqa: E711
+        .where(B2BDeal.tenant_id == current_user.tenant_id, B2BDeal.created_by_id == current_user.id, B2BDeal.batch_id != None)  # noqa: E711
         .group_by(B2BDeal.batch_id)
+    )
+    unified_counts_result = await db.execute(
+        select(DealStatement.batch_id, func.count(UnifiedDeal.id))
+        .join(UnifiedDeal, UnifiedDeal.statement_id == DealStatement.id)
+        .where(DealStatement.tenant_id == current_user.tenant_id, DealStatement.created_by_id == current_user.id, DealStatement.batch_id.isnot(None))
+        .group_by(DealStatement.batch_id)
     )
     deal_counts: dict[str, int] = {}
     for bid, cnt in airline_counts_result.all():
         deal_counts[bid] = deal_counts.get(bid, 0) + cnt
     for bid, cnt in b2b_counts_result.all():
         deal_counts[bid] = deal_counts.get(bid, 0) + cnt
+    for bid, cnt in unified_counts_result.all():
+        deal_counts[bid] = deal_counts.get(bid, 0) + cnt
 
     airline_lc_result = await db.execute(
         select(AirlineDeal.batch_id, AirlineDeal.deal_lifecycle_status, func.count(AirlineDeal.id))
-        .where(AirlineDeal.tenant_id == current_user.tenant_id, AirlineDeal.batch_id != None)  # noqa: E711
+        .where(AirlineDeal.tenant_id == current_user.tenant_id, AirlineDeal.created_by_id == current_user.id, AirlineDeal.batch_id != None)  # noqa: E711
         .group_by(AirlineDeal.batch_id, AirlineDeal.deal_lifecycle_status)
     )
     b2b_lc_result = await db.execute(
         select(B2BDeal.batch_id, B2BDeal.deal_lifecycle_status, func.count(B2BDeal.id))
-        .where(B2BDeal.tenant_id == current_user.tenant_id, B2BDeal.batch_id != None)  # noqa: E711
+        .where(B2BDeal.tenant_id == current_user.tenant_id, B2BDeal.created_by_id == current_user.id, B2BDeal.batch_id != None)  # noqa: E711
         .group_by(B2BDeal.batch_id, B2BDeal.deal_lifecycle_status)
+    )
+    unified_lc_result = await db.execute(
+        select(DealStatement.batch_id, UnifiedDeal.deal_lifecycle_status, func.count(UnifiedDeal.id))
+        .join(UnifiedDeal, UnifiedDeal.statement_id == DealStatement.id)
+        .where(DealStatement.tenant_id == current_user.tenant_id, DealStatement.created_by_id == current_user.id, DealStatement.batch_id.isnot(None))
+        .group_by(DealStatement.batch_id, UnifiedDeal.deal_lifecycle_status)
     )
     lifecycle_counts: dict[str, dict[str, int]] = {}
     for bid, status, cnt in airline_lc_result.all():
@@ -899,6 +1661,12 @@ async def list_deal_batches(
         lc = lifecycle_counts.setdefault(bid, {})
         lc[s] = lc.get(s, 0) + int(cnt)
     for bid, status, cnt in b2b_lc_result.all():
+        if bid is None:
+            continue
+        s = status.value if hasattr(status, "value") else str(status)
+        lc = lifecycle_counts.setdefault(bid, {})
+        lc[s] = lc.get(s, 0) + int(cnt)
+    for bid, status, cnt in unified_lc_result.all():
         if bid is None:
             continue
         s = status.value if hasattr(status, "value") else str(status)
@@ -945,6 +1713,7 @@ async def get_deal_batch(
         select(DealBatch).where(
             DealBatch.batch_id == batch_id,
             DealBatch.tenant_id == current_user.tenant_id,
+            DealBatch.created_by_id == current_user.id,
         )
     )
     batch = result.scalar_one_or_none()
@@ -953,13 +1722,18 @@ async def get_deal_batch(
 
     airline_cnt = await db.execute(
         select(func.count(AirlineDeal.id))
-        .where(AirlineDeal.batch_id == batch_id, AirlineDeal.tenant_id == current_user.tenant_id)
+        .where(AirlineDeal.batch_id == batch_id, AirlineDeal.tenant_id == current_user.tenant_id, AirlineDeal.created_by_id == current_user.id)
     )
     b2b_cnt = await db.execute(
         select(func.count(B2BDeal.id))
-        .where(B2BDeal.batch_id == batch_id, B2BDeal.tenant_id == current_user.tenant_id)
+        .where(B2BDeal.batch_id == batch_id, B2BDeal.tenant_id == current_user.tenant_id, B2BDeal.created_by_id == current_user.id)
     )
-    deal_count = (airline_cnt.scalar() or 0) + (b2b_cnt.scalar() or 0)
+    unified_cnt = await db.execute(
+        select(func.count(UnifiedDeal.id))
+        .join(DealStatement, DealStatement.id == UnifiedDeal.statement_id)
+        .where(DealStatement.batch_id == batch_id, DealStatement.tenant_id == current_user.tenant_id, DealStatement.created_by_id == current_user.id)
+    )
+    deal_count = (airline_cnt.scalar() or 0) + (b2b_cnt.scalar() or 0) + (unified_cnt.scalar() or 0)
 
     user_result = await db.execute(select(UserModel).where(UserModel.id == batch.created_by_id))
     user = user_result.scalar_one_or_none()
@@ -991,11 +1765,27 @@ async def get_repository_deal_history(
 ):
     """Unified history endpoint for any deal type."""
     # Fetch the deal's created_by_id and created_at from the right table
-    if deal_type == "airline":
+    if deal_type == "unified":
+        result = await db.execute(
+            select(UnifiedDeal).where(
+                UnifiedDeal.id == deal_id,
+                UnifiedDeal.tenant_id == current_user.tenant_id,
+                UnifiedDeal.created_by_id == current_user.id,
+            )
+        )
+        deal = result.scalar_one_or_none()
+        if not deal:
+            raise HTTPException(status_code=404, detail="Deal not found")
+        created_by_id = deal.created_by_id
+        created_at = deal.created_at
+        source_type_str = "manual"
+        status_str = deal.status.value if hasattr(deal.status, "value") else str(deal.status)
+    elif deal_type == "airline":
         result = await db.execute(
             select(AirlineDeal).where(
                 AirlineDeal.id == deal_id,
                 AirlineDeal.tenant_id == current_user.tenant_id,
+                AirlineDeal.created_by_id == current_user.id,
             )
         )
         deal = result.scalar_one_or_none()
@@ -1010,6 +1800,7 @@ async def get_repository_deal_history(
             select(B2BDeal).where(
                 B2BDeal.id == deal_id,
                 B2BDeal.tenant_id == current_user.tenant_id,
+                B2BDeal.created_by_id == current_user.id,
             )
         )
         deal = result.scalar_one_or_none()
@@ -1024,6 +1815,7 @@ async def get_repository_deal_history(
             select(UploadedDeal).where(
                 UploadedDeal.id == deal_id,
                 UploadedDeal.tenant_id == current_user.tenant_id,
+                UploadedDeal.created_by_id == current_user.id,
             )
         )
         deal = result.scalar_one_or_none()
@@ -1081,12 +1873,18 @@ async def update_repository_deal(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Update any deal in the repository (upload / airline / b2b table)."""
+    """Update any deal in the repository (unified / upload / airline / b2b table)."""
+    # ── Unified deals: header columns live on Deal; incentive/incl-excl data is
+    #    normalized into child tables and must be rebuilt, not setattr'd. ──────
+    if deal_type == "unified":
+        return await _update_unified_deal(deal_id, payload, current_user, db)
+
     if deal_type == "airline":
         result = await db.execute(
             select(AirlineDeal).where(
                 AirlineDeal.id == deal_id,
                 AirlineDeal.tenant_id == current_user.tenant_id,
+                AirlineDeal.created_by_id == current_user.id,
             )
         )
         deal = result.scalar_one_or_none()
@@ -1095,6 +1893,7 @@ async def update_repository_deal(
             select(B2BDeal).where(
                 B2BDeal.id == deal_id,
                 B2BDeal.tenant_id == current_user.tenant_id,
+                B2BDeal.created_by_id == current_user.id,
             )
         )
         deal = result.scalar_one_or_none()
@@ -1103,6 +1902,7 @@ async def update_repository_deal(
             select(UploadedDeal).where(
                 UploadedDeal.id == deal_id,
                 UploadedDeal.tenant_id == current_user.tenant_id,
+                UploadedDeal.created_by_id == current_user.id,
             )
         )
         deal = result.scalar_one_or_none()
@@ -1123,9 +1923,10 @@ async def update_repository_deal(
     status_str = deal.status.value if hasattr(deal.status, "value") else str(deal.status)
     lifecycle_str = deal.deal_lifecycle_status.value if hasattr(deal.deal_lifecycle_status, "value") else str(deal.deal_lifecycle_status or "draft")
     _prefix_map = {"airline": "AIR", "b2b": "B2B", "upload": "UPL"}
+    _deal_no = f"{_prefix_map.get(deal_type, 'UPL')}-{deal.id:04d}"
     return DealRepositoryItem(
         id=deal.id,
-        deal_no=f"{_prefix_map.get(deal_type, 'UPL')}-{deal.id:04d}",
+        deal_no=_deal_no,
         deal_type=deal_type,
         source_agent=deal.source_agent,
         airline_type=deal.airline_type,
@@ -1139,15 +1940,112 @@ async def update_repository_deal(
         entity_lcc=getattr(deal, "entity_lcc", None),
         remark=deal.remark,
         deal_maker_name=deal.deal_maker_name,
-        incentive_types=deal.incentive_types or [],
-        incentive_data=deal.incentive_data or {},
-        incl_excl_types=deal.incl_excl_types or [],
-        incl_excl_data=deal.incl_excl_data or {},
+        incentive_types=getattr(deal, "incentive_types", None) or [],
+        incentive_data=getattr(deal, "incentive_data", None) or {},
+        incl_excl_types=getattr(deal, "incl_excl_types", None) or [],
+        incl_excl_data=getattr(deal, "incl_excl_data", None) or {},
         status=status_str,
         deal_lifecycle_status=lifecycle_str,
         created_at=deal.created_at,
         file_type=None,
     )
+
+
+async def _update_unified_deal(
+    deal_id: int,
+    payload: DealUpdatePayload,
+    current_user: User,
+    db: AsyncSession,
+) -> DealRepositoryItem:
+    """Update a unified Deal: header fields are set directly; incentive_data /
+    incl_excl_data (when present) rebuild the normalized child tables.
+
+    The response always re-serializes the freshly-loaded deal via
+    _unified_deal_to_repo_item, so the Incentive Types / Incl-Excl columns keep
+    their values after a header-only edit and reflect edits after a popup save —
+    fixing the bug where those columns went blank on save.
+    """
+    eager = (
+        selectinload(UnifiedDeal.statement),
+        selectinload(UnifiedDeal.incentives).selectinload(DealIncentiveConfig.slabs).selectinload(DealIncentiveSlab.values),
+        selectinload(UnifiedDeal.incentives).selectinload(DealIncentiveConfig.rules).selectinload(DealRule.conditions),
+    )
+    result = await db.execute(
+        select(UnifiedDeal).options(*eager).where(
+            UnifiedDeal.id == deal_id,
+            UnifiedDeal.tenant_id == current_user.tenant_id,
+            UnifiedDeal.created_by_id == current_user.id,
+        )
+    )
+    deal = result.scalar_one_or_none()
+    if not deal:
+        raise HTTPException(status_code=404, detail="Deal not found")
+
+    # 1. Header fields — everything except the normalized incentive/incl-excl keys.
+    normalized_keys = {"incentive_types", "incentive_data", "incl_excl_types", "incl_excl_data", "vice_versa"}
+    update_data = payload.model_dump(exclude_none=True)
+    for field, value in update_data.items():
+        if field in normalized_keys:
+            continue
+        if field in ("valid_from", "valid_to") and isinstance(value, str):
+            value = date.fromisoformat(value) if value else None
+        if hasattr(deal, field):
+            setattr(deal, field, value)
+
+    # 2. Rebuild incentive/slab/rule rows only when the edit touched them.
+    touches_relations = (
+        payload.incentive_data is not None
+        or payload.incl_excl_data is not None
+        or bool(payload.incentive_types)
+    )
+    if touches_relations:
+        existing_inc_types, existing_inc_data = _build_inc_data_from_configs(deal.incentives)
+        existing_ie_data: dict = {}
+        for inc in (deal.incentives or []):
+            if getattr(inc, "rules", None):
+                _types, _data, _ = _build_ie_from_rules(inc.rules)
+                if _types:
+                    existing_ie_data[inc.incentive_type] = _data
+
+        final_inc_data = payload.incentive_data if payload.incentive_data is not None else existing_inc_data
+        if payload.incentive_types:
+            final_inc_types = list(payload.incentive_types)
+        elif payload.incentive_data is not None:
+            final_inc_types = list(payload.incentive_data.keys())
+        else:
+            final_inc_types = existing_inc_types
+        final_ie_data = payload.incl_excl_data if payload.incl_excl_data is not None else existing_ie_data
+
+        # Clear existing children, then recreate (cascade removes slabs/values/rules/conditions).
+        for inc in list(deal.incentives):
+            await db.delete(inc)
+        await db.flush()
+
+        await _rebuild_unified_relations(
+            deal_id=deal.id,
+            incentive_types=final_inc_types,
+            incentive_data=final_inc_data,
+            incl_excl_data=final_ie_data,
+            db=db,
+        )
+
+    await db.commit()
+
+    # 3. Re-load with relations eager so the response carries reconstructed data.
+    #    The session uses expire_on_commit=False, so the just-committed `deal` is
+    #    still cached in the identity map with its STALE incentives collection
+    #    (the rows we deleted/replaced above). Without populate_existing the eager
+    #    loaders won't overwrite that already-loaded collection, and the response
+    #    would echo pre-edit incentive/incl-excl data even though the DB is correct
+    #    — the bug where edits only showed up after a page refresh.
+    result = await db.execute(
+        select(UnifiedDeal)
+        .options(*eager)
+        .where(UnifiedDeal.id == deal_id)
+        .execution_options(populate_existing=True)
+    )
+    deal = result.scalar_one()
+    return _unified_deal_to_repo_item(deal)
 
 
 # ── Delete a deal from the repository ────────────────────────────────────
@@ -1159,12 +2057,22 @@ async def delete_repository_deal(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Permanently delete any deal in the repository (upload / airline / b2b table)."""
-    if deal_type == "airline":
+    """Permanently delete any deal in the repository (unified / upload / airline / b2b table)."""
+    if deal_type == "unified":
+        result = await db.execute(
+            select(UnifiedDeal).where(
+                UnifiedDeal.id == deal_id,
+                UnifiedDeal.tenant_id == current_user.tenant_id,
+                UnifiedDeal.created_by_id == current_user.id,
+            )
+        )
+        deal = result.scalar_one_or_none()
+    elif deal_type == "airline":
         result = await db.execute(
             select(AirlineDeal).where(
                 AirlineDeal.id == deal_id,
                 AirlineDeal.tenant_id == current_user.tenant_id,
+                AirlineDeal.created_by_id == current_user.id,
             )
         )
         deal = result.scalar_one_or_none()
@@ -1173,6 +2081,7 @@ async def delete_repository_deal(
             select(B2BDeal).where(
                 B2BDeal.id == deal_id,
                 B2BDeal.tenant_id == current_user.tenant_id,
+                B2BDeal.created_by_id == current_user.id,
             )
         )
         deal = result.scalar_one_or_none()
@@ -1181,6 +2090,7 @@ async def delete_repository_deal(
             select(UploadedDeal).where(
                 UploadedDeal.id == deal_id,
                 UploadedDeal.tenant_id == current_user.tenant_id,
+                UploadedDeal.created_by_id == current_user.id,
             )
         )
         deal = result.scalar_one_or_none()
@@ -1201,11 +2111,23 @@ async def resubmit_deal(
     current_user: User = Depends(get_current_user),
 ):
     """Resubmit a rejected deal for approval by resetting the approval workflow."""
-    if deal_type == "airline":
+    if deal_type == "unified":
+        result = await db.execute(
+            select(UnifiedDeal).where(
+                UnifiedDeal.id == deal_id,
+                UnifiedDeal.tenant_id == current_user.tenant_id,
+                UnifiedDeal.created_by_id == current_user.id,
+            )
+        )
+        deal = result.scalar_one_or_none()
+        rejected_status = DealStatusType.REJECTED
+        pending_status  = DealStatusType.PENDING_APPROVAL
+    elif deal_type == "airline":
         result = await db.execute(
             select(AirlineDeal).where(
                 AirlineDeal.id == deal_id,
                 AirlineDeal.tenant_id == current_user.tenant_id,
+                AirlineDeal.created_by_id == current_user.id,
             )
         )
         deal = result.scalar_one_or_none()
@@ -1216,6 +2138,7 @@ async def resubmit_deal(
             select(B2BDeal).where(
                 B2BDeal.id == deal_id,
                 B2BDeal.tenant_id == current_user.tenant_id,
+                B2BDeal.created_by_id == current_user.id,
             )
         )
         deal = result.scalar_one_or_none()
@@ -1226,6 +2149,7 @@ async def resubmit_deal(
             select(UploadedDeal).where(
                 UploadedDeal.id == deal_id,
                 UploadedDeal.tenant_id == current_user.tenant_id,
+                UploadedDeal.created_by_id == current_user.id,
             )
         )
         deal = result.scalar_one_or_none()
@@ -1253,7 +2177,10 @@ async def resubmit_deal(
         await db.flush()
 
     deal.status = pending_status
-    await _seed_approval_for_deal(deal_id, current_user, db, deal_type=deal_type)
+    if deal_type == "unified":
+        await _seed_approval_unified(deal, current_user, db)
+    else:
+        await _seed_approval_for_deal(deal_id, current_user, db, deal_type=deal_type)
     await db.commit()
     return {"success": True, "message": "Deal resubmitted for approval"}
 
@@ -1274,7 +2201,10 @@ async def list_deals_repository(
             selectinload(UploadedDeal.incentives),
             selectinload(UploadedDeal.incl_excl_rules),
         )
-        .where(UploadedDeal.tenant_id == current_user.tenant_id)
+        .where(
+            UploadedDeal.tenant_id == current_user.tenant_id,
+            UploadedDeal.created_by_id == current_user.id,
+        )
         .order_by(UploadedDeal.created_at.desc())
         .offset(skip)
         .limit(limit)
@@ -1326,6 +2256,7 @@ async def get_uploaded_deal(
         .where(
             UploadedDeal.id == upload_id,
             UploadedDeal.tenant_id == current_user.tenant_id,
+            UploadedDeal.created_by_id == current_user.id,
         )
     )
     deal = result.scalar_one_or_none()
@@ -1344,6 +2275,7 @@ async def delete_uploaded_deal(
         select(UploadedDeal).where(
             UploadedDeal.id == upload_id,
             UploadedDeal.tenant_id == current_user.tenant_id,
+            UploadedDeal.created_by_id == current_user.id,
         )
     )
     deal = result.scalar_one_or_none()
@@ -1364,6 +2296,7 @@ async def get_deal_history(
         select(UploadedDeal).where(
             UploadedDeal.id == deal_id,
             UploadedDeal.tenant_id == current_user.tenant_id,
+            UploadedDeal.created_by_id == current_user.id,
         )
     )
     deal = deal_result.scalar_one_or_none()
@@ -1430,38 +2363,42 @@ async def approvals_inbox(
     approvals = result.scalars().all()
 
     # 2. Group by deal_type for efficient batch lookup
+    unified_ids = [a.deal_id for a in approvals if a.deal_type == "unified"]
     airline_ids  = [a.deal_id for a in approvals if a.deal_type == "airline"]
     b2b_ids      = [a.deal_id for a in approvals if a.deal_type == "b2b"]
     upload_ids   = [a.deal_id for a in approvals if a.deal_type == "upload"]
 
+    unified_map: dict[int, UnifiedDeal]   = {}
     airline_map: dict[int, AirlineDeal]   = {}
     b2b_map:     dict[int, B2BDeal]       = {}
     upload_map:  dict[int, UploadedDeal]  = {}
 
+    if unified_ids:
+        rows = await db.execute(
+            select(UnifiedDeal)
+            .options(
+                selectinload(UnifiedDeal.incentives).selectinload(DealIncentiveConfig.slabs).selectinload(DealIncentiveSlab.values),
+                selectinload(UnifiedDeal.incentives).selectinload(DealIncentiveConfig.rules).selectinload(DealRule.conditions),
+            )
+            .where(UnifiedDeal.id.in_(unified_ids), UnifiedDeal.tenant_id == current_user.tenant_id)
+        )
+        unified_map = {d.id: d for d in rows.scalars().all()}
+
     if airline_ids:
         rows = await db.execute(
-            select(AirlineDeal).where(
-                AirlineDeal.id.in_(airline_ids),
-                AirlineDeal.tenant_id == current_user.tenant_id,
-            )
+            select(AirlineDeal).where(AirlineDeal.id.in_(airline_ids), AirlineDeal.tenant_id == current_user.tenant_id)
         )
         airline_map = {d.id: d for d in rows.scalars().all()}
 
     if b2b_ids:
         rows = await db.execute(
-            select(B2BDeal).where(
-                B2BDeal.id.in_(b2b_ids),
-                B2BDeal.tenant_id == current_user.tenant_id,
-            )
+            select(B2BDeal).where(B2BDeal.id.in_(b2b_ids), B2BDeal.tenant_id == current_user.tenant_id)
         )
         b2b_map = {d.id: d for d in rows.scalars().all()}
 
     if upload_ids:
         rows = await db.execute(
-            select(UploadedDeal).where(
-                UploadedDeal.id.in_(upload_ids),
-                UploadedDeal.tenant_id == current_user.tenant_id,
-            )
+            select(UploadedDeal).where(UploadedDeal.id.in_(upload_ids), UploadedDeal.tenant_id == current_user.tenant_id)
         )
         upload_map = {d.id: d for d in rows.scalars().all()}
 
@@ -1470,7 +2407,45 @@ async def approvals_inbox(
     for approval in approvals:
         status_str = approval.status.value if hasattr(approval.status, "value") else str(approval.status)
 
-        if approval.deal_type == "airline":
+        if approval.deal_type == "unified":
+            ud = unified_map.get(approval.deal_id)
+            if not ud:
+                continue
+            inc_types, inc_data = _build_inc_data_from_configs(ud.incentives)
+            _all_ie_types: list[str] = []
+            _all_ie_data: dict = {}
+            for _inc in (ud.incentives or []):
+                if getattr(_inc, "rules", None):
+                    _t, _d, _ = _build_ie_from_rules(_inc.rules)
+                    if _t:
+                        _all_ie_data[_inc.incentive_type] = _d
+                        for _rt in _t:
+                            if _rt not in _all_ie_types:
+                                _all_ie_types.append(_rt)
+            ie_types, ie_data = _all_ie_types, _all_ie_data
+            is_b2b = ud.deal_type == DealKind.B2B
+            items.append(ApprovalInboxItem(
+                id=approval.id, deal_id=ud.id,
+                deal_type="b2b" if is_b2b else "airline",
+                source_agent=ud.source_agent,
+                airline_name=ud.airline_name, airline_type=ud.airline_type,
+                status=status_str, created_at=ud.created_at,
+                valid_from=ud.valid_from, valid_to=ud.valid_to,
+                business_type=ud.business_type,
+                incentive_types=inc_types,
+                incentive_data=inc_data,
+                incl_excl_types=ie_types,
+                incl_excl_data=ie_data,
+                deal_maker_name=ud.deal_maker_name,
+                contract_year=ud.contract_year,
+                trigger_type=ud.trigger_type,
+                payout_type=ud.payout_type,
+                entity_lcc=ud.entity_lcc,
+                remark=ud.remark,
+                deal_no=f"{'B2B' if is_b2b else 'AIR'}-{ud.id:06d}",
+                batch_id=None,
+            ))
+        elif approval.deal_type == "airline":
             deal = airline_map.get(approval.deal_id)
             if not deal:
                 continue
@@ -1600,7 +2575,10 @@ async def get_deal_approval(
 
 async def _load_deal_for_approval(approval: DealApproval, db: AsyncSession):
     """Return (deal_object, deal_type_str) for a DealApproval record."""
-    if approval.deal_type == "airline":
+    if approval.deal_type == "unified":
+        r = await db.execute(select(UnifiedDeal).where(UnifiedDeal.id == approval.deal_id))
+        return r.scalar_one(), "unified"
+    elif approval.deal_type == "airline":
         r = await db.execute(select(AirlineDeal).where(AirlineDeal.id == approval.deal_id))
         return r.scalar_one(), "airline"
     elif approval.deal_type == "b2b":
@@ -1617,15 +2595,70 @@ async def _find_matching_active_deals(
     db: AsyncSession,
 ) -> list[ClosingDealSummary]:
     """Return summaries of ACTIVE deals that would be closed when new_deal is approved."""
-    inc_data  = new_deal.incentive_data or {}
-    inc_types = new_deal.incentive_types or []
-    primary   = inc_types[0] if inc_types else None
-    pdata     = inc_data.get(primary, {}) if (primary and isinstance(inc_data, dict)) else {}
-    new_flight_type = pdata.get("flightType")
-    new_class       = pdata.get("class")
+    summaries: list[ClosingDealSummary] = []
+
+    # Determine new deal's primary flight_type + class (works for both unified and legacy)
+    if new_deal_type == "unified":
+        inc_result = await db.execute(
+            select(DealIncentiveConfig)
+            .where(DealIncentiveConfig.deal_id == new_deal.id)
+            .order_by(DealIncentiveConfig.incentive_order).limit(1)
+        )
+        primary_inc = inc_result.scalar_one_or_none()
+        new_flight_type = primary_inc.flight_type if primary_inc else None
+        new_class = primary_inc.class_ if primary_inc else None
+    else:
+        inc_data  = getattr(new_deal, "incentive_data", {}) or {}
+        inc_types = getattr(new_deal, "incentive_types", []) or []
+        primary   = inc_types[0] if inc_types else None
+        pdata     = inc_data.get(primary, {}) if (primary and isinstance(inc_data, dict)) else {}
+        new_flight_type = pdata.get("flightType")
+        new_class = pdata.get("class")
+
+    base_filters_unified = [
+        UnifiedDeal.tenant_id             == new_deal.tenant_id,
+        UnifiedDeal.deal_lifecycle_status == DealLifecycleType.ACTIVE,
+        UnifiedDeal.deal_maker_name       == new_deal.deal_maker_name,
+        UnifiedDeal.airline_name          == new_deal.airline_name,
+        UnifiedDeal.airline_type          == new_deal.airline_type,
+    ]
+    if new_deal_type == "unified":
+        base_filters_unified.append(UnifiedDeal.id != new_deal.id)
+    uni_result = await db.execute(
+        select(UnifiedDeal)
+        .options(
+            selectinload(UnifiedDeal.incentives).selectinload(DealIncentiveConfig.slabs).selectinload(DealIncentiveSlab.values),
+        )
+        .where(*base_filters_unified)
+    )
+    for d in uni_result.scalars().all():
+        d_primary = d.incentives[0] if d.incentives else None
+        if d_primary and d_primary.flight_type == new_flight_type and d_primary.class_ == new_class:
+            is_b2b = d.deal_type == DealKind.B2B
+            inc_types, inc_data = _build_inc_data_from_configs(d.incentives)
+            summaries.append(ClosingDealSummary(
+                deal_id=d.id,
+                deal_type="b2b" if is_b2b else "airline",
+                deal_no=f"{'B2B' if is_b2b else 'AIR'}-{d.id:06d}",
+                airline_name=d.airline_name,
+                airline_type=d.airline_type,
+                source_agent=d.source_agent,
+                deal_maker_name=d.deal_maker_name,
+                valid_from=d.valid_from,
+                valid_to=d.valid_to,
+                contract_year=d.contract_year,
+                business_type=d.business_type,
+                trigger_type=d.trigger_type,
+                payout_type=d.payout_type,
+                entity_lcc=d.entity_lcc,
+                incentive_types=inc_types,
+                incentive_data=inc_data,
+                incl_excl_types=[],
+                incl_excl_data={},
+                remark=d.remark,
+            ))
 
     _prefix = {"airline": "AIR", "b2b": "B2B", "upload": "UPL"}
-    summaries: list[ClosingDealSummary] = []
     for Model, dtype in [(AirlineDeal, "airline"), (B2BDeal, "b2b"), (UploadedDeal, "upload")]:
         filters = [
             Model.tenant_id             == new_deal.tenant_id,
@@ -1638,8 +2671,8 @@ async def _find_matching_active_deals(
             filters.append(Model.id != new_deal.id)
         result = await db.execute(select(Model).where(*filters))
         for d in result.scalars().all():
-            d_data  = d.incentive_data or {}
-            d_types = d.incentive_types or []
+            d_data  = getattr(d, "incentive_data", {}) or {}
+            d_types = getattr(d, "incentive_types", []) or []
             d_p     = d_types[0] if d_types else None
             d_pd    = d_data.get(d_p, {}) if (d_p and isinstance(d_data, dict)) else {}
             if d_pd.get("flightType") == new_flight_type and d_pd.get("class") == new_class:
@@ -1736,7 +2769,12 @@ async def _apply_decision(
 
     # Fetch the deal from the correct table based on deal_type
     deal_type = approval.deal_type
-    if deal_type == "airline":
+    if deal_type == "unified":
+        deal_result = await db.execute(select(UnifiedDeal).where(UnifiedDeal.id == approval.deal_id))
+        deal = deal_result.scalar_one()
+        approved_status = DealStatusType.APPROVED
+        rejected_status = DealStatusType.REJECTED
+    elif deal_type == "airline":
         deal_result = await db.execute(select(AirlineDeal).where(AirlineDeal.id == approval.deal_id))
         deal = deal_result.scalar_one()
         approved_status = ManualDealStatus.APPROVED
@@ -1776,7 +2814,10 @@ async def _apply_decision(
             approval.status = ApprovalActionStatus.APPROVED
             deal.status = approved_status
             deal.deal_lifecycle_status = DealLifecycleStatus.ACTIVE
-            await _close_matching_active_deals(deal, deal_type, db)
+            if deal_type == "unified":
+                await _close_matching_unified_deals(deal, db)
+            else:
+                await _close_matching_active_deals(deal, deal_type, db)
 
     await db.commit()
     refresh = await db.execute(
@@ -1923,6 +2964,7 @@ async def upload_batch_file(
         select(DealBatch).where(
             DealBatch.batch_id == batch_id,
             DealBatch.tenant_id == current_user.tenant_id,
+            DealBatch.created_by_id == current_user.id,
         )
     )
     if not batch:
@@ -1967,6 +3009,7 @@ async def get_batch_file_url(
         select(DealBatch).where(
             DealBatch.batch_id == batch_id,
             DealBatch.tenant_id == current_user.tenant_id,
+            DealBatch.created_by_id == current_user.id,
         )
     )
     if not batch or not batch.file_url:

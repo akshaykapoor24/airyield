@@ -69,50 +69,77 @@ type ExtractionPreview = {
   sample_row:        Record<string, string>;
 };
 
-type FieldDef = { key: string; label: string; required: boolean };
+type StatementType = "B2B" | "AIRLINE";
+
+const AIRLINE_AGENCIES = ["BSP", "NDC", "TGHMPR", "TGQ"] as const;
+
+type FieldDef = { key: string; label: string; required: boolean; onlyFor?: StatementType };
 
 const OUR_FIELDS: FieldDef[] = [
-  { key: "booking_ref",        label: "Booking Ref",         required: true  },
+  // ── Core (both types) ────────────────────────────────────────────────────
   { key: "ticket_number",      label: "Ticket Number",       required: true  },
   { key: "airlines_code",      label: "Airline Code",        required: true  },
-  { key: "sector",             label: "Sector",              required: true  },
+  { key: "sector",             label: "Sector / Sectors",    required: true  },
   { key: "ticket_date",        label: "Ticket Date",         required: false },
   { key: "departure_datetime", label: "Departure Date/Time", required: false },
-  { key: "last_name",          label: "Last Name",           required: false },
-  { key: "first_name",         label: "First Name",          required: false },
-  { key: "segment_type",       label: "Segment Type",        required: false },
+  { key: "booking_class",      label: "Booking Class",       required: false },
+  { key: "gds_pnr",            label: "GDS / Gal PNR",       required: false },
+  { key: "airline_name",       label: "Airline Name",        required: false },
   { key: "invoice_type",       label: "Invoice Type",        required: false },
   { key: "invoice_no",         label: "Invoice No",          required: false },
-  { key: "booking_class",      label: "Booking Class",       required: false },
-  { key: "gds_pnr",            label: "GDS PNR",             required: false },
-  { key: "airline_name",       label: "Airline Name",        required: false },
-  { key: "sold_to",            label: "Sold To",             required: false },
-  { key: "customer_name",      label: "Customer Name",       required: false },
-  { key: "cc",                 label: "CC",                  required: false },
-  { key: "acc_code",           label: "Acc Code",            required: false },
-  { key: "sell_fare",          label: "Sell Fare",           required: false },
-  { key: "sell_tax",           label: "Sell Tax",            required: false },
-  { key: "sell_tax_yq",        label: "Sell Tax YQ",         required: false },
+  { key: "segment_type",       label: "Segment Type",        required: false },
+  { key: "sell_fare",          label: "Sell / Base Fare",    required: false },
+  { key: "sell_tax",           label: "Sell Tax / Total Tax",required: false },
+  { key: "sell_tax_yq",        label: "Tax YQ",              required: false },
   { key: "sale_yr",            label: "Sale YR",             required: false },
   { key: "sale_k3",            label: "Sale K3",             required: false },
-  { key: "rei_sell",           label: "REI Sell",            required: false },
-  { key: "seat_selection",     label: "Seat Selection",      required: false },
-  { key: "excess_baggage",     label: "Excess Baggage",      required: false },
-  { key: "meals",              label: "Meals",               required: false },
-  { key: "rfd_sell",           label: "RFD Sell",            required: false },
-  { key: "can_charge",         label: "CAN Charge",          required: false },
-  { key: "booking_fee_sell",   label: "Booking Fee Sell",    required: false },
-  { key: "cgst_sell",          label: "CGST Sell",           required: false },
-  { key: "sgst_sell",          label: "SGST Sell",           required: false },
-  { key: "igst_sell",          label: "IGST Sell",           required: false },
-  { key: "comm_sell",          label: "Comm Sell",           required: false },
-  { key: "adm",                label: "ADM",                 required: false },
-  { key: "incentive_sell",     label: "Incentive Sell",      required: false },
-  { key: "dis_sell",           label: "Dis Sell",            required: false },
-  { key: "tds_sell",           label: "TDS Sell",            required: false },
-  { key: "total_amt",          label: "Total Amt",           required: false },
-  { key: "paid_by_credit_card",label: "Paid By Credit Card", required: false },
-  { key: "net_amt",            label: "Net AMT",             required: false },
+  { key: "total_amt",          label: "Total Fare / Amt",    required: false },
+  { key: "comm_sell",          label: "Comm Sell / Comm Amt",required: false },
+  { key: "net_amt",            label: "Net AMT / Net Remit", required: false },
+  { key: "customer_name",      label: "Customer / Client",   required: false },
+  { key: "tour_code",          label: "Tour Code",           required: false },
+  { key: "acc_code",           label: "Acc Code / AC_ACCT",  required: false },
+  // ── B2B-primary ───────────────────────────────────────────────────────────
+  { key: "booking_ref",        label: "Booking Ref",         required: false, onlyFor: "B2B" },
+  { key: "last_name",          label: "Last Name",           required: false, onlyFor: "B2B" },
+  { key: "first_name",         label: "First Name",          required: false, onlyFor: "B2B" },
+  { key: "sold_to",            label: "Sold To",             required: false, onlyFor: "B2B" },
+  { key: "cc",                 label: "CC",                  required: false, onlyFor: "B2B" },
+  { key: "rei_sell",           label: "REI Sell",            required: false, onlyFor: "B2B" },
+  { key: "seat_selection",     label: "Seat Selection",      required: false, onlyFor: "B2B" },
+  { key: "excess_baggage",     label: "Excess Baggage",      required: false, onlyFor: "B2B" },
+  { key: "meals",              label: "Meals",               required: false, onlyFor: "B2B" },
+  { key: "rfd_sell",           label: "RFD Sell",            required: false, onlyFor: "B2B" },
+  { key: "can_charge",         label: "CAN Charge",          required: false, onlyFor: "B2B" },
+  { key: "booking_fee_sell",   label: "Booking Fee Sell",    required: false, onlyFor: "B2B" },
+  { key: "cgst_sell",          label: "CGST Sell",           required: false, onlyFor: "B2B" },
+  { key: "sgst_sell",          label: "SGST Sell",           required: false, onlyFor: "B2B" },
+  { key: "igst_sell",          label: "IGST Sell",           required: false, onlyFor: "B2B" },
+  { key: "adm",                label: "ADM",                 required: false, onlyFor: "B2B" },
+  { key: "incentive_sell",     label: "Incentive Sell",      required: false, onlyFor: "B2B" },
+  { key: "dis_sell",           label: "Dis Sell",            required: false, onlyFor: "B2B" },
+  { key: "tds_sell",           label: "TDS Sell",            required: false, onlyFor: "B2B" },
+  { key: "paid_by_credit_card",label: "Paid By Credit Card", required: false, onlyFor: "B2B" },
+  // ── Airline-primary ───────────────────────────────────────────────────────
+  { key: "pax_name",           label: "Pax Name",            required: false, onlyFor: "AIRLINE" },
+  { key: "air_pnr",            label: "Air PNR",             required: false, onlyFor: "AIRLINE" },
+  { key: "pcc",                label: "PCC",                 required: false, onlyFor: "AIRLINE" },
+  { key: "booking_signon",     label: "Booking Sign-on",     required: false, onlyFor: "AIRLINE" },
+  { key: "booking_agency_name",label: "Booking Agency Name", required: false, onlyFor: "AIRLINE" },
+  { key: "ticketing_signon",   label: "Ticketing Sign-on",   required: false, onlyFor: "AIRLINE" },
+  { key: "document_type",      label: "Document Type",       required: false, onlyFor: "AIRLINE" },
+  { key: "fare_basis",         label: "Fare Basis",          required: false, onlyFor: "AIRLINE" },
+  { key: "fare_const_type",    label: "Fare Const Type",     required: false, onlyFor: "AIRLINE" },
+  { key: "transaction_type",   label: "Transaction Type",    required: false, onlyFor: "AIRLINE" },
+  { key: "fop",                label: "FOP",                 required: false, onlyFor: "AIRLINE" },
+  { key: "fop_details",        label: "FOP Details",         required: false, onlyFor: "AIRLINE" },
+  { key: "flight_no",          label: "Flight No",           required: false, onlyFor: "AIRLINE" },
+  { key: "travel_dt",          label: "Travel Dt",           required: false, onlyFor: "AIRLINE" },
+  { key: "net_fare",           label: "Net Fare",            required: false, onlyFor: "AIRLINE" },
+  { key: "comm_percent",       label: "Comm (%)",            required: false, onlyFor: "AIRLINE" },
+  { key: "roe",                label: "ROE",                 required: false, onlyFor: "AIRLINE" },
+  { key: "nuc",                label: "NUC",                 required: false, onlyFor: "AIRLINE" },
+  { key: "gstn",               label: "GSTN",                required: false, onlyFor: "AIRLINE" },
 ];
 
 type TColDef   = { key: keyof TicketRow; label: string; type: "text"|"date"|"number" };
@@ -370,14 +397,14 @@ function AgencyDropdown({ agency, setAgency, agencyOptions, touched, fieldCls }:
 
 // ── Statement form panel ───────────────────────────────────────────────────
 function StatementFormPanel({
-  statementName, setStatementName,
+  statementType, setStatementType,
   agency, setAgency,
   agencyOptions,
   validFrom, setValidFrom,
   validTo, setValidTo,
   touched, isComplete,
 }: {
-  statementName: string; setStatementName: (v: string) => void;
+  statementType: StatementType; setStatementType: (v: StatementType) => void;
   agency: string; setAgency: (v: string) => void;
   agencyOptions: string[];
   validFrom: string; setValidFrom: (v: string) => void;
@@ -405,31 +432,59 @@ function StatementFormPanel({
       </div>
 
       <div className="px-5 py-5 space-y-4">
-        {/* Statement Name */}
+        {/* Statement Type */}
         <div>
           <label className="block text-xs font-semibold text-gray-600 mb-1.5 uppercase tracking-wide">
-            Statement Name <span className="text-red-500">*</span>
+            Statement Type <span className="text-red-500">*</span>
           </label>
-          <input
-            type="text"
-            placeholder="e.g. May 2026 IndiGo Statement"
-            value={statementName}
-            onChange={e => setStatementName(e.target.value)}
-            className={fieldCls(statementName)}
-          />
-          {touched && !statementName.trim() && (
-            <p className="text-[11px] text-red-500 mt-1">Statement name is required</p>
-          )}
+          <div className="flex rounded-lg border border-gray-200 overflow-hidden text-sm font-medium">
+            {(["B2B", "AIRLINE"] as StatementType[]).map(t => (
+              <button
+                key={t}
+                type="button"
+                onClick={() => { setStatementType(t); setAgency(""); }}
+                className={`flex-1 py-2 transition-colors ${
+                  statementType === t
+                    ? "bg-[#1e3a5f] text-white"
+                    : "bg-white text-gray-600 hover:bg-gray-50"
+                }`}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
         </div>
 
-        {/* Agency */}
-        <AgencyDropdown
-          agency={agency}
-          setAgency={setAgency}
-          agencyOptions={agencyOptions}
-          touched={touched}
-          fieldCls={fieldCls}
-        />
+        {/* Agency — conditional on statement type */}
+        {statementType === "AIRLINE" ? (
+          <div>
+            <label className="block text-xs font-semibold text-gray-600 mb-1.5 uppercase tracking-wide">
+              <Building2 className="w-3.5 h-3.5 inline mr-1" />
+              Statement Agency <span className="text-red-500">*</span>
+            </label>
+            <select
+              value={agency}
+              onChange={e => setAgency(e.target.value)}
+              className={fieldCls(agency)}
+            >
+              <option value="">— Select agency —</option>
+              {AIRLINE_AGENCIES.map(a => (
+                <option key={a} value={a}>{a}</option>
+              ))}
+            </select>
+            {touched && !agency && (
+              <p className="text-[11px] text-red-500 mt-1">Agency is required</p>
+            )}
+          </div>
+        ) : (
+          <AgencyDropdown
+            agency={agency}
+            setAgency={setAgency}
+            agencyOptions={agencyOptions}
+            touched={touched}
+            fieldCls={fieldCls}
+          />
+        )}
 
         {/* Valid From */}
         <div>
@@ -499,21 +554,20 @@ export default function UploadTicketsPage() {
   const downloadLinkRef  = useRef<HTMLAnchorElement>(null);
 
   // ── Statement form state ───────────────────────────────────────────────────
-  const [statementName, setStatementName]   = useState("");
-  const [agency,        setAgency]          = useState("");
-  const [agencyOptions, setAgencyOptions]   = useState<string[]>([]);
+  const [statementType, setStatementType] = useState<StatementType>("B2B");
+  const [agency,        setAgency]        = useState("");
+  const [agencyOptions, setAgencyOptions] = useState<string[]>([]);
 
   useEffect(() => {
     api.get<{ id: number; name: string }[]>("/suppliers/?limit=5000")
       .then(r => setAgencyOptions(r.data.map(s => s.name)))
       .catch(() => {});
   }, []);
-  const [validFrom,     setValidFrom]     = useState("");
-  const [validTo,       setValidTo]       = useState("");
-  const [formTouched,   setFormTouched]   = useState(false);
+  const [validFrom,   setValidFrom]   = useState("");
+  const [validTo,     setValidTo]     = useState("");
+  const [formTouched, setFormTouched] = useState(false);
 
   const isStatementComplete =
-    statementName.trim() !== "" &&
     agency !== "" &&
     validFrom !== "" &&
     validTo !== "" &&
@@ -559,11 +613,12 @@ export default function UploadTicketsPage() {
   const handleDownloadTemplate = async () => {
     setDownloading(true);
     try {
-      const resp = await api.get("/tickets/template/download", { responseType: "blob" });
+      const typeParam = statementType.toLowerCase();
+      const resp = await api.get(`/tickets/template/download?type=${typeParam}`, { responseType: "blob" });
       const url  = URL.createObjectURL(resp.data as Blob);
       const a    = downloadLinkRef.current!;
       a.href     = url;
-      a.download = "ticket_template.xlsx";
+      a.download = statementType === "AIRLINE" ? "airline_ticket_template.xlsx" : "ticket_template.xlsx";
       a.click();
       URL.revokeObjectURL(url);
     } catch {
@@ -582,6 +637,7 @@ export default function UploadTicketsPage() {
     try {
       const form = new FormData();
       form.append("file", files[0]);
+      form.append("statement_type", statementType);
       const { data } = await api.post<ExtractionPreview>("/tickets/upload/extract", form, {
         headers: { "Content-Type": "multipart/form-data" },
       });
@@ -616,6 +672,7 @@ export default function UploadTicketsPage() {
       const form = new FormData();
       form.append("file", storedFile);
       form.append("column_mapping", JSON.stringify(mapping));
+      form.append("statement_type", statementType);
       const { data } = await api.post<ExtractionPreview>("/tickets/upload/extract", form, {
         headers: { "Content-Type": "multipart/form-data" },
       });
@@ -631,7 +688,8 @@ export default function UploadTicketsPage() {
     }
   };
 
-  const requiredKeys    = OUR_FIELDS.filter(f => f.required).map(f => f.key);
+  const activeFields    = OUR_FIELDS.filter(f => !f.onlyFor || f.onlyFor === statementType);
+  const requiredKeys    = activeFields.filter(f => f.required).map(f => f.key);
   const missingRequired = requiredKeys.filter(k => !mapping[k] || mapping[k] === SKIP);
 
   // ── Step 3: confirm → save ────────────────────────────────────────────────
@@ -646,7 +704,7 @@ export default function UploadTicketsPage() {
         {
           file_name:      preview.file_name,
           rows,
-          statement_name: statementName,
+          statement_type: statementType,
           agency,
           valid_from:     validFrom,
           valid_to:       validTo,
@@ -679,7 +737,7 @@ export default function UploadTicketsPage() {
   const reset = () => {
     setStep("drop"); setPreview(null); setStoredFile(null);
     setMapping({}); setBatchId(null); setError(null); setRows([]); resetFilter();
-    setStatementName(""); setAgency(""); setValidFrom(""); setValidTo(""); setFormTouched(false);
+    setStatementType("B2B"); setAgency(""); setValidFrom(""); setValidTo(""); setFormTouched(false);
   };
 
   const isDone = step === "done";
@@ -741,9 +799,12 @@ export default function UploadTicketsPage() {
           </div>
           <div>
             <h2 className="text-lg font-bold text-gray-900">Statement Created</h2>
-            <p className="text-sm font-medium text-gray-700 mt-1">{statementName}</p>
+            <p className="text-sm font-medium text-gray-700 mt-1">
+              <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold mr-2 ${statementType === "AIRLINE" ? "bg-blue-100 text-blue-700" : "bg-purple-100 text-purple-700"}`}>{statementType}</span>
+              {agency}
+            </p>
             <p className="text-xs text-gray-500 mt-0.5">
-              {agency} · {validFrom} – {validTo}
+              {validFrom} – {validTo}
             </p>
             <p className="text-sm text-gray-500 mt-2">
               {preview.total_rows} tickets saved from <span className="font-medium">{preview.file_name}</span>
@@ -782,7 +843,7 @@ export default function UploadTicketsPage() {
         <div className="grid grid-cols-1 lg:grid-cols-[380px_1fr] gap-6 items-start">
           {/* LEFT: Statement form */}
           <StatementFormPanel
-            statementName={statementName} setStatementName={setStatementName}
+            statementType={statementType} setStatementType={setStatementType}
             agency={agency}               setAgency={setAgency}
             agencyOptions={agencyOptions}
             validFrom={validFrom}         setValidFrom={setValidFrom}
@@ -842,9 +903,8 @@ export default function UploadTicketsPage() {
           {/* statement summary bar */}
           <div className="bg-[#1e3a5f]/5 border border-[#1e3a5f]/20 rounded-xl px-5 py-3 flex items-center gap-4 flex-wrap">
             <FileText className="w-4 h-4 text-[#1e3a5f] shrink-0" />
-            <span className="text-xs font-semibold text-[#1e3a5f]">{statementName || <span className="text-red-400 italic">Statement name missing</span>}</span>
-            <span className="text-gray-300 text-xs">·</span>
-            <span className="text-xs text-gray-600">{agency || <span className="text-red-400 italic">Agency missing</span>}</span>
+            <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold tracking-wide ${statementType === "AIRLINE" ? "bg-blue-100 text-blue-700" : "bg-purple-100 text-purple-700"}`}>{statementType}</span>
+            <span className="text-xs font-semibold text-[#1e3a5f]">{agency || <span className="text-red-400 italic">Agency missing</span>}</span>
             <span className="text-gray-300 text-xs">·</span>
             <span className="text-xs text-gray-600">{validFrom && validTo ? `${validFrom} – ${validTo}` : <span className="text-red-400 italic">Dates missing</span>}</span>
             {!isStatementComplete && (
@@ -875,7 +935,7 @@ export default function UploadTicketsPage() {
               <CheckCircle className="w-5 h-5 text-green-600 shrink-0 mt-0.5" />
               <div>
                 <p className="text-sm font-semibold text-green-800">
-                  All columns matched automatically ({Object.keys(preview.suggested_mapping).length} of {OUR_FIELDS.length} fields)
+                  All columns matched automatically ({Object.keys(preview.suggested_mapping).length} of {activeFields.length} fields)
                 </p>
                 <p className="text-xs text-green-600 mt-0.5">
                   This looks like our template. You can review the mapping below or proceed directly.
@@ -887,7 +947,7 @@ export default function UploadTicketsPage() {
               <AlertCircle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
               <div>
                 <p className="text-sm font-semibold text-amber-800">
-                  {Object.keys(preview.suggested_mapping).length} of {OUR_FIELDS.length} columns auto-matched
+                  {Object.keys(preview.suggested_mapping).length} of {activeFields.length} columns auto-matched
                 </p>
                 <p className="text-xs text-amber-600 mt-0.5">
                   Map the remaining columns below, then click &quot;Apply Mapping&quot;.
@@ -911,7 +971,7 @@ export default function UploadTicketsPage() {
               <p className="text-xs text-gray-400">Select which column from your file maps to each field</p>
             </div>
             <div className="divide-y divide-gray-100 max-h-[460px] overflow-y-auto">
-              {OUR_FIELDS.map(field => {
+              {activeFields.map(field => {
                 const mapped    = mapping[field.key];
                 const isSkipped = !mapped || mapped === SKIP;
                 return (
@@ -973,7 +1033,7 @@ export default function UploadTicketsPage() {
             <div className="text-xs text-gray-500">
               {missingRequired.length > 0 && !preview.is_template_match && (
                 <span className="text-red-500">
-                  Required fields not mapped: {missingRequired.map(k => OUR_FIELDS.find(f => f.key === k)?.label).join(", ")}
+                  Required fields not mapped: {missingRequired.map(k => activeFields.find(f => f.key === k)?.label).join(", ")}
                 </span>
               )}
             </div>
@@ -1007,9 +1067,8 @@ export default function UploadTicketsPage() {
           {/* statement summary bar */}
           <div className="bg-[#1e3a5f]/5 border border-[#1e3a5f]/20 rounded-xl px-5 py-3 flex items-center gap-4 flex-wrap">
             <FileText className="w-4 h-4 text-[#1e3a5f] shrink-0" />
-            <span className="text-xs font-semibold text-[#1e3a5f]">{statementName || <span className="text-red-400 italic">Statement name missing</span>}</span>
-            <span className="text-gray-300 text-xs">·</span>
-            <span className="text-xs text-gray-600">{agency || <span className="text-red-400 italic">Agency missing</span>}</span>
+            <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold tracking-wide ${statementType === "AIRLINE" ? "bg-blue-100 text-blue-700" : "bg-purple-100 text-purple-700"}`}>{statementType}</span>
+            <span className="text-xs font-semibold text-[#1e3a5f]">{agency || <span className="text-red-400 italic">Agency missing</span>}</span>
             <span className="text-gray-300 text-xs">·</span>
             <span className="text-xs text-gray-600">{validFrom && validTo ? `${validFrom} – ${validTo}` : <span className="text-red-400 italic">Dates missing</span>}</span>
             {!isStatementComplete && (

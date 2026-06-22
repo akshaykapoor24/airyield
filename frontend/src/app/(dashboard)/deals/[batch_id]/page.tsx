@@ -9,6 +9,7 @@ import {
   FileText, FileSpreadsheet, Building2, Calendar, Hash, ChevronDown, Search,
 } from "lucide-react";
 import api from "@/lib/api";
+import { IncentiveTabContent } from "@/components/deals/IncentiveInclExclShared";
 
 // ── incl/excl option constants ─────────────────────────────────────────────
 const IE_CONTINENTS     = ["Africa","Asia","Europe","North America","Oceania","South America","Antarctica"];
@@ -154,7 +155,7 @@ function IESearchSelectField({label,placeholder="Search and select",options,valu
 }
 
 // ── types ──────────────────────────────────────────────────────────────────
-type DealType = "upload" | "airline" | "b2b";
+type DealType = "upload" | "airline" | "b2b" | "unified";
 
 type DealBatch = {
   batch_id:        string;
@@ -169,6 +170,41 @@ type DealBatch = {
   deal_count:      number;
   created_by_name: string | null;
   created_at:      string;
+};
+
+type SlabRow = {
+  slabType?:           string;
+  slabOrder?:          number;
+  quarterlyFreq?:      string;
+  halfYearlyFreq?:     string;
+  baseTargetAmtNumPct?: string;
+  baseTargetAmount?:   string;
+  targetFrom?:         string;
+  targetTo?:           string;
+  segment?:            string;
+  class?:              string;
+  values?:             Record<string, number | null>;
+};
+
+type IncentiveEntry = {
+  validFrom?:             string;
+  validTo?:               string;
+  frequency?:             string;
+  flightType?:            string;
+  class?:                 string;
+  routeType?:             string;
+  triggerBased?:          string;
+  targetBased?:           string;
+  targetCalcCols?:        string;
+  payoutCalcCols?:        string;
+  amountBasedType?:       string;
+  baseTargetAmount?:      string;
+  incentiveNumPct?:       string;
+  incentiveAmtPct?:       string;
+  cappedIncentive?:       string;
+  cappedIncentiveAmount?: string;
+  slabs?:                 SlabRow[];
+  [key: string]: unknown;
 };
 
 type DealRepositoryItem = {
@@ -188,9 +224,11 @@ type DealRepositoryItem = {
   remark:          string | null;
   deal_maker_name: string | null;
   incentive_types: string[] | null;
-  incentive_data:  Record<string, Record<string, string>> | null;
+  incentive_data:  Record<string, IncentiveEntry> | null;
   incl_excl_types: string[] | null;
-  incl_excl_data:  Record<string, Record<string, IEFieldValue>> | null;
+  // For unified deals: {inc_type: {rule_type: conditions}}
+  // For legacy deals:  {rule_type: conditions}
+  incl_excl_data:  Record<string, unknown> | null;
   deal_tag:              string | null;
   status:                string;
   deal_lifecycle_status: string | null;
@@ -257,9 +295,10 @@ const LIFECYCLE_LABEL: Record<string, string> = {
 };
 
 const DEAL_TYPE_STYLE: Record<string, { label: string; cls: string }> = {
-  airline: { label: "Airline", cls: "bg-sky-50 text-sky-700 border-sky-200" },
-  b2b:     { label: "B2B",     cls: "bg-violet-50 text-violet-700 border-violet-200" },
-  upload:  { label: "Upload",  cls: "bg-teal-50 text-teal-700 border-teal-200" },
+  airline: { label: "Airline",     cls: "bg-sky-50 text-sky-700 border-sky-200"         },
+  b2b:     { label: "B2B",         cls: "bg-violet-50 text-violet-700 border-violet-200" },
+  upload:  { label: "Upload",      cls: "bg-teal-50 text-teal-700 border-teal-200"       },
+  unified: { label: "Airline/B2B", cls: "bg-indigo-50 text-indigo-700 border-indigo-200" },
 };
 
 const STEP_STATUS_CONFIG: Record<string, { icon: React.ReactNode; color: string; label: string }> = {
@@ -307,9 +346,63 @@ function getDealSegments(d: DealRepositoryItem): string[] {
 }
 
 function getDealTypeBadge(d: DealRepositoryItem) {
+  if (d.deal_type === "unified") {
+    // The deal KIND (B2B vs Airline) is encoded in the deal_no prefix the backend
+    // builds from Deal.deal_type — the same signal the statement view shows. Don't
+    // use business_type (B2B/B2C/B2E/MICE), which is optional and may be empty on a
+    // B2B-kind deal, otherwise the badge disagrees with the statement.
+    const isB2b = d.deal_no?.startsWith("B2B") ?? !!d.business_type;
+    return isB2b ? DEAL_TYPE_STYLE.b2b : DEAL_TYPE_STYLE.airline;
+  }
   if (d.deal_type !== "upload") return DEAL_TYPE_STYLE[d.deal_type];
   if (d.business_type) return DEAL_TYPE_STYLE.b2b;
   return DEAL_TYPE_STYLE.airline;
+}
+
+// ── incentive form data conversion ────────────────────────────────────────
+function entryToFormData(entry: IncentiveEntry): Record<string, string> {
+  const form: Record<string, string> = {};
+  for (const [k, v] of Object.entries(entry)) {
+    if (k === "slabs") continue;
+    if (v !== null && v !== undefined && !Array.isArray(v) && typeof v !== "object") {
+      form[k] = String(v);
+    }
+  }
+  // Convert SlabRow[] (repository/uploaded deals carry a single `slabs` array)
+  // into the amountSlabs / segmentSlabs / siSlabs JSON strings the tab expects.
+  // Routing by slabType is lossless — Segment Incentive rows no longer leak into
+  // the amount-slab bucket and get dropped on save.
+  if (entry.slabs && entry.slabs.length > 0) {
+    const groups: Record<string, Record<string, string>[]> = { amount: [], segment: [], si: [] };
+    entry.slabs.forEach((s, i) => {
+      const row: Record<string, string> = { id: `r${i}` };
+      if (s.quarterlyFreq)       row.quarterlyFreq = s.quarterlyFreq;
+      if (s.halfYearlyFreq)      row.halfYearlyFreq = s.halfYearlyFreq;
+      if (s.baseTargetAmtNumPct) row.baseTargetNumPct = s.baseTargetAmtNumPct;
+      if (s.baseTargetAmount)    row.baseTargetAmount = s.baseTargetAmount;
+      if (s.targetFrom)          row.targetFrom = s.targetFrom;
+      if (s.targetTo)            row.targetTo = s.targetTo;
+      if (s.segment)             row.segment = s.segment;
+      if (s.class)               row.class = s.class;
+      for (const [k, v] of Object.entries(s.values ?? {})) {
+        row[k] = v != null ? String(v) : "";
+      }
+      const st = (s.slabType ?? "amount").toLowerCase();
+      (groups[st] ?? groups.amount).push(row);
+    });
+    if (groups.amount.length && !form.amountSlabs)   form.amountSlabs = JSON.stringify(groups.amount);
+    if (groups.segment.length && !form.segmentSlabs) form.segmentSlabs = JSON.stringify(groups.segment);
+    if (groups.si.length && !form.siSlabs)           form.siSlabs = JSON.stringify(groups.si);
+  }
+  return form;
+}
+
+function formDataToEntry(data: Record<string, string>): IncentiveEntry {
+  const entry: IncentiveEntry = {};
+  for (const [k, v] of Object.entries(data)) {
+    if (v !== "") entry[k as keyof IncentiveEntry] = v as string;
+  }
+  return entry;
 }
 
 const TABLE_HEADERS = [
@@ -321,105 +414,49 @@ const TABLE_HEADERS = [
   "Deal Maker", "Approval Status", "Deal Status", "Actions",
 ];
 
-// ── IncentiveEditModal ─────────────────────────────────────────────────────
-const INCENTIVE_FIELD_META: Record<string, { type: "date" | "select" | "number" | "text"; options?: string[] }> = {
-  validFrom:       { type: "date" },
-  validTo:         { type: "date" },
-  frequency:       { type: "select", options: ["Quarterly", "Half Yearly", "Yearly"] },
-  flightType:      { type: "select", options: ["International", "Domestic", "Both"] },
-  class:           { type: "select", options: ["All", "Economy", "Premium", "Business"] },
-  targetCalcCols:  { type: "select", options: ["Basic", "Basic + YQ", "Basic + YQ +YR", "Basic + YR"] },
-  payoutCalcCols:  { type: "select", options: ["Basic", "Basic + YQ", "Basic + YQ +YR", "Basic + YR"] },
-  incentiveNumPct: { type: "select", options: ["Number", "Percentage"] },
-  incentiveAmtPct: { type: "number" },
-};
-
-function IncentiveEditModal({ name, data, onSave, onClose }: {
+// ── IncentiveEditModal ────────────────────────────────────────────────────
+function IncentiveEditModal({ name, entry, onSave, onClose }: {
   name: string;
-  data: Record<string, string>;
-  onSave: (updated: Record<string, string>) => Promise<void>;
+  entry: IncentiveEntry;
+  onSave: (name: string, updated: IncentiveEntry) => Promise<void>;
   onClose: () => void;
 }) {
-  const [fields, setFields] = useState<Record<string, string>>({ ...data });
+  const [formData, setFormData] = useState<Record<string, string>>(() => entryToFormData(entry));
   const [saving, setSaving] = useState(false);
-
-  const set = (k: string, v: string) => setFields(prev => ({ ...prev, [k]: v }));
 
   const handleSave = async () => {
     setSaving(true);
-    try { await onSave(fields); onClose(); }
-    finally { setSaving(false); }
+    try {
+      await onSave(name, formDataToEntry(formData));
+      onClose();
+    } finally {
+      setSaving(false);
+    }
   };
-
-  const inputCls = "w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400 bg-white";
 
   return (
     <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={onClose}>
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md" onClick={e => e.stopPropagation()}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
           <div>
             <h2 className="text-sm font-bold text-gray-900">{name}</h2>
-            <p className="text-[10px] text-gray-400 mt-0.5">Incentive Type — Edit Details</p>
+            <p className="text-[10px] text-gray-400 mt-0.5">Edit incentive details · changes are saved to the deal</p>
           </div>
           <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-lg"><X className="w-4 h-4 text-gray-500" /></button>
         </div>
-        <div className="px-5 py-4 max-h-[60vh] overflow-y-auto">
-          {Object.keys(fields).length === 0 ? (
-            <p className="text-xs text-gray-400 py-2">No fields recorded for this incentive.</p>
-          ) : (
-            <div className="space-y-3">
-              {Object.entries(fields).map(([k, v]) => {
-                const meta = INCENTIVE_FIELD_META[k] ?? { type: "text" };
-                const label = k.replace(/([A-Z])/g, " $1").trim();
-                return (
-                  <div key={k}>
-                    <label className="block text-[9px] font-semibold text-gray-400 uppercase tracking-wide mb-1">
-                      {label}
-                    </label>
-                    {meta.type === "select" ? (
-                      <select
-                        value={v}
-                        onChange={e => set(k, e.target.value)}
-                        className={inputCls}
-                      >
-                        <option value="">— select —</option>
-                        {meta.options!.map(opt => (
-                          <option key={opt} value={opt}>{opt}</option>
-                        ))}
-                      </select>
-                    ) : meta.type === "date" ? (
-                      <input
-                        type="date"
-                        value={v ? v.slice(0, 10) : ""}
-                        onChange={e => set(k, e.target.value)}
-                        className={inputCls}
-                      />
-                    ) : meta.type === "number" ? (
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={v}
-                        onChange={e => set(k, e.target.value)}
-                        className={inputCls}
-                      />
-                    ) : (
-                      <input
-                        type="text"
-                        value={v}
-                        onChange={e => set(k, e.target.value)}
-                        className={inputCls}
-                      />
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
+
+        <div className="overflow-y-auto flex-1">
+          <IncentiveTabContent
+            name={name}
+            data={formData}
+            onChange={(k, v) => setFormData(prev => ({ ...prev, [k]: v }))}
+          />
         </div>
-        <div className="px-5 pb-4 flex gap-2">
+
+        <div className="px-5 pb-4 pt-3 border-t border-gray-100 flex gap-2">
           <button onClick={handleSave} disabled={saving}
             className="flex-1 flex items-center justify-center gap-1.5 bg-[#1e3a5f] text-white rounded-lg py-2 text-sm font-medium hover:bg-[#16304f] disabled:opacity-50">
-            <Save className="w-3.5 h-3.5" />{saving ? "Saving..." : "Save"}
+            <Save className="w-3.5 h-3.5"/>{saving ? "Saving..." : "Save Changes"}
           </button>
           <button onClick={onClose} className="flex-1 border border-gray-200 rounded-lg py-2 text-sm text-gray-600 hover:bg-gray-50">Cancel</button>
         </div>
@@ -549,18 +586,51 @@ function InclExclTypeForm({ typeName, form, onChange }: {
 }
 
 // ── InclExclEditModal ──────────────────────────────────────────────────────
-const IE_TYPES = ["Inclusion For Payout", "Exclusion For Payout"] as const;
+const ALL_RULE_TYPES = ["Inclusion For Trigger", "Exclusion For Trigger", "Inclusion For Payout", "Exclusion For Payout"] as const;
+type RuleType = typeof ALL_RULE_TYPES[number];
 
-function InclExclEditModal({ allData, onSave, onClose }: {
-  allData: Record<string, Record<string, IEFieldValue>>;
-  onSave: (updated: Record<string, Record<string, IEFieldValue>>) => Promise<void>;
+// One rule's condition fields. The modal's `forms` state holds either a flat
+// {rule_type: fields} map (legacy deals) or a nested {inc_type: {rule_type: fields}}
+// map (unified deals), so the state value type is the union of both shapes.
+type IEFields = Record<string, IEFieldValue>;
+type IEForms  = Record<string, IEFields | Record<string, IEFields>>;
+
+function InclExclEditModal({ rawData, dealType, incentiveTypes, initialRuleType, onSave, onClose }: {
+  rawData: Record<string, unknown>;
+  dealType: DealType;
+  incentiveTypes: string[];
+  initialRuleType?: RuleType;
+  onSave: (updated: Record<string, unknown>) => Promise<void>;
   onClose: () => void;
 }) {
-  const [forms, setForms] = useState<Record<string, Record<string, IEFieldValue>>>({
-    "Inclusion For Payout":  { ...(allData["Inclusion For Payout"]  ?? {}) },
-    "Exclusion For Payout":  { ...(allData["Exclusion For Payout"]  ?? {}) },
+  // Detect format: unified deals have per-incentive structure {inc_type: {rule_type: conditions}}
+  const isPerIncentive = dealType === "unified" && incentiveTypes.length > 0;
+
+  // For unified: forms = {inc_type: {rule_type: conditions}}
+  // For legacy:  forms = {rule_type: conditions}
+  const [forms, setForms] = useState<IEForms>(() => {
+    if (isPerIncentive) {
+      const init: Record<string, Record<string, IEFields>> = {};
+      for (const incType of incentiveTypes) {
+        const incData = (rawData[incType] ?? {}) as Record<string, IEFields>;
+        init[incType] = {};
+        for (const rt of ALL_RULE_TYPES) {
+          init[incType][rt] = { ...(incData[rt] ?? {}) };
+        }
+      }
+      return init;
+    } else {
+      const flatData = rawData as Record<string, IEFields>;
+      const init: Record<string, IEFields> = {};
+      for (const rt of ALL_RULE_TYPES) {
+        init[rt] = { ...(flatData[rt] ?? {}) };
+      }
+      return init;
+    }
   });
-  const [activeTab, setActiveTab] = useState<typeof IE_TYPES[number]>("Inclusion For Payout");
+
+  const [activeIncType, setActiveIncType] = useState<string>(incentiveTypes[0] ?? "");
+  const [activeRuleType, setActiveRuleType] = useState<RuleType>(initialRuleType ?? "Inclusion For Payout");
   const [saving, setSaving] = useState(false);
 
   const handleSave = async () => {
@@ -569,42 +639,83 @@ function InclExclEditModal({ allData, onSave, onClose }: {
     finally { setSaving(false); }
   };
 
+  // Current form data for the active view
+  const currentForm: IEFields = isPerIncentive
+    ? ((forms[activeIncType] as Record<string, IEFields>)?.[activeRuleType] ?? {})
+    : ((forms[activeRuleType] as IEFields) ?? {});
+
+  const handleFormChange = (updated: IEFields) => {
+    if (isPerIncentive) {
+      setForms(prev => ({
+        ...prev,
+        [activeIncType]: { ...(prev[activeIncType] as Record<string, IEFields>), [activeRuleType]: updated },
+      }));
+    } else {
+      setForms(prev => ({ ...prev, [activeRuleType]: updated }));
+    }
+  };
+
+  const handleClear = () => {
+    if (isPerIncentive) {
+      setForms(prev => ({
+        ...prev,
+        [activeIncType]: { ...(prev[activeIncType] as Record<string, IEFields>), [activeRuleType]: {} },
+      }));
+    } else {
+      setForms(prev => ({ ...prev, [activeRuleType]: {} }));
+    }
+  };
+
   return (
     <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={onClose}>
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col" onClick={e=>e.stopPropagation()}>
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
           <div>
             <h2 className="text-sm font-bold text-gray-900">Inclusions &amp; Exclusions</h2>
-            <p className="text-[10px] text-gray-400 mt-0.5">All fields support multiple values. Fields are independent.</p>
+            <p className="text-[10px] text-gray-400 mt-0.5">
+              {isPerIncentive ? "Per incentive type — select incentive then rule type" : "All fields support multiple values. Fields are independent."}
+            </p>
           </div>
           <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-lg"><X className="w-4 h-4 text-gray-500"/></button>
         </div>
-        {/* Tabs */}
-        <div className="flex items-center justify-between border-b border-gray-100 px-5">
-          <div className="flex">
-            {IE_TYPES.map(t=>(
-              <button key={t} type="button" onClick={()=>setActiveTab(t)}
-                className={`px-4 py-2.5 text-xs font-semibold border-b-2 transition-colors ${activeTab===t?"border-[#1e3a5f] text-[#1e3a5f]":"border-transparent text-gray-400 hover:text-gray-600"}`}>
-                {t.includes("Exclusion") ? "Exclusion For Payout" : "Inclusion For Payout"}
+
+        {/* Outer tabs: incentive types (unified only) */}
+        {isPerIncentive && incentiveTypes.length > 1 && (
+          <div className="flex gap-1 px-5 pt-3 pb-0">
+            {incentiveTypes.map(t => (
+              <button key={t} type="button" onClick={() => setActiveIncType(t)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${activeIncType === t ? "bg-[#1e3a5f] text-white" : "bg-gray-100 text-gray-500 hover:bg-gray-200"}`}>
+                {t}
               </button>
             ))}
           </div>
-          <button
-            type="button"
-            onClick={()=>setForms(p=>({...p,[activeTab]:{}}))}
-            className="flex items-center gap-1 text-[11px] font-medium text-red-500 hover:text-red-700 hover:bg-red-50 px-2.5 py-1 rounded-md transition-colors"
-          >
-            <X className="w-3 h-3"/>Clear All
+        )}
+
+        {/* Rule type tabs */}
+        <div className="flex items-center justify-between border-b border-gray-100 px-5 mt-1">
+          <div className="flex">
+            {ALL_RULE_TYPES.map(rt => (
+              <button key={rt} type="button" onClick={() => setActiveRuleType(rt)}
+                className={`px-4 py-2.5 text-xs font-semibold border-b-2 transition-colors whitespace-nowrap ${activeRuleType === rt ? "border-[#1e3a5f] text-[#1e3a5f]" : "border-transparent text-gray-400 hover:text-gray-600"}`}>
+                {rt}
+              </button>
+            ))}
+          </div>
+          <button type="button" onClick={handleClear}
+            className="flex items-center gap-1 text-[11px] font-medium text-red-500 hover:text-red-700 hover:bg-red-50 px-2.5 py-1 rounded-md transition-colors">
+            <X className="w-3 h-3"/>Clear
           </button>
         </div>
+
         <div className="overflow-y-auto flex-1 px-5 py-4">
           <InclExclTypeForm
-            key={activeTab}
-            typeName={activeTab}
-            form={forms[activeTab]}
-            onChange={updated=>setForms(p=>({...p,[activeTab]:updated}))}
+            key={`${activeIncType}:${activeRuleType}`}
+            typeName={activeRuleType}
+            form={currentForm}
+            onChange={handleFormChange}
           />
         </div>
+
         <div className="px-5 pb-4 pt-3 border-t border-gray-100 flex gap-2">
           <button onClick={handleSave} disabled={saving}
             className="flex-1 flex items-center justify-center gap-1.5 bg-[#1e3a5f] text-white rounded-lg py-2 text-sm font-medium hover:bg-[#16304f] disabled:opacity-50">
@@ -904,12 +1015,13 @@ export default function DealBatchPage() {
   const [deleteTarget,  setDeleteTarget]  = useState<DealRepositoryItem | null>(null);
   const [deleteLoading, setDeleteLoading] = useState(false);
 
-  // incentive / incl-excl edit popups
+  // incentive / incl-excl popups
   const [incentivePopup, setIncentivePopup] = useState<{
-    name: string; data: Record<string, string>; dealId: number; dealType: DealType;
+    name: string; entry: IncentiveEntry; dealId: number; dealType: DealType;
   } | null>(null);
   const [inclExclPopup, setInclExclPopup] = useState<{
-    dealId: number; dealType: DealType;
+    dealId: number; dealType: DealType; incentiveTypes: string[];
+    initialRuleType?: RuleType;
   } | null>(null);
 
   const fetchAll = useCallback(async () => {
@@ -972,18 +1084,19 @@ export default function DealBatchPage() {
     setEditDeal(null);
   }, [editDeal, patchDeal, fetchAll]);
 
-  const handleIncentiveSave = useCallback(async (updatedData: Record<string, string>) => {
+  const handleInclExclSave = useCallback(async (updated: Record<string, unknown>) => {
+    if (!inclExclPopup) return;
+    await patchDeal(inclExclPopup.dealId, inclExclPopup.dealType, { incl_excl_data: updated });
+  }, [inclExclPopup, patchDeal]);
+
+  const handleIncentiveSave = useCallback(async (name: string, updatedEntry: IncentiveEntry) => {
     if (!incentivePopup) return;
     const deal = deals.find(d => d.id === incentivePopup.dealId && d.deal_type === incentivePopup.dealType);
     if (!deal) return;
-    const newIncentiveData = { ...(deal.incentive_data ?? {}), [incentivePopup.name]: updatedData };
-    await patchDeal(incentivePopup.dealId, incentivePopup.dealType, { incentive_data: newIncentiveData });
+    await patchDeal(incentivePopup.dealId, incentivePopup.dealType, {
+      incentive_data: { ...(deal.incentive_data ?? {}), [name]: updatedEntry },
+    });
   }, [incentivePopup, deals, patchDeal]);
-
-  const handleInclExclSave = useCallback(async (allData: Record<string, Record<string, IEFieldValue>>) => {
-    if (!inclExclPopup) return;
-    await patchDeal(inclExclPopup.dealId, inclExclPopup.dealType, { incl_excl_data: allData });
-  }, [inclExclPopup, patchDeal]);
 
   const handleDeleteDeal = useCallback(async () => {
     if (!deleteTarget) return;
@@ -1361,7 +1474,7 @@ export default function DealBatchPage() {
                         <div className="flex flex-wrap gap-0.5">
                           {(d.incentive_types ?? []).map(t => (
                             <button key={t}
-                              onClick={() => setIncentivePopup({ name: t, data: d.incentive_data?.[t] ?? {}, dealId: d.id, dealType: d.deal_type })}
+                              onClick={() => setIncentivePopup({ name: t, entry: d.incentive_data?.[t] ?? {}, dealId: d.id, dealType: d.deal_type })}
                               className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-blue-50 text-blue-700 border border-blue-200 whitespace-nowrap hover:bg-blue-100 cursor-pointer transition-colors">
                               {t}
                             </button>
@@ -1371,27 +1484,38 @@ export default function DealBatchPage() {
                     </td>
 
                     <td className="px-2 py-1.5 min-w-28">
-                      <button
-                        onClick={() => setInclExclPopup({ dealId: d.id, dealType: d.deal_type })}
-                        className="text-left group"
-                      >
-                        {(d.incl_excl_types ?? []).length > 0 ? (
-                          <div className="flex flex-wrap gap-0.5">
-                            {(d.incl_excl_types ?? []).map(t => {
-                              const isExcl = t.toLowerCase().includes("exclusion");
-                              return (
-                                <span key={t} className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border whitespace-nowrap ${
+                      {(d.incl_excl_types ?? []).length > 0 ? (
+                        <div className="flex flex-wrap gap-0.5">
+                          {(d.incl_excl_types ?? []).map(t => {
+                            const isExcl = t.toLowerCase().includes("exclusion");
+                            return (
+                              <button
+                                key={t}
+                                onClick={() => setInclExclPopup({
+                                  dealId: d.id,
+                                  dealType: d.deal_type,
+                                  incentiveTypes: d.incentive_types ?? [],
+                                  initialRuleType: t as RuleType,
+                                })}
+                                className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border whitespace-nowrap transition-colors ${
                                   isExcl
-                                    ? "bg-red-50 text-red-600 border-red-200 group-hover:bg-red-100"
-                                    : "bg-green-50 text-green-700 border-green-200 group-hover:bg-green-100"
-                                }`}>{t}</span>
-                              );
-                            })}
-                          </div>
-                        ) : (
-                          <span className="text-[11px] text-gray-300 group-hover:text-gray-400">+ Add</span>
-                        )}
-                      </button>
+                                    ? "bg-red-50 text-red-600 border-red-200 hover:bg-red-100"
+                                    : "bg-green-50 text-green-700 border-green-200 hover:bg-green-100"
+                                }`}
+                              >
+                                {t}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => setInclExclPopup({ dealId: d.id, dealType: d.deal_type, incentiveTypes: d.incentive_types ?? [] })}
+                          className="text-[11px] text-gray-300 hover:text-gray-400"
+                        >
+                          + Add
+                        </button>
+                      )}
                     </td>
 
                     <td className="px-2 py-1.5 min-w-28">
@@ -1518,7 +1642,7 @@ export default function DealBatchPage() {
       {incentivePopup && (
         <IncentiveEditModal
           name={incentivePopup.name}
-          data={incentivePopup.data}
+          entry={incentivePopup.entry}
           onSave={handleIncentiveSave}
           onClose={() => setIncentivePopup(null)}
         />
@@ -1529,7 +1653,10 @@ export default function DealBatchPage() {
         const deal = deals.find(d => d.id === inclExclPopup.dealId && d.deal_type === inclExclPopup.dealType);
         return (
           <InclExclEditModal
-            allData={deal?.incl_excl_data ?? {}}
+            rawData={(deal?.incl_excl_data ?? {}) as Record<string, unknown>}
+            dealType={inclExclPopup.dealType}
+            incentiveTypes={inclExclPopup.incentiveTypes}
+            initialRuleType={inclExclPopup.initialRuleType}
             onSave={handleInclExclSave}
             onClose={() => setInclExclPopup(null)}
           />
