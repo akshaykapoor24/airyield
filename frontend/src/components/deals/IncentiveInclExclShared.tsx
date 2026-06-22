@@ -306,14 +306,16 @@ export function TagInput({ label, placeholder="Type and press Enter", values, on
 
 // ── date input ─────────────────────────────────────────────────────────────
 export function DateField({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
+  // Always a real date input so the FIRST click opens the native calendar (no
+  // text→date swap that used to cost a click). Stays empty until a date is picked —
+  // no current date is pre-filled.
   return (
     <div>
       <label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">{label}</label>
-      <input type="text" placeholder="Enter date" value={value}
-        onFocus={e => (e.target.type = "date")}
-        onBlur={e => { if (!e.target.value) e.target.type = "text"; }}
-        onChange={e => onChange(e.target.value)}
-        className="w-full border border-gray-200 rounded-md px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400"/>
+      <input type="date" value={value}
+        onClick={e => { try { e.currentTarget.showPicker?.(); } catch { /* unsupported — ignore */ } }}
+        onChange={e => onChange(e.currentTarget.value)}
+        className="w-full border border-gray-200 rounded-md px-2.5 py-1.5 text-xs text-gray-800 focus:outline-none focus:ring-1 focus:ring-blue-400 cursor-pointer"/>
     </div>
   );
 }
@@ -767,9 +769,10 @@ export function SlabGrid({ title, cols, rows, onRowsChange }: {
       <input
         type="date"
         value={row[col.key] ?? ""}
+        onClick={e => { try { e.currentTarget.showPicker?.(); } catch { /* ignore */ } }}
         onChange={e => updateCell(row.id, col.key, e.target.value)}
         onBlur={() => setEditing(false)}
-        className="w-full bg-transparent text-xs text-gray-700 focus:outline-none min-w-[110px]"
+        className="w-full bg-transparent text-xs text-gray-700 focus:outline-none min-w-[110px] cursor-pointer"
       />
     );
   };
@@ -1224,6 +1227,159 @@ export function InclExclTabContent({ suffix, isExclusion, data, onChange, viceVe
         <input type="checkbox" checked={viceVersa} onChange={onViceVersa} className="w-3.5 h-3.5 rounded border-gray-300 accent-blue-600"/>
         <span className="text-xs text-gray-600">Select this option if the route is vice versa.</span>
       </label>
+    </div>
+  );
+}
+
+// ── shared: repository-shaped incentive entry → flat form data ───────────────
+// Mirrors the upload/create conversion: drops the `slabs[]` array into the
+// amountSlabs / segmentSlabs / siSlabs JSON strings the SlabGrid expects, routed
+// by slabType so Segment Incentive rows are not lost.
+export function incentiveEntryToForm(entry: Record<string, unknown>): Record<string, string> {
+  const form: Record<string, string> = {};
+  for (const [k, v] of Object.entries(entry ?? {})) {
+    if (k === "slabs") continue;
+    if (v !== null && v !== undefined && !Array.isArray(v) && typeof v !== "object") form[k] = String(v);
+  }
+  const slabs = entry?.["slabs"] as Array<Record<string, unknown>> | undefined;
+  if (slabs && slabs.length > 0) {
+    const groups: Record<string, Record<string, string>[]> = { amount: [], segment: [], si: [] };
+    slabs.forEach((s, i) => {
+      const row: Record<string, string> = { id: `r${i}` };
+      if (s.quarterlyFreq)       row.quarterlyFreq = String(s.quarterlyFreq);
+      if (s.halfYearlyFreq)      row.halfYearlyFreq = String(s.halfYearlyFreq);
+      if (s.baseTargetAmtNumPct) row.baseTargetNumPct = String(s.baseTargetAmtNumPct);
+      if (s.baseTargetAmount)    row.baseTargetAmount = String(s.baseTargetAmount);
+      if (s.targetFrom)          row.targetFrom = String(s.targetFrom);
+      if (s.targetTo)            row.targetTo = String(s.targetTo);
+      if (s.segment)             row.segment = String(s.segment);
+      if (s.class)               row.class = String(s.class);
+      for (const [k, v] of Object.entries((s.values as Record<string, unknown>) ?? {})) row[k] = v != null ? String(v) : "";
+      const st = String(s.slabType ?? "amount").toLowerCase();
+      (groups[st] ?? groups.amount).push(row);
+    });
+    if (groups.amount.length && !form.amountSlabs)   form.amountSlabs = JSON.stringify(groups.amount);
+    if (groups.segment.length && !form.segmentSlabs) form.segmentSlabs = JSON.stringify(groups.segment);
+    if (groups.si.length && !form.siSlabs)           form.siSlabs = JSON.stringify(groups.si);
+  }
+  return form;
+}
+
+// ── shared: combined Incentive + Incl/Excl editor (repository) ───────────────
+// One tab per incentive type. Each tab shows that incentive's payout fields AND
+// its 4 inclusion/exclusion rule sub-tabs, so everything for an incentive is edited
+// in one place. onSave receives form-shaped incentive_data and per-incentive
+// incl_excl_data ({inc: {ruleType: conditions}}) for a single PATCH.
+export function IncentiveRulesModal({
+  incentiveTypes, incentiveData, inclExclData, initialIncType, onSave, onClose,
+}: {
+  incentiveTypes: string[];
+  incentiveData: Record<string, Record<string, unknown>>;
+  inclExclData: Record<string, Record<string, Record<string, IEFieldValue>>>;
+  initialIncType?: string;
+  onSave: (
+    incentiveData: Record<string, Record<string, string>>,
+    inclExclData: Record<string, Record<string, Record<string, IEFieldValue>>>,
+  ) => Promise<void>;
+  onClose: () => void;
+}) {
+  const [incForms, setIncForms] = useState<Record<string, Record<string, string>>>(() => {
+    const init: Record<string, Record<string, string>> = {};
+    for (const t of incentiveTypes) init[t] = incentiveEntryToForm(incentiveData[t] ?? {});
+    return init;
+  });
+  const [ieForms, setIeForms] = useState<Record<string, Record<string, Record<string, IEFieldValue>>>>(() => {
+    const init: Record<string, Record<string, Record<string, IEFieldValue>>> = {};
+    for (const t of incentiveTypes) {
+      init[t] = {};
+      const d = inclExclData[t] ?? {};
+      for (const rt of INCLUSIONS_EXCLUSIONS) init[t][rt] = { ...(d[rt] ?? {}) };
+    }
+    return init;
+  });
+  const [activeInc, setActiveInc] = useState(initialIncType && incentiveTypes.includes(initialIncType) ? initialIncType : (incentiveTypes[0] ?? ""));
+  const [activeRule, setActiveRule] = useState(INCLUSIONS_EXCLUSIONS[0]);
+  const [saving, setSaving] = useState(false);
+
+  const [continentOptions, setContinentOptions] = useState<string[]>(CONTINENTS);
+  const [countryGroupOptions, setCountryGroupOptions] = useState<string[]>(COUNTRY_GROUPS);
+  useEffect(() => {
+    api.get<{ continents: string[]; country_groups: string[] }>("/airports/options")
+      .then(r => { if (r.data.continents?.length) setContinentOptions(r.data.continents); if (r.data.country_groups?.length) setCountryGroupOptions(r.data.country_groups); })
+      .catch(() => {});
+  }, []);
+
+  const inc = incentiveTypes.includes(activeInc) ? activeInc : (incentiveTypes[0] ?? "");
+  const isExclusion = activeRule.startsWith("Exclusion");
+  const ieSuffix = isExclusion ? "for Exclusion" : "for Inclusion";
+  const ruleData = ieForms[inc]?.[activeRule] ?? {};
+
+  const setIncField = (k: string, v: string) => setIncForms(p => ({ ...p, [inc]: { ...(p[inc] ?? {}), [k]: v } }));
+  const setIeField = (k: string, v: IEFieldValue) =>
+    setIeForms(p => ({ ...p, [inc]: { ...(p[inc] ?? {}), [activeRule]: { ...(p[inc]?.[activeRule] ?? {}), [k]: v } } }));
+  const toggleViceVersa = () => setIeField("viceVersa", ruleData["viceVersa"] === "true" ? "" : "true");
+
+  const handleSave = async () => {
+    setSaving(true);
+    try { await onSave(incForms, ieForms); onClose(); }
+    finally { setSaving(false); }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+          <div>
+            <h2 className="text-sm font-bold text-gray-900">Incentive &amp; Rules</h2>
+            <p className="text-[10px] text-gray-400 mt-0.5">Per incentive type: payout details and its inclusion / exclusion rules, all in one place.</p>
+          </div>
+          <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-lg"><X className="w-4 h-4 text-gray-500" /></button>
+        </div>
+        {incentiveTypes.length === 0 ? (
+          <p className="px-5 py-8 text-xs text-gray-400 text-center">This deal has no incentive types.</p>
+        ) : (
+          <>
+            <TabBar tabs={incentiveTypes} active={inc} onSelect={setActiveInc} />
+            <div className="overflow-y-auto flex-1">
+              <IncentiveTabContent name={inc} data={incForms[inc] ?? {}} onChange={setIncField} />
+              <div className="border-t border-gray-100 mt-1 pt-3">
+                <h3 className="px-4 text-[11px] font-bold text-gray-500 uppercase tracking-wide">Inclusion / Exclusion Rules</h3>
+                <div className="px-4 mt-2">
+                  <div className="flex gap-1 border-b border-gray-100 flex-wrap">
+                    {INCLUSIONS_EXCLUSIONS.map(rt => {
+                      const has = Object.keys(ieForms[inc]?.[rt] ?? {}).some(k => k !== "viceVersa" && (ieForms[inc]?.[rt]?.[k] as IEFieldValue)?.length);
+                      return (
+                        <button key={rt} type="button" onClick={() => setActiveRule(rt)}
+                          className={`px-3 py-2 text-xs font-semibold border-b-2 -mb-px transition-colors whitespace-nowrap ${activeRule === rt ? "border-[#1e3a5f] text-[#1e3a5f]" : "border-transparent text-gray-400 hover:text-gray-600"}`}>
+                          {rt}{has && <span className="ml-1 inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 align-middle" />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+                <InclExclTabContent
+                  key={`${inc}:${activeRule}`}
+                  suffix={ieSuffix}
+                  isExclusion={isExclusion}
+                  data={ruleData}
+                  onChange={setIeField}
+                  viceVersa={ruleData["viceVersa"] === "true"}
+                  onViceVersa={toggleViceVersa}
+                  continentOptions={continentOptions}
+                  countryGroupOptions={countryGroupOptions}
+                />
+              </div>
+            </div>
+          </>
+        )}
+        <div className="px-5 pb-4 pt-3 border-t border-gray-100 flex gap-2">
+          <button onClick={handleSave} disabled={saving}
+            className="flex-1 flex items-center justify-center gap-1.5 bg-[#1e3a5f] text-white rounded-lg py-2 text-sm font-medium hover:bg-[#16304f] disabled:opacity-50">
+            <Check className="w-3.5 h-3.5" />{saving ? "Saving..." : "Save Changes"}
+          </button>
+          <button onClick={onClose} className="flex-1 border border-gray-200 rounded-lg py-2 text-sm text-gray-600 hover:bg-gray-50">Cancel</button>
+        </div>
+      </div>
     </div>
   );
 }

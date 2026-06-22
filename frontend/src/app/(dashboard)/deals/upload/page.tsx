@@ -1888,8 +1888,9 @@ export default function UploadDealPage(){
                   <input
                     type="date"
                     value={validFromDate}
+                    onClick={e=>{ try{ e.currentTarget.showPicker?.(); }catch{ /* unsupported — ignore */ } }}
                     onChange={e=>setValidFromDate(e.target.value)}
-                    className="w-full border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 text-gray-800"
+                    className="w-full border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 text-gray-800 cursor-pointer"
                   />
                   {validFromDate&&<p className="text-[10px] text-blue-600 mt-1">Will pre-fill Contract Valid From in Review &amp; Edit.</p>}
                 </div>
