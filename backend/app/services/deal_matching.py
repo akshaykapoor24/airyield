@@ -23,14 +23,18 @@ Incentive is computed from DealIncentiveConfig:
 """
 from __future__ import annotations
 
+import calendar
 from datetime import date
 from dataclasses import dataclass, field
 
+from dateutil import parser as _du
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, func
 from sqlalchemy.orm import selectinload
 
 from app.models.airline_class_master import AirlineClassMaster
+from app.models.airline import Airline
+from app.models.uploaded_ticket import UploadedTicket
 from app.models.deal import (
     Deal as UnifiedDeal,
     DealIncentiveConfig,
@@ -279,6 +283,259 @@ def _compute_incentive_from_config(
     return result
 
 
+# ── Slab (cumulative) calculation ───────────────────────────────────────────
+# Slab incentives depend on the TOTAL achieved sales for the airline in the
+# period (quarter / half / year), not a single ticket. The period is derived
+# from the ticket's departure date + the deal's Contract Year + the incentive's
+# Frequency. The cumulative total selects the slab band; the % is then read by
+# the ticket's own segment × class. (Fixed deals are untouched by all of this.)
+
+def _is_slab(config: DealIncentiveConfig) -> bool:
+    return (config.amount_based_type or "").strip().lower() == "slab based" or bool(getattr(config, "slabs", None))
+
+
+def _safe_date(*raws: str | None) -> date | None:
+    for raw in raws:
+        if not raw:
+            continue
+        try:
+            return _du.parse(str(raw), dayfirst=True).date()
+        except Exception:
+            continue
+    return None
+
+
+def _month_end(y: int, m: int) -> date:
+    return date(y, m, calendar.monthrange(y, m)[1])
+
+
+def _period_range(d: date, contract_year: str | None, frequency: str | None):
+    """Return (period_label, start_date, end_date) for the bucket the date falls in,
+    honouring Calendar vs Financial year. None if frequency isn't slab-relevant."""
+    cy = (contract_year or "").strip().lower()
+    financial = "financial" in cy or cy == "fy"
+    freq = (frequency or "").strip().lower()
+    y, m = d.year, d.month
+
+    if "quarter" in freq:
+        if not financial:                                  # Calendar quarters
+            q = (m - 1) // 3 + 1
+            sm = (q - 1) * 3 + 1
+            return (f"Q{q}", date(y, sm, 1), _month_end(y, sm + 2))
+        fy_q = {4: 1, 5: 1, 6: 1, 7: 2, 8: 2, 9: 2, 10: 3, 11: 3, 12: 3, 1: 4, 2: 4, 3: 4}[m]
+        sy = y if m >= 4 else y - 1                         # financial-year start year
+        qy, qm = {1: (sy, 4), 2: (sy, 7), 3: (sy, 10), 4: (sy + 1, 1)}[fy_q]
+        return (f"Q{fy_q}", date(qy, qm, 1), _month_end(qy, qm + 2))
+
+    if "half" in freq:
+        if not financial:
+            if m <= 6:
+                return ("H1", date(y, 1, 1), date(y, 6, 30))
+            return ("H2", date(y, 7, 1), date(y, 12, 31))
+        if 4 <= m <= 9:
+            return ("H1", date(y, 4, 1), _month_end(y, 9))
+        sy = y if m >= 10 else y - 1
+        return ("H2", date(sy, 10, 1), _month_end(sy + 1, 3))
+
+    if "year" in freq:
+        if not financial:
+            return ("Y1", date(y, 1, 1), date(y, 12, 31))
+        sy = y if m >= 4 else y - 1
+        return ("Y1", date(sy, 4, 1), _month_end(sy + 1, 3))
+
+    return None
+
+
+def _slab_seg_key(segment_type: str | None) -> str:
+    s = (segment_type or "").strip().upper()
+    if s in ("INTERNATIONAL", "INTL", "INTER", "INT"):
+        return "intl"
+    return "dom"   # default / domestic
+
+
+def _slab_class_key(cabin_groups: set[str] | None) -> str:
+    g = {x.lower() for x in (cabin_groups or set())}
+    if "business" in g or "first" in g:
+        return "Business"
+    if any("premium" in x for x in g):
+        return "Premium"
+    return "Economy"
+
+
+def _pick_amount_slab_cell(slab: DealIncentiveSlab, seg_key: str, class_key: str) -> float | None:
+    """Read the band's % for this segment × class — keys are 'domEconomy', 'intlBusiness', …"""
+    if not slab.values:
+        return None
+    want = f"{seg_key}{class_key}"
+    for sv in slab.values:
+        if sv.value_key == want and sv.value is not None:
+            return float(sv.value)
+    return None
+
+
+async def _period_cumulative_base(
+    db: AsyncSession,
+    airline_name: str,
+    start: date,
+    end: date,
+    flight_type: str | None,
+    target_calc_cols: str | None,
+    tenant_id: int,
+    created_by_id: int,
+) -> float:
+    """Sum the base of every ticket for this airline whose departure date is in
+    [start, end] and whose segment matches the incentive's flight type."""
+    ares = await db.execute(select(Airline).where(func.lower(Airline.name) == airline_name.lower()))
+    airline = ares.scalar_one_or_none()
+    variants: set[str] = set()
+    if airline:
+        for c in (airline.iata_code, airline.icao_code):
+            if not c:
+                continue
+            c = c.strip()
+            variants.add(c.upper())
+            if c.isdigit():
+                variants.add(c.zfill(3))
+                variants.add(c.lstrip("0") or c)
+    if not variants:
+        return 0.0
+
+    tres = await db.execute(
+        select(
+            UploadedTicket.sell_fare, UploadedTicket.sell_tax_yq, UploadedTicket.sale_yr,
+            UploadedTicket.departure_datetime, UploadedTicket.ticket_date, UploadedTicket.segment_type,
+        ).where(
+            UploadedTicket.tenant_id == tenant_id,
+            UploadedTicket.created_by_id == created_by_id,
+            func.upper(UploadedTicket.airlines_code).in_({v.upper() for v in variants}),
+        )
+    )
+    total = 0.0
+    for sf, yq, yr, dep, tdate, seg in tres.all():
+        if sf is None:
+            continue
+        if not _flight_type_matches(seg, flight_type):
+            continue
+        d = _safe_date(dep, tdate)
+        if d is None or not (start <= d <= end):
+            continue
+        total += _calc_base(
+            float(sf),
+            float(yq) if yq is not None else None,
+            float(yr) if yr is not None else None,
+            target_calc_cols,
+        )
+    return round(total, 2)
+
+
+_SEG_LABEL = {"dom": "Domestic", "intl": "International"}
+
+
+async def _compute_slab_cumulative_detailed(
+    db: AsyncSession,
+    config: DealIncentiveConfig,
+    deal: UnifiedDeal,
+    travel_date: date,
+    segment_type: str | None,
+    cabin_groups: set[str] | None,
+    sell_fare: float | None,
+    sell_tax_yq: float | None,
+    sale_yr: float | None,
+    tenant_id: int,
+    created_by_id: int,
+    airline_name: str,
+) -> tuple[float | None, dict]:
+    """Slab incentive for one ticket + a human-readable breakdown for the diagnosis
+    popup. Find the period band from the cumulative achieved sales, then apply the
+    band's segment×class %. No cap (out of scope)."""
+    base = _calc_base(sell_fare, sell_tax_yq, sale_yr, config.target_calc_cols)
+    seg_key, class_key = _slab_seg_key(segment_type), _slab_class_key(cabin_groups)
+    cell_label = f"{_SEG_LABEL.get(seg_key, 'Domestic')} {class_key}"
+    num_pct = (config.incentive_num_pct or "Percentage").strip().lower()
+    det: dict = {"cell_label": cell_label, "base": round(base, 2), "num_pct": "Percentage" if "percent" in num_pct else "Number"}
+
+    if not config.slabs:
+        det["formula"] = "slab — no slab rows configured"
+        return None, det
+    pr = _period_range(travel_date, deal.contract_year, config.frequency)
+    if pr is None:
+        det["formula"] = f"slab — could not resolve period (Contract Year / Frequency missing)"
+        return None, det
+    label, start, end = pr
+    det.update({
+        "period_label": label,
+        "period_range": f"{start:%d %b %Y} → {end:%d %b %Y}",
+    })
+
+    cumulative = await _period_cumulative_base(
+        db, airline_name, start, end, config.flight_type, config.target_calc_cols, tenant_id, created_by_id,
+    )
+    det["achieved"] = round(cumulative, 2)
+
+    def _slab_in_period(s: DealIncentiveSlab) -> bool:
+        if label.startswith("Q"):
+            return (s.quarterly_freq or "").strip().upper() == label
+        if label.startswith("H"):
+            return (s.half_yearly_freq or "").strip().upper() == label
+        return True   # Yearly → all slab rows
+    candidates = [s for s in config.slabs if _slab_in_period(s)] or list(config.slabs)
+
+    # Highest band whose minimum (base_target_amount = Target From) ≤ cumulative.
+    # Above the top band → top band (highest threshold wins). Below the first → 0.
+    candidates.sort(key=lambda s: float(s.base_target_amount or 0), reverse=True)
+    chosen = next((s for s in candidates if cumulative >= float(s.base_target_amount or 0)), None)
+    if chosen is None:
+        min_target = min((float(s.base_target_amount or 0) for s in candidates), default=0)
+        det["target"] = round(min_target, 2)
+        det["formula"] = (
+            f"{label}: achieved ₹{cumulative:,.0f} < min target ₹{min_target:,.0f} → target not met (₹0)"
+        )
+        return 0.0, det   # target not met
+
+    target = float(chosen.base_target_amount or 0)
+    det["target"] = round(target, 2)
+    cell = _pick_amount_slab_cell(chosen, seg_key, class_key)
+    if cell is None:
+        det["formula"] = f"{label}: band ≥₹{target:,.0f} reached, but no rate set for {cell_label}"
+        return None, det
+
+    det["cell_pct"] = cell
+    if "percent" in num_pct:
+        inc = round(base * cell / 100, 2)
+        det["formula"] = (
+            f"{label} achieved ₹{cumulative:,.0f} → band ≥₹{target:,.0f} → {cell_label} {cell}% · "
+            f"₹{round(base,2):,.0f} × {cell}% = ₹{inc:,.2f}"
+        )
+    else:
+        inc = round(cell, 2)
+        det["formula"] = (
+            f"{label} achieved ₹{cumulative:,.0f} → band ≥₹{target:,.0f} → {cell_label} flat ₹{inc:,.2f}"
+        )
+    det["incentive"] = inc
+    return inc, det
+
+
+async def _compute_slab_cumulative(
+    db: AsyncSession,
+    config: DealIncentiveConfig,
+    deal: UnifiedDeal,
+    travel_date: date,
+    segment_type: str | None,
+    cabin_groups: set[str] | None,
+    sell_fare: float | None,
+    sell_tax_yq: float | None,
+    sale_yr: float | None,
+    tenant_id: int,
+    created_by_id: int,
+    airline_name: str,
+) -> float | None:
+    inc, _ = await _compute_slab_cumulative_detailed(
+        db, config, deal, travel_date, segment_type, cabin_groups,
+        sell_fare, sell_tax_yq, sale_yr, tenant_id, created_by_id, airline_name,
+    )
+    return inc
+
+
 # ── Result type ────────────────────────────────────────────────────────────
 
 @dataclass
@@ -381,9 +638,16 @@ class DealMatchingService:
                 vt = config.contract_valid_to
                 if vf and vt and not (vf <= travel_date <= vt):
                     continue
-                inc = _compute_incentive_from_config(
-                    config, sell_fare, sell_tax_yq, sale_yr, segment_type, cabin_groups,
-                )
+                if _is_slab(config):
+                    # Slab → cumulative period band (Fixed path is left untouched).
+                    inc = await _compute_slab_cumulative(
+                        db, config, deal, travel_date, segment_type, cabin_groups,
+                        sell_fare, sell_tax_yq, sale_yr, tenant_id, created_by_id, airline_name,
+                    )
+                else:
+                    inc = _compute_incentive_from_config(
+                        config, sell_fare, sell_tax_yq, sale_yr, segment_type, cabin_groups,
+                    )
                 if inc is not None:
                     breakdown[config.incentive_type] = inc
 
@@ -576,42 +840,66 @@ class DealMatchingService:
                     detail=sv_detail,
                 ))
 
-                # Incentive computation
-                inc = _compute_incentive_from_config(
-                    config, sell_fare, sell_tax_yq, sale_yr, segment_type, cabin_groups,
-                )
+                # Incentive computation — Slab gets the cumulative-band breakdown,
+                # Fixed keeps its existing per-ticket formula (unchanged).
                 base = _calc_base(sell_fare, sell_tax_yq, sale_yr, config.target_calc_cols)
                 target_calc = config.target_calc_cols or "Basic"
                 target_upper = target_calc.upper().replace(" ", "")
                 yq_added = "YQ" in target_upper
                 yr_added = "YR" in target_upper
 
-                # Build human-readable formula
-                target_based_low = (config.target_based or "Fixed").lower()
-                num_pct_low = (config.incentive_num_pct or "Percentage").lower()
-                if target_based_low == "slab":
-                    formula_str = f"slab(base={round(base, 2)}) = {inc}"
-                elif "percent" in num_pct_low:
-                    formula_str = f"{round(base, 2)} × {config.incentive_amt_pct}% = {inc}"
+                if _is_slab(config):
+                    inc, det = await _compute_slab_cumulative_detailed(
+                        db, config, deal, travel_date, segment_type, cabin_groups,
+                        sell_fare, sell_tax_yq, sale_yr, tenant_id, created_by_id, airline_name,
+                    )
+                    breakdown_diag = {
+                        "incentive_type": config.incentive_type,
+                        "target_based": "Slab Based",
+                        "targetCalcCols": target_calc,
+                        "sell_fare": sell_fare,
+                        "sell_tax_yq_added": yq_added,
+                        "sell_tax_yq_value": sell_tax_yq,
+                        "sale_yr_added": yr_added,
+                        "sale_yr_value": sale_yr,
+                        "base_total": round(base, 2),
+                        "incentiveAmtPct": det.get("cell_pct"),
+                        "incentive_num_pct": det.get("num_pct", "Percentage"),
+                        "formula": det.get("formula"),
+                        "result": inc,
+                        # ── slab-specific detail for the diagnosis popup ──
+                        "is_slab": True,
+                        "slab_period": det.get("period_label"),
+                        "slab_period_range": det.get("period_range"),
+                        "slab_achieved": det.get("achieved"),
+                        "slab_target": det.get("target"),
+                        "slab_cell": det.get("cell_label"),
+                    }
                 else:
-                    formula_str = f"flat ₹{config.incentive_amt_pct} = {inc}"
-
-                breakdown_diag = {
-                    "incentive_type": config.incentive_type,
-                    "target_based": config.target_based or "Fixed",
-                    # Keys matching the old PLB format so the frontend display works
-                    "targetCalcCols": target_calc,
-                    "sell_fare": sell_fare,
-                    "sell_tax_yq_added": yq_added,
-                    "sell_tax_yq_value": sell_tax_yq,
-                    "sale_yr_added": yr_added,
-                    "sale_yr_value": sale_yr,
-                    "base_total": round(base, 2),
-                    "incentiveAmtPct": config.incentive_amt_pct,
-                    "incentive_num_pct": num_pct_low.title(),
-                    "formula": formula_str,
-                    "result": inc,
-                }
+                    inc = _compute_incentive_from_config(
+                        config, sell_fare, sell_tax_yq, sale_yr, segment_type, cabin_groups,
+                    )
+                    num_pct_low = (config.incentive_num_pct or "Percentage").lower()
+                    if "percent" in num_pct_low:
+                        formula_str = f"{round(base, 2)} × {config.incentive_amt_pct}% = {inc}"
+                    else:
+                        formula_str = f"flat ₹{config.incentive_amt_pct} = {inc}"
+                    breakdown_diag = {
+                        "incentive_type": config.incentive_type,
+                        "target_based": config.target_based or "Fixed",
+                        # Keys matching the old PLB format so the frontend display works
+                        "targetCalcCols": target_calc,
+                        "sell_fare": sell_fare,
+                        "sell_tax_yq_added": yq_added,
+                        "sell_tax_yq_value": sell_tax_yq,
+                        "sale_yr_added": yr_added,
+                        "sale_yr_value": sale_yr,
+                        "base_total": round(base, 2),
+                        "incentiveAmtPct": config.incentive_amt_pct,
+                        "incentive_num_pct": num_pct_low.title(),
+                        "formula": formula_str,
+                        "result": inc,
+                    }
 
                 config_overall = all(s.passed for s in steps)
 

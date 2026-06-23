@@ -649,7 +649,21 @@ export function AncillaryTabContent({ data, onChange }: {
 }
 
 // ── slab grid ─────────────────────────────────────────────────────────────
-export function amountSlabCols(_n: string, flightType: string): SlabColDef[] {
+// Frequency drives which period column the slab table shows:
+//   Quarterly  → Quarterly Freq (Q1–Q4)
+//   Half Yearly→ Half Yearly Freq (H1/H2)
+//   Yearly     → neither (whole-year band)
+//   unset/other→ both (legacy fallback so existing deals keep their column)
+function freqSlabCols(frequency: string): SlabColDef[] {
+  const quarterly: SlabColDef  = { key: "quarterlyFreq",  header: "Quarterly Freq",   type: "select", options: ["Q1","Q2","Q3","Q4"] };
+  const halfYearly: SlabColDef = { key: "halfYearlyFreq", header: "Half Yearly Freq", type: "select", options: ["H1","H2"] };
+  if (frequency === "Quarterly")   return [quarterly];
+  if (frequency === "Half Yearly") return [halfYearly];
+  if (frequency === "Yearly")      return [];
+  return [quarterly, halfYearly];
+}
+
+export function amountSlabCols(_n: string, flightType: string, frequency = ""): SlabColDef[] {
   const domesticCols: SlabColDef[] = [
     { key: "domEconomy",  header: "Domestic Economy",  type: "number" },
     { key: "domPremium",  header: "Domestic Premium",  type: "number" },
@@ -666,8 +680,7 @@ export function amountSlabCols(_n: string, flightType: string): SlabColDef[] {
     : [...domesticCols, ...intlCols];
 
   return [
-    { key: "quarterlyFreq",         header: "Quarterly Freq",          type: "select", options: ["Q1","Q2","Q3","Q4"] },
-    { key: "halfYearlyFreq",        header: "Half Yearly Freq",        type: "select", options: ["H1","H2"] },
+    ...freqSlabCols(frequency),
     { key: "baseTargetNumPct",      header: "Base Target (Num / Pct)", type: "select", options: ["Number","Percentage"] },
     { key: "baseTargetAmount",      header: "Base Target Amount",      type: "number" },
     { key: "targetFrom",            header: "Target From",             type: "number" },
@@ -678,7 +691,7 @@ export function amountSlabCols(_n: string, flightType: string): SlabColDef[] {
   ];
 }
 
-export function segmentSlabCols(flightType: string): SlabColDef[] {
+export function segmentSlabCols(flightType: string, frequency = ""): SlabColDef[] {
   const domesticCols: SlabColDef[] = [
     { key: "domEconomy",  header: "Domestic Economy",  type: "number" },
     { key: "domPremium",  header: "Domestic Premium",  type: "number" },
@@ -695,8 +708,7 @@ export function segmentSlabCols(flightType: string): SlabColDef[] {
     : [...domesticCols, ...intlCols]; // "Both" or unset → all combinations
 
   return [
-    { key: "quarterlyFreq",        header: "Quarterly Freq",   type: "select", options: ["Q1","Q2","Q3","Q4"] },
-    { key: "halfYearlyFreq",       header: "Half Yearly Freq", type: "select", options: ["H1","H2"] },
+    ...freqSlabCols(frequency),
     { key: "targetFrom",           header: "Target From",      type: "number" },
     { key: "targetTo",             header: "Target To",        type: "number" },
     ...segmentClassCols,
@@ -1063,7 +1075,7 @@ export function IncentiveTabContent({ name, data, onChange }: {
       {showAmountSlab && (
         <SlabGrid
           title={`${name} Amount Slab`}
-          cols={amountSlabCols(name, data["flightType"] ?? "")}
+          cols={amountSlabCols(name, data["flightType"] ?? "", data["frequency"] ?? "")}
           rows={amountSlabRows}
           onRowsChange={r => onChange("amountSlabs", JSON.stringify(r))}
         />
@@ -1072,7 +1084,7 @@ export function IncentiveTabContent({ name, data, onChange }: {
       {showSegmentSlab && (
         <SlabGrid
           title={`${name} Segment Slab`}
-          cols={segmentSlabCols(data["flightType"] ?? "")}
+          cols={segmentSlabCols(data["flightType"] ?? "", data["frequency"] ?? "")}
           rows={segmentSlabRows}
           onRowsChange={r => onChange("segmentSlabs", JSON.stringify(r))}
         />
