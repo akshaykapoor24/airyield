@@ -293,6 +293,15 @@ function convertAIDealsToRows(deals: AIDeal[]): ReviewRow[] {
           extra[`inc::${incType}::${field}`] = String(value);
         }
       }
+      // A flat commission % is a Fixed amount-based payout — set the payout-mode
+      // fields so the form shows "Incentive Percentage or Amount" pre-filled, even
+      // if the AI returned them null.
+      const amt = (incFields as Record<string, unknown>)["incentiveAmtPct"];
+      if (amt != null && amt !== "") {
+        if (!extra[`inc::${incType}::targetBased`])     extra[`inc::${incType}::targetBased`]     = "Amount Based";
+        if (!extra[`inc::${incType}::amountBasedType`]) extra[`inc::${incType}::amountBasedType`] = "Fixed";
+        if (!extra[`inc::${incType}::incentiveNumPct`]) extra[`inc::${incType}::incentiveNumPct`] = "Percentage";
+      }
     }
     return {
       row_order: idx,
@@ -1591,6 +1600,23 @@ export default function UploadDealPage(){
         const {data}=await api.post<AIExtractResponse>("/deals/upload/ai-extract",form,{headers:{"Content-Type":"multipart/form-data"}});
         const converted=convertAIDealsToRows(data.deals);
         converted.forEach(r=>{
+          // AI returns data for one incentive (PLB) — replicate it across every
+          // incentive type the user selected (e.g. Super PLB), so all are pre-filled.
+          const srcFields:Record<string,string>={}; let srcInc="";
+          for(const [k,v] of Object.entries(r.extra)){
+            if(!k.startsWith("inc::")) continue;
+            const parts=k.split("::"); // ["inc", incType, field]
+            if(!srcInc) srcInc=parts[1];
+            if(parts[1]===srcInc) srcFields[parts[2]]=v;
+          }
+          if(Object.keys(srcFields).length){
+            selectedIncentives.forEach(incType=>{
+              for(const [field,v] of Object.entries(srcFields)){
+                const key=`inc::${incType}::${field}`;
+                if(!r.extra[key]) r.extra[key]=v;
+              }
+            });
+          }
           if(!r.extra["c__valid_from"] && validFromDate) r.extra["c__valid_from"] = validFromDate;
           selectedIncentives.forEach(incType=>{
             if(!r.extra[`inc::${incType}::validFrom`] && validFromDate) r.extra[`inc::${incType}::validFrom`] = validFromDate;

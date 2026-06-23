@@ -164,6 +164,13 @@ type IncentiveBreakdown = {
   incentive_num_pct: string;
   formula: string;
   result: number | null;
+  // slab-specific (present when target_based === "Slab Based")
+  is_slab?: boolean;
+  slab_period?: string | null;
+  slab_period_range?: string | null;
+  slab_achieved?: number | null;
+  slab_target?: number | null;
+  slab_cell?: string | null;
 };
 type PLBDiagnostic = { plb_key: string; raw_plb: Record<string, unknown>; steps: MatchStep[]; incentive_breakdown: IncentiveBreakdown | null; plb_overall_match: boolean };
 type ExclusionRuleStep = { field: string; rule_value: string; ticket_value: string; matched: boolean };
@@ -1496,6 +1503,13 @@ export default function StatementDetailPage() {
                                             ...(ib.sell_tax_yq_added ? [["+ YQ Tax", `₹ ${(ib.sell_tax_yq_value ?? 0).toLocaleString("en-IN")}`]] : []),
                                             ...(ib.sale_yr_added     ? [["+ YR",     `₹ ${(ib.sale_yr_value    ?? 0).toLocaleString("en-IN")}`]] : []),
                                             ["Base Total",  `₹ ${(ib.base_total ?? 0).toLocaleString("en-IN")}`],
+                                            // Slab-based: show period, cumulative achieved, the band reached, and the cell
+                                            ...(ib.is_slab ? [
+                                              ["Period",            ib.slab_period_range ? `${ib.slab_period ?? ""} · ${ib.slab_period_range}` : (ib.slab_period ?? "—")],
+                                              ["Achieved (period)", `₹ ${(ib.slab_achieved ?? 0).toLocaleString("en-IN")}`],
+                                              ["Band Target ≥",     `₹ ${(ib.slab_target ?? 0).toLocaleString("en-IN")}`],
+                                              ["Segment × Class",   ib.slab_cell ?? "—"],
+                                            ] : []),
                                             ...(ib.incentiveAmtPct != null
                                               ? [[isPercentage ? "Rate" : "Amount", isPercentage ? `${ib.incentiveAmtPct}%` : `₹ ${ib.incentiveAmtPct}`]]
                                               : []),

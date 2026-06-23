@@ -32,8 +32,8 @@ PLB: {
   class:               "Economy"|"Premium"|"Business",
   targetCalcCols:      "Basic"|"Basic + YQ"|"Basic + YR"|"Basic + YQ +YR",
   payoutCalcCols:      same as targetCalcCols,
-  targetBased:         null,               # null unless document specifies a target amount/segment
-  amountBasedType:     null,
+  targetBased:         "Amount Based",     # a flat commission % is an amount-based payout
+  amountBasedType:     "Fixed",            # Fixed (not slab) — the % applies directly
   baseTargetAmount:    null,
   segmentBasedType:    null,
   baseTargetSegments:  null,
@@ -152,8 +152,8 @@ Return ONLY a valid JSON object — no markdown, no explanation:
           "class": "Economy",
           "targetCalcCols": "Basic + YQ",
           "payoutCalcCols": "Basic + YQ",
-          "targetBased": null,
-          "amountBasedType": null,
+          "targetBased": "Amount Based",
+          "amountBasedType": "Fixed",
           "baseTargetAmount": null,
           "segmentBasedType": null,
           "baseTargetSegments": null,
@@ -169,6 +169,9 @@ Return ONLY a valid JSON object — no markdown, no explanation:
 
 ## Final Rules
 
+- Every commission % is a FIXED amount-based payout — for each deal ALWAYS set:
+  targetBased="Amount Based", amountBasedType="Fixed", incentiveNumPct="Percentage",
+  and incentiveAmtPct = the numeric % (e.g. 2.0 for "2.00%").
 - Always prioritize accuracy over assumptions
 - Never merge multiple class deals into one
 - If data is missing → set null (do not guess)
