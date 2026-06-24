@@ -508,7 +508,11 @@ def _parse_travel_date(departure_datetime: str | None, ticket_date: str | None) 
         if not raw:
             continue
         try:
-            return dateutil_parser.parse(raw, dayfirst=True).date()
+            s = str(raw).strip()
+            # ISO YYYY-MM-DD — parse directly to avoid dayfirst misreading
+            if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+                return date.fromisoformat(s[:10])
+            return dateutil_parser.parse(s, dayfirst=True).date()
         except Exception:
             continue
     return None
@@ -1134,10 +1138,13 @@ async def match_diagnosis(
     travel_date = _parse_travel_date(ticket.departure_datetime, ticket.ticket_date)
     if travel_date:
         src = ticket.departure_datetime if ticket.departure_datetime else ticket.ticket_date
-        date_detail = f"parsed from '{src}' → {travel_date}"
+        if src and src.strip()[:10] == str(travel_date):
+            date_detail = f"date from departure field: {travel_date}"
+        else:
+            date_detail = f"parsed from '{src}' → {travel_date}"
     else:
         date_detail = (
-            f"departure_datetime='{ticket.departure_datetime}', ticket_date='{ticket.ticket_date}'; "
+            f"departure='{ticket.departure_datetime}', ticket_date='{ticket.ticket_date}'; "
             f"could not parse either — fix the date format"
         )
 
