@@ -21,6 +21,23 @@ const ENTITIES       = ["ATB", "TSI", "YOL"];
 const IATA_NUMBERS   = ["12345678", "87654321", "11223344", "44332211"];
 const BUSINESS_TYPES = ["B2B", "B2C", "B2E", "MICE"];
 const LOGIN_IDS      = ["AGENT001", "AGENT002", "AGENT003", "AGENT004"];
+// B2B merges the airline "Login ID" and "IATA Number" into a single field.
+const LOGIN_IATA_OPTIONS = [...LOGIN_IDS, ...IATA_NUMBERS];
+
+// The deal-level Contract Valid From/To flow down into each selected incentive's
+// own from/to date fields. Keys differ per incentive; Ancillary and Deposit
+// Incentive (DI) have no contract date fields, so they're intentionally omitted.
+const INCENTIVE_DATE_KEYS: Record<string, [fromKey: string, toKey: string]> = {
+  "PLB":               ["validFrom", "validTo"],
+  "Super PLB":         ["validFrom", "validTo"],
+  "Transaction Fee":   ["validFrom", "validTo"],
+  "Marketing Fund":    ["validFrom", "validTo"],
+  "Frontend":          ["validFrom", "validTo"],
+  "Backend":           ["validFrom", "validTo"],
+  "Push Action":       ["validFrom", "validTo"],
+  "Cashback":          ["cashbackPeriodFrom", "cashbackPeriodTo"],
+  "Segment Incentive": ["siPeriodFrom", "siPeriodTo"],
+};
 
 const INCL_EXCL_META: Record<string, { suffix: string; isExclusion: boolean }> = {
   "Inclusion For Trigger": { suffix: "for Inclusion", isExclusion: false },
@@ -117,15 +134,14 @@ export default function NewDealPage() {
   // airline contract fields
   const [airlineType, setAirlineType]   = useState("");
   const [airlineName, setAirlineName]   = useState("");
-  const [contractYear, setContractYear] = useState("");
   const [validFrom, setValidFrom]       = useState("");
   const [validTo, setValidTo]           = useState("");
+  const [contractYear, setContractYear] = useState("");
   const [triggerType, setTriggerType]   = useState("");
   const [payoutType, setPayoutType]     = useState("");
   const [entity, setEntity]             = useState("");
-  const [iataNumber, setIataNumber]     = useState("");
   const [businessType, setBusinessType] = useState("");
-  const [entityLCC, setEntityLCC]       = useState("");
+  // Single "Login ID / IATA" field, shared by both Airline and B2B forms.
   const [loginId, setLoginId]           = useState("");
   const [supplierName, setSupplierName] = useState("");
 
@@ -150,6 +166,7 @@ export default function NewDealPage() {
   const [dealMakerName, setDealMakerName] = useState("");
 
   const [airlineOptions, setAirlineOptions]           = useState<string[]>([]);
+  const [airlines, setAirlines]                       = useState<{airline_name:string;airline_type:string}[]>([]);
   const [loadingAirlines, setLoadingAirlines]         = useState(false);
   const [supplierOptions, setSupplierOptions]         = useState<string[]>([]);
   const [continentOptions, setContinentOptions]       = useState<string[]>(CONTINENTS);
@@ -174,26 +191,54 @@ export default function NewDealPage() {
       .catch(() => {});
   }, []);
 
-  const fetchAirlinesByType = async (type: string) => {
-    if (!type) { setAirlineOptions([]); return; }
+  // Load all airlines with their type up-front; Airline Type auto-fills from the
+  // class/RBD master once the user picks an airline.
+  useEffect(() => {
     setLoadingAirlines(true);
-    try {
-      const { data } = await api.get<string[]>(`/classes/airlines-by-type/${type}`);
-      setAirlineOptions(data);
-    } catch {
-      setAirlineOptions([]);
-    } finally {
-      setLoadingAirlines(false);
-    }
-  };
+    api.get<{airline_name:string;airline_type:string}[]>("/classes/airlines-with-type")
+      .then(r => { setAirlines(r.data); setAirlineOptions(r.data.map(a => a.airline_name)); })
+      .catch(() => {})
+      .finally(() => setLoadingAirlines(false));
+  }, []);
 
   const selectedIncentives = INCENTIVE_TYPES.filter(t => incentives[t]);
+
+  // Airline Name always lists every airline from the master. Picking a name
+  // auto-fills the Airline Type (looked up from the class/RBD master); choosing a
+  // type does NOT filter the name list.
+  const airlineNameOptions = airlineOptions;
+
+  // Set the deal-level contract dates and mirror them into every selected
+  // incentive that has its own from/to date fields (all except Ancillary and DI).
+  const setContractDates = (from: string, to: string) => {
+    setValidFrom(from);
+    setValidTo(to);
+    setIncentiveData(prev => {
+      const next = { ...prev };
+      for (const inc of selectedIncentives) {
+        const keys = INCENTIVE_DATE_KEYS[inc];
+        if (!keys) continue;
+        next[inc] = { ...(next[inc] ?? {}), [keys[0]]: from, [keys[1]]: to };
+      }
+      return next;
+    });
+  };
 
   const toggleIncentive = (key: string) => {
     setIncentives(p => {
       const next = { ...p, [key]: !p[key] };
       if (!p[key]) {
         setActiveIncentiveTab(key);
+        // Seed the newly-selected incentive's from/to with the deal-level dates.
+        const keys = INCENTIVE_DATE_KEYS[key];
+        if (keys && (validFrom || validTo)) {
+          setIncentiveData(prevD => {
+            const seeded = { ...(prevD[key] ?? {}) };
+            if (validFrom) seeded[keys[0]] = validFrom;
+            if (validTo)   seeded[keys[1]] = validTo;
+            return { ...prevD, [key]: seeded };
+          });
+        }
       } else {
         const remaining = INCENTIVE_TYPES.filter(t => t !== key && next[t]);
         setActiveIncentiveTab(remaining[remaining.length - 1] ?? "");
@@ -226,8 +271,24 @@ export default function NewDealPage() {
     if (f && f.type === "application/pdf") setFile(f);
   };
 
+  // Contract Year drives the contract dates:
+  //   Calendar year  ⇒ Jan 1 – Dec 31 of the current year
+  //   Financial year ⇒ Apr 1 (this year) – Mar 31 (next year)
+  // Dates stay editable afterwards; other fields are left untouched.
+  const handleContractYearChange = (val: string) => {
+    setContractYear(val);
+    const year = new Date().getFullYear();
+    if (val === "Calendar year") {
+      setContractDates(`${year}-01-01`, `${year}-12-31`);
+    } else if (val === "Financial year") {
+      setContractDates(`${year}-04-01`, `${year + 1}-03-31`);
+    }
+  };
+
   const validateCore = (): boolean => {
-    if (!airlineType) { toast.error("Please select Airline Type."); return false; }
+    // Airline Type is optional for B2B — it may be blank when the airline has no
+    // entry in the class/RBD master, and the user can fill it in by hand.
+    if (dealType === "airline" && !airlineType) { toast.error("Please select Airline Type."); return false; }
     if (!airlineName) { toast.error("Please select Airline Name."); return false; }
     if (!validFrom)   { toast.error("Please enter Valid From date."); return false; }
     return true;
@@ -244,11 +305,14 @@ export default function NewDealPage() {
       airline_name:     airlineName,
       valid_from:       validFrom,
       valid_to:         validTo,
-      entity:           airlineType === "GDS" ? (entity       || null) : null,
-      iata_number:      airlineType === "GDS" ? (iataNumber   || null) : null,
-      business_type:    (dealType === "b2b" || airlineType === "LCC") ? (businessType || null) : null,
-      entity_lcc:       airlineType === "LCC" ? (entityLCC    || null) : null,
-      login_id:         airlineType === "LCC" ? (loginId      || null) : null,
+      // Entity + Login ID/IATA are single fields on both forms, always sent and
+      // not gated by Airline Type. iata_number / entity_lcc are no longer split
+      // out separately — the consolidated values live in entity / login_id.
+      entity:           entity       || null,
+      iata_number:      null,
+      business_type:    businessType || null,
+      entity_lcc:       null,
+      login_id:         loginId      || null,
       remark:           remark        || null,
       deal_maker_name:  dealMakerName || null,
       incentive_types:  selectedIncentives,
@@ -266,7 +330,6 @@ export default function NewDealPage() {
     }
     if (dealType === "b2b") {
       payload.supplier_name = supplierName || null;
-      payload.contract_year = contractYear || null;
     }
     return payload;
   };
@@ -361,24 +424,7 @@ export default function NewDealPage() {
           {/* Airline Contract Details */}
           <SectionCard title="Airline Contract Details">
             <div className="px-4 py-3 grid grid-cols-2 gap-3">
-              {/* [1] Airline Type */}
-              <SelectField
-                label="Airline Type"
-                options={["GDS", "LCC"]}
-                value={airlineType}
-                onChange={v => { setAirlineType(v); setAirlineName(""); fetchAirlinesByType(v); }}
-              />
-
-              {/* [2] Airline Name */}
-              <SearchSelectField
-                label="Airline Name"
-                options={airlineOptions}
-                value={airlineName}
-                onChange={setAirlineName}
-                placeholder={loadingAirlines ? "Loading..." : airlineType ? "Search and select" : "Select airline type first"}
-              />
-
-              {/* [3] Supplier Name — B2B only */}
+              {/* [1] Supplier Name — B2B only */}
               {dealType === "b2b" && (
                 <SearchSelectField
                   label="Supplier Name"
@@ -389,21 +435,43 @@ export default function NewDealPage() {
                 />
               )}
 
-              {/* [4] Contract Year — Airline and B2B */}
-              {(dealType === "airline" || dealType === "b2b") && (
-                <SelectField label="Contract Year" options={CONTRACT_YEARS} value={contractYear} onChange={setContractYear} />
+              {/* [2] Airline Name — full master list; picking one auto-fills the type */}
+              <SearchSelectField
+                label="Airline Name"
+                options={airlineNameOptions}
+                value={airlineName}
+                onChange={name => {
+                  setAirlineName(name);
+                  // Auto-fill the type from the class/RBD master; if this airline has
+                  // no type there, clear it (don't keep the previous airline's type).
+                  const t = (airlines.find(a => a.airline_name === name)?.airline_type || "").toUpperCase();
+                  setAirlineType(t);
+                }}
+                placeholder={loadingAirlines ? "Loading airlines..." : "Search and select airline"}
+              />
+
+              {/* [3] Airline Type — auto-fills when an airline is picked (from the
+                   class/RBD master), but stays editable and may be left blank. */}
+              <SelectField
+                label="Airline Type"
+                options={["GDS", "LCC"]}
+                value={airlineType}
+                onChange={setAirlineType}
+              />
+
+              {/* [3b] Contract Year — Airline only; selecting it auto-fills the dates */}
+              {dealType === "airline" && (
+                <SelectField label="Contract Year" options={CONTRACT_YEARS} value={contractYear} onChange={handleContractYearChange} />
               )}
 
-              {/* [5] Business Type — always for B2B (defaults to B2B), and for LCC airline */}
-              {(dealType === "b2b" || airlineType === "LCC")
-                ? <SearchSelectField label="Business Type" options={BUSINESS_TYPES} value={businessType} onChange={setBusinessType} />
-                : <div />}
+              {/* [4] Business Type — shown for every deal (B2B defaults to "B2B") */}
+              <SearchSelectField label="Business Type" options={BUSINESS_TYPES} value={businessType} onChange={setBusinessType} />
 
-              {/* [6] Valid From */}
-              <DateField label="Contract Valid From" value={validFrom} onChange={setValidFrom} />
+              {/* [6] Valid From — flows into every selected incentive's "from" date */}
+              <DateField label="Contract Valid From" value={validFrom} onChange={v => setContractDates(v, validTo)} />
 
-              {/* [7] Valid To */}
-              <DateField label="Contract Valid To" value={validTo} onChange={setValidTo} />
+              {/* [7] Valid To — flows into every selected incentive's "to" date */}
+              <DateField label="Contract Valid To" value={validTo} onChange={v => setContractDates(validFrom, v)} />
 
               {/* [8a+8b] Trigger Type + Payout Type — Airline only */}
               {dealType === "airline" && (
@@ -413,21 +481,16 @@ export default function NewDealPage() {
                 </>
               )}
 
-              {/* Conditional: GDS extras */}
-              {airlineType === "GDS" && (
-                <>
-                  <SearchSelectField label="Entity"      options={ENTITIES}     value={entity}     onChange={setEntity} />
-                  <SearchSelectField label="IATA Number" options={IATA_NUMBERS} value={iataNumber} onChange={setIataNumber} />
-                </>
-              )}
-
-              {/* Conditional: LCC extras */}
-              {airlineType === "LCC" && (
-                <>
-                  <SearchSelectField label="Entity for LCC" options={ENTITIES}  value={entityLCC} onChange={setEntityLCC} />
-                  <SearchSelectField label="Login ID"        options={LOGIN_IDS} value={loginId}   onChange={setLoginId} />
-                </>
-              )}
+              {/* Entity + Login ID/IATA — single fixed fields shown for both Airline
+                   and B2B. Not gated by Airline Type, and unaffected when other
+                   fields (Airline Type, Contract Year, …) change. */}
+              <SearchSelectField label="Entity" options={ENTITIES} value={entity} onChange={setEntity} />
+              <SearchSelectField
+                label={dealType === "airline" ? "Login ID / IATA Code" : "Login ID / IATA Number"}
+                options={LOGIN_IATA_OPTIONS}
+                value={loginId}
+                onChange={setLoginId}
+              />
             </div>
           </SectionCard>
 

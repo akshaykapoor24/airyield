@@ -299,7 +299,11 @@ def _safe_date(*raws: str | None) -> date | None:
         if not raw:
             continue
         try:
-            return _du.parse(str(raw), dayfirst=True).date()
+            s = str(raw).strip()
+            # ISO YYYY-MM-DD — parse directly to avoid dayfirst misreading 06 as day
+            if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+                return date.fromisoformat(s[:10])
+            return _du.parse(s, dayfirst=True).date()
         except Exception:
             continue
     return None

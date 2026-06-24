@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.dependencies import get_current_user, require_role
 from app.models.airline_class_master import AirlineClassMaster
+from app.models.airline import Airline
 from app.models.class_approval import ClassApproval
 from app.models.user import User, UserRole
 from app.schemas.airline_class_master import (
@@ -250,6 +251,34 @@ async def get_airlines_by_type(
         .order_by(AirlineClassMaster.airline_name)
     )
     return [row[0] for row in result.all()]
+
+
+@router.get("/airlines-with-type")
+async def get_airlines_with_type(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Every airline (names from the Airline master) tagged with its type (GDS/LCC,
+    looked up from the class/RBD master by name). Used by the Create Deal form: the
+    user can pick a type to filter the names, or pick a name and have the type fill in.
+    Airlines with no class-master entry come back with airline_type = "".
+    """
+    name_rows = await db.execute(
+        select(Airline.name).where(Airline.is_active == True).distinct().order_by(Airline.name)  # noqa: E712
+    )
+    names = [r[0] for r in name_rows.all()]
+
+    type_rows = await db.execute(
+        select(AirlineClassMaster.airline_name, func.max(AirlineClassMaster.airline_type))
+        .where(AirlineClassMaster.airline_type.isnot(None))
+        .group_by(AirlineClassMaster.airline_name)
+    )
+    type_map = {n.strip().lower(): (t or "").upper() for n, t in type_rows.all()}
+
+    return [
+        {"airline_name": n, "airline_type": type_map.get(n.strip().lower(), "")}
+        for n in names
+    ]
 
 
 @router.get("/count")

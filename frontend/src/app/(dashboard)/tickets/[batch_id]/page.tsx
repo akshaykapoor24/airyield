@@ -1362,9 +1362,9 @@ export default function StatementDetailPage() {
 
                       {/* Date group */}
                       {[
-                        { label: "Raw departure",        value: diagnosis.raw_departure ?? "—",      green: false },
-                        { label: "Raw ticket date",      value: diagnosis.raw_ticket_date ?? "—",    green: false },
-                        { label: "Travel date (parsed)", value: diagnosis.travel_date ?? "—",         green: !!diagnosis.travel_date },
+                        { label: "Departure Date",       value: diagnosis.raw_departure ?? "—",      green: !!diagnosis.raw_departure },
+                        { label: "Ticket Date",          value: diagnosis.raw_ticket_date ?? "—",    green: false },
+                        { label: "Travel date (used)",   value: diagnosis.travel_date ?? "—",         green: !!diagnosis.travel_date },
                       ].map(r => (
                         <div key={r.label} className="flex items-baseline justify-between py-1.5 gap-4">
                           <span className="text-gray-500 shrink-0">{r.label}</span>
