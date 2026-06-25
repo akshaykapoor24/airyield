@@ -28,6 +28,8 @@ from app.models.uploaded_deal import (
 )
 from app.models.airline_class_master import AirlineClassMaster
 from app.models.class_approval import ClassApproval
+from app.models.customer import Customer
+from app.models.billing import Billing
 from app.models.uploaded_ticket import UploadedTicket
 from app.models.ticket_statement import TicketStatement
 from app.models.ticket_calculation import TicketCalculation
@@ -68,6 +70,8 @@ __all__ = [
     "Document",
     "UploadedDeal", "DealIncentive", "DealInclusionExclusion", "UploadedDealStatus", "UploadedDealSourceType",
     "AirlineClassMaster", "ClassApproval",
+    "Customer",
+    "Billing",
     "UploadedTicket",
     "TicketStatement",
     "TicketCalculation",

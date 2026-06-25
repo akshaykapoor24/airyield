@@ -459,6 +459,118 @@ async def get_ticket_statement(
     )
 
 
+# ── Income summary PDF ──────────────────────────────────────────────────────
+
+@router.get("/statements/{batch_id}/income-summary.pdf")
+async def download_income_summary_pdf(
+    batch_id:     str,
+    db:           AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Generate a per-ticket income summary PDF for one ticket statement."""
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+
+    # Statement (mirror get_ticket_statement filters)
+    stmt_res = await db.execute(
+        select(TicketStatement).where(
+            TicketStatement.batch_id == batch_id,
+            TicketStatement.tenant_id == current_user.tenant_id,
+            TicketStatement.created_by_id == current_user.id,
+        )
+    )
+    stmt = stmt_res.scalar_one_or_none()
+    if not stmt:
+        raise HTTPException(status_code=404, detail="Statement not found")
+
+    # Tickets (mirror list_uploaded_tickets filters)
+    tk_res = await db.execute(
+        select(UploadedTicket)
+        .where(
+            UploadedTicket.batch_id == batch_id,
+            UploadedTicket.tenant_id == current_user.tenant_id,
+            UploadedTicket.created_by_id == current_user.id,
+        )
+        .order_by(UploadedTicket.created_at.asc())
+    )
+    tickets = tk_res.scalars().all()
+
+    stmt_type = getattr(stmt, "statement_type", "B2B") or "B2B"
+    title     = stmt.statement_name or f"{stmt_type} · {stmt.agency}"
+
+    def money(v) -> str:
+        return f"Rs. {float(v):,.2f}" if v is not None else "—"
+
+    def passenger(t) -> str:
+        if t.pax_name:
+            return t.pax_name
+        name = f"{t.first_name or ''} {t.last_name or ''}".strip()
+        return name or "—"
+
+    rows: list[list[str]] = [
+        ["Ticket #", "Passenger", "Airline", "Sector", "Sell Fare", "Status", "Income"]
+    ]
+    total_income = 0.0
+    for t in tickets:
+        if t.calculated_incentive is not None:
+            total_income += float(t.calculated_incentive)
+        rows.append([
+            t.ticket_number or "—",
+            passenger(t),
+            t.airline_name or t.airlines_code or "—",
+            t.sector or "—",
+            money(t.sell_fare),
+            t.ticket_status or "—",
+            money(t.calculated_incentive),
+        ])
+    rows.append(["", "", "", "", "", f"Total ({len(tickets)})", money(total_income)])
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=landscape(A4),
+        leftMargin=18 * mm, rightMargin=18 * mm, topMargin=16 * mm, bottomMargin=16 * mm,
+    )
+    styles = getSampleStyleSheet()
+    period = f"{stmt.valid_from:%d %b %Y} – {stmt.valid_to:%d %b %Y}"
+    elements = [
+        Paragraph("Income Summary", styles["Title"]),
+        Paragraph(title, styles["Heading3"]),
+        Paragraph(f"Agency: {stmt.agency} &nbsp;&nbsp; Period: {period}", styles["Normal"]),
+        Spacer(1, 8 * mm),
+    ]
+
+    table = Table(rows, repeatRows=1)
+    navy = colors.HexColor("#1e3a5f")
+    table.setStyle(TableStyle([
+        ("BACKGROUND",   (0, 0), (-1, 0), navy),
+        ("TEXTCOLOR",    (0, 0), (-1, 0), colors.white),
+        ("FONTNAME",     (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE",     (0, 0), (-1, -1), 8),
+        ("ALIGN",        (4, 0), (4, -1), "RIGHT"),   # Sell Fare
+        ("ALIGN",        (6, 0), (6, -1), "RIGHT"),   # Income
+        ("VALIGN",       (0, 0), (-1, -1), "MIDDLE"),
+        ("GRID",         (0, 0), (-1, -1), 0.4, colors.HexColor("#d1d5db")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#f3f4f6")]),
+        ("BACKGROUND",   (0, -1), (-1, -1), colors.HexColor("#e5e7eb")),
+        ("FONTNAME",     (0, -1), (-1, -1), "Helvetica-Bold"),
+        ("TOPPADDING",   (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING",(0, 0), (-1, -1), 4),
+    ]))
+    elements.append(table)
+    doc.build(elements)
+    buf.seek(0)
+
+    filename = f"income-summary-{batch_id}.pdf"
+    return StreamingResponse(
+        buf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
 # ── List uploaded tickets ──────────────────────────────────────────────────
 
 @router.get("/uploads", response_model=list[UploadedTicketRead])
