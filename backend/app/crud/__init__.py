@@ -8,6 +8,7 @@ from app.models.route import Route
 from app.models.income import IncomeRecord
 from app.models.document import Document
 from app.models.airline_class_master import AirlineClassMaster
+from app.models.customer import Customer
 from app.crud.ticket import CRUDTicket
 
 user = CRUDBase(User)
@@ -20,3 +21,4 @@ income = CRUDBase(IncomeRecord)
 document = CRUDBase(Document)
 ticket = CRUDTicket()
 airline_class_master = CRUDBase(AirlineClassMaster)
+customer = CRUDBase(Customer)

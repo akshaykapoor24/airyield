@@ -9,7 +9,7 @@ import {
   Plane, Building2, MapPin, Route, Tag, DollarSign,
   Calculator, Upload, ClipboardCheck, CheckSquare,
   AlertTriangle, Edit3, Users, Shield, GitMerge,
-  BookOpen, History, Sliders, LayoutGrid, Plus,
+  BookOpen, History, Sliders, LayoutGrid, Plus, Contact,
 } from "lucide-react";
 import { loadDashboards, type CustomDashboard } from "@/lib/customDashboards";
 import { cn } from "@/lib/utils";
@@ -55,6 +55,7 @@ const TENANT_NAV: NavItem[] = [
       { label: "Ticket Repository", href: "/tickets", icon: BookOpen },
     ],
   },
+  { label: "My Customers", href: "/customers", icon: Contact },
   // {
   //   label: "Calculations", icon: Calculator,
   //   children: [
