@@ -53,6 +53,7 @@ const TENANT_NAV: NavItem[] = [
       { label: "Upload Tickets", href: "/tickets/upload", icon: Upload },
       // { label: "Validation", href: "/tickets/validation", icon: ClipboardCheck },
       { label: "Ticket Repository", href: "/tickets", icon: BookOpen },
+      { label: "Income Summary", href: "/tickets/income-summary", icon: DollarSign },
     ],
   },
   { label: "My Customers", href: "/customers", icon: Contact },
@@ -142,7 +143,15 @@ export default function Sidebar() {
   }, [pathname]);
 
   const isActive = (href: string) =>
-    href === "/" ? pathname === "/" : pathname === href || pathname.startsWith(href + "/");
+    href === "/" ? pathname === "/"
+    // "/tickets" (Ticket Repository) matches the list + statement detail pages,
+    // but NOT its sibling sub-tabs which have their own entries.
+    : href === "/tickets"
+      ? pathname === "/tickets" ||
+        (pathname.startsWith("/tickets/") &&
+          !pathname.startsWith("/tickets/income-summary") &&
+          !pathname.startsWith("/tickets/upload"))
+    : pathname === href || pathname.startsWith(href + "/");
 
   const isOnCustomDashboard = pathname.startsWith("/dashboard/");
 

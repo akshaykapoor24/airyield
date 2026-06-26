@@ -428,6 +428,13 @@ export default function StatementDetailPage() {
   const [batchCalcing,  setBatchCalcing]  = useState(false);
   const [batchResult,   setBatchResult]   = useState<BatchRunCalcResult | null>(null);
 
+  // ── Save income summary modal ──────────────────────────────────────────
+  const [showSaveSummary, setShowSaveSummary] = useState(false);
+  const [summaryName,     setSummaryName]     = useState("");
+  const [savingSummary,   setSavingSummary]   = useState(false);
+  const [saveSummaryDone, setSaveSummaryDone] = useState(false);
+  const [saveSummaryError,setSaveSummaryError]= useState<string | null>(null);
+
   // ── Edit modal ─────────────────────────────────────────────────────────
   const [editTicket,    setEditTicket]    = useState<UploadedTicket | null>(null);
   const [editDraft,     setEditDraft]     = useState<Partial<UploadedTicket>>({});
@@ -668,6 +675,28 @@ export default function StatementDetailPage() {
   const statTotalSellFare = tickets.reduce((s, t) => s + (t.sell_fare ?? 0), 0);
   const statNetAmt        = tickets.reduce((s, t) => s + (t.net_amt   ?? 0), 0);
 
+  // ── Income summary preview (client-side; backend recomputes authoritatively) ──
+  const anyCalculated = tickets.some(t => t.calculated_incentive != null);
+  const summaryTotals = INCENTIVE_TYPE_COLS.map(({ key, label }) => ({
+    key, label,
+    value: tickets.reduce((s, t) => s + (t.incentive_breakdown?.[key] ?? 0), 0),
+  }));
+  const summaryGrandTotal = tickets.reduce((s, t) => s + (t.calculated_incentive ?? 0), 0);
+
+  const saveIncomeSummary = async () => {
+    setSavingSummary(true);
+    setSaveSummaryError(null);
+    try {
+      await api.post(`/tickets/statements/${batchId}/income-summary`, { name: summaryName.trim() || null });
+      setSaveSummaryDone(true);
+      setTimeout(() => setShowSaveSummary(false), 900);
+    } catch {
+      setSaveSummaryError("Failed to save income summary.");
+    } finally {
+      setSavingSummary(false);
+    }
+  };
+
   // ── Loading / error states ─────────────────────────────────────────────
   if (loading) return (
     <div className="flex items-center justify-center py-24">
@@ -833,6 +862,14 @@ export default function StatementDetailPage() {
             {batchCalcing
               ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Running…</>
               : <><Calculator className="w-3.5 h-3.5" /> {selected.size > 0 ? `Run (${selected.size})` : "Run All"}</>}
+          </button>
+          <button
+            onClick={() => { setSummaryName(statement?.statement_name ?? ""); setSaveSummaryDone(false); setSaveSummaryError(null); setShowSaveSummary(true); }}
+            disabled={!anyCalculated}
+            title={anyCalculated ? "Save income summary for this statement" : "Run the calculation first"}
+            className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-600 text-white rounded-lg text-xs font-semibold hover:bg-emerald-700 disabled:opacity-50"
+          >
+            <TrendingUp className="w-3.5 h-3.5" /> Save Income Summary
           </button>
         </div>
       </div>
@@ -1212,6 +1249,78 @@ export default function StatementDetailPage() {
                 className="flex items-center gap-1.5 px-4 py-2 bg-[#1e3a5f] text-white rounded-lg text-xs font-semibold hover:bg-[#16304f] disabled:opacity-60"
               >
                 {saving ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Saving…</> : <><Save className="w-3.5 h-3.5" /> Save Changes</>}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Save Income Summary Modal ────────────────────────────────────── */}
+      {showSaveSummary && statement && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[85vh] flex flex-col">
+            {/* Header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+              <h2 className="text-sm font-bold text-gray-900">Save Income Summary</h2>
+              <button onClick={() => setShowSaveSummary(false)} className="p-1 hover:bg-gray-100 rounded-lg"><X className="w-4 h-4 text-gray-500" /></button>
+            </div>
+
+            {/* Body */}
+            <div className="overflow-y-auto flex-1 px-6 py-4 space-y-4">
+              {/* Statement metadata */}
+              <div className="grid grid-cols-2 gap-y-2 gap-x-4 text-xs">
+                <div><p className="text-gray-400">Statement</p><p className="font-medium text-gray-800">{statement.statement_name ?? `${statement.statement_type ?? "B2B"} · ${statement.agency}`}</p></div>
+                <div><p className="text-gray-400">Agency</p><p className="font-medium text-gray-800">{statement.agency}</p></div>
+                <div><p className="text-gray-400">Valid Period</p><p className="font-medium text-gray-800">{formatDate(statement.valid_from)} → {formatDate(statement.valid_to)}</p></div>
+                <div><p className="text-gray-400">Tickets</p><p className="font-medium text-gray-800">{statement.ticket_count.toLocaleString()}</p></div>
+              </div>
+
+              {/* Editable name */}
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Income Summary Name</label>
+                <input
+                  value={summaryName}
+                  onChange={e => setSummaryName(e.target.value)}
+                  placeholder={statement.statement_name ?? "Income summary name"}
+                  className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400"
+                />
+              </div>
+
+              {/* Incentive totals preview */}
+              <div className="border border-gray-100 rounded-xl overflow-hidden">
+                <table className="w-full text-xs">
+                  <tbody className="divide-y divide-gray-100">
+                    {summaryTotals.map(r => (
+                      <tr key={r.key}>
+                        <td className="px-3 py-1.5 text-gray-600">{r.label}</td>
+                        <td className="px-3 py-1.5 text-right font-mono text-gray-700">
+                          {r.value ? `₹${r.value.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : <span className="text-gray-300">—</span>}
+                        </td>
+                      </tr>
+                    ))}
+                    <tr className="border-t-2 border-gray-300 bg-gray-50 font-bold">
+                      <td className="px-3 py-2 text-gray-900">Total Income</td>
+                      <td className="px-3 py-2 text-right font-mono text-emerald-700">
+                        ₹{summaryGrandTotal.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              {saveSummaryError && <p className="text-xs text-red-600">{saveSummaryError}</p>}
+              {saveSummaryDone && <p className="text-xs text-emerald-600">Income summary saved.</p>}
+            </div>
+
+            {/* Footer */}
+            <div className="px-6 py-4 border-t border-gray-100 flex items-center justify-end gap-2">
+              <button onClick={() => setShowSaveSummary(false)} className="px-4 py-2 border border-gray-200 text-xs rounded-lg text-gray-600 hover:bg-gray-50">Close</button>
+              <button
+                onClick={saveIncomeSummary}
+                disabled={savingSummary}
+                className="flex items-center gap-1.5 px-4 py-2 bg-emerald-600 text-white rounded-lg text-xs font-semibold hover:bg-emerald-700 disabled:opacity-60"
+              >
+                {savingSummary ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Saving…</> : <><Save className="w-3.5 h-3.5" /> Confirm &amp; Save</>}
               </button>
             </div>
           </div>

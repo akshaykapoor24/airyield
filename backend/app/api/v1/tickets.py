@@ -21,6 +21,7 @@ from app.models.airline_deal import AirlineDeal
 from app.models.b2b_deal import B2BDeal
 from app.models.uploaded_ticket import UploadedTicket
 from app.models.ticket_statement import TicketStatement
+from app.models.income_summary import IncomeSummary
 from app.models.ticket_calculation import TicketCalculation
 from app.models.user import User
 from app.schemas.uploaded_ticket import (
@@ -34,6 +35,8 @@ from app.schemas.uploaded_ticket import (
     UploadedTicketUpdate,
     MatchDiagnosisResponse,
     TicketStatementRead,
+    IncomeSummaryCreate,
+    IncomeSummaryRead,
 )
 from pydantic import BaseModel
 from app.services.deal_matching import DealMatchingService
@@ -459,21 +462,25 @@ async def get_ticket_statement(
     )
 
 
-# ── Income summary PDF ──────────────────────────────────────────────────────
+# ── Income summary (saved per-statement aggregates) ─────────────────────────
 
-@router.get("/statements/{batch_id}/income-summary.pdf")
-async def download_income_summary_pdf(
+# Must stay byte-identical to INCENTIVE_TYPE_COLS[].key on the frontend batch page
+# and to the keys produced into UploadedTicket.incentive_breakdown by deal matching.
+INCENTIVE_TYPE_KEYS = [
+    "PLB", "Super PLB", "Transaction Fee", "Deposit Incentive (DI)",
+    "Marketing Fund", "Ancillary", "Frontend", "Backend", "Cashback",
+    "Segment Incentive", "Push Action",
+]
+
+
+@router.post("/statements/{batch_id}/income-summary", response_model=IncomeSummaryRead)
+async def save_income_summary(
     batch_id:     str,
+    payload:      IncomeSummaryCreate,
     db:           AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Generate a per-ticket income summary PDF for one ticket statement."""
-    from reportlab.lib import colors
-    from reportlab.lib.pagesizes import A4, landscape
-    from reportlab.lib.styles import getSampleStyleSheet
-    from reportlab.lib.units import mm
-    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-
+    """Aggregate a statement's tickets authoritatively and UPSERT one IncomeSummary row."""
     # Statement (mirror get_ticket_statement filters)
     stmt_res = await db.execute(
         select(TicketStatement).where(
@@ -488,87 +495,105 @@ async def download_income_summary_pdf(
 
     # Tickets (mirror list_uploaded_tickets filters)
     tk_res = await db.execute(
-        select(UploadedTicket)
-        .where(
+        select(UploadedTicket).where(
             UploadedTicket.batch_id == batch_id,
             UploadedTicket.tenant_id == current_user.tenant_id,
             UploadedTicket.created_by_id == current_user.id,
         )
-        .order_by(UploadedTicket.created_at.asc())
     )
     tickets = tk_res.scalars().all()
 
-    stmt_type = getattr(stmt, "statement_type", "B2B") or "B2B"
-    title     = stmt.statement_name or f"{stmt_type} · {stmt.agency}"
-
-    def money(v) -> str:
-        return f"Rs. {float(v):,.2f}" if v is not None else "—"
-
-    def passenger(t) -> str:
-        if t.pax_name:
-            return t.pax_name
-        name = f"{t.first_name or ''} {t.last_name or ''}".strip()
-        return name or "—"
-
-    rows: list[list[str]] = [
-        ["Ticket #", "Passenger", "Airline", "Sector", "Sell Fare", "Status", "Income"]
-    ]
+    # Aggregate per incentive type + grand total (null → 0)
+    totals = {k: 0.0 for k in INCENTIVE_TYPE_KEYS}
     total_income = 0.0
     for t in tickets:
+        bd = t.incentive_breakdown or {}
+        for k in INCENTIVE_TYPE_KEYS:
+            v = bd.get(k)
+            if v is not None:
+                totals[k] += float(v)
         if t.calculated_incentive is not None:
             total_income += float(t.calculated_incentive)
-        rows.append([
-            t.ticket_number or "—",
-            passenger(t),
-            t.airline_name or t.airlines_code or "—",
-            t.sector or "—",
-            money(t.sell_fare),
-            t.ticket_status or "—",
-            money(t.calculated_incentive),
-        ])
-    rows.append(["", "", "", "", "", f"Total ({len(tickets)})", money(total_income)])
+    totals = {k: round(v, 2) for k, v in totals.items()}
+    total_income = round(total_income, 2)
 
-    buf = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buf, pagesize=landscape(A4),
-        leftMargin=18 * mm, rightMargin=18 * mm, topMargin=16 * mm, bottomMargin=16 * mm,
+    stmt_type = getattr(stmt, "statement_type", "B2B") or "B2B"
+    name = (payload.name or "").strip() or stmt.statement_name or f"{stmt_type} · {stmt.agency}"
+
+    # Upsert on (tenant_id, created_by_id, batch_id)
+    existing_res = await db.execute(
+        select(IncomeSummary).where(
+            IncomeSummary.tenant_id == current_user.tenant_id,
+            IncomeSummary.created_by_id == current_user.id,
+            IncomeSummary.batch_id == batch_id,
+        )
     )
-    styles = getSampleStyleSheet()
-    period = f"{stmt.valid_from:%d %b %Y} – {stmt.valid_to:%d %b %Y}"
-    elements = [
-        Paragraph("Income Summary", styles["Title"]),
-        Paragraph(title, styles["Heading3"]),
-        Paragraph(f"Agency: {stmt.agency} &nbsp;&nbsp; Period: {period}", styles["Normal"]),
-        Spacer(1, 8 * mm),
-    ]
+    obj = existing_res.scalar_one_or_none()
+    if obj is None:
+        obj = IncomeSummary(
+            tenant_id=current_user.tenant_id,
+            created_by_id=current_user.id,
+            batch_id=batch_id,
+        )
+        db.add(obj)
 
-    table = Table(rows, repeatRows=1)
-    navy = colors.HexColor("#1e3a5f")
-    table.setStyle(TableStyle([
-        ("BACKGROUND",   (0, 0), (-1, 0), navy),
-        ("TEXTCOLOR",    (0, 0), (-1, 0), colors.white),
-        ("FONTNAME",     (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE",     (0, 0), (-1, -1), 8),
-        ("ALIGN",        (4, 0), (4, -1), "RIGHT"),   # Sell Fare
-        ("ALIGN",        (6, 0), (6, -1), "RIGHT"),   # Income
-        ("VALIGN",       (0, 0), (-1, -1), "MIDDLE"),
-        ("GRID",         (0, 0), (-1, -1), 0.4, colors.HexColor("#d1d5db")),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#f3f4f6")]),
-        ("BACKGROUND",   (0, -1), (-1, -1), colors.HexColor("#e5e7eb")),
-        ("FONTNAME",     (0, -1), (-1, -1), "Helvetica-Bold"),
-        ("TOPPADDING",   (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING",(0, 0), (-1, -1), 4),
-    ]))
-    elements.append(table)
-    doc.build(elements)
-    buf.seek(0)
+    obj.name             = name
+    obj.statement_name   = stmt.statement_name
+    obj.statement_type   = stmt_type
+    obj.agency           = stmt.agency
+    obj.valid_from       = stmt.valid_from
+    obj.valid_to         = stmt.valid_to
+    obj.ticket_count     = len(tickets)
+    obj.incentive_totals = totals
+    obj.total_income     = total_income
 
-    filename = f"income-summary-{batch_id}.pdf"
-    return StreamingResponse(
-        buf,
-        media_type="application/pdf",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    await db.commit()
+    await db.refresh(obj)
+    return obj
+
+
+@router.get("/income-summaries", response_model=list[IncomeSummaryRead])
+async def list_income_summaries(
+    agency:     Optional[str] = Query(None),
+    valid_from: Optional[date] = Query(None),
+    valid_to:   Optional[date] = Query(None),
+    db:           AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List saved income summaries, filtered by agency and a valid-date overlap range."""
+    q = select(IncomeSummary).where(
+        IncomeSummary.tenant_id == current_user.tenant_id,
+        IncomeSummary.created_by_id == current_user.id,
     )
+    if agency:
+        q = q.where(IncomeSummary.agency == agency)
+    if valid_from:                                   # overlap: drop rows ending before the range start
+        q = q.where(IncomeSummary.valid_to >= valid_from)
+    if valid_to:                                     # overlap: drop rows starting after the range end
+        q = q.where(IncomeSummary.valid_from <= valid_to)
+    q = q.order_by(IncomeSummary.created_at.desc())
+    result = await db.execute(q)
+    return result.scalars().all()
+
+
+@router.delete("/income-summaries/{summary_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_income_summary(
+    summary_id:   int,
+    db:           AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    res = await db.execute(
+        select(IncomeSummary).where(
+            IncomeSummary.id == summary_id,
+            IncomeSummary.tenant_id == current_user.tenant_id,
+            IncomeSummary.created_by_id == current_user.id,
+        )
+    )
+    obj = res.scalar_one_or_none()
+    if not obj:
+        raise HTTPException(status_code=404, detail="Income summary not found")
+    await db.delete(obj)
+    await db.commit()
 
 
 # ── List uploaded tickets ──────────────────────────────────────────────────

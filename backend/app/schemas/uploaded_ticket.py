@@ -148,6 +148,29 @@ class TicketStatementRead(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class IncomeSummaryCreate(BaseModel):
+    """POST body for saving an income summary. name optional → defaults to statement_name."""
+    name: Optional[str] = None
+
+
+class IncomeSummaryRead(BaseModel):
+    id:               int
+    batch_id:         str
+    name:             str
+    statement_name:   Optional[str] = None
+    statement_type:   str = "B2B"
+    agency:           str
+    valid_from:       date
+    valid_to:         date
+    ticket_count:     int
+    incentive_totals: Dict[str, float] = {}
+    total_income:     float
+    created_at:       datetime
+    updated_at:       datetime
+
+    model_config = {"from_attributes": True}
+
+
 class UploadedTicketRead(TicketRow):
     """Full record as stored in DB — used for both list and detail responses."""
     id:              int
