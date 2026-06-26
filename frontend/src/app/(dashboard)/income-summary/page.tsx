@@ -87,7 +87,7 @@ export default function IncomeSummaryPage() {
     <div className="space-y-5">
       <div className="flex items-start justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Income Summary Dashboard</h1>
+          <h1 className="text-2xl font-bold text-gray-900">Income Statement Dashboard</h1>
           <p className="text-sm text-gray-500 mt-0.5">All time · All income heads</p>
         </div>
         <button onClick={fetchData} disabled={loading}

@@ -30,7 +30,7 @@ const TENANT_NAV: NavItem[] = [
   {
     label: "Dashboards", icon: BarChart2,
     children: [
-      { label: "Income Summary", href: "/income-summary", icon: DollarSign },
+      { label: "Income Statement", href: "/income-summary", icon: DollarSign },
       { label: "Pending Actions", href: "/pending-actions", icon: ClipboardCheck },
       { label: "Supplier Comparison", href: "/supplier-comparison", icon: GitMerge },
     ],
@@ -53,7 +53,7 @@ const TENANT_NAV: NavItem[] = [
       { label: "Upload Tickets", href: "/tickets/upload", icon: Upload },
       // { label: "Validation", href: "/tickets/validation", icon: ClipboardCheck },
       { label: "Ticket Repository", href: "/tickets", icon: BookOpen },
-      { label: "Income Summary", href: "/tickets/income-summary", icon: DollarSign },
+      { label: "Income Statement", href: "/tickets/income-summary", icon: DollarSign },
     ],
   },
   { label: "My Customers", href: "/customers", icon: Contact },

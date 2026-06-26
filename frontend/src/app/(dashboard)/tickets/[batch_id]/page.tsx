@@ -869,7 +869,7 @@ export default function StatementDetailPage() {
             title={anyCalculated ? "Save income summary for this statement" : "Run the calculation first"}
             className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-600 text-white rounded-lg text-xs font-semibold hover:bg-emerald-700 disabled:opacity-50"
           >
-            <TrendingUp className="w-3.5 h-3.5" /> Save Income Summary
+            <TrendingUp className="w-3.5 h-3.5" /> Save Income Statement
           </button>
         </div>
       </div>
@@ -1255,13 +1255,13 @@ export default function StatementDetailPage() {
         </div>
       )}
 
-      {/* ── Save Income Summary Modal ────────────────────────────────────── */}
+      {/* ── Save Income Statement Modal ────────────────────────────────────── */}
       {showSaveSummary && statement && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[85vh] flex flex-col">
             {/* Header */}
             <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-              <h2 className="text-sm font-bold text-gray-900">Save Income Summary</h2>
+              <h2 className="text-sm font-bold text-gray-900">Save Income Statement</h2>
               <button onClick={() => setShowSaveSummary(false)} className="p-1 hover:bg-gray-100 rounded-lg"><X className="w-4 h-4 text-gray-500" /></button>
             </div>
 
@@ -1277,7 +1277,7 @@ export default function StatementDetailPage() {
 
               {/* Editable name */}
               <div>
-                <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Income Summary Name</label>
+                <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Income Statement Name</label>
                 <input
                   value={summaryName}
                   onChange={e => setSummaryName(e.target.value)}

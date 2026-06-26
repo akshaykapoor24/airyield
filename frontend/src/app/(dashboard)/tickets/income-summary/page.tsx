@@ -152,7 +152,7 @@ export default function IncomeSummaryTabPage() {
       {/* header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-bold text-gray-900 uppercase tracking-wide">Income Summary</h1>
+          <h1 className="text-xl font-bold text-gray-900 uppercase tracking-wide">Income Statement</h1>
           <p className="text-xs text-gray-500 mt-0.5">Saved per-statement income summaries</p>
         </div>
         <button
@@ -218,7 +218,7 @@ export default function IncomeSummaryTabPage() {
           </div>
           <p className="text-sm font-medium text-gray-600">No income summaries yet</p>
           <p className="text-xs text-gray-400 mt-1">
-            Open a ticket statement, run the calculation, then click “Save Income Summary”.
+            Open a ticket statement, run the calculation, then click “Save Income Statement”.
           </p>
         </div>
       )}
@@ -238,7 +238,7 @@ export default function IncomeSummaryTabPage() {
             <table className="w-full">
               <thead>
                 <tr style={{ background: "#1e3a5f" }}>
-                  <th className="px-4 py-2 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Income Summary</th>
+                  <th className="px-4 py-2 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Income Statement</th>
                   <th className="px-4 py-2 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Statement</th>
                   <th className="px-4 py-2 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">
                     <span className="flex items-center gap-1"><Building2 className="w-3.5 h-3.5" /> Agency</span>
@@ -414,7 +414,7 @@ export default function IncomeSummaryTabPage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm">
             <div className="px-6 py-4 border-b border-gray-100">
-              <h2 className="text-sm font-bold text-gray-900">Delete Income Summary</h2>
+              <h2 className="text-sm font-bold text-gray-900">Delete Income Statement</h2>
             </div>
             <div className="px-6 py-4">
               <p className="text-xs text-gray-600">

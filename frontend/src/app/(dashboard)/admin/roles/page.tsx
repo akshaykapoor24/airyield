@@ -6,7 +6,7 @@ import { Shield, CheckCircle, XCircle, Edit2 } from "lucide-react";
 const ROLES = ["Admin", "Manager", "Agent", "Viewer"];
 
 const PERMISSIONS = [
-  { module: "Dashboard", actions: ["View Dashboard", "View Income Summary", "View Supplier Comparison"] },
+  { module: "Dashboard", actions: ["View Dashboard", "View Income Statement", "View Supplier Comparison"] },
   { module: "Deals", actions: ["View Deals", "Upload Deal", "Manual Deal Entry", "Review Extraction", "Submit Deal", "Approve Deal", "Reject Deal"] },
   { module: "Tickets", actions: ["View Tickets", "Upload Tickets", "View Validation", "Match Deal Manually"] },
   { module: "Calculations", actions: ["Run Calculation", "View Output", "Resolve Exceptions", "Create Override", "Approve Override"] },
@@ -22,7 +22,7 @@ const DEFAULT_MATRIX: Record<string, Record<string, boolean>> = {
     !["Manage Users", "Manage Roles", "Manage Approval Matrix", "System Configuration", "Delete Masters"].includes(a)
   ]))),
   Agent: Object.fromEntries(PERMISSIONS.flatMap(p => p.actions.map(a => [a,
-    ["View Dashboard", "View Income Summary", "View Supplier Comparison", "View Deals", "Upload Deal", "Manual Deal Entry", "Review Extraction", "Submit Deal",
+    ["View Dashboard", "View Income Statement", "View Supplier Comparison", "View Deals", "Upload Deal", "Manual Deal Entry", "Review Extraction", "Submit Deal",
      "View Tickets", "Upload Tickets", "View Validation", "View Income", "View Period Report", "View Masters"].includes(a)
   ]))),
   Viewer: Object.fromEntries(PERMISSIONS.flatMap(p => p.actions.map(a => [a,
