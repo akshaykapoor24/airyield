@@ -32,6 +32,7 @@ from app.models.customer import Customer
 from app.models.billing import Billing
 from app.models.uploaded_ticket import UploadedTicket
 from app.models.ticket_statement import TicketStatement
+from app.models.income_summary import IncomeSummary
 from app.models.ticket_calculation import TicketCalculation
 from app.models.airline_deal import AirlineDeal, ManualDealStatus
 from app.models.b2b_deal import B2BDeal
@@ -74,6 +75,7 @@ __all__ = [
     "Billing",
     "UploadedTicket",
     "TicketStatement",
+    "IncomeSummary",
     "TicketCalculation",
     "AirlineDeal", "B2BDeal", "ManualDealStatus",
     "DealBatch",
