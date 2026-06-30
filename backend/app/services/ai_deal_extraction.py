@@ -15,6 +15,10 @@ Your task is to process airline deal PDFs uploaded by users and convert them int
 Each deal object has:
 - airline_type  → "GDS" or "LCC"
 - airline_name  → full airline name from the document
+- iata_commission → the IATA commission percentage for this airline, as a plain number
+                    (e.g. 5 for "5%"), taken from an "IATA Commission" / "IATA %" column
+                    if present; otherwise null. This is the agent's standard IATA
+                    commission, separate from the PLB incentive %.
 - contract_valid_from → null (caller supplies this; set to null always)
 - contract_valid_to   → ISO date "YYYY-MM-DD" extracted from the document, or null
 - incentive_types = ["PLB"]
@@ -140,6 +144,7 @@ Return ONLY a valid JSON object — no markdown, no explanation:
     {
       "airline_type": "GDS",
       "airline_name": "Air India",
+      "iata_commission": null,
       "contract_valid_from": null,
       "contract_valid_to": "2026-03-31",
       "incentive_types": ["PLB"],

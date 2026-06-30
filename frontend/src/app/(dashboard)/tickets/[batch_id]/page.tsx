@@ -76,6 +76,7 @@ type UploadedTicket = {
   matched_deal_type: string | null;
   matched_deal_name: string | null;
   calculated_incentive: number | null;
+  iata_commission: number | null;
   incentive_breakdown: Record<string, number> | null;
   ticket_status: string;
   split_type: string | null;
@@ -131,6 +132,7 @@ type RunCalcResult = {
   matched_deal_type: string | null;
   matched_deal_name: string | null;
   calculated_incentive: number | null;
+  iata_commission: number | null;
   incentive_breakdown: Record<string, number> | null;
   message: string;
 };
@@ -535,6 +537,7 @@ export default function StatementDetailPage() {
         matched_deal_type:    data.matched_deal_type,
         matched_deal_name:    data.matched_deal_name,
         calculated_incentive: data.calculated_incentive,
+        iata_commission:      data.iata_commission ?? 0,
         incentive_breakdown:  data.incentive_breakdown ?? null,
         ticket_status: data.cancelled ? "cancelled" : data.excluded ? "excluded" : data.included ? "included" : "calculated",
         exclusion_reason: data.excluded ? (data.message || null) : null,
@@ -578,6 +581,7 @@ export default function StatementDetailPage() {
             matched_deal_type:    r.matched_deal_type,
             matched_deal_name:    r.matched_deal_name,
             calculated_incentive: r.calculated_incentive,
+            iata_commission:      r.iata_commission ?? 0,
             incentive_breakdown:  r.incentive_breakdown ?? null,
             ticket_status:        r.cancelled ? "cancelled" : r.excluded ? "excluded" : "calculated",
             exclusion_reason:     r.excluded ? (r.message || null) : null,
@@ -974,7 +978,7 @@ export default function StatementDetailPage() {
                 <th colSpan={NUM_HEADERS.length} className="px-3 py-2.5 text-[10px] font-bold text-white uppercase tracking-wider text-left border-l border-white/20" style={{background:"#334d6e"}}>
                   Financial
                 </th>
-                <th colSpan={EXTRA_TEXT_HEADERS.length + INCENTIVE_TYPE_COLS.length + 5} className="px-3 py-2.5 text-[10px] font-bold text-white uppercase tracking-wider text-left border-l border-white/20 whitespace-nowrap" style={{background:"#1e3a5f"}}>
+                <th colSpan={EXTRA_TEXT_HEADERS.length + INCENTIVE_TYPE_COLS.length + 6} className="px-3 py-2.5 text-[10px] font-bold text-white uppercase tracking-wider text-left border-l border-white/20 whitespace-nowrap" style={{background:"#1e3a5f"}}>
                   Additional
                 </th>
                 {statement.statement_type === "AIRLINE" && (
@@ -999,6 +1003,7 @@ export default function StatementDetailPage() {
                   <th key={col.key} className="px-2.5 py-2 text-right text-[10px] font-semibold text-white/80 whitespace-nowrap border-l border-white/10">{col.label}</th>
                 ))}
                 <th className="px-2.5 py-2 text-right text-[10px] font-semibold text-white/80 whitespace-nowrap border-l border-white/10">Delta Comm</th>
+                <th className="px-2.5 py-2 text-right text-[10px] font-semibold text-white/80 whitespace-nowrap border-l border-white/10">IATA Comm</th>
                 <th className="px-2.5 py-2 text-left text-[10px] font-semibold text-white/80 whitespace-nowrap border-l border-white/10">Status</th>
                 <th className="px-2.5 py-2 text-left text-[10px] font-semibold text-white/80 whitespace-nowrap border-l border-white/10">Type</th>
                 <th className="px-2.5 py-2 text-left text-[10px] font-semibold text-white/80 whitespace-nowrap border-l border-white/10">Matched Deal</th>
@@ -1073,6 +1078,13 @@ export default function StatementDetailPage() {
                           {delta >= 0 ? "+" : ""}₹{delta.toLocaleString("en-IN", { minimumFractionDigits: 2 })}
                         </span>;
                       })()}
+                    </td>
+
+                    {/* IATA Comm = matched deal's IATA % × sell fare (0 if no deal commission) */}
+                    <td className="px-2.5 py-2 text-xs text-right font-mono whitespace-nowrap border-l border-gray-100">
+                      {t.iata_commission != null
+                        ? <span className="text-teal-600 font-semibold">₹{t.iata_commission.toLocaleString("en-IN", { minimumFractionDigits: 2 })}</span>
+                        : <span className="text-gray-300">—</span>}
                     </td>
 
                     {/* Status */}

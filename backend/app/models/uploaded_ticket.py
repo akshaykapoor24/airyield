@@ -134,6 +134,7 @@ class UploadedTicket(Base):
     matched_deal_type:     Mapped[str | None]   = mapped_column(String(20), nullable=True)   # 'airline' | 'b2b'
     matched_deal_name:     Mapped[str | None]   = mapped_column(String(300), nullable=True)
     calculated_incentive:  Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    iata_commission:       Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)   # deal IATA comm % applied to sell fare
     incentive_breakdown:   Mapped[dict | None]  = mapped_column(JSONB, nullable=True)
     ticket_status:         Mapped[str]          = mapped_column(String(10), nullable=False, server_default="draft")
     split_type:            Mapped[str | None]   = mapped_column(String(10), nullable=True)

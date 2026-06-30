@@ -9,6 +9,8 @@ from app.models.income import IncomeRecord
 from app.models.document import Document
 from app.models.airline_class_master import AirlineClassMaster
 from app.models.customer import Customer
+from app.models.entity import Entity
+from app.models.login_id import LoginId
 from app.crud.ticket import CRUDTicket
 
 user = CRUDBase(User)
@@ -22,3 +24,5 @@ document = CRUDBase(Document)
 ticket = CRUDTicket()
 airline_class_master = CRUDBase(AirlineClassMaster)
 customer = CRUDBase(Customer)
+entity = CRUDBase(Entity)
+login_id = CRUDBase(LoginId)

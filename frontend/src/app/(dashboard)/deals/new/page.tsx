@@ -9,7 +9,7 @@ import {
   IEFieldValue,
   INCENTIVE_TYPES, INCLUSIONS_EXCLUSIONS,
   CONTINENTS, COUNTRY_GROUPS,
-  SelectField, SearchSelectField, DateField, TabBar, SectionCard,
+  SelectField, SearchSelectField, MultiSearchSelectField, DateField, TabBar, SectionCard,
   IncentiveTabContent, InclExclTabContent,
 } from "@/components/deals/IncentiveInclExclShared";
 
@@ -17,12 +17,17 @@ import {
 const CONTRACT_YEARS = ["Calendar year", "Financial year"];
 const TRIGGER_TYPES  = ["Flown", "Sales"];
 const PAYOUT_TYPES   = ["Flown", "Sales"];
-const ENTITIES       = ["ATB", "TSI", "YOL"];
-const IATA_NUMBERS   = ["12345678", "87654321", "11223344", "44332211"];
 const BUSINESS_TYPES = ["B2B", "B2C", "B2E", "MICE"];
-const LOGIN_IDS      = ["AGENT001", "AGENT002", "AGENT003", "AGENT004"];
-// B2B merges the airline "Login ID" and "IATA Number" into a single field.
-const LOGIN_IATA_OPTIONS = [...LOGIN_IDS, ...IATA_NUMBERS];
+
+// Entity codes and Login IDs / IATA come from the User Master. Login IDs are
+// filtered by airline name + vendor (supplier) + LoB (= business type).
+type LoginIdMaster = {
+  login_id: string;
+  airline_name: string | null;
+  vendor_name: string | null;
+  lob: string | null;
+  is_active: boolean;
+};
 
 // The deal-level Contract Valid From/To flow down into each selected incentive's
 // own from/to date fields. Keys differ per incentive; Ancillary and Deposit
@@ -141,8 +146,9 @@ export default function NewDealPage() {
   const [payoutType, setPayoutType]     = useState("");
   const [entity, setEntity]             = useState("");
   const [businessType, setBusinessType] = useState("");
-  // Single "Login ID / IATA" field, shared by both Airline and B2B forms.
-  const [loginId, setLoginId]           = useState("");
+  const [iataCommission, setIataCommission] = useState("");   // IATA commission %
+  // Login ID / IATA — multi-select from the User Master, shared by Airline and B2B.
+  const [loginIds, setLoginIds]         = useState<string[]>([]);
   const [supplierName, setSupplierName] = useState("");
 
   // top-level tab
@@ -169,6 +175,8 @@ export default function NewDealPage() {
   const [airlines, setAirlines]                       = useState<{airline_name:string;airline_type:string}[]>([]);
   const [loadingAirlines, setLoadingAirlines]         = useState(false);
   const [supplierOptions, setSupplierOptions]         = useState<string[]>([]);
+  const [entityOptions, setEntityOptions]             = useState<string[]>([]);
+  const [allLoginIds, setAllLoginIds]                 = useState<LoginIdMaster[]>([]);
   const [continentOptions, setContinentOptions]       = useState<string[]>(CONTINENTS);
   const [countryGroupOptions, setCountryGroupOptions] = useState<string[]>(COUNTRY_GROUPS);
 
@@ -179,6 +187,16 @@ export default function NewDealPage() {
   useEffect(() => {
     api.get<{ id: number; name: string }[]>("/suppliers/?limit=5000")
       .then(r => setSupplierOptions(r.data.map(s => s.name)))
+      .catch(() => {});
+  }, []);
+
+  // Entity codes + Login IDs from the User Master (tenant-scoped).
+  useEffect(() => {
+    api.get<{ code: string }[]>("/entities/", { params: { limit: 1000 } })
+      .then(r => setEntityOptions(Array.from(new Set(r.data.map(e => e.code).filter(Boolean)))))
+      .catch(() => {});
+    api.get<LoginIdMaster[]>("/login-ids/", { params: { limit: 1000 } })
+      .then(r => setAllLoginIds(r.data))
       .catch(() => {});
   }, []);
 
@@ -207,6 +225,19 @@ export default function NewDealPage() {
   // auto-fills the Airline Type (looked up from the class/RBD master); choosing a
   // type does NOT filter the name list.
   const airlineNameOptions = airlineOptions;
+
+  // Login IDs are filtered by the selected Airline Name + Supplier (vendor) +
+  // Business Type (= the login id's LoB). Each filter applies only when set, so
+  // e.g. "Air India" + "Lords Travel" + "B2B" narrows to matching login ids.
+  const _norm = (s: string | null | undefined) => (s ?? "").trim().toLowerCase();
+  const loginIdOptions = Array.from(new Set(
+    allLoginIds
+      .filter(l => l.is_active)
+      .filter(l => !airlineName  || _norm(l.airline_name) === _norm(airlineName))
+      .filter(l => !supplierName || _norm(l.vendor_name)  === _norm(supplierName))
+      .filter(l => !businessType || _norm(l.lob)          === _norm(businessType))
+      .map(l => l.login_id)
+  ));
 
   // Set the deal-level contract dates and mirror them into every selected
   // incentive that has its own from/to date fields (all except Ancillary and DI).
@@ -310,9 +341,11 @@ export default function NewDealPage() {
       // out separately — the consolidated values live in entity / login_id.
       entity:           entity       || null,
       iata_number:      null,
+      iata_commission:  iataCommission || null,
       business_type:    businessType || null,
       entity_lcc:       null,
-      login_id:         loginId      || null,
+      login_id:         loginIds.join(", ") || null,   // joined display (back-compat)
+      login_ids:        loginIds.length ? loginIds : null,
       remark:           remark        || null,
       deal_maker_name:  dealMakerName || null,
       incentive_types:  selectedIncentives,
@@ -484,13 +517,31 @@ export default function NewDealPage() {
               {/* Entity + Login ID/IATA — single fixed fields shown for both Airline
                    and B2B. Not gated by Airline Type, and unaffected when other
                    fields (Airline Type, Contract Year, …) change. */}
-              <SearchSelectField label="Entity" options={ENTITIES} value={entity} onChange={setEntity} />
-              <SearchSelectField
+              <SearchSelectField label="Entity" options={entityOptions} value={entity} onChange={setEntity} />
+              <MultiSearchSelectField
                 label={dealType === "airline" ? "Login ID / IATA Code" : "Login ID / IATA Number"}
-                options={LOGIN_IATA_OPTIONS}
-                value={loginId}
-                onChange={setLoginId}
+                placeholder="Search and select"
+                options={loginIdOptions}
+                values={loginIds}
+                onChange={setLoginIds}
               />
+
+              {/* IATA Commission (%) — free numeric input, after Login ID / IATA */}
+              <div>
+                <label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">IATA Commission (%)</label>
+                <div className="relative">
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    min="0"
+                    value={iataCommission}
+                    onChange={e => setIataCommission(e.target.value)}
+                    placeholder="e.g. 5"
+                    className="w-full border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 pr-6"
+                  />
+                  <span className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 text-xs pointer-events-none">%</span>
+                </div>
+              </div>
             </div>
           </SectionCard>
 

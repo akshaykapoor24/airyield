@@ -101,6 +101,7 @@ class ExtractedRow(BaseModel):
     eco_commission:   str        = ""
     peco_commission:  str        = ""
     bus_commission:   str        = ""
+    iata_commission:  Optional[str] = None   # IATA commission % (contract-level, per row)
     base_type:        str        = ""
     valid_on:         str        = ""
     valid_from:       Optional[str] = None
@@ -261,6 +262,7 @@ class ConfirmUploadPayload(BaseModel):
     remark:          Optional[str]  = None
     # GDS-specific
     iata_number:     Optional[str]  = None
+    iata_commission: Optional[str]  = None   # IATA commission % (deal-level fallback)
     # LCC-specific
     business_type:   Optional[str]  = None
     entity_lcc:      Optional[str]  = None

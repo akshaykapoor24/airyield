@@ -10,6 +10,8 @@ export type AuthUser = {
   role: AppRole | string;
   department: string | null;
   is_active: boolean;
+  tenant_id?: number | null;
+  tenant_type?: "corporate" | "individual" | null;
 };
 
 export const ROLE_LABELS: Record<string, string> = {

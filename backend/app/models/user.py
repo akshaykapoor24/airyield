@@ -1,6 +1,6 @@
 import enum
 from datetime import datetime
-from sqlalchemy import String, Boolean, DateTime, ForeignKey, Enum as SAEnum, Integer
+from sqlalchemy import String, Boolean, DateTime, ForeignKey, Enum as SAEnum, Integer, inspect as sa_inspect
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
@@ -38,3 +38,15 @@ class User(Base):
     updated_at:      Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="users")  # noqa: F821
+
+    @property
+    def tenant_type(self) -> str | None:
+        """Derived 'corporate'|'individual' from the related tenant.
+
+        Returns None when the tenant relationship is not eager-loaded, so that
+        serialization never triggers an (illegal) async lazy-load. Callers that
+        need the value should load the user with selectinload(User.tenant).
+        """
+        if "tenant" in sa_inspect(self).unloaded:
+            return None
+        return self.tenant.tenant_type.value if self.tenant else None
