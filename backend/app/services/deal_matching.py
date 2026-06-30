@@ -554,6 +554,7 @@ class DealMatchResult:
     valid_from:           date | None = None
     valid_to:             date | None = None
     deal_maker_name:      str | None  = None
+    iata_commission:      str | None  = None  # deal's IATA commission %, applied to ticket sell fare
 
 
 # ── Main service ───────────────────────────────────────────────────────────
@@ -669,6 +670,7 @@ class DealMatchingService:
                     valid_from=deal.valid_from,
                     valid_to=deal.valid_to,
                     deal_maker_name=deal.deal_maker_name,
+                    iata_commission=deal.iata_commission,
                 ))
 
         matches.sort(key=lambda m: m.calculated_incentive or 0, reverse=True)

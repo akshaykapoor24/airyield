@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import {
   RefreshCw, TrendingUp, Building2, Calendar, Hash,
-  AlertCircle, X, Trash2, Eye,
+  AlertCircle, X, Trash2, Eye, FileText, FileSpreadsheet,
 } from "lucide-react";
 import api from "@/lib/api";
 
@@ -35,6 +35,7 @@ type IncomeSummary = {
   ticket_count:     number;
   incentive_totals: Record<string, number> | null;
   total_income:     number;
+  iata_commission_total: number;
   created_at:       string;
   updated_at:       string;
 };
@@ -50,6 +51,7 @@ type ViewTicket = {
   sector:               string | null;
   sell_fare:            number | null;
   ticket_status:        string;
+  iata_commission:      number | null;
   calculated_incentive: number | null;
 };
 
@@ -120,6 +122,19 @@ export default function IncomeSummaryTabPage() {
   const viewPassenger = (t: ViewTicket) =>
     t.pax_name || [t.first_name, t.last_name].filter(Boolean).join(" ") || "—";
   const viewTotal = viewTickets.reduce((s, t) => s + (t.calculated_incentive ?? 0), 0);
+  const viewIataTotal = viewTickets.reduce((s, t) => s + (t.iata_commission ?? 0), 0);
+
+  const downloadIncome = async (summaryId: number, fmt: "pdf" | "xlsx", name: string) => {
+    try {
+      const res = await api.get(`/tickets/income-summaries/${summaryId}/${fmt}`, { responseType: "blob" });
+      const url = window.URL.createObjectURL(res.data as Blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${name || "income-statement"}.${fmt}`;
+      document.body.appendChild(a); a.click(); a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch { alert("Download failed."); }
+  };
 
   const allAgencies = Array.from(new Set(rows.map(r => r.agency))).sort();
 
@@ -252,6 +267,7 @@ export default function IncomeSummaryTabPage() {
                   {INCENTIVE_TYPE_COLS.map(c => (
                     <th key={c.key} className="px-3 py-2 text-right text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">{c.label}</th>
                   ))}
+                  <th className="px-3 py-2 text-right text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">IATA Comm</th>
                   <th className="px-4 py-2 text-right text-[11px] font-semibold text-white/90 uppercase tracking-wide whitespace-nowrap">Total Income</th>
                   <th className="px-4 py-2 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Saved</th>
                   <th className="px-4 py-2" />
@@ -260,7 +276,7 @@ export default function IncomeSummaryTabPage() {
               <tbody className="divide-y divide-gray-100">
                 {filtered.length === 0 ? (
                   <tr>
-                    <td colSpan={INCENTIVE_TYPE_COLS.length + 8} className="px-4 py-10 text-center text-xs text-gray-400">
+                    <td colSpan={INCENTIVE_TYPE_COLS.length + 9} className="px-4 py-10 text-center text-xs text-gray-400">
                       No income summaries match the current filters.
                     </td>
                   </tr>
@@ -299,6 +315,10 @@ export default function IncomeSummaryTabPage() {
                         </td>
                       );
                     })}
+                    <td className="px-3 py-2 text-right text-xs font-mono whitespace-nowrap">
+                      {r.iata_commission_total ? <span className="text-teal-600 font-semibold">{formatINR(r.iata_commission_total)}</span>
+                                               : <span className="text-gray-300">—</span>}
+                    </td>
                     <td className="px-4 py-2 text-right text-xs font-mono font-bold text-emerald-700 whitespace-nowrap">
                       {formatINR(r.total_income)}
                     </td>
@@ -366,6 +386,7 @@ export default function IncomeSummaryTabPage() {
                       <th className="px-2 py-2 font-semibold">Sector</th>
                       <th className="px-2 py-2 font-semibold text-right">Sell Fare</th>
                       <th className="px-2 py-2 font-semibold">Status</th>
+                      <th className="px-2 py-2 font-semibold text-right">IATA Comm</th>
                       <th className="px-2 py-2 font-semibold text-right">Income</th>
                     </tr>
                   </thead>
@@ -382,6 +403,11 @@ export default function IncomeSummaryTabPage() {
                             {t.ticket_status}
                           </span>
                         </td>
+                        <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">
+                          {t.iata_commission != null
+                            ? <span className="text-teal-600 font-semibold">{formatINR(t.iata_commission)}</span>
+                            : <span className="text-gray-300">—</span>}
+                        </td>
                         <td className="px-2 py-1.5 text-right font-mono font-semibold text-emerald-700 whitespace-nowrap">{formatINR(t.calculated_incentive)}</td>
                       </tr>
                     ))}
@@ -389,6 +415,7 @@ export default function IncomeSummaryTabPage() {
                   <tfoot>
                     <tr className="border-t-2 border-gray-300 font-bold text-gray-900">
                       <td className="px-2 py-2" colSpan={6}>Total ({viewTickets.length} tickets)</td>
+                      <td className="px-2 py-2 text-right font-mono text-teal-600 whitespace-nowrap">{formatINR(viewIataTotal)}</td>
                       <td className="px-2 py-2 text-right font-mono text-emerald-700 whitespace-nowrap">{formatINR(viewTotal)}</td>
                     </tr>
                   </tfoot>
@@ -397,7 +424,22 @@ export default function IncomeSummaryTabPage() {
             </div>
 
             {/* Footer */}
-            <div className="px-6 py-3 border-t border-gray-100 flex items-center justify-end">
+            <div className="px-6 py-3 border-t border-gray-100 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] text-gray-400">Download:</span>
+                <button
+                  onClick={() => downloadIncome(viewTarget.id, "pdf", viewTarget.name)}
+                  className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-white bg-[#1e3a5f] rounded-lg hover:bg-[#16304f]"
+                >
+                  <FileText className="w-3.5 h-3.5" /> PDF
+                </button>
+                <button
+                  onClick={() => downloadIncome(viewTarget.id, "xlsx", viewTarget.name)}
+                  className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5" /> XLS
+                </button>
+              </div>
               <button
                 onClick={() => setViewTarget(null)}
                 className="px-3 py-2 text-xs text-gray-600 hover:bg-gray-100 rounded-lg"

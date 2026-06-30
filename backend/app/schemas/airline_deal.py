@@ -18,9 +18,11 @@ class AirlineDealCreate(BaseModel):
     payout_type: Optional[str] = None
     entity: Optional[str] = None
     iata_number: Optional[str] = None
+    iata_commission: Optional[str] = None
     business_type: Optional[str] = None
     entity_lcc: Optional[str] = None
     login_id: Optional[str] = None
+    login_ids: Optional[list[str]] = None
     incentive_types: Optional[list[str]] = None
     incentive_data: Optional[dict] = None
     incl_excl_types: Optional[list[str]] = None
@@ -45,9 +47,11 @@ class AirlineDealResponse(BaseModel):
     payout_type: Optional[str]
     entity: Optional[str]
     iata_number: Optional[str]
+    iata_commission: Optional[str] = None
     business_type: Optional[str]
     entity_lcc: Optional[str]
     login_id: Optional[str]
+    login_ids: Optional[list[str]] = None
     incentive_types: Optional[list]
     incentive_data: Optional[dict]
     incl_excl_types: Optional[list]

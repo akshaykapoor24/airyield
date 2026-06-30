@@ -136,6 +136,7 @@ class Deal(Base):
     trigger_type  : Mapped[str | None] = mapped_column(String(50), nullable=True)
     payout_type   : Mapped[str | None] = mapped_column(String(50), nullable=True)
     iata_number   : Mapped[str | None] = mapped_column(String(50), nullable=True)
+    iata_commission : Mapped[str | None] = mapped_column(String(50), nullable=True)   # IATA commission %
 
     # ── B2B-only fields ──────────────────────────────────────────────────────
     supplier_name : Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -143,7 +144,8 @@ class Deal(Base):
     # ── LCC fields (airline or B2B can be LCC) ───────────────────────────────
     business_type  : Mapped[str | None] = mapped_column(String(50), nullable=True)
     entity_lcc     : Mapped[str | None] = mapped_column(String(50), nullable=True)
-    login_id       : Mapped[str | None] = mapped_column(String(100), nullable=True)
+    login_id       : Mapped[str | None] = mapped_column(String(100), nullable=True)   # joined display string (back-compat)
+    login_ids      : Mapped[list | None] = mapped_column(JSONB, nullable=True)         # multiple login ids / IATA selected on the deal
     variant        : Mapped[str | None] = mapped_column(String(100), nullable=True)
     eco_commission : Mapped[str | None] = mapped_column(String(50), nullable=True)
     peco_commission: Mapped[str | None] = mapped_column(String(50), nullable=True)

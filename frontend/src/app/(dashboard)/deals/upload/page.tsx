@@ -126,6 +126,7 @@ const CONTRACT_COLS_ALL = [
   {key:"c__payout_type",   label:"Payout Type"},
   {key:"c__entity_lcc",    label:"Entity"},
   {key:"c__login_id",      label:"Login ID"},
+  {key:"c__iata_commission", label:"IATA Commission (%)"},
 ];
 const B2B_HIDDEN_COLS = ["c__contract_year","c__trigger_type","c__payout_type"];
 const REMARKS_COL = {key:"r__remarks", label:"Remarks"};
@@ -166,6 +167,7 @@ const MT_CONTRACT_COLS_ALL: {key:string;label:string}[] = [
   {key:"c__payout_type",     label:"Payout Type"},
   {key:"c__entity_lcc",      label:"Entity"},
   {key:"c__login_id",        label:"Login ID"},
+  {key:"c__iata_commission", label:"IATA Commission (%)"},
   {key:"c__supplier_name",   label:"Supplier"},
   {key:"c__deal_maker_name", label:"Deal Maker"},
   {key:"r__remarks",         label:"Remarks"},
@@ -265,6 +267,7 @@ type ExtractionPreview = {
 type AIDeal = {
   airline_type: string;
   airline_name: string;
+  iata_commission: string | number | null;
   contract_valid_from: string | null;
   contract_valid_to: string | null;
   incentive_types: string[];
@@ -284,6 +287,8 @@ function convertAIDealsToRows(deals: AIDeal[]): ReviewRow[] {
     const extra: Record<string, string> = {};
     if (deal.airline_type)        extra["c__airline_type"] = deal.airline_type;
     if (deal.airline_name)        extra["c__airline_name"]  = deal.airline_name;
+    if (deal.iata_commission != null && deal.iata_commission !== "")
+                                  extra["c__iata_commission"] = String(deal.iata_commission);
     if (deal.contract_valid_from) extra["c__valid_from"]    = deal.contract_valid_from;
     if (deal.contract_valid_to)   extra["c__valid_to"]      = deal.contract_valid_to;
     for (const [incType, incFields] of Object.entries(deal.incentive_data ?? {})) {
@@ -733,7 +738,7 @@ function InclExclPopup({
 // STEP 2 — COLUMN MAPPING
 // ═══════════════════════════════════════════════════════════════════════════════
 function ColumnMappingStep({
-  preview, columnMap, onMapChange, selectedIncentives, selectedInclExcl, dealType, onConfirm, onBack
+  preview, columnMap, onMapChange, selectedIncentives, selectedInclExcl, dealType, onConfirm, onBack, contractOnly=false
 }:{
   preview:ExtractionPreview;
   columnMap:Record<string,string>;
@@ -743,6 +748,7 @@ function ColumnMappingStep({
   dealType:string;
   onConfirm:(contract:Record<string,string>,rows:ReviewRow[],rowInclExcl:Record<number,RowInclExcl>)=>void;
   onBack:()=>void;
+  contractOnly?:boolean;   // multi-tab: map only the contract sheet (incentive/rules live on other sheets)
 }){
   const docCols:string[] = preview.doc_columns?.length
     ? preview.doc_columns
@@ -784,8 +790,8 @@ function ColumnMappingStep({
           if(dc){let v=cellVal(rawRow,dc);if(v){if(col.key==="c__valid_from"||col.key==="c__valid_to")v=toDateStr(v);extra[col.key]=v;}}
         }
       }
-      // Per-row incentive column values
-      for(const inc of selectedIncentives){
+      // Per-row incentive column values (skipped for multi-tab — those live on other sheets)
+      if(!contractOnly) for(const inc of selectedIncentives){
         for(const f of INCENTIVE_FIELDS[inc]??[]){
           const colKey=`i__${inc}__${f.key}`;
           const dc=columnMap[colKey];
@@ -800,7 +806,7 @@ function ColumnMappingStep({
     // duplicated across every selected incentive type so each starts with the same
     // data — independently editable afterward via the per-row Incl/Excl modal)
     const rowInclExclFromXLS:Record<number,RowInclExcl>={};
-    for(let i=0;i<rowCount;i++){
+    if(!contractOnly) for(let i=0;i<rowCount;i++){
       const rawRow=rawRows[i];
       if(!rawRow)continue;
       const flatByType:Record<string,Record<string,IEFieldValue>>={};
@@ -840,7 +846,10 @@ function ColumnMappingStep({
     onConfirm(contract,rows,rowInclExclFromXLS);
   };
 
-  const groups=[
+  const groups=contractOnly?[
+    {label:"Airline Contract Details",cols:contractCols},
+    {label:"Remarks",cols:[REMARKS_COL]},
+  ]:[
     {label:"Airline Contract Details",cols:contractCols},
     ...selectedIncentives.map(inc=>({label:`Incentive Types — ${inc}`,cols:incentiveMapCols(inc)})),
     ...selectedInclExcl.map(type=>({label:`Incl/Excl — ${type}`,cols:inclExclMapCols(type)})),
@@ -943,6 +952,7 @@ const CELL_PLACEHOLDER: Record<string, string> = {
   "c__entity_lcc":    "ATB / TSI / YOL",
   "c__business_type": "B2B / B2C / B2E",
   "c__login_id":      "Agent login ID",
+  "c__iata_commission": "IATA %",
   "airline_name":     "Airline name",
   "iata_code":        "IATA code",
   "eco_commission":   "ECO %",
@@ -1428,6 +1438,8 @@ export default function UploadDealPage(){
   const [bulkColValue,  setBulkColValue]  = useState("");
   const [savedBatchId,  setSavedBatchId]  = useState<string|null>(null);
   const [isMultiTab,    setIsMultiTab]    = useState(false);   // multi-tab workbook upload
+  // parsed multi-tab rows held aside while the user reviews/adjusts column mapping
+  const [mtParsed,      setMtParsed]      = useState<{rows:ReviewRow[];rowInclExcl:Record<number,RowInclExcl>}|null>(null);
 
   useEffect(()=>{
     api.get<{id:number;name:string}[]>("/suppliers/?limit=5000")
@@ -1635,7 +1647,8 @@ export default function UploadDealPage(){
         setFilterText("");setSelectedRows(new Set());setBulkColKey("");setBulkColValue("");
         setStep(3);
       }else{
-        // Multi-tab workbook? Parse all sheets in-browser, join by Deal No, skip Step 2.
+        // Multi-tab workbook? Parse all sheets in-browser (join by Deal No), then show
+        // the column-mapping step for the contract sheet before Review — like flat XLS.
         if(/\.xlsx?$/i.test(file.name)){
           const wb=XLSX.read(new Uint8Array(await file.arrayBuffer()),{type:"array"});
           if(wb.SheetNames.includes(MT_CONTRACT_SHEET)){
@@ -1648,16 +1661,28 @@ export default function UploadDealPage(){
             if(validFromDate){
               parsed.rows.forEach(r=>{ if(!r.extra["c__valid_from"]) r.extra["c__valid_from"]=validFromDate; });
             }
+            // Build a contract-sheet preview for the mapping UI: one raw row per Deal No,
+            // in the same order as parsed.rows so they merge back by index.
+            const sheet=wb.Sheets[MT_CONTRACT_SHEET];
+            const headerRow=(XLSX.utils.sheet_to_json<string[]>(sheet,{header:1})[0]??[]).map(h=>String(h)).filter(Boolean);
+            const seenDeal=new Set<string>();
+            const contractRawRows=XLSX.utils.sheet_to_json<Record<string,string>>(sheet,{defval:"",raw:false}).filter(rw=>{
+              const dn=String(rw["Deal No"]??"").trim();
+              if(!dn||seenDeal.has(dn))return false; seenDeal.add(dn); return true;
+            });
+            const mtPreview:ExtractionPreview={
+              source_type:"excel", file_name:file.name, confidence:0.95,
+              rows:parsed.rows.map(r=>({row_order:r.row_order,airline_name:r.airline_name,iata_code:r.iata_code,eco_commission:r.eco_commission,peco_commission:r.peco_commission,bus_commission:r.bus_commission,valid_on:r.valid_on,validity_raw:r.validity_raw,remarks:r.remarks})),
+              doc_columns:headerRow, raw_rows:contractRawRows,
+            };
             setIsMultiTab(true);
+            setMtParsed({rows:parsed.rows,rowInclExcl:parsed.rowInclExcl});
             // Keep the Step-1 selection visible in review, plus anything found in the file.
-            // (Incentives with no data simply aren't saved — confirm derives types from
-            // the actual filled values.)
             setSelectedIncentives(prev=>[...new Set([...prev, ...parsed.incentiveUnion])]);
             setSelectedInclExcl(prev=>[...new Set([...prev, ...parsed.inclExclUnion])]);
-            setRows(parsed.rows);
-            setRowInclExcl(parsed.rowInclExcl);
+            initColumnMap(mtPreview);
             setFilterText("");setSelectedRows(new Set());setBulkColKey("");setBulkColValue("");
-            setStep(3);
+            setStep(2);
             return;
           }
         }
@@ -1673,6 +1698,21 @@ export default function UploadDealPage(){
 
   // ── Step 2 → 3: Apply mapping ────────────────────────────────────────────────
   const handleMappingConfirm=(contract:Record<string,string>,mappedRows:ReviewRow[],prePopulatedInclExcl:Record<number,RowInclExcl>)=>{
+    // Multi-tab: keep the in-browser-parsed incentive / incl-excl data; only the
+    // contract columns come from the (possibly adjusted) mapping. Merge by row index.
+    if(isMultiTab && mtParsed){
+      const merged=mtParsed.rows.map((pr,i)=>({
+        ...pr,
+        row_order:i,
+        extra:{...pr.extra, ...(mappedRows[i]?.extra??{}), c__deal_tag:dealTag==="adhoc"?"Adhoc":"Standard"},
+      }));
+      setRows(merged);
+      setRowInclExcl(mtParsed.rowInclExcl);
+      setMtParsed(null);
+      setFilterText("");setSelectedRows(new Set());setBulkColKey("");setBulkColValue("");
+      setStep(3);
+      return;
+    }
     const fallbackContract: Record<string, string> = {
       c__airline_type:  contract.c__airline_type  || "GDS",
       c__trigger_type:  contract.c__trigger_type  || "Sales",
@@ -1732,6 +1772,7 @@ export default function UploadDealPage(){
           entity_lcc:      getContractVal("c__entity_lcc")||null,
           business_type:   getContractVal("c__business_type")||null,
           login_id:        getContractVal("c__login_id")||null,
+          iata_commission: getContractVal("c__iata_commission")||null,
           incentive_types: selectedIncentives,
           incentive_data:  {},
           incl_excl_types: selectedInclExcl,
@@ -1759,6 +1800,7 @@ export default function UploadDealPage(){
               business_type:  r.extra["c__business_type"]||null,
               entity_lcc:     r.extra["c__entity_lcc"]||null,
               login_id:       r.extra["c__login_id"]||null,
+              iata_commission:r.extra["c__iata_commission"]||null,
               deal_maker_name:r.extra["c__deal_maker_name"]||null,
               supplier_name:  r.extra["c__supplier_name"]||null,
               contract_year:  r.extra["c__contract_year"]||null,
@@ -2043,6 +2085,7 @@ export default function UploadDealPage(){
           dealType={dealType}
           onConfirm={handleMappingConfirm}
           onBack={()=>setStep(1)}
+          contractOnly={isMultiTab}
         />
       )}
 

@@ -12,8 +12,13 @@ router = APIRouter()
 @router.post("/signup", response_model=TokenWithUser, status_code=status.HTTP_201_CREATED)
 async def signup(payload: SignupPayload, db: AsyncSession = Depends(get_db)):
     """
-    Public signup. First user from a domain becomes company_admin.
-    If that domain already has an admin, returns 409 with a message.
+    Public signup with two flows (the new user is always super_admin of their tenant):
+
+    - corporate:  work email required (public providers rejected). The first
+                  person from a company domain creates/owns that tenant; later
+                  signups from the same domain get 409 (add them via User Management).
+    - individual: any email allowed (incl. Gmail/Yahoo). Each signup gets its own
+                  private single-person tenant. PAN required; GST optional.
     """
     return await AuthService.signup(db, payload)
 

@@ -506,6 +506,7 @@ async def save_income_summary(
     # Aggregate per incentive type + grand total (null → 0)
     totals = {k: 0.0 for k in INCENTIVE_TYPE_KEYS}
     total_income = 0.0
+    total_iata = 0.0
     for t in tickets:
         bd = t.incentive_breakdown or {}
         for k in INCENTIVE_TYPE_KEYS:
@@ -514,8 +515,11 @@ async def save_income_summary(
                 totals[k] += float(v)
         if t.calculated_incentive is not None:
             total_income += float(t.calculated_incentive)
+        if t.iata_commission is not None:
+            total_iata += float(t.iata_commission)
     totals = {k: round(v, 2) for k, v in totals.items()}
     total_income = round(total_income, 2)
+    total_iata = round(total_iata, 2)
 
     stmt_type = getattr(stmt, "statement_type", "B2B") or "B2B"
     name = (payload.name or "").strip() or stmt.statement_name or f"{stmt_type} · {stmt.agency}"
@@ -546,6 +550,7 @@ async def save_income_summary(
     obj.ticket_count     = len(tickets)
     obj.incentive_totals = totals
     obj.total_income     = total_income
+    obj.iata_commission_total = total_iata
 
     await db.commit()
     await db.refresh(obj)
@@ -594,6 +599,65 @@ async def delete_income_summary(
         raise HTTPException(status_code=404, detail="Income summary not found")
     await db.delete(obj)
     await db.commit()
+
+
+async def _load_income_summary_with_tickets(summary_id: int, db: AsyncSession, current_user: User):
+    """Fetch a saved income summary + the (live) tickets of its statement."""
+    res = await db.execute(
+        select(IncomeSummary).where(
+            IncomeSummary.id == summary_id,
+            IncomeSummary.tenant_id == current_user.tenant_id,
+            IncomeSummary.created_by_id == current_user.id,
+        )
+    )
+    summary = res.scalar_one_or_none()
+    if not summary:
+        raise HTTPException(status_code=404, detail="Income summary not found")
+    tk = await db.execute(
+        select(UploadedTicket)
+        .where(
+            UploadedTicket.batch_id == summary.batch_id,
+            UploadedTicket.tenant_id == current_user.tenant_id,
+            UploadedTicket.created_by_id == current_user.id,
+        )
+        .order_by(UploadedTicket.id)
+    )
+    return summary, tk.scalars().all()
+
+
+def _income_filename(summary, ext: str) -> str:
+    safe = "".join(c for c in (summary.name or "income-statement") if c.isalnum() or c in (" ", "-", "_")).strip().replace(" ", "_")
+    return f"{safe or 'income-statement'}.{ext}"
+
+
+@router.get("/income-summaries/{summary_id}/pdf")
+async def export_income_summary_pdf(
+    summary_id:   int,
+    db:           AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    from app.services.income_statement_export import build_income_statement_pdf
+    summary, tickets = await _load_income_summary_with_tickets(summary_id, db, current_user)
+    buf = build_income_statement_pdf(summary, tickets)
+    return StreamingResponse(
+        buf, media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename={_income_filename(summary, 'pdf')}"},
+    )
+
+
+@router.get("/income-summaries/{summary_id}/xlsx")
+async def export_income_summary_xlsx(
+    summary_id:   int,
+    db:           AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    from app.services.income_statement_export import build_income_statement_xlsx
+    summary, tickets = await _load_income_summary_with_tickets(summary_id, db, current_user)
+    buf = build_income_statement_xlsx(summary, tickets)
+    return StreamingResponse(
+        buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={_income_filename(summary, 'xlsx')}"},
+    )
 
 
 # ── List uploaded tickets ──────────────────────────────────────────────────
@@ -692,6 +756,8 @@ async def _run_single(
     # Set status upfront so every early-exit path persists "calculated" to the DB.
     # The excluded branch below overrides this to "excluded".
     ticket.ticket_status = "calculated"
+    # IATA commission defaults to 0; set to the computed amount when a deal matches.
+    ticket.iata_commission = 0
 
     if ticket.invoice_type and ticket.invoice_type.strip().lower() in _CANCELLED_INVOICE_TYPES:
         ticket.comm_sell = 0
@@ -830,6 +896,17 @@ async def _run_single(
             else match.calculated_incentive
         )
 
+        # IATA commission: the matched deal's IATA % applied to the ticket's sell fare
+        # (base fare). Shown in its own column — NOT part of the incentive total. 0 if none.
+        iata_pct = 0.0
+        if match.iata_commission:
+            try:
+                iata_pct = float(str(match.iata_commission).strip().rstrip("%").strip())
+            except (TypeError, ValueError):
+                iata_pct = 0.0
+        sell = float(ticket.sell_fare) if ticket.sell_fare is not None else 0.0
+        ticket.iata_commission = round(iata_pct / 100.0 * sell, 2)
+
         had_inclusion_rule = False
 
         if match.is_unified:
@@ -919,6 +996,7 @@ async def _run_single(
                         matched_deal_type=match.deal_type,
                         matched_deal_name=match.deal_name,
                         calculated_incentive=0,
+                        iata_commission=float(ticket.iata_commission or 0),
                         incentive_breakdown={},
                         message=incl_reason,
                     )
@@ -939,6 +1017,7 @@ async def _run_single(
                             matched_deal_type=match.deal_type,
                             matched_deal_name=match.deal_name,
                             calculated_incentive=0,
+                            iata_commission=float(ticket.iata_commission or 0),
                             incentive_breakdown={},
                             message=excl_reason,
                         )
@@ -953,6 +1032,7 @@ async def _run_single(
             matched_deal_type=match.deal_type,
             matched_deal_name=match.deal_name,
             calculated_incentive=ticket.calculated_incentive,
+            iata_commission=float(ticket.iata_commission or 0),
             incentive_breakdown=ticket.incentive_breakdown or {},
             message=f"Matched {match.deal_type} deal ID {match.deal_id}.",
         )

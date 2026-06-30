@@ -107,6 +107,7 @@ class TicketRow(BaseModel):
     matched_deal_type:     Optional[str]   = None
     matched_deal_name:     Optional[str]   = None
     calculated_incentive:  Optional[float] = None
+    iata_commission:       Optional[float] = None
     incentive_breakdown:   Optional[Dict[str, float]] = None
     exclusion_reason:      Optional[str]   = None
 
@@ -165,6 +166,7 @@ class IncomeSummaryRead(BaseModel):
     ticket_count:     int
     incentive_totals: Dict[str, float] = {}
     total_income:     float
+    iata_commission_total: float = 0
     created_at:       datetime
     updated_at:       datetime
 
@@ -200,6 +202,7 @@ class RunCalculationResult(BaseModel):
     matched_deal_type:    Optional[str]
     matched_deal_name:    Optional[str]
     calculated_incentive: Optional[float]
+    iata_commission:      Optional[float] = None
     incentive_breakdown:  Optional[Dict[str, float]] = None
     message:              str
 

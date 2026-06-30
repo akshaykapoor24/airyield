@@ -40,6 +40,7 @@ class IncomeSummary(Base):
     # ── aggregated totals ────────────────────────────────────────────────────
     incentive_totals: Mapped[dict | None] = mapped_column(JSONB, nullable=True)   # {<one of 11 incentive-type keys>: float}
     total_income:     Mapped[float]       = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    iata_commission_total: Mapped[float]  = mapped_column(Numeric(14, 2), nullable=False, default=0, server_default="0")  # sum of tickets' IATA commission
 
     created_at:    Mapped[datetime]    = mapped_column(DateTime, default=datetime.utcnow)
     updated_at:    Mapped[datetime]    = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

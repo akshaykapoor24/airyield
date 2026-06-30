@@ -250,9 +250,12 @@ export default function UserManagementPage() {
   const [modal, setModal]           = useState<Partial<UserRow> | null | false>(false);
   const [menuOpen, setMenuOpen]     = useState<number | null>(null);
 
-  // derive admin's domain from the logged-in user stored in localStorage
-  const adminEmail  = typeof window !== "undefined" ? (() => { try { return JSON.parse(localStorage.getItem("ay_user") ?? "{}").email ?? ""; } catch { return ""; } })() : "";
+  // derive admin context from the logged-in user stored in localStorage
+  const storedUser = typeof window !== "undefined" ? (() => { try { return JSON.parse(localStorage.getItem("ay_user") ?? "{}"); } catch { return {}; } })() : {};
+  const adminEmail  = storedUser?.email ?? "";
   const adminDomain = adminEmail.includes("@") ? adminEmail.split("@")[1].toLowerCase() : "";
+  // individual tenants are private single-person workspaces — no team management
+  const isIndividual = storedUser?.tenant_type === "individual";
 
   // ── fetch users from API ──────────────────────────────────────────────
   const fetchUsers = useCallback(async () => {
@@ -351,10 +354,16 @@ export default function UserManagementPage() {
             className="flex items-center gap-1.5 bg-white border border-gray-200 text-gray-600 px-3 py-2 rounded-lg text-xs font-medium hover:bg-gray-50 disabled:opacity-50">
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`}/>
           </button>
-          <button onClick={() => setModal(null)}
-            className="flex items-center gap-1.5 bg-[#1e3a5f] text-white px-3.5 py-2 rounded-lg text-xs font-medium hover:bg-[#16304f]">
-            <Plus className="w-3.5 h-3.5"/> Add User
-          </button>
+          {isIndividual ? (
+            <span className="text-[11px] text-gray-400 self-center max-w-45 leading-snug">
+              Private workspace — adding team members isn&apos;t available.
+            </span>
+          ) : (
+            <button onClick={() => setModal(null)}
+              className="flex items-center gap-1.5 bg-[#1e3a5f] text-white px-3.5 py-2 rounded-lg text-xs font-medium hover:bg-[#16304f]">
+              <Plus className="w-3.5 h-3.5"/> Add User
+            </button>
+          )}
         </div>
       </div>
 

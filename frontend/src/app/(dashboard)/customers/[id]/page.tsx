@@ -378,14 +378,14 @@ export default function CustomerDetailPage() {
             {customer?.company && <p className="text-xs text-gray-500 mt-0.5">{customer.company}</p>}
           </div>
         </div>
-        {customer && (
+        {/* {customer && (
           <button
             onClick={() => setShowEdit(true)}
             className="flex items-center gap-1.5 bg-white border border-gray-200 text-gray-700 px-3.5 py-2 rounded-lg text-xs font-semibold hover:bg-gray-50"
           >
             <Edit2 className="w-3.5 h-3.5" /> Edit
           </button>
-        )}
+        )} */}
       </div>
 
       {/* Tab bar */}
