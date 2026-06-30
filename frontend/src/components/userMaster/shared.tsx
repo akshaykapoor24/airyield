@@ -26,6 +26,17 @@ export type LoginIdRow = {
   is_active: boolean;
 };
 
+export type IataCommissionRow = {
+  id: number;
+  airline_name: string;
+  airline_code: string | null;
+  iata_numeric_code: string | null;
+  iata_commission_pct: number | null;
+  valid_from: string | null;
+  valid_to: string | null;
+  is_active: boolean;
+};
+
 export type SupplierOpt = { id: number; name: string };
 export type BulkResult = { total: number; success: number; failed: number; errors: string[] };
 
@@ -40,7 +51,7 @@ export function apiError(e: unknown): string {
   return "Request failed.";
 }
 
-export async function downloadTemplate(resource: "entities" | "login-ids", filename: string) {
+export async function downloadTemplate(resource: "entities" | "login-ids" | "iata-commissions", filename: string) {
   const res = await api.get(`/${resource}/template`, { responseType: "blob" });
   const url = window.URL.createObjectURL(res.data as Blob);
   const link = document.createElement("a");
@@ -71,7 +82,7 @@ export function ActiveBadge({ active, onClick }: { active: boolean; onClick: () 
 export function UploadBox({
   resource, templateName, columns, onDone,
 }: {
-  resource: "entities" | "login-ids";
+  resource: "entities" | "login-ids" | "iata-commissions";
   templateName: string;
   columns: string;
   onDone: () => void;
