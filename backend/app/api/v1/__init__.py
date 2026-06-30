@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.v1 import auth, users, airlines, suppliers, airports, routes, deals, tickets, income, documents, reports, classes, approval_workflows, dashboard, customers, entities, login_ids
+from app.api.v1 import auth, users, airlines, suppliers, airports, routes, deals, tickets, income, documents, reports, classes, approval_workflows, dashboard, customers, entities, login_ids, iata_commissions
 
 router = APIRouter()
 
@@ -21,3 +21,4 @@ router.include_router(dashboard.router, prefix="/dashboard", tags=["Dashboard"])
 router.include_router(customers.router, prefix="/customers", tags=["Customers"])
 router.include_router(entities.router, prefix="/entities", tags=["User Master - Entities"])
 router.include_router(login_ids.router, prefix="/login-ids", tags=["User Master - Login IDs"])
+router.include_router(iata_commissions.router, prefix="/iata-commissions", tags=["User Master - IATA Commission"])
