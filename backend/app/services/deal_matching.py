@@ -283,6 +283,56 @@ def _compute_incentive_from_config(
     return result
 
 
+# ── Ancillary calculation ───────────────────────────────────────────────────
+# Ancillary incentive is unique: it is NOT computed from the base fare but from
+# the ticket's own ancillary fee columns (Exc. Bag. / Meals / Seat Sel.), each
+# scaled by the deal's per-sub-type Percentage or added as a flat Number.
+
+# Deal ancillary sub-type label → ticket fee field. Only these three have a
+# corresponding ticket column; the rest (Transport, Group, Lounge, Cab) are skipped.
+_ANCILLARY_FEE_LABELS = ("Baggage Type", "Meals", "Seat Fees")
+
+
+def _compute_ancillary_from_items(
+    items: dict | None,
+    seat_selection: float | None,
+    excess_baggage: float | None,
+    meals: float | None,
+) -> float | None:
+    """Ancillary incentive = sum over Baggage/Meals/Seat of (fee × pct) or flat number.
+    Returns None when no sub-type applies (so the column stays empty)."""
+    if not items:
+        return None
+    fee_by_label = {
+        "Baggage Type": excess_baggage,
+        "Meals":        meals,
+        "Seat Fees":    seat_selection,
+    }
+    total = 0.0
+    matched = False
+    for label in _ANCILLARY_FEE_LABELS:
+        sub = items.get(label)
+        if not isinstance(sub, dict):
+            continue
+        amount = sub.get("amount")
+        if amount in (None, ""):
+            continue
+        with_type = (sub.get("withType") or "").strip().lower()
+        if with_type.startswith("without"):      # "Without Baggage/Meal/Seat Fees" → excluded
+            continue
+        try:
+            amt = float(amount)
+        except (TypeError, ValueError):
+            continue
+        num_pct = (sub.get("numPct") or "Percentage").strip().lower()
+        if "percent" in num_pct:
+            total += float(fee_by_label[label] or 0) * amt / 100.0
+        else:                                     # "Number" → flat amount per ticket
+            total += amt
+        matched = True
+    return round(total, 2) if matched else None
+
+
 # ── Slab (cumulative) calculation ───────────────────────────────────────────
 # Slab incentives depend on the TOTAL achieved sales for the airline in the
 # period (quarter / half / year), not a single ticket. The period is derived
@@ -574,6 +624,9 @@ class DealMatchingService:
         sell_fare:       float | None = None,
         sell_tax_yq:     float | None = None,
         sale_yr:         float | None = None,
+        seat_selection:  float | None = None,
+        excess_baggage:  float | None = None,
+        meals:           float | None = None,
         supplier_agency: str | None = None,
         statement_type:  str | None = None,
     ) -> list[DealMatchResult]:
@@ -643,7 +696,12 @@ class DealMatchingService:
                 vt = config.contract_valid_to
                 if vf and vt and not (vf <= travel_date <= vt):
                     continue
-                if _is_slab(config):
+                if config.ancillary_items:
+                    # Ancillary → from the ticket's own fee columns, not the base fare.
+                    inc = _compute_ancillary_from_items(
+                        config.ancillary_items, seat_selection, excess_baggage, meals,
+                    )
+                elif _is_slab(config):
                     # Slab → cumulative period band (Fixed path is left untouched).
                     inc = await _compute_slab_cumulative(
                         db, config, deal, travel_date, segment_type, cabin_groups,
@@ -1029,6 +1087,9 @@ class DealMatchingService:
         sell_fare:       float | None = None,
         sell_tax_yq:     float | None = None,
         sale_yr:         float | None = None,
+        seat_selection:  float | None = None,
+        excess_baggage:  float | None = None,
+        meals:           float | None = None,
         supplier_agency: str | None = None,
         statement_type:  str | None = None,
     ) -> DealMatchResult | None:
@@ -1038,6 +1099,7 @@ class DealMatchingService:
             tenant_id=tenant_id, created_by_id=created_by_id, segment_type=segment_type,
             booking_class=booking_class, invoice_type=invoice_type,
             sell_fare=sell_fare, sell_tax_yq=sell_tax_yq, sale_yr=sale_yr,
+            seat_selection=seat_selection, excess_baggage=excess_baggage, meals=meals,
             supplier_agency=supplier_agency,
             statement_type=statement_type,
         )

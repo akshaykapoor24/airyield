@@ -880,6 +880,9 @@ async def _run_single(
         sell_fare=float(ticket.sell_fare) if ticket.sell_fare is not None else None,
         sell_tax_yq=float(ticket.sell_tax_yq) if ticket.sell_tax_yq is not None else None,
         sale_yr=float(ticket.sale_yr) if ticket.sale_yr is not None else None,
+        seat_selection=float(ticket.seat_selection) if ticket.seat_selection is not None else None,
+        excess_baggage=float(ticket.excess_baggage) if ticket.excess_baggage is not None else None,
+        meals=float(ticket.meals) if ticket.meals is not None else None,
         supplier_agency=supplier_agency,
         statement_type=ticket.statement_type,
     )
@@ -1256,6 +1259,9 @@ async def get_all_matched_deals(
         sell_fare=float(ticket.sell_fare) if ticket.sell_fare is not None else None,
         sell_tax_yq=float(ticket.sell_tax_yq) if ticket.sell_tax_yq is not None else None,
         sale_yr=float(ticket.sale_yr) if ticket.sale_yr is not None else None,
+        seat_selection=float(ticket.seat_selection) if ticket.seat_selection is not None else None,
+        excess_baggage=float(ticket.excess_baggage) if ticket.excess_baggage is not None else None,
+        meals=float(ticket.meals) if ticket.meals is not None else None,
     )
 
     best_id = all_matches[0].deal_id if all_matches else None
