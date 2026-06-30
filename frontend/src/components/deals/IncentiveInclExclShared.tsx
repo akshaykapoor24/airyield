@@ -1274,6 +1274,22 @@ export function incentiveEntryToForm(entry: Record<string, unknown>): Record<str
     if (groups.segment.length && !form.segmentSlabs) form.segmentSlabs = JSON.stringify(groups.segment);
     if (groups.si.length && !form.siSlabs)           form.siSlabs = JSON.stringify(groups.si);
   }
+  // Expand the nested ancillaryItems blob ({"Baggage Type":{withType,numPct,amount},…})
+  // back into the flat baggage*/meals*/… keys AncillaryTabContent reads. Without this
+  // the Ancillary tab renders empty AND a Save would reconstruct it from absent flat
+  // keys, wiping the deal's ancillary data.
+  const ancillaryItems = entry?.["ancillaryItems"] as
+    Record<string, { withType?: unknown; numPct?: unknown; amount?: unknown }> | undefined;
+  if (ancillaryItems && typeof ancillaryItems === "object") {
+    for (const item of ANCILLARY_ITEMS) {
+      const sub = ancillaryItems[item.label];
+      if (sub && typeof sub === "object") {
+        if (sub.withType != null) form[item.key]       = String(sub.withType);
+        if (sub.numPct   != null) form[item.numPctKey] = String(sub.numPct);
+        if (sub.amount   != null) form[item.amtKey]    = String(sub.amount);
+      }
+    }
+  }
   return form;
 }
 
