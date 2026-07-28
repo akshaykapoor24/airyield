@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from sqlalchemy import String, DateTime, ForeignKey, Numeric, Integer, Text
+from sqlalchemy import String, DateTime, ForeignKey, Numeric, Integer, Text, Boolean
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
@@ -140,5 +140,11 @@ class UploadedTicket(Base):
     split_type:            Mapped[str | None]   = mapped_column(String(10), nullable=True)
     exclusion_reason:      Mapped[str | None]   = mapped_column(String(500), nullable=True)
     adm_acm_ra:            Mapped[str | None]   = mapped_column(String(10), nullable=True)   # 'ADM' | 'ACM' | 'RA'
+
+    # ── Billing status ────────────────────────────────────────────────────────
+    # A ticket is billed to at most one customer billing. Locked once billed;
+    # cleared when that billing is deleted.
+    is_billed:             Mapped[bool]         = mapped_column(Boolean, nullable=False, server_default="false", default=False)
+    billing_id:            Mapped[int | None]   = mapped_column(Integer, ForeignKey("billings.id", ondelete="SET NULL"), nullable=True, index=True)
 
     created_by: Mapped["User"] = relationship("User")  # noqa: F821

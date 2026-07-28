@@ -2,92 +2,6 @@ from __future__ import annotations
 from pydantic import BaseModel
 from typing import Optional
 from datetime import date, datetime
-from app.models.uploaded_deal import UploadedDealStatus, UploadedDealSourceType
-
-
-# ── UploadedDeal ───────────────────────────────────────────────────────────
-
-class UploadedDealCreate(BaseModel):
-    source_agent: str
-    issue_date:   Optional[date] = None
-    notes:        Optional[str]  = None
-
-
-class UploadedDealRead(BaseModel):
-    id:            int
-    source_type:   UploadedDealSourceType
-    source_agent:  str
-    issue_date:    Optional[date]
-    file_name:     str
-    file_type:     str
-    status:        UploadedDealStatus
-    notes:         Optional[str]
-    # deal header fields
-    airline_type:     Optional[str]  = None
-    airline_name:     Optional[str]  = None
-    contract_year:    Optional[str]  = None
-    valid_from:       Optional[date] = None
-    valid_to:         Optional[date] = None
-    trigger_type:     Optional[str]  = None
-    payout_type:      Optional[str]  = None
-    entity:           Optional[str]  = None
-    remark:           Optional[str]  = None
-    iata_number:      Optional[str]  = None
-    business_type:    Optional[str]  = None
-    entity_lcc:       Optional[str]  = None
-    login_id:         Optional[str]  = None
-    variant:          Optional[str]  = None
-    eco_commission:   Optional[str]  = None
-    peco_commission:  Optional[str]  = None
-    bus_commission:   Optional[str]  = None
-    base_type:        Optional[str]  = None
-    valid_on:         Optional[str]  = None
-    validity_raw:     Optional[str]  = None
-    deal_maker_name:  Optional[str]  = None
-    # incentives & inclusions/exclusions (stored as JSON)
-    incentive_types:  Optional[list] = None
-    incentive_data:   Optional[dict] = None
-    incl_excl_types:  Optional[list] = None
-    incl_excl_data:   Optional[dict] = None
-    vice_versa:       Optional[dict] = None
-    # metadata
-    tenant_id:     Optional[int]
-    created_by_id: int
-    created_at:    datetime
-
-    model_config = {"from_attributes": True}
-
-
-class UploadedDealSummary(BaseModel):
-    """Light version for list views — no rows."""
-    id:            int
-    source_type:   UploadedDealSourceType
-    source_agent:  str
-    issue_date:    Optional[date]
-    file_name:     str
-    file_type:     str
-    status:        UploadedDealStatus
-    notes:         Optional[str]
-    created_at:    datetime
-    row_count:     int = 0
-    # contract fields
-    airline_type:     Optional[str]  = None
-    airline_name:     Optional[str]  = None
-    contract_year:    Optional[str]  = None
-    valid_from:       Optional[date] = None
-    valid_to:         Optional[date] = None
-    trigger_type:     Optional[str]  = None
-    payout_type:      Optional[str]  = None
-    business_type:    Optional[str]  = None
-    entity_lcc:       Optional[str]  = None
-    remark:           Optional[str]  = None
-    deal_maker_name:  Optional[str]  = None
-    incentive_types:  Optional[list] = None
-    incentive_data:   Optional[dict] = None
-    incl_excl_types:  Optional[list] = None
-    incl_excl_data:   Optional[dict] = None
-
-    model_config = {"from_attributes": True}
 
 
 # ── Extraction preview (returned before DB save) ───────────────────────────
@@ -156,7 +70,10 @@ class DealRepositoryItem(BaseModel):
     trigger_type:     Optional[str]  = None  # null for b2b
     payout_type:      Optional[str]  = None  # null for b2b
     business_type:    Optional[str]  = None
+    entity:           Optional[str]  = None  # agency / user-master entity (B2B Standard)
     entity_lcc:       Optional[str]  = None
+    login_id:         Optional[str]  = None  # joined display string
+    login_ids:        Optional[list] = None
     remark:           Optional[str]  = None
     deal_maker_name:  Optional[str]  = None
     incentive_types:  Optional[list] = None
@@ -164,6 +81,7 @@ class DealRepositoryItem(BaseModel):
     incl_excl_types:  Optional[list] = None
     incl_excl_data:   Optional[dict] = None
     deal_tag:             Optional[str]  = "standard"
+    direction:            Optional[str]  = "inbound"   # 'inbound' (received) | 'outbound' (floated)
     status:               str
     deal_lifecycle_status: Optional[str] = None
     created_at:           datetime
@@ -188,6 +106,13 @@ class DealUpdatePayload(BaseModel):
     entity_lcc:      Optional[str] = None
     remark:          Optional[str] = None
     deal_maker_name: Optional[str] = None
+    # Header fields needed for a full edit round-trip from the Create Deal form.
+    entity:          Optional[str] = None
+    login_id:        Optional[str] = None
+    login_ids:       Optional[list] = None
+    iata_number:     Optional[str] = None
+    iata_commission: Optional[str] = None
+    supplier_name:   Optional[str] = None
     incentive_types: Optional[list] = None
     incentive_data:  Optional[dict] = None
     incl_excl_types: Optional[list] = None
@@ -248,6 +173,7 @@ class ConfirmUploadPayload(BaseModel):
     source_type:     str            = "upload"   # "upload" | "manual"
     source_agent:    Optional[str]  = None  # auto-set from filename if omitted
     deal_tag:        Optional[str]  = "standard"  # "standard" | "adhoc"
+    direction:       str            = "inbound"   # "inbound" (received) | "outbound" (floated to a sub-agency)
     issue_date:      Optional[str]  = None   # ISO string "2026-03-18"
     notes:           Optional[str]  = None
     # deal header (same as new deal form)

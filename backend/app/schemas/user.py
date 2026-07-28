@@ -35,6 +35,8 @@ class UserRead(BaseModel):
     role: UserRole
     department: Optional[str]
     is_active: bool
+    is_verified: bool = False
+    onboarding_complete: bool = False
     created_at: datetime
     tenant_id: Optional[int] = None
     tenant_type: Optional[str] = None   # "corporate" | "individual" (derived from tenant)
@@ -103,3 +105,58 @@ class TokenWithUser(BaseModel):
 class Token(BaseModel):
     access_token: str
     token_type: str = "bearer"
+
+
+# ── Email verification ──────────────────────────────────────────────────────
+class SignupResult(BaseModel):
+    """Signup no longer issues a session — the account must be verified first."""
+    email: str
+    is_verified: bool = False
+    message: str
+    verification_url: Optional[str] = None   # dev-only convenience (DEBUG)
+
+
+class VerifyEmailPayload(BaseModel):
+    token: str
+
+
+class ResendVerificationPayload(BaseModel):
+    email: EmailStr
+
+
+class SimpleMessage(BaseModel):
+    message: str
+
+
+# ── Profile (My Profile / onboarding step 1) ────────────────────────────────
+class ProfileRead(BaseModel):
+    """Combined user + tenant view for the profile screens."""
+    id: int
+    email: str
+    full_name: str
+    role: UserRole
+    tenant_type: Optional[str] = None
+    is_verified: bool = False
+    onboarding_complete: bool = False
+    company_name: Optional[str] = None   # tenant.name
+    pan_number: Optional[str] = None     # tenant.pan_number
+    gst_number: Optional[str] = None     # tenant.gst_number
+
+
+class ProfileUpdate(BaseModel):
+    full_name: Optional[str] = None
+    company_name: Optional[str] = None
+    pan_number: Optional[str] = None
+    gst_number: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _validate(self) -> "ProfileUpdate":
+        if self.pan_number is not None:
+            self.pan_number = self.pan_number.strip().upper() or None
+            if self.pan_number and not PAN_RE.match(self.pan_number):
+                raise ValueError("Invalid PAN format. Expected 10 characters, e.g. ABCDE1234F.")
+        if self.gst_number is not None:
+            self.gst_number = self.gst_number.strip().upper() or None
+            if self.gst_number and not GSTIN_RE.match(self.gst_number):
+                raise ValueError("Invalid GSTIN format. Expected 15 characters, e.g. 22ABCDE1234F1Z5.")
+        return self

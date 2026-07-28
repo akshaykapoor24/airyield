@@ -27,6 +27,7 @@ class AirlineRead(BaseModel):
     name: str
     iata_code: str
     icao_code: Optional[str]
+    iata_numeric_code: Optional[str] = None
     logo_url: Optional[str]
     is_active: bool
     contract_year: Optional[str] = None

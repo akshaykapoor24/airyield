@@ -8,6 +8,8 @@ class B2BDealCreate(BaseModel):
     source_agent: Optional[str] = None
     deal_maker_name: Optional[str] = None
     deal_tag: Optional[str] = "standard"
+    # inbound = deal received from this supplier; outbound = deal floated to it (supplier_name = whom)
+    direction: str = "inbound"
     supplier_name: Optional[str] = None
     remark: Optional[str] = None
     airline_type: str
@@ -35,6 +37,7 @@ class B2BDealResponse(BaseModel):
     status: str
     deal_lifecycle_status: str = "draft"
     deal_tag: Optional[str] = "standard"
+    direction: str = "inbound"
     source_agent: str
     deal_maker_name: Optional[str]
     supplier_name: Optional[str]

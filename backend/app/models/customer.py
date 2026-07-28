@@ -22,7 +22,11 @@ class Customer(Base):
     title:         Mapped[str | None] = mapped_column(String(100), nullable=True)
     phone:         Mapped[str | None] = mapped_column(String(50),  nullable=True)
     email:         Mapped[str | None] = mapped_column(String(255), nullable=True)
-    gst_no:        Mapped[str | None] = mapped_column(String(30),  nullable=True)
+    # Note: customer-local naming (gst_no / pan_no). The User/tenant/supplier models
+    # use gst_number / pan_number — intentionally NOT unified; only the frontend regexes are shared.
+    gst_registered: Mapped[bool]      = mapped_column(Boolean, nullable=False, server_default="false", default=False)
+    gst_no:        Mapped[str | None] = mapped_column(String(30),  nullable=True)   # only set when gst_registered
+    pan_no:        Mapped[str | None] = mapped_column(String(20),  nullable=True)   # optional
 
     markup_type:   Mapped[str | None]   = mapped_column(String(20), nullable=True)   # 'percentage' | 'fixed'
     markup_value:  Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)

@@ -24,8 +24,8 @@ class Document(Base):
     mime_type: Mapped[str] = mapped_column(String(100), nullable=False)
     category: Mapped[DocumentCategory] = mapped_column(SAEnum(DocumentCategory), default=DocumentCategory.OTHER)
 
-    # Optional links
-    deal_id: Mapped[int | None] = mapped_column(ForeignKey("legacy_deals.id"), nullable=True)
+    # Optional links — legacy_deals table removed; kept as a plain int (no FK). Legacy/unused.
+    deal_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     ticket_batch_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -33,4 +33,3 @@ class Document(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     uploaded_by: Mapped["User"] = relationship("User")  # noqa: F821
-    deal: Mapped["UploadedDeal"] = relationship("UploadedDeal")  # noqa: F821

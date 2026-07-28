@@ -9,7 +9,9 @@ class CustomerCreate(BaseModel):
     title: Optional[str] = None
     phone: Optional[str] = None
     email: Optional[str] = None
+    gst_registered: Optional[bool] = None
     gst_no: Optional[str] = None
+    pan_no: Optional[str] = None
     markup_type: Optional[str] = None   # 'percentage' | 'fixed'
     markup_value: Optional[float] = None
     billing_type: Optional[str] = None  # 'reseller' | 'agency'
@@ -22,7 +24,9 @@ class CustomerUpdate(BaseModel):
     title: Optional[str] = None
     phone: Optional[str] = None
     email: Optional[str] = None
+    gst_registered: Optional[bool] = None
     gst_no: Optional[str] = None
+    pan_no: Optional[str] = None
     markup_type: Optional[str] = None
     markup_value: Optional[float] = None
     billing_type: Optional[str] = None
@@ -37,7 +41,9 @@ class CustomerRead(BaseModel):
     title: Optional[str] = None
     phone: Optional[str] = None
     email: Optional[str] = None
+    gst_registered: bool = False
     gst_no: Optional[str] = None
+    pan_no: Optional[str] = None
     markup_type: Optional[str] = None
     markup_value: Optional[float] = None
     billing_type: Optional[str] = None
@@ -69,6 +75,9 @@ class SoldTicketRead(BaseModel):
     sell_fare: Optional[float] = None
     total_amt: Optional[float] = None
     calculated_incentive: Optional[float] = None
+    incentive_breakdown: Optional[dict] = None
+    is_billed: bool = False
+    billing_id: Optional[int] = None
     # computed
     base_amount: float
     markup_amount: float

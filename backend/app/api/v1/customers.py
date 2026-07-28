@@ -3,11 +3,10 @@ from io import BytesIO
 from typing import Optional
 
 import pandas as pd
-from dateutil import parser as _du
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from fastapi.responses import StreamingResponse
 
-from sqlalchemy import select, func, or_, and_
+from sqlalchemy import select, func, or_, and_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -23,12 +22,27 @@ from app.schemas.customer import (
 )
 from app.schemas.billing import BillingCreate, BillingUpdate, BillingRead, BillingListItem
 from app.services.billing_pdf import build_billing_pdf
+from app.services.billing_calc import (
+    to_float as _f,
+    compute_markup as _compute_markup,
+    compute_gst as _compute_gst,
+    safe_date as _safe_date,
+    passenger_name as _passenger_name,
+)
 
 router = APIRouter()
 
 _MARKUP_TYPES = {"percentage", "fixed"}
 _BILLING_TYPES = {"reseller", "agency"}
-_GST_RATE = 0.18
+_TRUTHY = {"registered", "yes", "true", "y", "1"}
+
+
+def _clean_upper(value) -> Optional[str]:
+    """Strip + uppercase a possibly-None identifier (GST/PAN), returning None if empty."""
+    if value is None:
+        return None
+    v = str(value).strip().upper()
+    return v or None
 
 
 def _scope(current_user: User):
@@ -39,69 +53,11 @@ def _scope(current_user: User):
     )
 
 
-def _f(value) -> float:
-    """Coerce a possibly-None Decimal/str to float."""
-    if value is None:
-        return 0.0
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
-
-
 def _norm_choice(value: Optional[str], allowed: set[str]) -> Optional[str]:
     if not value:
         return None
     v = str(value).strip().lower()
     return v if v in allowed else None
-
-
-def _safe_date(*raws) -> Optional[date]:
-    """Parse a ticket date string to a date. Handles ISO YYYY-MM-DD and dayfirst formats.
-    Mirrors the parser used in services/deal_matching.py.
-    """
-    for raw in raws:
-        if not raw:
-            continue
-        try:
-            s = str(raw).strip()
-            if len(s) >= 10 and s[4] == "-" and s[7] == "-":
-                return date.fromisoformat(s[:10])
-            return _du.parse(s, dayfirst=True).date()
-        except Exception:
-            continue
-    return None
-
-
-def _passenger_name(t: UploadedTicket) -> str:
-    if t.pax_name:
-        return t.pax_name
-    name = f"{t.first_name or ''} {t.last_name or ''}".strip()
-    return name or "—"
-
-
-def _compute_markup(base: float, markup_type: Optional[str], markup_value) -> float:
-    mtype = (markup_type or "").lower()
-    mval = _f(markup_value)
-    if mtype == "percentage":
-        return base * mval / 100.0
-    if mtype == "fixed":
-        return mval
-    return 0.0
-
-
-def _compute_gst(base: float, markup: float, billing_type: Optional[str]) -> float:
-    """GST (18%) base depends on billing type:
-      - reseller: GST on the whole marked-up price (gross + markup)
-      - agency:   GST on the markup only
-      - unset/other: no GST applied
-    """
-    bt = (billing_type or "").lower()
-    if bt == "reseller":
-        return (base + markup) * _GST_RATE
-    if bt == "agency":
-        return markup * _GST_RATE
-    return 0.0
 
 
 async def _get_owned_customer(customer_id: int, db: AsyncSession, current_user: User) -> Customer:
@@ -160,6 +116,7 @@ async def create_customer(
     first_name = (payload.first_name or "").strip()
     if not first_name:
         raise HTTPException(status_code=400, detail="first_name is required.")
+    gst_registered = bool(payload.gst_registered)
     customer = Customer(
         tenant_id=current_user.tenant_id,
         created_by_id=current_user.id,
@@ -169,7 +126,9 @@ async def create_customer(
         title=(payload.title or "").strip() or None,
         phone=(payload.phone or "").strip() or None,
         email=(payload.email or "").strip() or None,
-        gst_no=(payload.gst_no or "").strip() or None,
+        gst_registered=gst_registered,
+        gst_no=_clean_upper(payload.gst_no) if gst_registered else None,
+        pan_no=_clean_upper(payload.pan_no),
         markup_type=_norm_choice(payload.markup_type, _MARKUP_TYPES),
         markup_value=payload.markup_value,
         billing_type=_norm_choice(payload.billing_type, _BILLING_TYPES),
@@ -252,6 +211,8 @@ async def bulk_upload_customers(
                 errors.append(f"{row_prefix}: MARKUP_VALUE '{markup_value_raw}' is not a number.")
                 continue
 
+        gst_registered = str(row.get("GST_REGISTERED", "") or "").strip().lower() in _TRUTHY
+
         try:
             customer = Customer(
                 tenant_id=current_user.tenant_id,
@@ -262,6 +223,9 @@ async def bulk_upload_customers(
                 title=str(row.get("TITLE", "") or "").strip() or None,
                 phone=str(row.get("PHONE", "") or "").strip() or None,
                 email=str(row.get("EMAIL", "") or "").strip() or None,
+                gst_registered=gst_registered,
+                gst_no=_clean_upper(row.get("GST_NO")) if gst_registered else None,
+                pan_no=_clean_upper(row.get("PAN_NO")),
                 markup_type=_norm_choice(str(row.get("MARKUP_TYPE", "") or ""), _MARKUP_TYPES),
                 markup_value=markup_value,
                 billing_type=_norm_choice(str(row.get("BILLING_TYPE", "") or ""), _BILLING_TYPES),
@@ -286,12 +250,14 @@ async def download_customer_template():
 
     headers = [
         "FIRST_NAME", "LAST_NAME", "COMPANY", "TITLE", "PHONE", "EMAIL",
+        "GST_REGISTERED", "GST_NO", "PAN_NO",
         "MARKUP_TYPE", "MARKUP_VALUE", "BILLING_TYPE",
     ]
     ws.append(headers)
-    # Sample rows showing accepted values for MARKUP_TYPE (percentage|fixed) / BILLING_TYPE (reseller|agency)
-    ws.append(["John", "Doe", "Acme Pvt Ltd", "Mr", "9876543210", "john@acme.com", "percentage", "10", "reseller"])
-    ws.append(["Jane", "Roe", "Beta Travels", "Ms", "9123456780", "jane@beta.com", "fixed", "500", "agency"])
+    # Sample rows: GST_REGISTERED (Registered|Unregistered) — GST_NO is ignored when Unregistered.
+    # MARKUP_TYPE (percentage|fixed) / BILLING_TYPE (reseller|agency).
+    ws.append(["John", "Doe", "Acme Pvt Ltd", "Mr", "9876543210", "john@acme.com", "Registered", "27ABCDE1234F1Z5", "ABCDE1234F", "percentage", "10", "reseller"])
+    ws.append(["Jane", "Roe", "Beta Travels", "Ms", "9123456780", "jane@beta.com", "Unregistered", "", "", "fixed", "500", "agency"])
 
     bio = BytesIO()
     wb.save(bio)
@@ -326,6 +292,15 @@ async def update_customer(
         data["markup_type"] = _norm_choice(data["markup_type"], _MARKUP_TYPES)
     if "billing_type" in data:
         data["billing_type"] = _norm_choice(data["billing_type"], _BILLING_TYPES)
+    if "gst_no" in data:
+        data["gst_no"] = _clean_upper(data["gst_no"])
+    if "pan_no" in data:
+        data["pan_no"] = _clean_upper(data["pan_no"])
+    # Unregistered ⇒ never keep a GST number. Resolve against the incoming
+    # gst_registered value if provided, else the customer's stored one.
+    registered = data.get("gst_registered", obj.gst_registered)
+    if not registered:
+        data["gst_no"] = None
     for field, value in data.items():
         setattr(obj, field, value)
     await db.commit()
@@ -429,6 +404,9 @@ async def get_customer_sold_tickets(
             sell_fare=_f(t.sell_fare) if t.sell_fare is not None else None,
             total_amt=_f(t.total_amt) if t.total_amt is not None else None,
             calculated_incentive=_f(t.calculated_incentive) if t.calculated_incentive is not None else None,
+            incentive_breakdown=t.incentive_breakdown,
+            is_billed=bool(t.is_billed),
+            billing_id=t.billing_id,
             base_amount=round(base, 2),
             markup_amount=round(markup_amount, 2),
             gst_amount=round(gst_amount, 2),
@@ -465,6 +443,7 @@ async def create_billing(
 
     ticket_ids = [it.ticket_id for it in payload.items]
     addl_map = {it.ticket_id: _f(it.additional_markup) for it in payload.items}
+    disc_map = {it.ticket_id: _f(it.discount) for it in payload.items}
 
     res = await db.execute(
         select(UploadedTicket).where(
@@ -477,15 +456,23 @@ async def create_billing(
     if not tickets:
         raise HTTPException(status_code=400, detail="No matching tickets found for this billing.")
 
+    # A ticket may belong to at most one billing. The UI prevents selecting
+    # already-billed rows, so an already-billed ticket here means a stale view.
+    already = [t.ticket_number or str(t.id) for t in tickets if t.is_billed]
+    if already:
+        raise HTTPException(status_code=400, detail=f"Already billed: {', '.join(already)}. Refresh and try again.")
+
     line_items: list[dict] = []
     total_base = total_markup = total_addl = total_gst = grand = 0.0
     for t in tickets:
         base = _f(t.total_amt) if t.total_amt is not None else _f(t.sell_fare)
         cust_markup = _compute_markup(base, customer.markup_type, customer.markup_value)
         addl = addl_map.get(t.id, 0.0)
+        disc = disc_map.get(t.id, 0.0)
         total_mk = cust_markup + addl
-        gst = _compute_gst(base, total_mk, customer.billing_type)
-        line_total = base + total_mk + gst
+        # Discount reduces the taxable value first, then GST applies on the reduced amount.
+        gst = _compute_gst(base, total_mk, customer.billing_type, disc)
+        line_total = base + total_mk - disc + gst
         total_base += base
         total_markup += cust_markup
         total_addl += addl
@@ -502,6 +489,7 @@ async def create_billing(
             "base_amount": round(base, 2),
             "markup_amount": round(cust_markup, 2),
             "additional_markup": round(addl, 2),
+            "discount": round(disc, 2),
             "gst_amount": round(gst, 2),
             "total": round(line_total, 2),
         })
@@ -522,6 +510,11 @@ async def create_billing(
         line_items=line_items,
     )
     db.add(billing)
+    await db.flush()  # assign billing.id before linking tickets
+    # Lock the billed tickets to this billing (single atomic transaction).
+    for t in tickets:
+        t.is_billed = True
+        t.billing_id = billing.id
     await db.commit()
     await db.refresh(billing)
     return billing
@@ -592,8 +585,9 @@ async def update_billing(
         base = _f(it.get("base_amount"))
         markup = _f(it.get("markup_amount"))
         addl = addl_map.get(it.get("ticket_id"), _f(it.get("additional_markup")))
-        gst = _compute_gst(base, markup + addl, billing.billing_type)
-        line_total = base + markup + addl + gst
+        disc = _f(it.get("discount"))   # preserved from creation (not edited in the popup)
+        gst = _compute_gst(base, markup + addl, billing.billing_type, disc)
+        line_total = base + markup + addl - disc + gst
         total_base += base
         total_markup += markup
         total_addl += addl
@@ -602,6 +596,7 @@ async def update_billing(
         new_items.append({
             **it,
             "additional_markup": round(addl, 2),
+            "discount": round(disc, 2),
             "gst_amount": round(gst, 2),
             "total": round(line_total, 2),
         })
@@ -626,6 +621,13 @@ async def delete_billing(
 ):
     await _get_owned_customer(customer_id, db, current_user)
     billing = await _get_owned_billing(billing_id, customer_id, db, current_user)
+    # Free the tickets locked to this billing so they can be billed again.
+    # (Explicit reset also clears is_billed, which the SET NULL FK alone can't.)
+    await db.execute(
+        update(UploadedTicket)
+        .where(UploadedTicket.billing_id == billing.id)
+        .values(is_billed=False, billing_id=None)
+    )
     await db.delete(billing)
     await db.commit()
 

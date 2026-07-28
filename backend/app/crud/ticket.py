@@ -25,29 +25,10 @@ class CRUDTicket(CRUDBase):
     async def manual_match(
         self, db: AsyncSession, *, ticket: Ticket, deal_id: int, user_id: int
     ) -> Ticket:
-        from app.models.income import IncomeRecord
-        from app.services.income_calculator import IncomeCalculatorService
-        from sqlalchemy import select as sa_select
-        from app.models.uploaded_deal import UploadedDeal
-
+        # Legacy path: the legacy_deals table has been removed, so there is no deal to
+        # look up and no income record to compute here. Kept for API compatibility.
         ticket.matched_deal_id = deal_id
         ticket.is_manually_matched = True
-
-        deal_result = await db.execute(sa_select(UploadedDeal).where(UploadedDeal.id == deal_id))
-        deal = deal_result.scalar_one_or_none()
-        if deal:
-            income_data = IncomeCalculatorService.calculate(ticket, deal)
-            # upsert income record
-            existing = await db.execute(
-                sa_select(IncomeRecord).where(IncomeRecord.ticket_id == ticket.id)
-            )
-            record = existing.scalar_one_or_none()
-            if record:
-                for k, v in income_data.items():
-                    setattr(record, k, v)
-            else:
-                db.add(IncomeRecord(**income_data))
-
         await db.commit()
         await db.refresh(ticket)
         return ticket

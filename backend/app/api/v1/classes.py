@@ -281,6 +281,26 @@ async def get_airlines_with_type(
     ]
 
 
+@router.get("/codes")
+async def get_class_codes(
+    airline_name: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Class types + booking-class codes for one airline (exact name match,
+    case-insensitive) from the airline class/RBD master. Used by the deal
+    inclusion/exclusion Class field to offer the airline's real class codes."""
+    rows = await db.execute(
+        select(AirlineClassMaster.class_type, AirlineClassMaster.class_code)
+        .where(
+            func.upper(AirlineClassMaster.airline_name) == airline_name.strip().upper(),
+            AirlineClassMaster.is_active == True,  # noqa: E712
+        )
+        .order_by(AirlineClassMaster.class_type, AirlineClassMaster.class_code)
+    )
+    return [{"class_type": ct, "class_code": cc} for ct, cc in rows.all()]
+
+
 @router.get("/count")
 async def count_airline_classes(
     q: Optional[str] = None,

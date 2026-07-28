@@ -17,8 +17,6 @@ from sqlalchemy.orm import selectinload
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models.airline import Airline
-from app.models.airline_deal import AirlineDeal
-from app.models.b2b_deal import B2BDeal
 from app.models.uploaded_ticket import UploadedTicket
 from app.models.ticket_statement import TicketStatement
 from app.models.income_summary import IncomeSummary
@@ -719,6 +717,12 @@ def _parse_travel_date(departure_datetime: str | None, ticket_date: str | None) 
     return None
 
 
+def _parse_issue_date(ticket_date: str | None, departure_datetime: str | None) -> date | None:
+    """Ticket ISSUE/sale date (issue-preferred, departure fallback) for contract
+    validity. Reuses the same parser with swapped preference order."""
+    return _parse_travel_date(ticket_date, departure_datetime)
+
+
 _CANCELLED_INVOICE_TYPES = {"credit note", "refund"}
 
 
@@ -868,12 +872,15 @@ async def _run_single(
     statement = stmt_res.scalar_one_or_none()
     supplier_agency = (statement.agency or None) if statement else None
 
+    issue_date = _parse_issue_date(ticket.ticket_date, ticket.departure_datetime)
+
     match = await DealMatchingService.find_best_deal(
         db=db,
         airline_name=airline.name,
         travel_date=travel_date,
         tenant_id=tenant_id,
         created_by_id=ticket.created_by_id,
+        issue_date=issue_date,
         segment_type=ticket.segment_type,
         booking_class=ticket.booking_class,
         invoice_type=ticket.invoice_type,
@@ -971,60 +978,6 @@ async def _run_single(
                                     incentive_breakdown={},
                                     message=reason,
                                 )
-        else:
-            # ── Old schema: deal-level incl_excl_types / incl_excl_data ──
-            if match.deal_type == "airline":
-                deal_res = await db.execute(select(AirlineDeal).where(AirlineDeal.id == match.deal_id))
-                matched_deal = deal_res.scalar_one_or_none()
-            else:
-                deal_res = await db.execute(select(B2BDeal).where(B2BDeal.id == match.deal_id))
-                matched_deal = deal_res.scalar_one_or_none()
-
-            incl_excl_types = matched_deal.incl_excl_types or [] if matched_deal else []
-            incl_excl_data  = matched_deal.incl_excl_data  or {} if matched_deal else {}
-
-            # Step 1: Inclusion For Payout
-            if "Inclusion For Payout" in incl_excl_types:
-                had_inclusion_rule = True
-                incl_rule = incl_excl_data.get("Inclusion For Payout", {})
-                is_included, incl_reason = await evaluate_inclusion_for_payout(ticket, incl_rule, db)
-                if not is_included:
-                    ticket.calculated_incentive = 0
-                    ticket.ticket_status        = "excluded"
-                    ticket.exclusion_reason     = incl_reason
-                    ticket.incentive_breakdown  = {}
-                    return RunCalculationResult(
-                        ticket_id=ticket.id, matched=True, excluded=True,
-                        matched_deal_id=match.deal_id,
-                        matched_deal_type=match.deal_type,
-                        matched_deal_name=match.deal_name,
-                        calculated_incentive=0,
-                        iata_commission=float(ticket.iata_commission or 0),
-                        incentive_breakdown={},
-                        message=incl_reason,
-                    )
-
-            # Step 2: Exclusion For Payout
-            if "Exclusion For Payout" in incl_excl_types:
-                excl_rule = incl_excl_data.get("Exclusion For Payout", {})
-                if excl_rule:
-                    excl_is_excluded, excl_reason = await evaluate_exclusion_for_payout(ticket, excl_rule, db)
-                    if excl_is_excluded:
-                        ticket.calculated_incentive = 0
-                        ticket.ticket_status        = "excluded"
-                        ticket.exclusion_reason     = excl_reason
-                        ticket.incentive_breakdown  = {}
-                        return RunCalculationResult(
-                            ticket_id=ticket.id, matched=True, excluded=True,
-                            matched_deal_id=match.deal_id,
-                            matched_deal_type=match.deal_type,
-                            matched_deal_name=match.deal_name,
-                            calculated_incentive=0,
-                            iata_commission=float(ticket.iata_commission or 0),
-                            incentive_breakdown={},
-                            message=excl_reason,
-                        )
-
         # ── Success: all incl/excl checks passed ──────────────────────────
         ticket.ticket_status  = "included" if had_inclusion_rule else "calculated"
         ticket.exclusion_reason = None
@@ -1246,6 +1199,7 @@ async def get_all_matched_deals(
     travel_date = _parse_travel_date(ticket.departure_datetime, ticket.ticket_date)
     if not travel_date:
         return []
+    issue_date = _parse_issue_date(ticket.ticket_date, ticket.departure_datetime)
 
     all_matches = await DealMatchingService.find_all_deals(
         db=db,
@@ -1253,6 +1207,7 @@ async def get_all_matched_deals(
         travel_date=travel_date,
         tenant_id=current_user.tenant_id,
         created_by_id=current_user.id,
+        issue_date=issue_date,
         segment_type=ticket.segment_type,
         booking_class=ticket.booking_class,
         invoice_type=ticket.invoice_type,
@@ -1409,12 +1364,14 @@ async def match_diagnosis(
     supplier_agency = (stmt_row.agency or None) if stmt_row else None
 
     # ── Run diagnosis ─────────────────────────────────────────────────────
+    issue_date = _parse_issue_date(ticket.ticket_date, ticket.departure_datetime)
     deals = await DealMatchingService.diagnose_match(
         db=db,
         airline_name=airline_name,
         travel_date=travel_date,
         tenant_id=current_user.tenant_id,
         created_by_id=current_user.id,
+        issue_date=issue_date,
         segment_type=ticket.segment_type,
         booking_class=ticket.booking_class,
         invoice_type=ticket.invoice_type,

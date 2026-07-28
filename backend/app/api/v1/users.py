@@ -5,7 +5,9 @@ from sqlalchemy import select
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models.user import User, UserRole
-from app.schemas.user import UserRead, UserUpdate, UserCreate, UserRoleUpdate
+from app.schemas.user import (
+    UserRead, UserUpdate, UserCreate, UserRoleUpdate, ProfileRead, ProfileUpdate,
+)
 
 router = APIRouter()
 
@@ -39,6 +41,67 @@ async def update_me(
 ):
     from app import crud
     return await crud.user.update(db, db_obj=current_user, obj_in=payload)
+
+
+# ── Combined profile (user + tenant) for My Profile / onboarding step 1 ────
+def _profile_read(user: User) -> ProfileRead:
+    tenant = user.tenant
+    return ProfileRead(
+        id=user.id,
+        email=user.email,
+        full_name=user.full_name,
+        role=user.role,
+        tenant_type=user.tenant_type,
+        is_verified=user.is_verified,
+        onboarding_complete=user.onboarding_complete,
+        company_name=tenant.name if tenant else None,
+        pan_number=tenant.pan_number if tenant else None,
+        gst_number=tenant.gst_number if tenant else None,
+    )
+
+
+@router.get("/me/profile", response_model=ProfileRead)
+async def get_my_profile(current_user: User = Depends(get_current_user)):
+    return _profile_read(current_user)
+
+
+@router.patch("/me/profile", response_model=ProfileRead)
+async def update_my_profile(
+    payload: ProfileUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update editable user + tenant fields. Email and account type are read-only."""
+    data = payload.model_dump(exclude_unset=True)
+
+    if "full_name" in data:
+        new_name = (data["full_name"] or "").strip()
+        if not new_name:
+            raise HTTPException(status_code=400, detail="Full name cannot be empty.")
+        current_user.full_name = new_name
+
+    tenant = current_user.tenant
+    if tenant is not None:
+        if "company_name" in data:
+            tenant.name = (data["company_name"] or "").strip() or None
+        if "pan_number" in data:
+            tenant.pan_number = data["pan_number"]   # already normalised/validated by schema
+        if "gst_number" in data:
+            tenant.gst_number = data["gst_number"]
+
+    await db.commit()   # expire_on_commit=False keeps user + eager-loaded tenant in memory
+    return _profile_read(current_user)
+
+
+@router.post("/me/complete-onboarding", response_model=UserRead)
+async def complete_onboarding(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Mark the first-login onboarding wizard as finished."""
+    current_user.onboarding_complete = True
+    await db.commit()   # expire_on_commit=False keeps tenant loaded for tenant_type
+    return current_user
 
 
 # ── Admin: list users in same tenant ──────────────────────────────────────

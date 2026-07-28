@@ -9,6 +9,12 @@ const api = axios.create({
 api.interceptors.request.use((config) => {
   const token = getToken();
   if (token) config.headers.Authorization = `Bearer ${token}`;
+  // For file uploads, drop the default application/json Content-Type so the
+  // browser sets multipart/form-data with the correct boundary. Without this,
+  // FormData posts go out as application/json and the server can't read the file.
+  if (typeof FormData !== "undefined" && config.data instanceof FormData) {
+    config.headers.delete("Content-Type");
+  }
   return config;
 });
 

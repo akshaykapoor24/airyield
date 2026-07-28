@@ -1,12 +1,15 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { Eye, EyeOff, Building2, User, CheckCircle2, AlertTriangle } from "lucide-react";
-import { setToken, setUser } from "@/lib/auth";
+import {
+  AlertTriangle, ArrowRight, Building2, CheckCircle2, CreditCard, Eye, EyeOff,
+  Loader2, Lock, Mail, MailCheck, ReceiptText, TriangleAlert, User,
+} from "lucide-react";
 
 type AccountType = "corporate" | "individual";
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
 
 // client-side mirrors of the backend rules (server is authoritative)
 const PAN_RE   = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
@@ -18,8 +21,25 @@ const PUBLIC_DOMAINS = new Set([
   "gmx.com", "mail.com", "yandex.com",
 ]);
 
+/** Purely visual strength hint — the server enforces the real rule (min 8). */
+function strengthOf(pw: string) {
+  if (!pw) return { score: 0, label: "", tone: "" };
+  let score = 0;
+  if (pw.length >= 8) score++;
+  if (pw.length >= 12) score++;
+  if (/[A-Z]/.test(pw) && /[a-z]/.test(pw)) score++;
+  if (/\d/.test(pw) && /[^A-Za-z0-9]/.test(pw)) score++;
+  const meta = [
+    { label: "Too short", tone: "bg-red-500 text-red-600" },
+    { label: "Weak",      tone: "bg-orange-500 text-orange-600" },
+    { label: "Fair",      tone: "bg-amber-500 text-amber-600" },
+    { label: "Strong",    tone: "bg-emerald-500 text-emerald-600" },
+    { label: "Excellent", tone: "bg-emerald-600 text-emerald-700" },
+  ][score];
+  return { score, ...meta };
+}
+
 export default function SignupPage() {
-  const router = useRouter();
   const [accountType,  setAccountType]  = useState<AccountType>("corporate");
   const [fullName,     setFullName]     = useState("");
   const [email,        setEmail]        = useState("");
@@ -36,8 +56,14 @@ export default function SignupPage() {
   const [publicWarn,   setPublicWarn]   = useState("");  // corporate + public domain
   const [panError,     setPanError]     = useState("");
   const [gstError,     setGstError]     = useState("");
+  // post-signup confirmation ("check your email")
+  const [sent,         setSent]         = useState(false);
+  const [devVerifyUrl, setDevVerifyUrl] = useState<string | null>(null);
+  const [resendMsg,    setResendMsg]    = useState("");
+  const [resending,    setResending]    = useState(false);
 
   const isIndividual = accountType === "individual";
+  const pwStrength = strengthOf(password);
 
   const switchType = (t: AccountType) => {
     setAccountType(t);
@@ -109,7 +135,7 @@ export default function SignupPage() {
 
     setLoading(true);
     try {
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1"}/auth/signup`, {
+      const res = await fetch(`${API_BASE}/auth/signup`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -135,9 +161,10 @@ export default function SignupPage() {
         setError(msg);
         return;
       }
-      setToken(data.access_token);
-      setUser(data.user);
-      router.push("/dashboard");
+      // Account created but unverified — no session issued. Show a "check your
+      // email" confirmation; in dev the backend returns the link directly.
+      setDevVerifyUrl(data?.verification_url ?? null);
+      setSent(true);
     } catch {
       setError("Cannot reach server. Make sure the backend is running.");
     } finally {
@@ -145,24 +172,92 @@ export default function SignupPage() {
     }
   };
 
-  const inputCls =
-    "w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#1e3a5f]/30 focus:border-[#1e3a5f] transition-colors";
+  const handleResend = async () => {
+    setResending(true); setResendMsg("");
+    try {
+      const res = await fetch(`${API_BASE}/auth/resend-verification`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+      const data = await res.json().catch(() => null);
+      setResendMsg(data?.message ?? "If that account is unverified, a new link has been sent.");
+    } catch {
+      setResendMsg("Cannot reach server. Make sure the backend is running.");
+    } finally {
+      setResending(false);
+    }
+  };
+
+  const field =
+    "peer w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-10 pr-4 text-sm text-slate-900 shadow-sm outline-none transition-all duration-200 placeholder:text-slate-400 hover:border-slate-300 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/12";
+  const bad = "border-red-300 focus:border-red-400 focus:ring-red-500/12";
+  const icon =
+    "pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400 transition-colors peer-focus:text-blue-600";
+
+  // ── post-signup: verification email sent ─────────────────────────────────
+  if (sent) {
+    return (
+      <div className="animate-scale-in text-center sm:text-left">
+        <div className="relative mx-auto mb-6 grid h-16 w-16 place-items-center sm:mx-0">
+          <span className="animate-pulse-ring absolute inset-0 rounded-full bg-blue-400/40" />
+          <span className="relative grid h-16 w-16 place-items-center rounded-full bg-blue-50 ring-1 ring-blue-200">
+            <MailCheck className="h-8 w-8 text-blue-600" />
+          </span>
+        </div>
+
+        <h1 className="text-[1.75rem] font-bold tracking-tight text-slate-900">Check your email</h1>
+        <p className="mt-2 text-sm leading-relaxed text-slate-500">
+          We&apos;ve sent a verification link to{" "}
+          <span className="font-semibold text-slate-700">{email}</span>. Click it to
+          activate your account, then sign in.
+        </p>
+
+        {devVerifyUrl && (
+          <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-left">
+            <p className="mb-1.5 text-[11px] font-semibold text-amber-700">
+              Developer mode — verify directly:
+            </p>
+            <a
+              href={devVerifyUrl}
+              className="break-all text-[11px] font-semibold text-blue-600 underline underline-offset-2"
+            >
+              Open verification link
+            </a>
+          </div>
+        )}
+
+        <div className="mt-7 space-y-3">
+          <Link
+            href="/login"
+            className="group flex w-full items-center justify-center gap-2 rounded-xl py-3 text-sm font-semibold text-white shadow-lg shadow-blue-500/25 transition-all hover:-translate-y-0.5 hover:shadow-xl hover:shadow-blue-500/35"
+            style={{ background: "var(--brand-grad)" }}
+          >
+            Go to sign in
+            <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
+          </Link>
+          <button
+            onClick={handleResend}
+            disabled={resending}
+            className="w-full rounded-xl border border-slate-200 py-3 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-60"
+          >
+            {resending ? "Sending…" : "Resend verification email"}
+          </button>
+          {resendMsg && (
+            <p className="text-center text-[11px] text-slate-600">{resendMsg}</p>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="w-full max-w-md">
-      {/* mobile logo */}
-      <div className="lg:hidden flex items-center gap-2 mb-8">
-        <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: "#1e3a5f" }}>
-          <svg className="w-4 h-4 text-white" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M21 16v-2l-8-5V3.5c0-.83-.67-1.5-1.5-1.5S10 2.67 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5l8 2.5z"/>
-          </svg>
-        </div>
-        <span className="font-bold text-gray-900">AirYield</span>
-      </div>
-
-      <div className="mb-5">
-        <h1 className="text-2xl font-bold text-gray-900">Create your account</h1>
-        <p className="text-sm text-gray-500 mt-1">
+    <div>
+      <div className="animate-fade-up">
+        <h1 className="text-[1.75rem] font-bold tracking-tight text-slate-900">
+          Create your account
+        </h1>
+        <p className="mt-1.5 text-sm text-slate-500">
           {isIndividual
             ? "Set up your personal workspace — private to you."
             : "Set up your company workspace — you'll be the admin."}
@@ -170,191 +265,279 @@ export default function SignupPage() {
       </div>
 
       {/* account-type segmented toggle */}
-      <div className="grid grid-cols-2 gap-2 mb-5">
+      <div
+        className="animate-fade-up mt-6 grid grid-cols-2 gap-2 rounded-2xl bg-slate-100 p-1.5"
+        style={{ animationDelay: "60ms" }}
+        role="tablist"
+      >
         {([
-          { t: "corporate" as const,  label: "Corporate", sub: "Company / work email", Icon: Building2 },
-          { t: "individual" as const, label: "Individual", sub: "Personal email is fine", Icon: User },
+          { t: "corporate" as const,  label: "Corporate",  sub: "Work email",     Icon: Building2 },
+          { t: "individual" as const, label: "Individual", sub: "Personal email", Icon: User },
         ]).map(({ t, label, sub, Icon }) => {
           const active = accountType === t;
           return (
             <button
               key={t}
               type="button"
+              role="tab"
+              aria-selected={active}
               onClick={() => switchType(t)}
-              className={`flex flex-col items-start gap-0.5 rounded-xl border px-3.5 py-2.5 text-left transition-colors ${
+              className={`flex flex-col items-start gap-0.5 rounded-xl px-3.5 py-2.5 text-left transition-all duration-300 ${
                 active
-                  ? "border-[#1e3a5f] bg-[#1e3a5f] text-white"
-                  : "border-gray-200 text-gray-600 hover:border-gray-300"
-              }`}>
-              <span className="flex items-center gap-1.5 text-sm font-semibold">
-                <Icon className="w-4 h-4"/> {label}
+                  ? "bg-white shadow-md shadow-slate-900/5 ring-1 ring-slate-200"
+                  : "text-slate-500 hover:bg-white/60"
+              }`}
+            >
+              <span
+                className={`flex items-center gap-1.5 text-sm font-semibold ${
+                  active ? "text-blue-700" : "text-slate-600"
+                }`}
+              >
+                <Icon className="h-4 w-4" /> {label}
               </span>
-              <span className={`text-[11px] ${active ? "text-white/70" : "text-gray-400"}`}>{sub}</span>
+              <span className={`text-[11px] ${active ? "text-slate-500" : "text-slate-400"}`}>
+                {sub}
+              </span>
             </button>
           );
         })}
       </div>
 
       {/* context banner */}
-      {isIndividual ? (
-        <div className="flex items-start gap-2.5 bg-gray-50 border border-gray-200 rounded-xl px-3.5 py-2.5 mb-5">
-          <User className="w-4 h-4 text-gray-500 flex-shrink-0 mt-0.5"/>
-          <p className="text-[11px] text-gray-600 leading-snug">
-            <span className="font-semibold">Private workspace.</span>{" "}
-            Only you have access. Any email works, including Gmail or Yahoo.
-          </p>
-        </div>
-      ) : (
-        <div className="flex items-start gap-2.5 bg-blue-50 border border-blue-200 rounded-xl px-3.5 py-2.5 mb-5">
-          <Building2 className="w-4 h-4 text-blue-500 flex-shrink-0 mt-0.5"/>
-          <p className="text-[11px] text-blue-700 leading-snug">
-            <span className="font-semibold">One admin per company.</span>{" "}
-            The first person from your work domain becomes the admin. Teammates are
-            added later from User Management.
-          </p>
-        </div>
-      )}
+      <div
+        className="animate-fade-up mt-4"
+        style={{ animationDelay: "110ms" }}
+        key={accountType}
+      >
+        {isIndividual ? (
+          <div className="flex items-start gap-2.5 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5">
+            <User className="mt-0.5 h-4 w-4 shrink-0 text-slate-500" />
+            <p className="text-[11px] leading-snug text-slate-600">
+              <span className="font-semibold">Private workspace.</span> Only you have
+              access. Any email works, including Gmail or Yahoo.
+            </p>
+          </div>
+        ) : (
+          <div className="flex items-start gap-2.5 rounded-xl border border-blue-200 bg-blue-50 px-3.5 py-2.5">
+            <Building2 className="mt-0.5 h-4 w-4 shrink-0 text-blue-500" />
+            <p className="text-[11px] leading-snug text-blue-700">
+              <span className="font-semibold">One admin per company.</span> The first
+              person from your work domain becomes the admin. Teammates are added later
+              from User Management.
+            </p>
+          </div>
+        )}
+      </div>
 
-      <form onSubmit={handleSignup} className="space-y-3.5">
+      <form onSubmit={handleSignup} className="mt-5 space-y-4" noValidate>
         {/* full name */}
         <div>
-          <label className="block text-xs font-semibold text-gray-700 mb-1.5">Full Name *</label>
-          <input
-            type="text"
-            value={fullName}
-            onChange={e => setFullName(e.target.value)}
-            placeholder="e.g. Rajesh Kumar"
-            className={inputCls}
-          />
+          <label htmlFor="fullName" className="mb-1.5 block text-xs font-semibold text-slate-700">
+            Full name <span className="text-red-500">*</span>
+          </label>
+          <div className="relative">
+            <input
+              id="fullName"
+              type="text"
+              autoComplete="name"
+              value={fullName}
+              onChange={(e) => setFullName(e.target.value)}
+              placeholder="e.g. Rajesh Kumar"
+              className={field}
+            />
+            <User className={icon} />
+          </div>
         </div>
 
         {/* email */}
         <div>
-          <label className="block text-xs font-semibold text-gray-700 mb-1.5">
-            {isIndividual ? "Email *" : "Work Email *"}
+          <label htmlFor="email" className="mb-1.5 block text-xs font-semibold text-slate-700">
+            {isIndividual ? "Email" : "Work email"} <span className="text-red-500">*</span>
           </label>
-          <input
-            type="email"
-            value={email}
-            onChange={e => handleEmailChange(e.target.value)}
-            placeholder={isIndividual ? "you@example.com" : "you@yourcompany.com"}
-            className={inputCls}
-          />
+          <div className="relative">
+            <input
+              id="email"
+              type="email"
+              autoComplete="email"
+              value={email}
+              onChange={(e) => handleEmailChange(e.target.value)}
+              placeholder={isIndividual ? "you@example.com" : "you@yourcompany.com"}
+              className={`${field} ${!isIndividual && publicWarn ? bad : ""}`}
+            />
+            <Mail className={icon} />
+          </div>
           {!isIndividual && domainNote && (
-            <div className="flex items-center gap-1.5 mt-1.5">
-              <CheckCircle2 className="w-3.5 h-3.5 text-green-500"/>
-              <p className="text-[11px] text-green-600 font-medium">{domainNote}</p>
-            </div>
+            <p className="animate-fade-in mt-1.5 flex items-center gap-1.5 text-[11px] font-medium text-emerald-600">
+              <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+              {domainNote}
+            </p>
           )}
           {!isIndividual && publicWarn && (
-            <div className="flex items-center gap-1.5 mt-1.5">
-              <AlertTriangle className="w-3.5 h-3.5 text-amber-500"/>
-              <p className="text-[11px] text-amber-600 font-medium">{publicWarn}</p>
-            </div>
+            <p className="animate-fade-in mt-1.5 flex items-center gap-1.5 text-[11px] font-medium text-amber-600">
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+              {publicWarn}
+            </p>
           )}
         </div>
 
         {/* company name — corporate only */}
         {!isIndividual && (
-          <div>
-            <label className="block text-xs font-semibold text-gray-700 mb-1.5">
-              Company Name <span className="text-gray-400 font-normal">(optional)</span>
+          <div className="animate-fade-up">
+            <label htmlFor="company" className="mb-1.5 block text-xs font-semibold text-slate-700">
+              Company name <span className="font-normal text-slate-400">(optional)</span>
             </label>
-            <input
-              type="text"
-              value={companyName}
-              onChange={e => setCompanyName(e.target.value)}
-              placeholder="e.g. Yatra Online Pvt Ltd"
-              className={inputCls}
-            />
+            <div className="relative">
+              <input
+                id="company"
+                type="text"
+                autoComplete="organization"
+                value={companyName}
+                onChange={(e) => setCompanyName(e.target.value)}
+                placeholder="e.g. Yatra Online Pvt Ltd"
+                className={field}
+              />
+              <Building2 className={icon} />
+            </div>
           </div>
         )}
 
         {/* PAN — required for individual, optional for corporate */}
         <div>
-          <label className="block text-xs font-semibold text-gray-700 mb-1.5">
-            PAN Number {isIndividual
-              ? <span className="text-red-500">*</span>
-              : <span className="text-gray-400 font-normal">(optional)</span>}
+          <label htmlFor="pan" className="mb-1.5 block text-xs font-semibold text-slate-700">
+            PAN number{" "}
+            {isIndividual ? (
+              <span className="text-red-500">*</span>
+            ) : (
+              <span className="font-normal text-slate-400">(optional)</span>
+            )}
           </label>
-          <input
-            type="text"
-            value={pan}
-            onChange={e => handlePanChange(e.target.value)}
-            placeholder="ABCDE1234F"
-            maxLength={10}
-            className={`${inputCls} uppercase ${panError ? "border-red-300 focus:ring-red-200" : ""}`}
-          />
-          {panError && <p className="text-[11px] text-red-500 mt-1">{panError}</p>}
+          <div className="relative">
+            <input
+              id="pan"
+              type="text"
+              value={pan}
+              onChange={(e) => handlePanChange(e.target.value)}
+              placeholder="ABCDE1234F"
+              maxLength={10}
+              className={`${field} font-mono uppercase tracking-wider ${panError ? bad : ""}`}
+            />
+            <CreditCard className={icon} />
+          </div>
+          {panError && <p className="mt-1 text-[11px] text-red-500">{panError}</p>}
         </div>
 
-        {/* GST registered toggle — both flows */}
-        <div>
-          <label className="flex items-center gap-2 cursor-pointer select-none">
+        {/* GST registered toggle */}
+        <div className="rounded-xl border border-slate-200 bg-slate-50/60 px-3.5 py-3">
+          <label className="flex cursor-pointer select-none items-center gap-2.5">
             <input
               type="checkbox"
               checked={gstRegistered}
-              onChange={e => { setGstRegistered(e.target.checked); if (!e.target.checked) { setGst(""); setGstError(""); } }}
-              className="w-4 h-4 rounded border-gray-300 text-[#1e3a5f] focus:ring-[#1e3a5f]/30"
+              onChange={(e) => {
+                setGstRegistered(e.target.checked);
+                if (!e.target.checked) { setGst(""); setGstError(""); }
+              }}
+              className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500/30"
             />
-            <span className="text-xs font-semibold text-gray-700">Are you GST registered?</span>
+            <span className="flex items-center gap-1.5 text-xs font-semibold text-slate-700">
+              <ReceiptText className="h-3.5 w-3.5 text-slate-400" />
+              Are you GST registered?
+            </span>
           </label>
           {gstRegistered && (
-            <div className="mt-2">
+            <div className="animate-fade-up mt-3">
               <input
                 type="text"
                 value={gst}
-                onChange={e => handleGstChange(e.target.value)}
+                onChange={(e) => handleGstChange(e.target.value)}
                 placeholder="GSTIN — e.g. 22ABCDE1234F1Z5"
                 maxLength={15}
-                className={`${inputCls} uppercase ${gstError ? "border-red-300 focus:ring-red-200" : ""}`}
+                className={`w-full rounded-xl border border-slate-200 bg-white px-4 py-2.5 font-mono text-sm uppercase tracking-wider shadow-sm outline-none transition-all placeholder:font-sans placeholder:tracking-normal placeholder:text-slate-400 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/12 ${
+                  gstError ? bad : ""
+                }`}
               />
-              {gstError && <p className="text-[11px] text-red-500 mt-1">{gstError}</p>}
+              {gstError && <p className="mt-1 text-[11px] text-red-500">{gstError}</p>}
             </div>
           )}
         </div>
 
         {/* password */}
         <div>
-          <label className="block text-xs font-semibold text-gray-700 mb-1.5">Password *</label>
+          <label htmlFor="password" className="mb-1.5 block text-xs font-semibold text-slate-700">
+            Password <span className="text-red-500">*</span>
+          </label>
           <div className="relative">
             <input
+              id="password"
               type={showPw ? "text" : "password"}
+              autoComplete="new-password"
               value={password}
-              onChange={e => setPassword(e.target.value)}
+              onChange={(e) => setPassword(e.target.value)}
               placeholder="Min 8 characters"
-              className={`${inputCls} pr-10`}
+              className={`${field} pr-11`}
             />
-            <button type="button" onClick={() => setShowPw(s => !s)}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
-              {showPw ? <EyeOff className="w-4 h-4"/> : <Eye className="w-4 h-4"/>}
+            <Lock className={icon} />
+            <button
+              type="button"
+              onClick={() => setShowPw((s) => !s)}
+              aria-label={showPw ? "Hide password" : "Show password"}
+              className="absolute right-3 top-1/2 -translate-y-1/2 rounded-md p-1 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
+            >
+              {showPw ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
             </button>
           </div>
+
+          {/* strength meter */}
+          {password && (
+            <div className="animate-fade-in mt-2 flex items-center gap-2">
+              <div className="flex flex-1 gap-1">
+                {[0, 1, 2, 3].map((i) => (
+                  <span
+                    key={i}
+                    className={`h-1 flex-1 rounded-full transition-all duration-300 ${
+                      i < pwStrength.score ? pwStrength.tone.split(" ")[0] : "bg-slate-200"
+                    }`}
+                  />
+                ))}
+              </div>
+              <span className={`text-[10px] font-semibold ${pwStrength.tone.split(" ")[1]}`}>
+                {pwStrength.label}
+              </span>
+            </div>
+          )}
         </div>
 
         {/* confirm */}
         <div>
-          <label className="block text-xs font-semibold text-gray-700 mb-1.5">Confirm Password *</label>
-          <input
-            type="password"
-            value={confirm}
-            onChange={e => setConfirm(e.target.value)}
-            placeholder="Re-enter your password"
-            className={`w-full border rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 transition-colors ${
-              confirm && confirm !== password
-                ? "border-red-300 focus:ring-red-200"
-                : "border-gray-200 focus:ring-[#1e3a5f]/30 focus:border-[#1e3a5f]"
-            }`}
-          />
+          <label htmlFor="confirm" className="mb-1.5 block text-xs font-semibold text-slate-700">
+            Confirm password <span className="text-red-500">*</span>
+          </label>
+          <div className="relative">
+            <input
+              id="confirm"
+              type="password"
+              autoComplete="new-password"
+              value={confirm}
+              onChange={(e) => setConfirm(e.target.value)}
+              placeholder="Re-enter your password"
+              className={`${field} ${confirm && confirm !== password ? bad : ""} ${
+                confirm && confirm === password ? "border-emerald-300 focus:border-emerald-400 focus:ring-emerald-500/12" : ""
+              }`}
+            />
+            <Lock className={icon} />
+            {confirm && confirm === password && (
+              <CheckCircle2 className="animate-scale-in absolute right-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-emerald-500" />
+            )}
+          </div>
           {confirm && confirm !== password && (
-            <p className="text-[11px] text-red-500 mt-1">Passwords do not match</p>
+            <p className="mt-1 text-[11px] text-red-500">Passwords do not match</p>
           )}
         </div>
 
         {/* error */}
         {error && (
-          <div className="bg-red-50 border border-red-200 rounded-lg px-3 py-2.5 text-xs text-red-600 leading-snug">
-            {error}
+          <div className="animate-shake flex items-start gap-2.5 rounded-xl border border-red-200 bg-red-50 px-3.5 py-3">
+            <TriangleAlert className="mt-px h-4 w-4 shrink-0 text-red-500" />
+            <p className="text-xs leading-relaxed text-red-700">{error}</p>
           </div>
         )}
 
@@ -362,15 +545,26 @@ export default function SignupPage() {
         <button
           type="submit"
           disabled={loading}
-          className="w-full text-white py-3 rounded-xl font-semibold text-sm hover:opacity-90 disabled:opacity-60 transition-all"
-          style={{ background: "#1e3a5f" }}>
-          {loading ? "Creating account..." : "Create Account"}
+          className="group flex w-full items-center justify-center gap-2 rounded-xl py-3.5 text-sm font-semibold text-white shadow-lg shadow-blue-500/25 transition-all hover:-translate-y-0.5 hover:shadow-xl hover:shadow-blue-500/35 disabled:translate-y-0 disabled:opacity-60 disabled:shadow-none"
+          style={{ background: "var(--brand-grad)" }}
+        >
+          {loading ? (
+            <>
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Creating account…
+            </>
+          ) : (
+            <>
+              Create account
+              <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
+            </>
+          )}
         </button>
       </form>
 
-      <p className="text-center text-sm text-gray-600 mt-5">
+      <p className="mt-6 text-center text-sm text-slate-600">
         Already have an account?{" "}
-        <Link href="/login" className="font-semibold text-[#1e3a5f] hover:underline">
+        <Link href="/login" className="font-semibold text-blue-600 hover:underline">
           Sign in
         </Link>
       </p>

@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import {
   ArrowLeft, RefreshCw, Upload, Plus, X, CheckCircle, XCircle,
   AlertCircle, MinusCircle, User, Clock, Pencil, Save, Trash2,
@@ -220,7 +220,9 @@ type DealRepositoryItem = {
   trigger_type:    string | null;
   payout_type:     string | null;
   business_type:   string | null;
+  entity:          string | null;
   entity_lcc:      string | null;
+  login_ids:       string[] | null;
   remark:          string | null;
   deal_maker_name: string | null;
   incentive_types: string[] | null;
@@ -409,7 +411,7 @@ const TABLE_HEADERS = [
   "Deal No", "Deal Type", "Deal Tag", "Airline Name", "Airline Type", "Contract Year",
   "Valid From", "Valid To",
   "Trigger Type", "Payout Type",
-  "Business Type", "Entity (LCC)",
+  "Business Type", "Entity", "Login IDs",
   "Incentive & Rules",
   "Deal Maker", "Approval Status", "Deal Status", "Actions",
 ];
@@ -972,6 +974,7 @@ function DealEditPanel({ deal, onSave, onClose }: {
 // ── main page ──────────────────────────────────────────────────────────────
 export default function DealBatchPage() {
   const params = useParams();
+  const router = useRouter();
   const batchId = params.batch_id as string;
 
   const [batch,    setBatch]   = useState<DealBatch | null>(null);
@@ -1026,7 +1029,9 @@ export default function DealBatchPage() {
     try {
       const [batchRes, dealsRes] = await Promise.all([
         api.get<DealBatch>(`/deals/batches/${batchId}`),
-        api.get<DealRepositoryItem[]>(`/deals/repository?batch_id=${batchId}`),
+        // A batch is a single direction, so fetch all its deals regardless of the
+        // inbound/outbound default — otherwise floated (outbound) statements look empty.
+        api.get<DealRepositoryItem[]>(`/deals/repository?batch_id=${batchId}&direction=all`),
       ]);
       setBatch(batchRes.data);
       setDeals(dealsRes.data);
@@ -1457,8 +1462,18 @@ export default function DealBatchPage() {
 
                     <td className="px-2 py-1.5 min-w-20">
                       <p className="text-[11px] text-gray-700 whitespace-nowrap">
-                        {d.entity_lcc || <span className="text-gray-300">—</span>}
+                        {d.entity || d.entity_lcc || <span className="text-gray-300">—</span>}
                       </p>
+                    </td>
+
+                    <td className="px-2 py-1.5 min-w-24 max-w-[160px]">
+                      {(d.login_ids ?? []).length > 0 ? (
+                        <div className="flex flex-wrap gap-0.5">
+                          {d.login_ids!.map(l => (
+                            <span key={l} className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200 whitespace-nowrap">{l}</span>
+                          ))}
+                        </div>
+                      ) : <span className="text-[11px] text-gray-300">—</span>}
                     </td>
 
                     <td className="px-2 py-1.5 min-w-28">
@@ -1508,7 +1523,7 @@ export default function DealBatchPage() {
                           <Clock className="w-3 h-3" /> History
                         </button>
                         <button
-                          onClick={() => (d.status === "approved" || d.status === "rejected") && setEditDeal(d)}
+                          onClick={() => (d.status === "approved" || d.status === "rejected") && router.push(`/deals/new?editId=${d.id}`)}
                           disabled={d.status !== "approved" && d.status !== "rejected" || d.deal_lifecycle_status === "closed"}
                           title={
                             d.status === "rejected" ? "Edit and resubmit for approval" :
@@ -1605,6 +1620,8 @@ export default function DealBatchPage() {
           initialIncType={incentiveRulesPopup.initialIncType}
           onSave={handleIncentiveRulesSave}
           onClose={() => setIncentiveRulesPopup(null)}
+          b2bStandard={(incentiveRulesPopup.deal.deal_no?.startsWith("B2B") ?? !!incentiveRulesPopup.deal.business_type) && (incentiveRulesPopup.deal.deal_tag ?? "standard") === "standard"}
+          airlineName={incentiveRulesPopup.deal.airline_name ?? undefined}
         />
       )}
 

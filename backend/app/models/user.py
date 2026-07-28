@@ -28,6 +28,11 @@ class User(Base):
                                        )
     department:      Mapped[str|None] = mapped_column(String(100), nullable=True)
     is_active:       Mapped[bool]     = mapped_column(Boolean, default=True)
+    # email verification: signup creates an unverified account; login is blocked
+    # until the emailed verification link flips this to True.
+    is_verified:     Mapped[bool]     = mapped_column(Boolean, default=False, nullable=False)
+    # first-login onboarding wizard (user info → entities → login ids) completion.
+    onboarding_complete: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     tenant_id:       Mapped[int|None] = mapped_column(
                                            Integer,
                                            ForeignKey("tenants.id", ondelete="SET NULL"),

@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Plus, Upload, Search, RefreshCw, X, CheckCircle, XCircle, AlertCircle, MinusCircle, User, Save, Trash2, FileText, FileSpreadsheet, ChevronRight, Building2, Calendar, Hash, History, Pencil, Plane, List } from "lucide-react";
 import api from "@/lib/api";
 import { IncentiveTabContent, InclExclTabContent, IEFieldValue, CONTINENTS, COUNTRY_GROUPS, IncentiveRulesModal } from "@/components/deals/IncentiveInclExclShared";
@@ -52,7 +52,9 @@ type DealRepositoryItem = {
   trigger_type:    string | null;
   payout_type:     string | null;
   business_type:   string | null;
+  entity:          string | null;
   entity_lcc:      string | null;
+  login_ids:       string[] | null;
   remark:          string | null;
   deal_maker_name: string | null;
   incentive_types: string[] | null;
@@ -732,7 +734,9 @@ function DealFlatTable({ deals, showAirlineCol = true, onOpenHistory, onEdit, on
             {showAirlineCol && (
               <th className="px-3 py-2.5 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Airline / Maker</th>
             )}
-            <th className="px-3 py-2.5 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Valid Period</th>
+            <th className="px-3 py-2.5 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Contract Valid Period</th>
+            <th className="px-3 py-2.5 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Entity</th>
+            <th className="px-3 py-2.5 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Login IDs</th>
             <th className="px-3 py-2.5 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Incentive &amp; Rules</th>
             <th className="px-3 py-2.5 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Approval Status</th>
             <th className="px-3 py-2.5 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Deal Status</th>
@@ -760,6 +764,18 @@ function DealFlatTable({ deals, showAirlineCol = true, onOpenHistory, onEdit, on
                   <span className="text-xs text-gray-700">{formatDate(d.valid_from)}</span>
                   <span className="text-gray-400 mx-1">→</span>
                   <span className="text-xs text-gray-700">{formatDate(d.valid_to)}</span>
+                </td>
+                <td className="px-3 py-2.5 text-xs text-gray-700 max-w-[140px] truncate" title={d.entity ?? d.entity_lcc ?? undefined}>
+                  {d.entity || d.entity_lcc || "—"}
+                </td>
+                <td className="px-3 py-2.5">
+                  {(d.login_ids ?? []).length > 0 ? (
+                    <div className="flex flex-wrap gap-0.5 max-w-[160px]">
+                      {d.login_ids!.map(l => (
+                        <span key={l} className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200 whitespace-nowrap">{l}</span>
+                      ))}
+                    </div>
+                  ) : <span className="text-xs text-gray-400">—</span>}
                 </td>
                 <td className="px-3 py-2.5">
                   <div className="flex flex-wrap gap-0.5 max-w-[220px]">
@@ -821,6 +837,9 @@ function DealFlatTable({ deals, showAirlineCol = true, onOpenHistory, onEdit, on
 // ── main page ──────────────────────────────────────────────────────────────
 export default function DealsPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  // Incoming (received) vs Outgoing (floated to a sub-agency) repository view.
+  const direction = searchParams.get("direction") === "outbound" ? "outbound" : "inbound";
   const [sectionTab, setSectionTab] = useState("Deal Repository");
   const [deals,      setDeals]      = useState<DealRepositoryItem[]>([]);
   const [batches,    setBatches]    = useState<DealBatch[]>([]);
@@ -855,8 +874,8 @@ export default function DealsPage() {
     setApiError("");
     try {
       const [batchRes, dealRes] = await Promise.all([
-        api.get<DealBatch[]>("/deals/batches"),
-        api.get<DealRepositoryItem[]>("/deals/repository"),
+        api.get<DealBatch[]>(`/deals/batches?direction=${direction}`),
+        api.get<DealRepositoryItem[]>(`/deals/repository?direction=${direction}`),
       ]);
       setBatches(batchRes.data);
       setDeals(dealRes.data);
@@ -866,7 +885,7 @@ export default function DealsPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [direction]);
 
   useEffect(() => { fetchDeals(); }, [fetchDeals]);
 
@@ -1014,7 +1033,7 @@ export default function DealsPage() {
           {/* ── Header ──────────────────────────────────────────────────── */}
           <div className="flex items-start justify-between">
             <div>
-              <h1 className="text-xl font-bold text-gray-900 uppercase tracking-wide">Deal Repository</h1>
+              <h1 className="text-xl font-bold text-gray-900 uppercase tracking-wide">{direction === "outbound" ? "Outgoing Deal Repository" : "Incoming Deal Repository"}</h1>
               <p className="text-xs text-gray-500 mt-0.5">All deals — uploads, airline contracts and B2B agreements</p>
             </div>
             <div className="flex gap-2">
@@ -1022,11 +1041,11 @@ export default function DealsPage() {
                 className="flex items-center gap-1.5 bg-white border border-gray-200 text-gray-600 px-3 py-1.5 rounded-lg text-xs font-medium hover:bg-gray-50 disabled:opacity-50">
                 <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
               </button>
-              <Link href="/deals/upload"
+              <Link href={`/deals/upload?direction=${direction}`}
                 className="flex items-center gap-1.5 bg-white border border-gray-200 text-gray-700 px-3 py-1.5 rounded-lg text-xs font-medium hover:bg-gray-50">
                 <Upload className="w-3.5 h-3.5" /> Upload
               </Link>
-              <Link href="/deals/new"
+              <Link href={`/deals/new?direction=${direction}`}
                 className="flex items-center gap-1.5 bg-[#1e3a5f] text-white px-3 py-1.5 rounded-lg text-xs font-medium hover:bg-[#16304f]">
                 <Plus className="w-3.5 h-3.5" /> Create Deal
               </Link>
@@ -1106,10 +1125,10 @@ export default function DealsPage() {
                   <th className="px-4 py-3 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Supplier / Source</th>
                   <th className="px-3 py-3 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Deal Type</th>
                   <th className="px-3 py-3 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Deal Tag</th>
-                  <th className="px-3 py-3 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Incentive Types</th>
                   <th className="px-3 py-3 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">
-                    <span className="flex items-center gap-1"><Calendar className="w-3.5 h-3.5" /> Valid Period</span>
+                    <span className="flex items-center gap-1"><Calendar className="w-3.5 h-3.5" /> Contract Valid Period</span>
                   </th>
+                  <th className="px-3 py-3 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Incentive Types</th>
                   <th className="px-3 py-3 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">File</th>
                   <th className="px-3 py-3 text-center text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">
                     <span className="flex items-center justify-center gap-1"><Hash className="w-3 h-3" /> Deals</span>
@@ -1145,7 +1164,7 @@ export default function DealsPage() {
                           {batches.length === 0 ? "No deal batches yet" : "No batches match the filters"}
                         </p>
                         {batches.length === 0 && (
-                          <Link href="/deals/upload"
+                          <Link href={`/deals/upload?direction=${direction}`}
                             className="flex items-center gap-1.5 bg-[#1e3a5f] text-white px-3 py-1.5 rounded-lg text-xs font-medium hover:bg-[#16304f]">
                             <Upload className="w-3 h-3" /> Upload First Deal
                           </Link>
@@ -1188,6 +1207,13 @@ export default function DealsPage() {
                         </span>
                       </td>
 
+                      {/* Contract valid period */}
+                      <td className="px-3 py-3 whitespace-nowrap">
+                        <span className="text-xs font-medium text-gray-700">{formatDate(b.valid_from)}</span>
+                        <span className="text-gray-400 mx-1">→</span>
+                        <span className="text-xs font-medium text-gray-700">{formatDate(b.valid_to)}</span>
+                      </td>
+
                       {/* Incentive types */}
                       <td className="px-3 py-3">
                         <div className="flex flex-wrap gap-0.5">
@@ -1198,13 +1224,6 @@ export default function DealsPage() {
                             : <span className="text-xs text-gray-400">—</span>
                           }
                         </div>
-                      </td>
-
-                      {/* Valid period */}
-                      <td className="px-3 py-3 whitespace-nowrap">
-                        <span className="text-xs font-medium text-gray-700">{formatDate(b.valid_from)}</span>
-                        <span className="text-gray-400 mx-1">→</span>
-                        <span className="text-xs font-medium text-gray-700">{formatDate(b.valid_to)}</span>
                       </td>
 
                       {/* File */}
@@ -1281,7 +1300,7 @@ export default function DealsPage() {
                 <DealFlatTable
                   deals={filteredDeals}
                   onOpenHistory={openHistory}
-                  onEdit={setEditDeal}
+                  onEdit={(d) => router.push(`/deals/new?editId=${d.id}`)}
                   onDelete={setDeleteTarget}
                   onOpenIncentiveRules={openIncentiveRules}
                 />
@@ -1314,7 +1333,7 @@ export default function DealsPage() {
                       deals={airlineDeals}
                       showAirlineCol={false}
                       onOpenHistory={openHistory}
-                      onEdit={setEditDeal}
+                      onEdit={(d) => router.push(`/deals/new?editId=${d.id}`)}
                       onDelete={setDeleteTarget}
                       onOpenIncentiveRules={openIncentiveRules}
                     />
@@ -1356,6 +1375,8 @@ export default function DealsPage() {
           initialIncType={incentiveRulesPopup.initialIncType}
           onSave={handleIncentiveRulesSave}
           onClose={() => setIncentiveRulesPopup(null)}
+          b2bStandard={(incentiveRulesPopup.deal.deal_no?.startsWith("B2B") ?? !!incentiveRulesPopup.deal.business_type) && (incentiveRulesPopup.deal.deal_tag ?? "standard") === "standard"}
+          airlineName={incentiveRulesPopup.deal.airline_name ?? undefined}
         />
       )}
 

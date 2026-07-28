@@ -40,6 +40,19 @@ def _match_any(rule_vals: list[str], ticket_val: str) -> bool:
     return any(rv == tv for rv in rule_vals)
 
 
+def _class_code_matches(booking_class: str | None, rule_vals: list[str]) -> bool:
+    """True if any rule value equals one of the ticket's raw booking-class CODES.
+
+    B2B Standard incl/excl rules store the airline's real class codes (B, E, G…).
+    `rule_vals` are already lowercased by `_val_to_list`; the ticket booking class
+    is split on '/' the same way `_resolve_cabin_groups` parses codes.
+    """
+    if not booking_class:
+        return False
+    codes = [c.strip().lower() for c in booking_class.replace(" ", "").split("/") if c.strip()]
+    return any(rv in codes for rv in rule_vals)
+
+
 def _cat_match(rule_vals: list[str], apt_categorization: str) -> bool:
     """Match a rule's country-group values against an airport's categorization.
 
@@ -289,8 +302,11 @@ async def diagnose_inclusion_for_payout(
 
             elif field == "class":
                 cabin_groups = await _resolve_cabin_groups(db, airline_name or "", booking_class)
-                field_matched = any(_class_matches_groups(cabin_groups, rv) for rv in rv_list)
-                ticket_value_str = f"{booking_class or '—'} → {'/'.join(sorted(cabin_groups))}"
+                field_matched = (
+                    any(_class_matches_groups(cabin_groups, rv) for rv in rv_list)   # legacy/airline: group names
+                    or _class_code_matches(booking_class, rv_list)                   # B2B Standard: raw class codes
+                )
+                ticket_value_str = f"{booking_class or '—'} → {'/'.join(sorted(cabin_groups))} (codes: {booking_class or '—'})"
 
             elif field == "soto":
                 o_apt = await get_origin()
@@ -547,8 +563,11 @@ async def diagnose_exclusion_for_payout(
 
             elif field == "class":
                 cabin_groups = await _resolve_cabin_groups(db, airline_name or "", booking_class)
-                field_matched = any(_class_matches_groups(cabin_groups, rv) for rv in rv_list)
-                ticket_value_str = f"{booking_class or '—'} → {'/'.join(sorted(cabin_groups))}"
+                field_matched = (
+                    any(_class_matches_groups(cabin_groups, rv) for rv in rv_list)   # legacy/airline: group names
+                    or _class_code_matches(booking_class, rv_list)                   # B2B Standard: raw class codes
+                )
+                ticket_value_str = f"{booking_class or '—'} → {'/'.join(sorted(cabin_groups))} (codes: {booking_class or '—'})"
 
             elif field == "soto":
                 o_apt = await get_origin()
@@ -772,7 +791,10 @@ async def evaluate_inclusion_for_payout(
             elif field == "class":
                 airline_name = ticket.airline_name or ""
                 cabin_groups = await _resolve_cabin_groups(db, airline_name, ticket.booking_class)
-                field_matched = any(_class_matches_groups(cabin_groups, rv) for rv in rv_list)
+                field_matched = (
+                    any(_class_matches_groups(cabin_groups, rv) for rv in rv_list)   # legacy/airline: group names
+                    or _class_code_matches(ticket.booking_class, rv_list)            # B2B Standard: raw class codes
+                )
 
             elif field == "soto":
                 o_apt = await get_origin()
@@ -993,7 +1015,10 @@ async def evaluate_exclusion_for_payout(
             elif field == "class":
                 airline_name = ticket.airline_name or ""
                 cabin_groups = await _resolve_cabin_groups(db, airline_name, ticket.booking_class)
-                field_matched = any(_class_matches_groups(cabin_groups, rv) for rv in rv_list)
+                field_matched = (
+                    any(_class_matches_groups(cabin_groups, rv) for rv in rv_list)   # legacy/airline: group names
+                    or _class_code_matches(ticket.booking_class, rv_list)            # B2B Standard: raw class codes
+                )
 
             # ── SOTO (India origin/destination rule) ──────────────────────────
             elif field == "soto":
