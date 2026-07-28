@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import { ArrowLeft, Edit2, RefreshCw, Contact, Ticket, FileText, Download, Trash2, Save, X, Eye } from "lucide-react";
 import api from "@/lib/api";
 import CustomerModal, { type Customer } from "@/components/customers/CustomerModal";
+import { INCENTIVE_TYPE_COLS } from "@/lib/incentives";
 
 type SoldTicket = {
   id: number;
@@ -21,6 +22,9 @@ type SoldTicket = {
   sell_fare: number | null;
   total_amt: number | null;
   calculated_incentive: number | null;
+  incentive_breakdown: Record<string, number> | null;
+  is_billed: boolean;
+  billing_id: number | null;
   base_amount: number;
   markup_amount: number;
   gst_amount: number;
@@ -58,6 +62,7 @@ type BillingDetailLine = {
   base_amount: number;
   markup_amount: number;
   additional_markup: number;
+  discount: number;
   gst_amount: number;
   total: number;
 };
@@ -96,16 +101,18 @@ function passengerName(t: SoldTicket): string {
 }
 
 /** Recompute one row with the customer markup + the entered additional (flat) markup. */
-function rowCalc(t: SoldTicket, additionalStr: string, billingType: Customer["billing_type"]) {
+function rowCalc(t: SoldTicket, additionalStr: string, discountStr: string, billingType: Customer["billing_type"]) {
   const base = t.base_amount;
   const custMarkup = t.markup_amount;
   const addl = parseFloat(additionalStr) || 0;
+  const disc = parseFloat(discountStr) || 0;
   const totalMarkup = custMarkup + addl;
+  // Discount reduces the taxable value first, then GST applies on the reduced amount.
   let gst = 0;
-  if (billingType === "reseller") gst = (base + totalMarkup) * GST_RATE;
-  else if (billingType === "agency") gst = totalMarkup * GST_RATE;
-  const total = base + totalMarkup + gst;
-  return { base, custMarkup, addl, totalMarkup, gst, total };
+  if (billingType === "reseller") gst = Math.max(0, base + totalMarkup - disc) * GST_RATE;
+  else if (billingType === "agency") gst = Math.max(0, totalMarkup - disc) * GST_RATE;
+  const total = base + totalMarkup - disc + gst;
+  return { base, custMarkup, addl, disc, totalMarkup, gst, total };
 }
 
 /** Recompute a saved billing line when its additional markup is being edited (base markup preserved). */
@@ -113,11 +120,12 @@ function editRowCalc(it: BillingDetailLine, additionalStr: string, billingType: 
   const base = it.base_amount;
   const markup = it.markup_amount;
   const addl = parseFloat(additionalStr) || 0;
+  const disc = it.discount ?? 0;   // discount is preserved from creation (not edited here)
   const totalMarkup = markup + addl;
   let gst = 0;
-  if (billingType === "reseller") gst = (base + totalMarkup) * GST_RATE;
-  else if (billingType === "agency") gst = totalMarkup * GST_RATE;
-  const total = base + totalMarkup + gst;
+  if (billingType === "reseller") gst = Math.max(0, base + totalMarkup - disc) * GST_RATE;
+  else if (billingType === "agency") gst = Math.max(0, totalMarkup - disc) * GST_RATE;
+  const total = base + totalMarkup - disc + gst;
   return { base, addl, markup, gst, total };
 }
 
@@ -149,6 +157,8 @@ export default function CustomerDetailPage() {
   const [loadingTickets, setLoadingTickets] = useState(false);
   const [ticketsError, setTicketsError] = useState<string | null>(null);
   const [additional, setAdditional] = useState<Record<number, string>>({});
+  const [discounts, setDiscounts] = useState<Record<number, string>>({});
+  const [selected, setSelected] = useState<Set<number>>(new Set());
 
   // Save Billing
   const [showSaveBilling, setShowSaveBilling] = useState(false);
@@ -214,6 +224,8 @@ export default function CustomerDetailPage() {
       });
       setSoldTickets(data.tickets);
       setAdditional({});
+      setDiscounts({});
+      setSelected(new Set());
     } catch {
       setTicketsError("Failed to load tickets.");
     } finally {
@@ -235,7 +247,7 @@ export default function CustomerDetailPage() {
       gst = 0,
       total = 0;
     for (const t of rows) {
-      const c = rowCalc(t, additional[t.id] ?? "", customer?.billing_type ?? null);
+      const c = rowCalc(t, additional[t.id] ?? "", discounts[t.id] ?? "", customer?.billing_type ?? null);
       base += c.base;
       markup += c.custMarkup;
       addl += c.addl;
@@ -243,7 +255,31 @@ export default function CustomerDetailPage() {
       total += c.total;
     }
     return { count: rows.length, base, markup, addl, gst, total };
-  }, [soldTickets, additional, customer]);
+  }, [soldTickets, additional, discounts, customer]);
+
+  // Ids of rows that can be selected (already-billed tickets are locked).
+  const selectableIds = useMemo(
+    () => (soldTickets ?? []).filter((t) => !t.is_billed).map((t) => t.id),
+    [soldTickets],
+  );
+  const allSelected = selectableIds.length > 0 && selectableIds.every((id) => selected.has(id));
+
+  const toggleRow = (id: number) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const toggleAll = () => setSelected(allSelected ? new Set() : new Set(selectableIds));
+
+  // Totals over the SELECTED rows only (what a Save Billing will actually bill).
+  const selectedSummary = useMemo(() => {
+    const rows = (soldTickets ?? []).filter((t) => selected.has(t.id));
+    let total = 0;
+    for (const t of rows) total += rowCalc(t, additional[t.id] ?? "", discounts[t.id] ?? "", customer?.billing_type ?? null).total;
+    return { count: rows.length, total };
+  }, [soldTickets, selected, additional, discounts, customer]);
 
   // Live totals for the Billing edit popup (markup being edited per ticket).
   const editTotals = useMemo(() => {
@@ -265,22 +301,27 @@ export default function CustomerDetailPage() {
   }, [editBilling, addlEdits]);
 
   const saveBilling = async () => {
-    if (!billingName.trim() || !soldTickets || soldTickets.length === 0) return;
+    const rows = (soldTickets ?? []).filter((t) => selected.has(t.id) && !t.is_billed);
+    if (!billingName.trim() || rows.length === 0) return;
     setSavingBilling(true);
     try {
       await api.post(`/customers/${customerId}/billings`, {
         billing_name: billingName.trim(),
         period_from: dateFrom,
         period_to: dateTo,
-        items: soldTickets.map((t) => ({
+        items: rows.map((t) => ({
           ticket_id: t.id,
           additional_markup: parseFloat(additional[t.id] ?? "") || 0,
+          discount: parseFloat(discounts[t.id] ?? "") || 0,
         })),
       });
       setShowSaveBilling(false);
       setBillingName("");
-      setTab("Billing Info");
+      setSelected(new Set());
       fetchBillings();
+      // Refresh the tickets so the just-billed rows show as "Billed".
+      applyRange();
+      setTab("Billing Info");
     } catch (e: unknown) {
       const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
       alert(msg ?? "Failed to save billing.");
@@ -424,6 +465,9 @@ export default function CustomerDetailPage() {
             <DetailRow label="Title" value={customer.title} />
             <DetailRow label="Phone / Contact" value={customer.phone} />
             <DetailRow label="Email" value={customer.email} />
+            <DetailRow label="GST Registration" value={customer.gst_registered ? "Registered" : "Unregistered"} />
+            <DetailRow label="GST No" value={customer.gst_registered ? customer.gst_no : "—"} />
+            <DetailRow label="PAN No" value={customer.pan_no} />
             <DetailRow label="Markup Type" value={customer.markup_type ? customer.markup_type.charAt(0).toUpperCase() + customer.markup_type.slice(1) : "—"} />
             <DetailRow label="Markup" value={markupLabel(customer)} />
             <DetailRow
@@ -476,9 +520,10 @@ export default function CustomerDetailPage() {
             {soldTickets && soldTickets.length > 0 && (
               <button
                 onClick={() => setShowSaveBilling(true)}
-                className="ml-auto flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg px-4 py-2 text-sm font-semibold"
+                disabled={selected.size === 0}
+                className="ml-auto flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg px-4 py-2 text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <Save className="w-4 h-4" /> Save Billing
+                <Save className="w-4 h-4" /> Save Billing{selected.size > 0 ? ` (${selected.size})` : ""}
               </button>
             )}
           </div>
@@ -534,17 +579,35 @@ export default function CustomerDetailPage() {
                   <table className="w-full">
                     <thead>
                       <tr style={{ background: "#1e3a5f" }}>
-                        {["TICKET #", "AIRLINE", "CODE", "PASSENGER", "SECTOR", "DATE", "TOTAL FARE", "MARKUP", "ADD. MARKUP", "GST", "TOTAL BILLING"].map((h) => (
+                        <th className="px-3 py-2.5 text-center">
+                          <input
+                            type="checkbox"
+                            checked={allSelected}
+                            onChange={toggleAll}
+                            disabled={selectableIds.length === 0}
+                            title="Select all unbilled"
+                            className="accent-emerald-500 cursor-pointer align-middle"
+                          />
+                        </th>
+                        {["TICKET #", "AIRLINE", "CODE", "PASSENGER", "SECTOR", "DATE", "TOTAL FARE", "MARKUP", "ADD. MARKUP", "DISCOUNT", "GST", "TOTAL BILLING", "STATUS"].map((h) => (
                           <th key={h} className="px-3 py-2.5 text-left text-[10px] font-semibold text-white uppercase tracking-wider whitespace-nowrap">
                             {h}
                           </th>
                         ))}
+                        {INCENTIVE_TYPE_COLS.map((col) => (
+                          <th key={col.key} className="px-3 py-2.5 text-right text-[10px] font-semibold text-white/90 uppercase tracking-wider whitespace-nowrap border-l border-white/10">
+                            {col.label}
+                          </th>
+                        ))}
+                        <th className="px-3 py-2.5 text-right text-[10px] font-bold text-white uppercase tracking-wider whitespace-nowrap border-l-2 border-white/30">
+                          Total Inc.
+                        </th>
                       </tr>
                     </thead>
                     <tbody>
                       {soldTickets.length === 0 ? (
                         <tr>
-                          <td colSpan={11} className="px-4 py-16 text-center">
+                          <td colSpan={26} className="px-4 py-16 text-center">
                             <div className="flex flex-col items-center justify-center">
                               <div className="w-14 h-14 bg-gray-50 rounded-full flex items-center justify-center mb-3">
                                 <Ticket className="w-7 h-7 text-gray-300" />
@@ -556,9 +619,21 @@ export default function CustomerDetailPage() {
                         </tr>
                       ) : (
                         soldTickets.map((t, idx) => {
-                          const c = rowCalc(t, additional[t.id] ?? "", customer.billing_type);
+                          const c = rowCalc(t, additional[t.id] ?? "", discounts[t.id] ?? "", customer.billing_type);
+                          const totalInc = INCENTIVE_TYPE_COLS.reduce((s, col) => s + (t.incentive_breakdown?.[col.key] ?? 0), 0);
+                          const isSel = selected.has(t.id);
                           return (
-                            <tr key={t.id} className={`border-b border-gray-50 hover:bg-blue-50/30 ${idx % 2 === 0 ? "bg-white" : "bg-gray-50/30"}`}>
+                            <tr key={t.id} className={`border-b border-gray-50 hover:bg-blue-50/30 ${isSel ? "bg-emerald-50/40" : idx % 2 === 0 ? "bg-white" : "bg-gray-50/30"}`}>
+                              <td className="px-3 py-2 text-center">
+                                <input
+                                  type="checkbox"
+                                  checked={isSel}
+                                  disabled={t.is_billed}
+                                  onChange={() => toggleRow(t.id)}
+                                  title={t.is_billed ? "Already billed" : undefined}
+                                  className="accent-emerald-500 cursor-pointer align-middle disabled:cursor-not-allowed disabled:opacity-40"
+                                />
+                              </td>
                               <td className="px-3 py-2 text-[11px] font-semibold text-gray-800">{t.ticket_number ?? "—"}</td>
                               <td className="px-3 py-2 text-[11px] text-gray-600">{t.airline_name ?? "—"}</td>
                               <td className="px-3 py-2 text-[11px] font-mono text-gray-600">{t.airlines_code ?? "—"}</td>
@@ -570,14 +645,51 @@ export default function CustomerDetailPage() {
                               <td className="px-3 py-2">
                                 <input
                                   type="number"
+                                  step="any"
                                   value={additional[t.id] ?? ""}
                                   onChange={(e) => setAdditional((prev) => ({ ...prev, [t.id]: e.target.value }))}
                                   placeholder="0"
                                   className="w-24 border border-gray-200 rounded px-2 py-1 text-[11px] focus:outline-none focus:ring-1 focus:ring-[#1e3a5f]/40 bg-white"
                                 />
                               </td>
+                              <td className="px-3 py-2">
+                                <input
+                                  type="number"
+                                  step="any"
+                                  value={discounts[t.id] ?? ""}
+                                  onChange={(e) => setDiscounts((prev) => ({ ...prev, [t.id]: e.target.value }))}
+                                  placeholder="0"
+                                  className="w-24 border border-gray-200 rounded px-2 py-1 text-[11px] focus:outline-none focus:ring-1 focus:ring-rose-400/50 bg-white"
+                                />
+                              </td>
                               <td className="px-3 py-2 text-[11px] text-amber-600">{money(c.gst)}</td>
                               <td className="px-3 py-2 text-[11px] font-semibold text-gray-800">{money(c.total)}</td>
+                              <td className="px-3 py-2 whitespace-nowrap">
+                                {t.is_billed ? (
+                                  <span className="inline-block bg-emerald-50 text-emerald-700 text-[10px] font-semibold px-2 py-0.5 rounded-full border border-emerald-200">Billed</span>
+                                ) : (
+                                  <span className="inline-block bg-gray-100 text-gray-500 text-[10px] font-semibold px-2 py-0.5 rounded-full">Not Billed</span>
+                                )}
+                              </td>
+                              {INCENTIVE_TYPE_COLS.map((col) => {
+                                const val = t.incentive_breakdown?.[col.key] ?? null;
+                                return (
+                                  <td key={col.key} className="px-3 py-2 text-[11px] text-right font-mono whitespace-nowrap border-l border-gray-100">
+                                    {val != null ? (
+                                      <span className="text-amber-600 font-semibold">₹{val.toLocaleString("en-IN", { minimumFractionDigits: 2 })}</span>
+                                    ) : (
+                                      <span className="text-gray-300">—</span>
+                                    )}
+                                  </td>
+                                );
+                              })}
+                              <td className="px-3 py-2 text-[11px] text-right font-mono whitespace-nowrap border-l-2 border-gray-200">
+                                {totalInc > 0 ? (
+                                  <span className="text-emerald-700 font-bold">₹{totalInc.toLocaleString("en-IN", { minimumFractionDigits: 2 })}</span>
+                                ) : (
+                                  <span className="text-gray-300">—</span>
+                                )}
+                              </td>
                             </tr>
                           );
                         })
@@ -710,8 +822,8 @@ export default function CustomerDetailPage() {
               </div>
               <div className="bg-gray-50 border border-gray-100 rounded-lg px-3 py-2.5 text-[11px] text-gray-600 space-y-1">
                 <div className="flex justify-between"><span>Period</span><span className="font-semibold">{dateFrom} → {dateTo}</span></div>
-                <div className="flex justify-between"><span>Tickets</span><span className="font-semibold">{summary.count}</span></div>
-                <div className="flex justify-between"><span>Grand Total</span><span className="font-semibold">{money(summary.total)}</span></div>
+                <div className="flex justify-between"><span>Selected Tickets</span><span className="font-semibold">{selectedSummary.count}</span></div>
+                <div className="flex justify-between"><span>Grand Total</span><span className="font-semibold">{money(selectedSummary.total)}</span></div>
               </div>
             </div>
             <div className="px-6 pb-5 flex gap-3">

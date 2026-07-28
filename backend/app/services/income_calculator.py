@@ -4,7 +4,6 @@ and produces an IncomeRecord.
 """
 from decimal import Decimal
 from app.models.ticket import Ticket
-from app.models.uploaded_deal import UploadedDeal
 
 
 class IncomeCalculatorService:
@@ -19,10 +18,10 @@ class IncomeCalculatorService:
             return Decimal("0")
 
     @staticmethod
-    def calculate(ticket: Ticket, deal: UploadedDeal) -> dict:
+    def calculate(ticket: Ticket, deal) -> dict:
         base = Decimal(str(ticket.base_fare))
 
-        commission_pct = IncomeCalculatorService._parse_percent(deal.eco_commission)
+        commission_pct = IncomeCalculatorService._parse_percent(getattr(deal, "eco_commission", None))
         override_pct = Decimal("0")
         incentive = Decimal("0")
 

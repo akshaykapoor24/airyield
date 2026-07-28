@@ -140,7 +140,7 @@ export default function CustomersPage() {
           <table className="w-full">
             <thead>
               <tr style={{ background: "#1e3a5f" }}>
-                {["NAME", "COMPANY", "TITLE", "EMAIL", "PHONE", "MARKUP TYPE", "MARKUP VALUE", "BILLING", "ACTIONS"].map((h) => (
+                {["NAME", "COMPANY", "TITLE", "EMAIL", "PHONE", "GST NO", "PAN NO", "MARKUP TYPE", "MARKUP VALUE", "BILLING", "ACTIONS"].map((h) => (
                   <th key={h} className="px-3 py-2.5 text-left text-[10px] font-semibold text-white uppercase tracking-wider whitespace-nowrap">
                     {h}
                   </th>
@@ -150,13 +150,13 @@ export default function CustomersPage() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={9} className="px-4 py-12 text-center text-xs text-gray-400">
+                  <td colSpan={11} className="px-4 py-12 text-center text-xs text-gray-400">
                     <RefreshCw className="w-4 h-4 animate-spin mx-auto mb-2 text-gray-300" /> Loading customers…
                   </td>
                 </tr>
               ) : pageItems.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="px-4 py-16 text-center">
+                  <td colSpan={11} className="px-4 py-16 text-center">
                     <div className="flex flex-col items-center justify-center text-center">
                       <div className="w-14 h-14 bg-gray-50 rounded-full flex items-center justify-center mb-3">
                         <Contact className="w-7 h-7 text-gray-300" />
@@ -193,6 +193,10 @@ export default function CustomersPage() {
                     <td className="px-3 py-2 text-[11px] text-gray-500">{c.title ?? "—"}</td>
                     <td className="px-3 py-2 text-[11px] text-gray-500">{c.email ?? "—"}</td>
                     <td className="px-3 py-2 text-[11px] text-gray-500">{c.phone ?? "—"}</td>
+                    <td className="px-3 py-2 text-[11px] font-mono text-gray-600">
+                      {c.gst_registered ? (c.gst_no ?? "—") : <span className="text-gray-400">Unregistered</span>}
+                    </td>
+                    <td className="px-3 py-2 text-[11px] font-mono text-gray-600">{c.pan_no ?? "—"}</td>
                     <td className="px-3 py-2 text-[11px] text-gray-600">{markupTypeLabel(c)}</td>
                     <td className="px-3 py-2 text-[11px] font-semibold text-gray-700">{markupValueLabel(c)}</td>
                     <td className="px-3 py-2">

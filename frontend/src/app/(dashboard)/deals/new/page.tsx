@@ -10,7 +10,7 @@ import {
   INCENTIVE_TYPES, INCLUSIONS_EXCLUSIONS,
   CONTINENTS, COUNTRY_GROUPS,
   SelectField, SearchSelectField, MultiSearchSelectField, DateField, TabBar, SectionCard,
-  IncentiveTabContent, InclExclTabContent,
+  IncentiveTabContent, InclExclTabContent, incentiveEntryToForm,
 } from "@/components/deals/IncentiveInclExclShared";
 
 // ── static options ───────────────────────────────────────────────────────────
@@ -52,44 +52,63 @@ const INCL_EXCL_META: Record<string, { suffix: string; isExclusion: boolean }> =
 };
 
 // ── deal type selection screen ───────────────────────────────────────────────
-function DealTypeSelector({ onSelect }: { onSelect: (t: "airline" | "b2b", tag: "standard" | "adhoc") => void }) {
-  const [selected, setSelected] = useState<"airline" | "b2b" | null>(null);
-  const [dealTag, setDealTag]   = useState<"standard" | "adhoc">("standard");
+function DealTypeSelector({ direction, onSelect }: { direction: "inbound" | "outbound"; onSelect: (dir: "inbound" | "outbound", t: "airline" | "b2b", tag: "standard" | "adhoc") => void }) {
+  const [selected, setSelected]   = useState<"airline" | "b2b" | null>(null);
+  const [dealTag, setDealTag]     = useState<"standard" | "adhoc">("standard");
+
+  // Floated deals can only be B2B — you can't float a deal back to an airline.
+  const typeOptions: ReadonlyArray<"airline" | "b2b"> = direction === "outbound" ? ["b2b"] : ["airline", "b2b"];
+  const effectiveSelected: "airline" | "b2b" | null = direction === "outbound" ? "b2b" : selected;
 
   return (
     <div className="min-h-[60vh] flex items-center justify-center">
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-10 w-full max-w-md">
-        <h1 className="text-base font-semibold text-gray-800 mb-1">Select Deal Type</h1>
+        <h1 className="text-base font-semibold text-gray-800 mb-1">Deal Details</h1>
         <p className="text-xs text-gray-400 mb-6">Choose the type of deal you want to create.</p>
 
-        <div className="flex flex-col gap-3 mb-6">
-          {(["airline", "b2b"] as const).map(type => (
-            <label key={type}
-              className={`flex items-center gap-3 border rounded-lg px-4 py-3.5 cursor-pointer transition-colors ${
-                selected === type
-                  ? "border-blue-500 bg-blue-50/60"
-                  : "border-gray-200 hover:border-gray-300 hover:bg-gray-50/60"
-              }`}>
-              <input
-                type="radio"
-                name="dealType"
-                value={type}
-                checked={selected === type}
-                onChange={() => setSelected(type)}
-                className="w-4 h-4 accent-blue-600"
-              />
-              <div>
-                <span className="text-sm font-medium text-gray-800">
-                  {type === "airline" ? "Airline" : "B2B"}
-                </span>
-                <p className="text-[11px] text-gray-400 mt-0.5">
-                  {type === "airline"
-                    ? "Airline contract with full incentive and payout details"
-                    : "B2B deal without contract year"}
-                </p>
-              </div>
-            </label>
-          ))}
+        {/* Direction is fixed by the entry point (Incoming vs Floated repo) — read-only */}
+        <div className="mb-6">
+          <p className="text-[11px] font-medium text-gray-500 uppercase tracking-wide mb-2">Deal Direction</p>
+          <span className={`inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-medium border ${
+            direction === "outbound"
+              ? "border-amber-200 bg-amber-50 text-amber-700"
+              : "border-emerald-200 bg-emerald-50 text-emerald-700"
+          }`}>
+            {direction === "outbound" ? "Floated" : "Incoming"}
+          </span>
+        </div>
+
+        <div className="mb-6">
+          <p className="text-[11px] font-medium text-gray-500 uppercase tracking-wide mb-2">Deal Type</p>
+          <div className="flex gap-3">
+            {typeOptions.map(type => (
+              <label key={type}
+                className={`flex items-start gap-2 border rounded-lg px-4 py-2.5 cursor-pointer transition-colors flex-1 ${
+                  effectiveSelected === type
+                    ? "border-blue-500 bg-blue-50/60"
+                    : "border-gray-200 hover:border-gray-300 hover:bg-gray-50/60"
+                }`}>
+                <input
+                  type="radio"
+                  name="dealType"
+                  value={type}
+                  checked={effectiveSelected === type}
+                  onChange={() => setSelected(type)}
+                  className="w-3.5 h-3.5 mt-0.5 accent-blue-600"
+                />
+                <div>
+                  <span className="text-xs font-medium text-gray-800">
+                    {type === "airline" ? "Airline" : "B2B"}
+                  </span>
+                  <p className="text-[10px] text-gray-400 mt-0.5 leading-tight">
+                    {type === "airline"
+                      ? "Airline contract with full incentive and payout details"
+                      : "B2B deal without contract year"}
+                  </p>
+                </div>
+              </label>
+            ))}
+          </div>
         </div>
 
         <div className="mb-8">
@@ -119,8 +138,8 @@ function DealTypeSelector({ onSelect }: { onSelect: (t: "airline" | "b2b", tag: 
 
         <button
           type="button"
-          disabled={!selected}
-          onClick={() => selected && onSelect(selected, dealTag)}
+          disabled={!effectiveSelected}
+          onClick={() => effectiveSelected && onSelect(direction, effectiveSelected, dealTag)}
           className="w-full py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
           Continue →
         </button>
@@ -135,6 +154,8 @@ export default function NewDealPage() {
 
   const [dealType, setDealType] = useState<"airline" | "b2b" | null>(null);
   const [dealTag, setDealTag]   = useState<"standard" | "adhoc">("standard");
+  // inbound = deal received; outbound = deal floated to a sub-agency (B2B only).
+  const [direction, setDirection] = useState<"inbound" | "outbound">("inbound");
 
   // airline contract fields
   const [airlineType, setAirlineType]   = useState("");
@@ -180,14 +201,105 @@ export default function NewDealPage() {
   const [continentOptions, setContinentOptions]       = useState<string[]>(CONTINENTS);
   const [countryGroupOptions, setCountryGroupOptions] = useState<string[]>(COUNTRY_GROUPS);
 
+  // Agency Onboarding sources. For a B2B Standard deal, Entity + Login ID come
+  // from the user's Agency Profile (the agency whose name matches the chosen
+  // Supplier) rather than the User Master. Agency names are copied from the
+  // Supplier master, so Supplier → Agency is a name match.
+  const [agencies, setAgencies]             = useState<{ id: number; name: string }[]>([]);
+  const [agencyEntities, setAgencyEntities] = useState<{ id: number; name: string; code: string }[]>([]);
+  const [agencyLoginIds, setAgencyLoginIds] = useState<{ id: number; login_id: string; entity_id: number | null }[]>([]);
+  const [agencyEntityId, setAgencyEntityId] = useState<number | null>(null);   // selected agency entity (drives login ids)
+
   const [isSubmitting, setIsSubmitting]   = useState(false);
   const [isDraftSaving, setIsDraftSaving] = useState(false);
   const [submitError, setSubmitError]     = useState("");
+
+  // Edit mode: /deals/new?editId=<id> pre-fills the form from an existing deal and
+  // saves via PATCH instead of POST. While pre-filling a B2B Standard deal, the
+  // agency-reset effects must NOT wipe the prefilled Entity/Login selection — this
+  // ref suppresses those resets until the user actively changes Supplier/Entity.
+  const suppressAgencyResetRef = useRef(false);
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editChecked, setEditChecked] = useState(false);
+  const [loadingEdit, setLoadingEdit] = useState(false);
+
+  // B2B Standard reroutes Entity + Login ID to the Agency Onboarding data.
+  const isB2bStandard = dealType === "b2b" && dealTag === "standard";
+  // Resolve the agency matching the chosen Supplier (name match — agency names
+  // are copied from the Supplier master at onboarding time).
+  const agencyId = isB2bStandard
+    ? (agencies.find(a => (a.name ?? "").trim().toLowerCase() === supplierName.trim().toLowerCase())?.id ?? null)
+    : null;
 
   useEffect(() => {
     api.get<{ id: number; name: string }[]>("/suppliers/?limit=5000")
       .then(r => setSupplierOptions(r.data.map(s => s.name)))
       .catch(() => {});
+  }, []);
+
+  // The user's own agencies (Agency Profile → Agency Onboarding). Used to map the
+  // chosen Supplier to an agency for the B2B Standard Entity/Login ID lists.
+  useEffect(() => {
+    api.get<{ id: number; name: string }[]>("/agencies/", { params: { limit: 1000 } })
+      .then(r => setAgencies(r.data))
+      .catch(() => {});
+  }, []);
+
+  // Edit mode — read ?editId once and pre-fill the whole form from the deal.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const raw = params.get("editId");
+    const id = Number(raw || "");
+    setEditChecked(true);
+    if (!raw || !Number.isFinite(id) || id <= 0) {
+      // Create mode — direction is fixed by the entry point (Incoming vs Floated repo).
+      if (params.get("direction") === "outbound") setDirection("outbound");
+      return;
+    }
+    let cancelled = false;
+    setLoadingEdit(true);
+    suppressAgencyResetRef.current = true;   // keep prefilled entity/login (B2B Standard)
+    api.get<Record<string, unknown>>(`/deals/repository/${id}/form`)
+      .then(({ data }) => {
+        if (cancelled) return;
+        setEditingId(id);
+        setDealType(data.deal_type === "b2b" ? "b2b" : "airline");
+        setDealTag(data.deal_tag === "adhoc" ? "adhoc" : "standard");
+        setDirection(data.direction === "outbound" ? "outbound" : "inbound");
+        setAirlineType((data.airline_type as string) ?? "");
+        setAirlineName((data.airline_name as string) ?? "");
+        setValidFrom((data.valid_from as string) ?? "");
+        setValidTo((data.valid_to as string) ?? "");
+        setContractYear((data.contract_year as string) ?? "");
+        setTriggerType((data.trigger_type as string) ?? "");
+        setPayoutType((data.payout_type as string) ?? "");
+        setEntity((data.entity as string) ?? "");
+        setBusinessType((data.business_type as string) ?? "");
+        setIataCommission((data.iata_commission as string) ?? "");
+        setLoginIds(Array.isArray(data.login_ids) ? (data.login_ids as string[]) : []);
+        setSupplierName((data.supplier_name as string) ?? "");
+        setRemark((data.remark as string) ?? "");
+        setDealMakerName((data.deal_maker_name as string) ?? "");
+        // Incentives: rebuild the boolean map + per-incentive flat form (repo slabs[]
+        // → amountSlabs/segmentSlabs JSON via incentiveEntryToForm).
+        const incTypes = (data.incentive_types as string[]) ?? [];
+        const incMap: Record<string, boolean> = {};
+        const incData: Record<string, Record<string, string>> = {};
+        const rawIncData = (data.incentive_data as Record<string, Record<string, unknown>>) ?? {};
+        for (const t of incTypes) {
+          incMap[t] = true;
+          incData[t] = incentiveEntryToForm(rawIncData[t] ?? {});
+        }
+        setIncentives(incMap);
+        setIncentiveData(incData);
+        setActiveIncentiveTab(incTypes[0] ?? "");
+        // Incl/excl already arrives in create-form shape {ruleType: {incType: fields}}.
+        setInclExclData((data.incl_excl_data as Record<string, Record<string, Record<string, IEFieldValue>>>) ?? {});
+        setViceVersa((data.vice_versa as Record<string, Record<string, boolean>>) ?? {});
+      })
+      .catch(() => { suppressAgencyResetRef.current = false; })
+      .finally(() => { if (!cancelled) setLoadingEdit(false); });
+    return () => { cancelled = true; };
   }, []);
 
   // Entity codes + Login IDs from the User Master (tenant-scoped).
@@ -219,6 +331,42 @@ export default function NewDealPage() {
       .finally(() => setLoadingAirlines(false));
   }, []);
 
+  // B2B Standard: whenever the resolved agency changes (i.e. the Supplier changed),
+  // reset the entity/login selection and reload the agency's entities. During an edit
+  // prefill the reset is suppressed so the prefilled Entity/Login survives.
+  useEffect(() => {
+    if (!isB2bStandard) return;
+    if (!suppressAgencyResetRef.current) {
+      setEntity("");
+      setAgencyEntityId(null);
+      setLoginIds([]);
+      setAgencyLoginIds([]);
+    }
+    if (!agencyId) { setAgencyEntities([]); return; }
+    api.get<{ id: number; name: string; code: string }[]>("/agency-entities/", { params: { agency_id: agencyId, limit: 1000 } })
+      .then(r => setAgencyEntities(r.data))
+      .catch(() => setAgencyEntities([]));
+  }, [isB2bStandard, agencyId]);
+
+  // B2B Standard edit prefill: the form endpoint gives the entity NAME, not its id.
+  // Once the agency's entities load, resolve the id so the login ids can be fetched.
+  useEffect(() => {
+    if (!isB2bStandard || !entity || agencyEntityId != null) return;
+    const match = agencyEntities.find(e => e.name === entity);
+    if (match) setAgencyEntityId(match.id);
+  }, [isB2bStandard, entity, agencyEntities, agencyEntityId]);
+
+  // B2B Standard: whenever the selected agency entity changes, reload that entity's
+  // login ids from Agency Onboarding (reset suppressed during an edit prefill).
+  useEffect(() => {
+    if (!isB2bStandard) return;
+    if (!suppressAgencyResetRef.current) setLoginIds([]);
+    if (!agencyId || !agencyEntityId) { setAgencyLoginIds([]); return; }
+    api.get<{ id: number; login_id: string; entity_id: number | null }[]>("/agency-login-ids/", { params: { agency_id: agencyId, entity_id: agencyEntityId, limit: 1000 } })
+      .then(r => setAgencyLoginIds(r.data))
+      .catch(() => setAgencyLoginIds([]));
+  }, [isB2bStandard, agencyId, agencyEntityId]);
+
   const selectedIncentives = INCENTIVE_TYPES.filter(t => incentives[t]);
 
   // Airline Name always lists every airline from the master. Picking a name
@@ -238,6 +386,27 @@ export default function NewDealPage() {
       .filter(l => !businessType || _norm(l.lob)          === _norm(businessType))
       .map(l => l.login_id)
   ));
+
+  // Entity + Login ID sources swap to Agency Onboarding data for B2B Standard.
+  // Entity options are the matched agency's entity names; Login ID options are the
+  // login ids under the chosen entity. Everything else keeps the User Master list.
+  const entityFieldOptions = isB2bStandard
+    ? Array.from(new Set(agencyEntities.map(e => e.name).filter(Boolean)))
+    : entityOptions;
+  const loginIdFieldOptions = isB2bStandard
+    ? Array.from(new Set(agencyLoginIds.map(l => l.login_id).filter(Boolean)))
+    : loginIdOptions;
+  const entityPlaceholder = !isB2bStandard
+    ? "Search and select"
+    : !supplierName            ? "Select a supplier first"
+    : agencyId == null         ? "No matching agency for this supplier"
+    : agencyEntities.length === 0 ? "No entities for this agency"
+    :                            "Search and select";
+  const loginIdPlaceholder = !isB2bStandard
+    ? "Search and select"
+    : !entity                    ? "Select an entity first"
+    : agencyLoginIds.length === 0 ? "No login IDs for this entity"
+    :                             "Search and select";
 
   // Set the deal-level contract dates and mirror them into every selected
   // incentive that has its own from/to date fields (all except Ancillary and DI).
@@ -330,6 +499,7 @@ export default function NewDealPage() {
       source_type:      "manual",
       source_agent:     dealMakerName || "manual",
       deal_tag:         dealTag,
+      direction:        direction,
       issue_date:       null,
       notes:            null,
       airline_type:     airlineType,
@@ -372,9 +542,14 @@ export default function NewDealPage() {
     setIsDraftSaving(true);
     setSubmitError("");
     try {
-      const endpoint = dealType === "b2b" ? "/deals/manual/b2b" : "/deals/manual/airline";
-      await api.post(endpoint, { ...buildPayload(), save_as_draft: true });
-      toast.success("Deal saved as draft.");
+      if (editingId != null) {
+        await api.patch(`/deals/repository/${editingId}?deal_type=unified`, buildPayload());
+        toast.success("Deal updated.");
+      } else {
+        const endpoint = dealType === "b2b" ? "/deals/manual/b2b" : "/deals/manual/airline";
+        await api.post(endpoint, { ...buildPayload(), save_as_draft: true });
+        toast.success("Deal saved as draft.");
+      }
       router.push("/deals");
     } catch (err: unknown) {
       const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
@@ -389,9 +564,15 @@ export default function NewDealPage() {
     setIsSubmitting(true);
     setSubmitError("");
     try {
-      const endpoint = dealType === "b2b" ? "/deals/manual/b2b" : "/deals/manual/airline";
-      await api.post(endpoint, buildPayload());
-      toast.success("Deal submitted for approval.");
+      if (editingId != null) {
+        // Edit: full-replace update of the existing deal (rebuilds incentives + rules).
+        await api.patch(`/deals/repository/${editingId}?deal_type=unified`, buildPayload());
+        toast.success("Deal updated.");
+      } else {
+        const endpoint = dealType === "b2b" ? "/deals/manual/b2b" : "/deals/manual/airline";
+        await api.post(endpoint, buildPayload());
+        toast.success("Deal submitted for approval.");
+      }
       router.push("/deals");
     } catch (err: unknown) {
       const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
@@ -401,9 +582,16 @@ export default function NewDealPage() {
     }
   };
 
-  // ── Step 0: deal-type selection ──────────────────────────────────────────
+  // ── Step 0: deal-type selection (skipped in edit mode — type comes from the deal) ─
   if (dealType === null) {
-    return <DealTypeSelector onSelect={(t, tag) => { setDealType(t); setDealTag(tag); setBusinessType(t === "b2b" ? "B2B" : ""); }} />;
+    if (!editChecked || loadingEdit) {
+      return (
+        <div className="min-h-[60vh] flex items-center justify-center">
+          <p className="text-sm text-gray-400">Loading deal…</p>
+        </div>
+      );
+    }
+    return <DealTypeSelector direction={direction} onSelect={(d, t, tag) => { setDirection(d); setDealType(t); setDealTag(tag); setBusinessType(t === "b2b" ? "B2B" : ""); }} />;
   }
 
   // ── Step 1: two-tab form ─────────────────────────────────────────────────
@@ -412,16 +600,19 @@ export default function NewDealPage() {
 
       {/* Page header */}
       <div className="flex items-center gap-2 mb-3">
-        <button type="button" onClick={() => setDealType(null)}
+        <button type="button" onClick={() => editingId != null ? router.push("/deals") : setDealType(null)}
           className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 transition-colors">
           <ArrowLeft className="w-3.5 h-3.5" />
           Back
         </button>
         <span className="text-gray-300 text-xs">|</span>
         <h1 className="text-sm font-semibold text-gray-700">
-          Create Deal —{" "}
+          {editingId != null ? "Edit Deal" : "Create Deal"} —{" "}
           <span className="text-blue-600">{dealType === "airline" ? "Airline" : "B2B"}</span>
           <span className="ml-2 text-[11px] font-normal text-gray-400 capitalize">{dealTag}</span>
+          <span className={`ml-2 px-1.5 py-0.5 rounded text-[10px] font-medium ${direction === "outbound" ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}>
+            {direction === "outbound" ? "Floated" : "Incoming"}
+          </span>
         </h1>
       </div>
 
@@ -463,7 +654,7 @@ export default function NewDealPage() {
                   label="Supplier Name"
                   options={supplierOptions}
                   value={supplierName}
-                  onChange={setSupplierName}
+                  onChange={v => { suppressAgencyResetRef.current = false; setSupplierName(v); }}
                   placeholder={supplierOptions.length ? "Search and select supplier" : "Loading suppliers..."}
                 />
               )}
@@ -516,12 +707,25 @@ export default function NewDealPage() {
 
               {/* Entity + Login ID/IATA — single fixed fields shown for both Airline
                    and B2B. Not gated by Airline Type, and unaffected when other
-                   fields (Airline Type, Contract Year, …) change. */}
-              <SearchSelectField label="Entity" options={entityOptions} value={entity} onChange={setEntity} />
+                   fields (Airline Type, Contract Year, …) change. For B2B Standard
+                   these come from Agency Onboarding (agency-by-supplier → entities →
+                   login ids); otherwise from the User Master. */}
+              <SearchSelectField
+                label="Entity"
+                placeholder={entityPlaceholder}
+                options={entityFieldOptions}
+                value={entity}
+                onChange={name => {
+                  suppressAgencyResetRef.current = false;   // user picked an entity → allow login reset
+                  setEntity(name);
+                  // Track the agency entity id so its login ids can be loaded (B2B Standard).
+                  if (isB2bStandard) setAgencyEntityId(agencyEntities.find(e => e.name === name)?.id ?? null);
+                }}
+              />
               <MultiSearchSelectField
                 label={dealType === "airline" ? "Login ID / IATA Code" : "Login ID / IATA Number"}
-                placeholder="Search and select"
-                options={loginIdOptions}
+                placeholder={loginIdPlaceholder}
+                options={loginIdFieldOptions}
                 values={loginIds}
                 onChange={setLoginIds}
               />
@@ -666,6 +870,7 @@ export default function NewDealPage() {
                     name={activeIncentiveTab}
                     data={incentiveData[activeIncentiveTab] ?? {}}
                     onChange={(k, v) => setIncentiveField(activeIncentiveTab, k, v)}
+                    b2bStandard={isB2bStandard}
                   />
 
                   {/* Level B: incl/excl rule sub-sub-tabs */}
@@ -697,6 +902,10 @@ export default function NewDealPage() {
                           onViceVersa={() => toggleViceVersa(ruleTab, activeIncentiveTab)}
                           continentOptions={continentOptions}
                           countryGroupOptions={countryGroupOptions}
+                          // B2B Standard: Class field lists the airline's class codes,
+                          // narrowed by this incentive's selected Class.
+                          airlineName={isB2bStandard ? airlineName : undefined}
+                          incentiveClass={incentiveData[activeIncentiveTab]?.class}
                         />
                       );
                     })()}
@@ -729,7 +938,7 @@ export default function NewDealPage() {
             onClick={handleSaveDraft}
             disabled={isDraftSaving || isSubmitting}
             className="px-6 py-1.5 border border-gray-300 text-gray-600 rounded-full text-xs font-medium hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
-            {isDraftSaving ? "Saving..." : "Save Draft"}
+            {isDraftSaving ? "Saving..." : editingId != null ? "Save Changes" : "Save Draft"}
           </button>
 
           {/* Deal Details tab → Next */}
@@ -753,7 +962,7 @@ export default function NewDealPage() {
               onClick={handleSubmitForApproval}
               disabled={isSubmitting || isDraftSaving}
               className="px-6 py-1.5 bg-blue-600 text-white rounded-full text-xs font-semibold hover:bg-blue-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed">
-              {isSubmitting ? "Submitting..." : "Submit for Approval"}
+              {isSubmitting ? "Submitting..." : editingId != null ? "Update Deal" : "Submit for Approval"}
             </button>
           )}
 

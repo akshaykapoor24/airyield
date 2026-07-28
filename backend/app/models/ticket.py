@@ -36,8 +36,8 @@ class Ticket(Base):
     total_fare: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
     currency: Mapped[str] = mapped_column(String(3), default="USD")
 
-    # Matched deal
-    matched_deal_id: Mapped[int | None] = mapped_column(ForeignKey("legacy_deals.id"), nullable=True)
+    # Matched deal — legacy_deals table removed; kept as a plain int (no FK). Legacy/unused.
+    matched_deal_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     is_manually_matched: Mapped[bool] = mapped_column(Boolean, default=False)
 
     upload_batch_id: Mapped[str | None] = mapped_column(String(100), nullable=True)  # group uploads together
@@ -47,5 +47,4 @@ class Ticket(Base):
     airline: Mapped["Airline"] = relationship("Airline")  # noqa: F821
     route: Mapped["Route"] = relationship("Route")  # noqa: F821
     supplier: Mapped["Supplier"] = relationship("Supplier")  # noqa: F821
-    matched_deal: Mapped["UploadedDeal"] = relationship("UploadedDeal")  # noqa: F821
     income_record: Mapped["IncomeRecord"] = relationship("IncomeRecord", back_populates="ticket", uselist=False)  # noqa: F821

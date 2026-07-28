@@ -79,7 +79,7 @@ export default function UploadCustomersModal({
             <div>
               <p className="text-xs font-semibold text-[#1e3a5f]">Download Excel Template</p>
               <p className="text-[10px] text-blue-500 mt-0.5">
-                Columns: FIRST_NAME, LAST_NAME, COMPANY, TITLE, PHONE, EMAIL, MARKUP_TYPE (percentage|fixed), MARKUP_VALUE, BILLING_TYPE (reseller|agency)
+                Columns: FIRST_NAME, LAST_NAME, COMPANY, TITLE, PHONE, EMAIL, GST_REGISTERED (Registered|Unregistered), GST_NO, PAN_NO, MARKUP_TYPE (percentage|fixed), MARKUP_VALUE, BILLING_TYPE (reseller|agency)
               </p>
             </div>
             <button

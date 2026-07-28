@@ -1364,6 +1364,7 @@ export default function UploadDealPage(){
 
   // ── Step 1 state ────────────────────────────────────────────────────────────
   const [dealType,      setDealType]      = useState("");           // "airline" | "b2b"
+  const [direction,     setDirection]     = useState("inbound");    // "inbound" (received) | "outbound" (floated)
   const [dealTag,       setDealTag]       = useState("standard");   // "standard" | "adhoc"
   const [supplierName,  setSupplierName]  = useState("");
   const [supplierOptions, setSupplierOptions] = useState<string[]>([]);
@@ -1376,6 +1377,15 @@ export default function UploadDealPage(){
   const [selectedIncentives, setSelectedIncentives] = useState<string[]>([]);
   const [selectedInclExcl,   setSelectedInclExcl]   = useState<string[]>([]);
   const [copyPrevInclExcl,   setCopyPrevInclExcl]   = useState(true);
+
+  // Direction is fixed by the entry point (Incoming vs Floated repo) — read it from the
+  // ?direction query param instead of asking. Floated deals are B2B only.
+  useEffect(()=>{
+    if(new URLSearchParams(window.location.search).get("direction")==="outbound"){
+      setDirection("outbound");
+      setDealType("b2b");
+    }
+  },[]);
 
   // ── Step 2 state ────────────────────────────────────────────────────────────
   const [preview,   setPreview]   = useState<ExtractionPreview|null>(null);
@@ -1762,6 +1772,7 @@ export default function UploadDealPage(){
           source_agent:    sourceAgent,
           source_type:     "upload",
           deal_tag:        dealTag,
+          direction:       direction,
           airline_type:    getContractVal("c__airline_type")||null,
           airline_name:    getContractVal("c__airline_name")||null,
           contract_year:   dealType==="airline"?(getContractVal("c__contract_year")||null):null,
@@ -1906,17 +1917,28 @@ export default function UploadDealPage(){
           <div className="col-span-2 space-y-3">
             <SectionCard title="Deal Details">
               <div className="px-4 py-3 space-y-3">
+                {/* Direction is fixed by the entry point (Incoming vs Floated repo) — read-only */}
+                <div>
+                  <label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">Deal Direction</label>
+                  <span className={`inline-flex items-center px-2.5 py-1 rounded-md text-xs font-medium border ${
+                    direction==="outbound"
+                      ? "border-amber-200 bg-amber-50 text-amber-700"
+                      : "border-emerald-200 bg-emerald-50 text-emerald-700"
+                  }`}>
+                    {direction==="outbound"?"Floated":"Incoming"}
+                  </span>
+                </div>
                 <SelectField
                   label="Deal Type"
                   required
                   placeholder="Select deal type…"
-                  options={["Airline","B2B"]}
+                  options={direction==="outbound"?["B2B"]:["Airline","B2B"]}
                   value={dealType==="airline"?"Airline":dealType==="b2b"?"B2B":""}
                   onChange={v=>{ setDealType(v==="Airline"?"airline":v==="B2B"?"b2b":""); setSupplierName(""); }}
                 />
                 {dealType==="b2b"&&(
                   <SearchSelectField
-                    label="Supplier Name *"
+                    label={direction==="outbound"?"Floated To (Agency) *":"Supplier Name *"}
                     placeholder="Search supplier…"
                     options={supplierOptions}
                     value={supplierName}

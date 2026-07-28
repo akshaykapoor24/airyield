@@ -62,6 +62,11 @@ class RuleOperatorEnum(str, enum.Enum):
     STARTS_WITH = "starts_with"
 
 
+class DealDirection(str, enum.Enum):
+    INBOUND = "inbound"     # deal you RECEIVE from an airline / big agency → you EARN
+    OUTBOUND = "outbound"   # deal you FLOAT to a small agency at a commission → you PAY
+
+
 def _vals(e):
     return [m.value for m in e]
 
@@ -81,6 +86,8 @@ class DealStatement(Base):
     deal_type     : Mapped[DealKind]         = mapped_column(SAEnum(DealKind, native_enum=False, values_callable=_vals), default=DealKind.AIRLINE)
     deal_tag      : Mapped[DealTagType]      = mapped_column(SAEnum(DealTagType, native_enum=False, values_callable=_vals), default=DealTagType.STANDARD)
     deal_category : Mapped[DealCategoryType] = mapped_column(SAEnum(DealCategoryType, native_enum=False, values_callable=_vals), default=DealCategoryType.ENTERPRISE)
+    # inbound = deal received (airline / big agency); outbound = deal floated to a sub-agency
+    direction     : Mapped[DealDirection]    = mapped_column(SAEnum(DealDirection, native_enum=False, values_callable=_vals), default=DealDirection.INBOUND, server_default="inbound", index=True)
 
     # File metadata (NULL for manual source_type)
     file_name  : Mapped[str | None] = mapped_column(String(500), nullable=True)
@@ -96,10 +103,6 @@ class DealStatement(Base):
 
     # B2B batch supplier
     supplier_name : Mapped[str | None] = mapped_column(String(300), nullable=True)
-
-    # Migration audit trail — references the old table and PK this row was migrated from
-    legacy_table : Mapped[str | None] = mapped_column(String(50), nullable=True)   # 'airline_deals'|'b2b_deals'|'legacy_deals'
-    legacy_id    : Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     created_by_id : Mapped[int]      = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     created_at    : Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -120,6 +123,10 @@ class Deal(Base):
     statement_id : Mapped[int]       = mapped_column(BigInteger, ForeignKey("deal_statements.id", ondelete="CASCADE"), nullable=False)
     tenant_id    : Mapped[int]       = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
     deal_type    : Mapped[DealKind]  = mapped_column(SAEnum(DealKind, native_enum=False, values_callable=_vals), default=DealKind.AIRLINE)
+    # inbound = deal received (airline / big agency, income you EARN);
+    # outbound = deal floated to a sub-agency (commission you PAY). supplier_name holds the
+    # counterparty either way — the source (inbound) or whom it was floated to (outbound).
+    direction    : Mapped[DealDirection] = mapped_column(SAEnum(DealDirection, native_enum=False, values_callable=_vals), default=DealDirection.INBOUND, server_default="inbound", index=True)
 
     # ── Shared header fields ─────────────────────────────────────────────────
     source_agent    : Mapped[str]      = mapped_column(String(255), nullable=False, server_default="manual")
@@ -146,12 +153,6 @@ class Deal(Base):
     entity_lcc     : Mapped[str | None] = mapped_column(String(50), nullable=True)
     login_id       : Mapped[str | None] = mapped_column(String(100), nullable=True)   # joined display string (back-compat)
     login_ids      : Mapped[list | None] = mapped_column(JSONB, nullable=True)         # multiple login ids / IATA selected on the deal
-    variant        : Mapped[str | None] = mapped_column(String(100), nullable=True)
-    eco_commission : Mapped[str | None] = mapped_column(String(50), nullable=True)
-    peco_commission: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    bus_commission : Mapped[str | None] = mapped_column(String(50), nullable=True)
-    base_type      : Mapped[str | None] = mapped_column(String(20), nullable=True)
-    valid_on       : Mapped[str | None] = mapped_column(String(20), nullable=True)
 
     # ── Approval & lifecycle ─────────────────────────────────────────────────
     status                : Mapped[DealStatusType]   = mapped_column(SAEnum(DealStatusType, native_enum=False, values_callable=_vals), default=DealStatusType.PENDING_APPROVAL)
@@ -195,6 +196,11 @@ class DealIncentiveConfig(Base):
     #    Backend / Push Action / Marketing Fund) ──────────────────────────────
     contract_valid_from : Mapped[date | None] = mapped_column(Date, nullable=True)
     contract_valid_to   : Mapped[date | None] = mapped_column(Date, nullable=True)
+    # Travel-date window (B2B Standard, date-wise). When both set, a ticket matches
+    # this incentive only if its TRAVEL/departure date falls within — see
+    # deal_matching.find_all_deals. NULL on legacy/airline deals ⇒ no travel filter.
+    travel_valid_from   : Mapped[date | None] = mapped_column(Date, nullable=True)
+    travel_valid_to     : Mapped[date | None] = mapped_column(Date, nullable=True)
     frequency           : Mapped[str | None]  = mapped_column(String(50), nullable=True)   # Yearly | Quarterly | Half-Yearly
     flight_type         : Mapped[str | None]  = mapped_column(String(30), nullable=True)   # Both | Domestic | International
     class_              : Mapped[str | None]  = mapped_column("class", String(30), nullable=True)  # Economy | Premium | Business
@@ -282,6 +288,11 @@ class DealIncentiveSlab(Base):
     # Frequency qualifiers (amount slabs)
     quarterly_freq    : Mapped[str | None] = mapped_column(String(20), nullable=True)  # Q1 | Q2 | Q3 | Q4
     half_yearly_freq  : Mapped[str | None] = mapped_column(String(20), nullable=True)  # H1 | H2
+
+    # Date-wise slab window (B2B Standard). Replaces the frequency qualifiers: the
+    # band's period is this [valid_from, valid_to] range instead of a Q/H label.
+    valid_from        : Mapped[date | None] = mapped_column(Date, nullable=True)
+    valid_to          : Mapped[date | None] = mapped_column(Date, nullable=True)
 
     # Amount-slab fields
     base_target_amt_num_pct : Mapped[str | None]   = mapped_column(String(50), nullable=True)  # Percentage | Amount

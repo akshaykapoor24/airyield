@@ -51,7 +51,7 @@ export function apiError(e: unknown): string {
   return "Request failed.";
 }
 
-export async function downloadTemplate(resource: "entities" | "login-ids" | "iata-commissions", filename: string) {
+export async function downloadTemplate(resource: "entities" | "login-ids" | "iata-commissions" | "user-entities" | "user-login-ids" | "agencies" | "agency-entities" | "agency-login-ids", filename: string) {
   const res = await api.get(`/${resource}/template`, { responseType: "blob" });
   const url = window.URL.createObjectURL(res.data as Blob);
   const link = document.createElement("a");
@@ -82,7 +82,7 @@ export function ActiveBadge({ active, onClick }: { active: boolean; onClick: () 
 export function UploadBox({
   resource, templateName, columns, onDone,
 }: {
-  resource: "entities" | "login-ids" | "iata-commissions";
+  resource: "entities" | "login-ids" | "iata-commissions" | "user-entities" | "user-login-ids" | "agencies" | "agency-entities" | "agency-login-ids";
   templateName: string;
   columns: string;
   onDone: () => void;

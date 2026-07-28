@@ -42,6 +42,7 @@ from app.models.deal import (
     DealRule,
     DealStatusType,
     DealLifecycleType,
+    DealDirection,
     build_rule_dict,
 )
 
@@ -511,11 +512,29 @@ async def _compute_slab_cumulative_detailed(
     if not config.slabs:
         det["formula"] = "slab — no slab rows configured"
         return None, det
-    pr = _period_range(travel_date, deal.contract_year, config.frequency)
-    if pr is None:
-        det["formula"] = f"slab — could not resolve period (Contract Year / Frequency missing)"
-        return None, det
-    label, start, end = pr
+    # Date-wise slabs (B2B Standard) carry an explicit [valid_from, valid_to] per
+    # row that replaces the Quarterly/Half-Yearly frequency period. Otherwise fall
+    # back to deriving the period from Contract Year + Frequency.
+    date_wise = any(s.valid_from and s.valid_to for s in config.slabs)
+    if date_wise:
+        candidates = [
+            s for s in config.slabs
+            if s.valid_from and s.valid_to and s.valid_from <= travel_date <= s.valid_to
+        ]
+        if not candidates:
+            det["formula"] = f"slab — travel date {travel_date} outside every slab date window"
+            return None, det
+        start = min(s.valid_from for s in candidates)
+        end   = max(s.valid_to   for s in candidates)
+        label = f"{start:%d %b %Y}–{end:%d %b %Y}"
+    else:
+        pr = _period_range(travel_date, deal.contract_year, config.frequency)
+        if pr is None:
+            det["formula"] = f"slab — could not resolve period (Contract Year / Frequency missing)"
+            return None, det
+        label, start, end = pr
+        candidates = None   # resolved after cumulative via the frequency-label filter
+
     det.update({
         "period_label": label,
         "period_range": f"{start:%d %b %Y} → {end:%d %b %Y}",
@@ -526,13 +545,14 @@ async def _compute_slab_cumulative_detailed(
     )
     det["achieved"] = round(cumulative, 2)
 
-    def _slab_in_period(s: DealIncentiveSlab) -> bool:
-        if label.startswith("Q"):
-            return (s.quarterly_freq or "").strip().upper() == label
-        if label.startswith("H"):
-            return (s.half_yearly_freq or "").strip().upper() == label
-        return True   # Yearly → all slab rows
-    candidates = [s for s in config.slabs if _slab_in_period(s)] or list(config.slabs)
+    if candidates is None:
+        def _slab_in_period(s: DealIncentiveSlab) -> bool:
+            if label.startswith("Q"):
+                return (s.quarterly_freq or "").strip().upper() == label
+            if label.startswith("H"):
+                return (s.half_yearly_freq or "").strip().upper() == label
+            return True   # Yearly → all slab rows
+        candidates = [s for s in config.slabs if _slab_in_period(s)] or list(config.slabs)
 
     # Highest band whose minimum (base_target_amount = Target From) ≤ cumulative.
     # Above the top band → top band (highest threshold wins). Below the first → 0.
@@ -618,6 +638,7 @@ class DealMatchingService:
         travel_date:     date,
         tenant_id:       int,
         created_by_id:   int,
+        issue_date:      date | None = None,
         segment_type:    str | None = None,
         booking_class:   str | None = None,
         invoice_type:    str | None = None,
@@ -645,17 +666,24 @@ class DealMatchingService:
         cabin_groups = await _resolve_cabin_groups(db, airline_name, booking_class)
         matches: list[DealMatchResult] = []
 
+        # Contract validity keys off the ticket ISSUE date; travel/slab checks keep
+        # the departure date. Fall back to travel_date when no issue date is given.
+        contract_date = issue_date or travel_date
+
         # ── Unified deals table (single source of truth) ───────────────────
         where_clauses = [
             UnifiedDeal.tenant_id             == tenant_id,
             UnifiedDeal.created_by_id         == created_by_id,
+            # Only INBOUND deals count as your income. Floated (outbound) deals are
+            # commission you pay a sub-agency — they must never match your own tickets.
+            UnifiedDeal.direction             == DealDirection.INBOUND,
             UnifiedDeal.status                == DealStatusType.APPROVED,
             UnifiedDeal.deal_lifecycle_status == DealLifecycleType.ACTIVE,
             func.lower(UnifiedDeal.airline_name) == airline_lower,
             UnifiedDeal.valid_from.is_not(None),
             UnifiedDeal.valid_to.is_not(None),
-            UnifiedDeal.valid_from <= travel_date,
-            UnifiedDeal.valid_to   >= travel_date,
+            UnifiedDeal.valid_from <= contract_date,
+            UnifiedDeal.valid_to   >= contract_date,
         ]
         # Push deal_type filter into the query to reduce rows fetched
         if is_b2b:
@@ -694,7 +722,13 @@ class DealMatchingService:
                     continue
                 vf = config.contract_valid_from
                 vt = config.contract_valid_to
-                if vf and vt and not (vf <= travel_date <= vt):
+                if vf and vt and not (vf <= contract_date <= vt):
+                    continue
+                # Travel-date window (B2B Standard, date-wise). Only enforced when both
+                # bounds are set; NULL on legacy/airline deals ⇒ no travel filter.
+                tvf = config.travel_valid_from
+                tvt = config.travel_valid_to
+                if tvf and tvt and not (tvf <= travel_date <= tvt):
                     continue
                 if config.ancillary_items:
                     # Ancillary → from the ticket's own fee columns, not the base fare.
@@ -741,6 +775,7 @@ class DealMatchingService:
         travel_date:         date,
         tenant_id:           int,
         created_by_id:       int,
+        issue_date:          date | None = None,
         segment_type:        str | None = None,
         booking_class:       str | None = None,
         invoice_type:        str | None = None,
@@ -758,9 +793,9 @@ class DealMatchingService:
         """
         Return a full step-by-step diagnostic for every approved deal belonging to this
         airline+tenant.
-        statement_type restricts which deal tables are shown in diagnosis:
-          "B2B"     → only b2b_deals; supplier match enforced.
-          "AIRLINE" → only airline_deals.
+        statement_type restricts which unified deals are shown in diagnosis:
+          "B2B"     → only deal_type="b2b"; supplier match enforced.
+          "AIRLINE" → only deal_type="airline".
         Never short-circuits — every PLB step is evaluated.
         """
         from app.schemas.uploaded_ticket import (
@@ -770,6 +805,10 @@ class DealMatchingService:
         airline_lower = airline_name.lower()
         cabin_groups, _ = await _resolve_cabin_groups_with_detail(db, airline_name, booking_class)
         results: list[DealDiagnostic] = []
+
+        # Contract validity keys off the ticket ISSUE date; travel-window + slab use
+        # the departure date. Fall back to travel_date when no issue date is given.
+        contract_date = issue_date or travel_date
 
         async def _diagnose_unified_deal(deal: UnifiedDeal) -> DealDiagnostic:
             from app.services.exclusion_evaluator import (
@@ -781,13 +820,13 @@ class DealMatchingService:
             deal_no = f"{prefix}-{deal.id:04d}"
             deal_name = deal.airline_name or airline_name
 
-            # ── A: Deal-level validity ─────────────────────────────────────
+            # ── A: Deal-level validity (matched against the ticket ISSUE date) ─
             vf = deal.valid_from
             vt = deal.valid_to
             if vf and vt:
-                val_pass = vf <= travel_date <= vt
+                val_pass = vf <= contract_date <= vt
                 val_detail = (
-                    f"travel_date={travel_date}, deal valid_from={vf}, valid_to={vt}; "
+                    f"issue_date={contract_date}, deal valid_from={vf}, valid_to={vt}; "
                     f"{'within range' if val_pass else 'OUTSIDE range — extend the deal validity'}"
                 )
             else:
@@ -797,7 +836,7 @@ class DealMatchingService:
             deal_validity_step = MatchStepResult(
                 step="Deal Validity",
                 passed=val_pass,
-                ticket_value=str(travel_date),
+                ticket_value=str(contract_date),
                 deal_value=f"{vf or '—'} → {vt or '—'}",
                 detail=val_detail,
             )
@@ -884,13 +923,13 @@ class DealMatchingService:
                         ),
                     ))
 
-                # Config sub-validity
+                # Config sub-validity (matched against the ticket ISSUE date)
                 vf_cfg = config.contract_valid_from
                 vt_cfg = config.contract_valid_to
                 if vf_cfg and vt_cfg:
-                    sv_pass = vf_cfg <= travel_date <= vt_cfg
+                    sv_pass = vf_cfg <= contract_date <= vt_cfg
                     sv_detail = (
-                        f"config validFrom='{vf_cfg}', validTo='{vt_cfg}', travel_date={travel_date}; "
+                        f"config validFrom='{vf_cfg}', validTo='{vt_cfg}', issue_date={contract_date}; "
                         + ("within range" if sv_pass else "OUTSIDE range — extend config validFrom/validTo")
                     )
                 else:
@@ -899,10 +938,28 @@ class DealMatchingService:
                 steps.append(MatchStepResult(
                     step="Config Sub-Validity",
                     passed=sv_pass,
-                    ticket_value=str(travel_date),
+                    ticket_value=str(contract_date),
                     deal_value=f"{vf_cfg or '—'} → {vt_cfg or '—'}",
                     detail=sv_detail,
                 ))
+
+                # Travel Date validity (B2B Standard date-wise; matched against the
+                # ticket TRAVEL/departure date). Enforced only when both bounds are set.
+                tvf_cfg = config.travel_valid_from
+                tvt_cfg = config.travel_valid_to
+                if tvf_cfg and tvt_cfg:
+                    tv_pass = tvf_cfg <= travel_date <= tvt_cfg
+                    tv_detail = (
+                        f"config travelValidFrom='{tvf_cfg}', travelValidTo='{tvt_cfg}', travel_date={travel_date}; "
+                        + ("within range" if tv_pass else "OUTSIDE range — extend config travel dates")
+                    )
+                    steps.append(MatchStepResult(
+                        step="Travel Date Validity",
+                        passed=tv_pass,
+                        ticket_value=str(travel_date),
+                        deal_value=f"{tvf_cfg} → {tvt_cfg}",
+                        detail=tv_detail,
+                    ))
 
                 # Incentive computation — Slab gets the cumulative-band breakdown,
                 # Fixed keeps its existing per-ticket formula (unchanged).
@@ -1043,6 +1100,8 @@ class DealMatchingService:
         diag_where = [
             UnifiedDeal.tenant_id == tenant_id,
             UnifiedDeal.created_by_id == created_by_id,
+            # Diagnosis is income-side too — exclude floated (outbound) deals.
+            UnifiedDeal.direction == DealDirection.INBOUND,
             UnifiedDeal.status    == DealStatusType.APPROVED,
             func.lower(UnifiedDeal.airline_name) == airline_lower,
         ]
@@ -1081,6 +1140,7 @@ class DealMatchingService:
         travel_date:     date,
         tenant_id:       int,
         created_by_id:   int,
+        issue_date:      date | None = None,
         segment_type:    str | None = None,
         booking_class:   str | None = None,
         invoice_type:    str | None = None,
@@ -1096,7 +1156,8 @@ class DealMatchingService:
         """Return the single best (highest incentive) matching deal."""
         matches = await DealMatchingService.find_all_deals(
             db=db, airline_name=airline_name, travel_date=travel_date,
-            tenant_id=tenant_id, created_by_id=created_by_id, segment_type=segment_type,
+            tenant_id=tenant_id, created_by_id=created_by_id, issue_date=issue_date,
+            segment_type=segment_type,
             booking_class=booking_class, invoice_type=invoice_type,
             sell_fare=sell_fare, sell_tax_yq=sell_tax_yq, sale_yr=sale_yr,
             seat_selection=seat_selection, excess_baggage=excess_baggage, meals=meals,

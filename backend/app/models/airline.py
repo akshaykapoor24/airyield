@@ -11,6 +11,9 @@ class Airline(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     iata_code: Mapped[str] = mapped_column(String(3), unique=True, nullable=False)
     icao_code: Mapped[str | None] = mapped_column(String(4), nullable=True)
+    # 3-digit IATA numeric / BSP accounting code (e.g. 098, 165), zero-padded.
+    # Used to resolve BSP detailed-statement airline codes to airline names.
+    iata_numeric_code: Mapped[str | None] = mapped_column(String(3), nullable=True, index=True)
     logo_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     contract_year: Mapped[str | None] = mapped_column(String(2), nullable=True)

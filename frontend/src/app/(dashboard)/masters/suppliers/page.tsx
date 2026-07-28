@@ -12,6 +12,25 @@ import Pagination from "@/components/ui/Pagination";
 
 type SupplierBranch = { name: string; iata_code: string };
 
+// Directory / member-list fields (from the supplier master XLS). Keys match the backend.
+type SupplierDirectory = {
+  region_chapter: string | null;
+  membership_category: string | null;
+  address_1: string | null;
+  address_2: string | null;
+  address_3: string | null;
+  city: string | null;
+  pincode: string | null;
+  telephone_mobile: string | null;
+  website: string | null;
+  email_address: string | null;
+  alternate_email_id: string | null;
+  accounts_email: string | null;
+  fax_no: string | null;
+  representative_1: string | null;
+  representative_2: string | null;
+};
+
 type Supplier = {
   id: number;
   name: string;
@@ -28,7 +47,7 @@ type Supplier = {
   pan_number: string | null;
   notes: string | null;
   is_active: boolean;
-};
+} & SupplierDirectory;
 
 type BulkResult = { total: number; success: number; failed: number; errors: string[] };
 
@@ -53,9 +72,35 @@ type Approval = {
   rejection_reason: string | null;
   request_type: "new" | "update";
   target_id: number | null;
-};
+} & SupplierDirectory;
 
 const VENDOR_TYPES = ["Agent", "Corporate", "OTA", "TMC", "GSA", "Other"];
+
+// Directory fields rendered in the Add/Edit forms and the diff modal.
+// `wide` fields span both grid columns (long free-text like addresses/emails).
+const DIRECTORY_FIELDS: { key: keyof SupplierDirectory; label: string; wide?: boolean }[] = [
+  { key: "region_chapter", label: "Region / Chapter", wide: true },
+  { key: "membership_category", label: "Membership Category" },
+  { key: "city", label: "City" },
+  { key: "pincode", label: "Pincode" },
+  { key: "website", label: "Website" },
+  { key: "address_1", label: "Address 1", wide: true },
+  { key: "address_2", label: "Address 2", wide: true },
+  { key: "address_3", label: "Address 3", wide: true },
+  { key: "telephone_mobile", label: "Telephone & Mobile", wide: true },
+  { key: "email_address", label: "Email Address", wide: true },
+  { key: "alternate_email_id", label: "Alternate Email ID", wide: true },
+  { key: "accounts_email", label: "Accounts Email", wide: true },
+  { key: "fax_no", label: "Fax No" },
+  { key: "representative_1", label: "Representative I" },
+  { key: "representative_2", label: "Representative II" },
+];
+
+const emptyDirectory: Record<keyof SupplierDirectory, string> = {
+  region_chapter: "", membership_category: "", address_1: "", address_2: "", address_3: "",
+  city: "", pincode: "", telephone_mobile: "", website: "", email_address: "",
+  alternate_email_id: "", accounts_email: "", fax_no: "", representative_1: "", representative_2: "",
+};
 
 const emptyForm = {
   name: "",
@@ -69,7 +114,30 @@ const emptyForm = {
   gst_number: "",
   pan_number: "",
   notes: "",
+  ...emptyDirectory,
 };
+
+function DirectoryFields({
+  form, set,
+}: {
+  form: Record<keyof SupplierDirectory, string>;
+  set: (k: keyof SupplierDirectory, v: string) => void;
+}) {
+  return (
+    <div className="border-t border-gray-100 pt-3">
+      <p className="text-[11px] font-bold text-gray-500 uppercase tracking-wide mb-2">Directory Details</p>
+      <div className="grid grid-cols-2 gap-3">
+        {DIRECTORY_FIELDS.map(f => (
+          <div key={f.key} className={f.wide ? "col-span-2" : ""}>
+            <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">{f.label}</label>
+            <input value={form[f.key]} onChange={e => set(f.key, e.target.value)}
+              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-400 bg-gray-50" />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 function AddSupplierModal({
   onClose, onSaved, isPlatformAdmin,
@@ -114,6 +182,7 @@ function AddSupplierModal({
         gst_number: s.gst_number ?? "",
         pan_number: s.pan_number ?? "",
         notes: s.notes ?? "",
+        ...(Object.fromEntries(DIRECTORY_FIELDS.map(f => [f.key, s[f.key] ?? ""])) as Record<keyof SupplierDirectory, string>),
       });
       setBranches(s.branches ?? []);
     }
@@ -137,6 +206,7 @@ function AddSupplierModal({
         gst_number: form.gst_number || null,
         pan_number: form.pan_number || null,
         notes: form.notes || null,
+        ...Object.fromEntries(DIRECTORY_FIELDS.map(f => [f.key, form[f.key] || null])),
         request_type: requestType,
         target_id: targetId,
       });
@@ -345,6 +415,8 @@ function AddSupplierModal({
                   className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-400 bg-gray-50 resize-none" />
               </div>
 
+              <DirectoryFields form={form} set={(k, v) => set(k, v)} />
+
               {error && <p className="text-[11px] text-red-500">{error}</p>}
             </div>
           ) : (
@@ -353,7 +425,9 @@ function AddSupplierModal({
                 <div>
                   <p className="text-xs font-semibold text-violet-700">Download XLS Template</p>
                   <p className="text-[10px] text-violet-500 mt-0.5">
-                    Columns: VENDOR_NAME, VENDOR_DISPLAY_NAME, TYPE, BRANCHES (format: Delhi|DEL;Mumbai|BOM), CONTACT_NUMBER, …
+                    Columns: COMPANY NAME, REGION / CHAPTER, MEMBERSHIP CATEGORY, ADD1-3, CITY, PINCODE,
+                    TELEPHONE NOS. &amp; MOBILE NOS., WEBSITE, E.MAIL ADDRESS, ALTERNATE E-MAIL ID-1, ACCOUNTS,
+                    FAX NO, REPRESENTATIVE I/II (+ optional TYPE, BRANCHES, GST_NUMBER, PAN_NUMBER, REMARKS)
                   </p>
                 </div>
                 <button type="button" onClick={handleTemplateDownload}
@@ -434,6 +508,7 @@ function EditSupplierModal({
     gst_number: supplier.gst_number ?? "",
     pan_number: supplier.pan_number ?? "",
     notes: supplier.notes ?? "",
+    ...(Object.fromEntries(DIRECTORY_FIELDS.map(f => [f.key, supplier[f.key] ?? ""])) as Record<keyof SupplierDirectory, string>),
     is_active: supplier.is_active,
   });
   const [branches, setBranches] = useState<SupplierBranch[]>(supplier.branches ?? []);
@@ -462,6 +537,7 @@ function EditSupplierModal({
         gst_number: form.gst_number || null,
         pan_number: form.pan_number || null,
         notes: form.notes || null,
+        ...Object.fromEntries(DIRECTORY_FIELDS.map(f => [f.key, form[f.key] || null])),
         is_active: form.is_active,
       });
       onSaved();
@@ -569,6 +645,9 @@ function EditSupplierModal({
             <textarea value={form.notes} onChange={e => set("notes", e.target.value)} rows={2}
               className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-400 bg-gray-50 resize-none" />
           </div>
+
+          <DirectoryFields form={form} set={(k, v) => set(k, v)} />
+
           <label className="flex items-center gap-2 text-sm text-gray-600">
             <input type="checkbox" checked={form.is_active} onChange={e => set("is_active", e.target.checked)}
               className="rounded border-gray-300 text-violet-600 focus:ring-violet-500" />
@@ -644,6 +723,7 @@ function SupplierDiffModal({
     { label: "GST Number",         ak: "gst_number",     ck: "gst_number" },
     { label: "PAN Number",         ak: "pan_number",     ck: "pan_number" },
     { label: "Remarks",            ak: "notes",          ck: "notes" },
+    ...DIRECTORY_FIELDS.map(f => ({ label: f.label, ak: f.key as keyof Approval, ck: f.key as keyof Supplier })),
   ];
   const branchesStr = (bs: SupplierBranch[] | null | undefined) =>
     (bs ?? []).map(b => `${b.name}${b.iata_code ? ` (${b.iata_code})` : ""}`).join(", ") || "—";
@@ -895,7 +975,8 @@ export default function SuppliersPage() {
               <thead>
                 <tr style={{ background: "#1e4d8c" }}>
                   {[
-                    "CODE", "VENDOR NAME", "DISPLAY NAME", "TYPE", "BRANCHES", "CONTACT", "EMAIL", "GST", "PAN", "STATUS",
+                    "CODE", "VENDOR NAME", "DISPLAY NAME", "CITY", "REGION / CHAPTER", "MEMBERSHIP",
+                    "TYPE", "BRANCHES", "CONTACT", "EMAIL", "GST", "PAN", "STATUS",
                     ...(isPlatformAdmin ? ["ACTIONS"] : []),
                   ].map(h => (
                     <th key={h} className="px-3 py-2.5 text-left text-[10px] font-semibold text-white uppercase tracking-wider whitespace-nowrap">{h}</th>
@@ -904,11 +985,11 @@ export default function SuppliersPage() {
               </thead>
               <tbody>
                 {loading ? (
-                  <tr><td colSpan={isPlatformAdmin ? 11 : 10} className="px-4 py-12 text-center text-xs text-gray-400">
+                  <tr><td colSpan={isPlatformAdmin ? 14 : 13} className="px-4 py-12 text-center text-xs text-gray-400">
                     <RefreshCw className="w-4 h-4 animate-spin mx-auto mb-2 text-gray-300" /> Loading suppliers...
                   </td></tr>
                 ) : suppliers.length === 0 ? (
-                  <tr><td colSpan={isPlatformAdmin ? 11 : 10} className="px-4 py-12 text-center text-xs text-gray-400">No suppliers found.</td></tr>
+                  <tr><td colSpan={isPlatformAdmin ? 14 : 13} className="px-4 py-12 text-center text-xs text-gray-400">No suppliers found.</td></tr>
                 ) : suppliers.map((s, idx) => (
                   <tr key={s.id}
                     className={`border-b border-gray-50 hover:bg-violet-50/30 transition-colors group ${idx % 2 === 0 ? "bg-white" : "bg-gray-50/30"}`}>
@@ -917,6 +998,9 @@ export default function SuppliersPage() {
                       <span className="font-mono text-[11px] font-bold text-violet-600 bg-violet-50 px-2 py-0.5 rounded">{s.name}</span>
                     </td>
                     <td className="px-3 py-2 text-[11px] text-gray-500">{s.vendor_name ?? "—"}</td>
+                    <td className="px-3 py-2 text-[11px] text-gray-600">{s.city ?? "—"}</td>
+                    <td className="px-3 py-2 text-[11px] text-gray-500 max-w-40 truncate" title={s.region_chapter ?? ""}>{s.region_chapter ?? "—"}</td>
+                    <td className="px-3 py-2 text-[11px] text-gray-600">{s.membership_category ?? "—"}</td>
                     <td className="px-3 py-2 text-[11px] text-gray-600">{s.vendor_type ?? "—"}</td>
                     <td className="px-3 py-2">
                       {s.branches && s.branches.length > 0 ? (

@@ -252,7 +252,8 @@ async def bulk_upload_airlines(
             if _is_platform_admin(current_user):
                 await crud.airline.create(
                     db,
-                    obj_in={"name": airline_name, "iata_code": code, "icao_code": iata_numeric_value, "logo_url": None},
+                    obj_in={"name": airline_name, "iata_code": code, "icao_code": iata_numeric_value,
+                            "iata_numeric_code": iata_numeric_value, "logo_url": None},
                 )
             else:
                 pending = await db.execute(

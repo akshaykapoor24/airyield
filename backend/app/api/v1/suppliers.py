@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 from io import BytesIO
 
@@ -30,6 +31,22 @@ SUBMITTERS = (
     UserRole.FINANCE_USER,
     UserRole.APPROVER,
 )
+
+
+# Directory / member-list fields shared by Supplier and SupplierApproval.
+# Kept in one place so create/update/approve/bulk-upload stay in sync.
+DIRECTORY_FIELDS = (
+    "region_chapter", "membership_category",
+    "address_1", "address_2", "address_3",
+    "city", "pincode", "telephone_mobile", "website",
+    "email_address", "alternate_email_id", "accounts_email",
+    "fax_no", "representative_1", "representative_2",
+)
+
+
+def _directory_kwargs(obj) -> dict:
+    """Extract the directory fields from a payload/ORM object as a kwargs dict."""
+    return {f: getattr(obj, f, None) for f in DIRECTORY_FIELDS}
 
 
 def _is_platform_admin(user: User) -> bool:
@@ -117,6 +134,8 @@ async def create_supplier(
             target.gst_number = payload.gst_number
             target.pan_number = payload.pan_number
             target.notes = payload.notes
+            for _f, _v in _directory_kwargs(payload).items():
+                setattr(target, _f, _v)
             await db.commit()
             await db.refresh(target)
             return {"status": "updated", "supplier": SupplierRead.model_validate(target)}
@@ -134,6 +153,7 @@ async def create_supplier(
             gst_number=payload.gst_number,
             pan_number=payload.pan_number,
             notes=payload.notes,
+            **_directory_kwargs(payload),
             submitted_by_id=current_user.id,
             tenant_id=current_user.tenant_id,
             status="pending",
@@ -165,6 +185,7 @@ async def create_supplier(
             gst_number=payload.gst_number,
             pan_number=payload.pan_number,
             notes=payload.notes,
+            **_directory_kwargs(payload),
         )
         db.add(supplier)
         await db.commit()
@@ -184,6 +205,7 @@ async def create_supplier(
         gst_number=payload.gst_number,
         pan_number=payload.pan_number,
         notes=payload.notes,
+        **_directory_kwargs(payload),
         submitted_by_id=current_user.id,
         tenant_id=current_user.tenant_id,
         status="pending",
@@ -204,20 +226,33 @@ async def bulk_upload_suppliers(
 ):
     content = await file.read()
     filename = (file.filename or "").lower()
-    required = {"VENDOR_NAME"}
+    # The name column may be labelled COMPANY NAME (new directory) or VENDOR_NAME (legacy template).
+    NAME_COLS = ("COMPANY_NAME", "VENDOR_NAME")
 
     def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+        # Uppercase, then collapse any run of non-alphanumeric chars to a single "_".
+        # e.g. "REGION / CHAPTER" -> "REGION_CHAPTER", "E.MAIL ADDRESS" -> "E_MAIL_ADDRESS".
         df.columns = [
-            str(c).strip().upper().replace(" ", "_").replace("/", "_").replace("-", "_")
+            re.sub(r"[^A-Z0-9]+", "_", str(c).strip().upper()).strip("_")
             for c in df.columns
         ]
         df.dropna(how="all", inplace=True)
         return df
 
+    def _cell(row, *keys):
+        """First non-empty cell value among the given normalized column names."""
+        for k in keys:
+            val = row.get(k)
+            if val is None:
+                continue
+            s = str(val).strip()
+            if s and s.lower() not in ("nan", "none"):
+                return s
+        return None
+
     try:
         df = None
         used_header_row = 0
-        last_missing = None
 
         for header_row in (0, 1, 2):
             try:
@@ -226,9 +261,7 @@ async def bulk_upload_suppliers(
                 else:
                     df_try = pd.read_excel(BytesIO(content), dtype=str, engine="openpyxl", header=header_row)
                 df_try = _normalize_columns(df_try)
-                missing = required - set(df_try.columns)
-                last_missing = missing
-                if not missing:
+                if any(c in df_try.columns for c in NAME_COLS):
                     df = df_try
                     used_header_row = header_row
                     break
@@ -236,12 +269,11 @@ async def bulk_upload_suppliers(
                 continue
 
         if df is None:
-            detail = (
-                "Missing required column: VENDOR_NAME. Check that the header is in the first few rows."
-                if last_missing is None else
-                f"Missing required columns: {sorted(last_missing)}. Required: VENDOR_NAME"
+            raise HTTPException(
+                status_code=400,
+                detail="Missing required name column. Expected 'COMPANY NAME' (or 'VENDOR_NAME'). "
+                       "Check that the header is in the first few rows.",
             )
-            raise HTTPException(status_code=400, detail=detail)
     except Exception as e:
         if isinstance(e, HTTPException):
             raise
@@ -254,16 +286,17 @@ async def bulk_upload_suppliers(
     for i, row in df.iterrows():
         row_num = i + used_header_row + 2
         row_prefix = f"Row {row_num}"
-        name = str(row.get("VENDOR_NAME", "") or "").strip()
+        name = _cell(row, *NAME_COLS)
         if not name:
-            errors.append(f"{row_prefix}: VENDOR_NAME is required.")
+            errors.append(f"{row_prefix}: COMPANY NAME / VENDOR_NAME is required.")
             continue
 
-        vendor_type = str(row.get("TYPE", "") or "").strip() or None
-        vendor_name = str(row.get("VENDOR_DISPLAY_NAME", "") or "").strip() or None
-        branch = str(row.get("BRANCH", "") or "").strip() or None
+        # Legacy vendor fields (blank for a plain directory import)
+        vendor_type = _cell(row, "TYPE")
+        vendor_name = _cell(row, "VENDOR_DISPLAY_NAME")
+        branch = _cell(row, "BRANCH")
         # Parse BRANCHES column: "Delhi|DEL;Mumbai|BOM"
-        branches_raw = str(row.get("BRANCHES", "") or "").strip()
+        branches_raw = _cell(row, "BRANCHES") or ""
         branches: list | None = None
         if branches_raw:
             parsed = []
@@ -272,13 +305,32 @@ async def bulk_upload_suppliers(
                 if parts[0].strip():
                     parsed.append({"name": parts[0].strip(), "iata_code": (parts[1].strip().upper() if len(parts) > 1 else "")})
             branches = parsed or None
-        contact_phone = str(row.get("CONTACT_NUMBER", "") or "").strip() or None
-        alternate_phone = str(row.get("ALTERNATE_CONTACT_NO", "") or "").strip() or None
-        contact_email = str(row.get("CONTACT_EMAIL", "") or "").strip() or None
-        alternate_email = str(row.get("ALTERNATE_EMAIL", "") or "").strip() or None
-        gst_number = str(row.get("GST_NUMBER", "") or "").strip() or None
-        pan_number = str(row.get("PAN_NUMBER", "") or "").strip() or None
-        notes = str(row.get("REMARKS", "") or "").strip() or None
+        contact_phone = _cell(row, "CONTACT_NUMBER")
+        alternate_phone = _cell(row, "ALTERNATE_CONTACT_NO")
+        contact_email = _cell(row, "CONTACT_EMAIL")
+        alternate_email = _cell(row, "ALTERNATE_EMAIL")
+        gst_number = _cell(row, "GST_NUMBER")
+        pan_number = _cell(row, "PAN_NUMBER")
+        notes = _cell(row, "REMARKS")
+
+        # Directory / member-list fields
+        directory = {
+            "region_chapter": _cell(row, "REGION_CHAPTER", "REGION"),
+            "membership_category": _cell(row, "MEMBERSHIP_CATEGORY", "MEMBERSHIP"),
+            "address_1": _cell(row, "ADD1", "ADDRESS_1", "ADDRESS1"),
+            "address_2": _cell(row, "ADD2", "ADDRESS_2", "ADDRESS2"),
+            "address_3": _cell(row, "ADD3", "ADDRESS_3", "ADDRESS3"),
+            "city": _cell(row, "CITY"),
+            "pincode": _cell(row, "PINCODE", "PIN_CODE", "PIN"),
+            "telephone_mobile": _cell(row, "TELEPHONE_NOS_MOBILE_NOS", "TELEPHONE_MOBILE", "TELEPHONE_NOS", "TELEPHONE", "PHONE", "MOBILE"),
+            "website": _cell(row, "WEBSITE", "WEB"),
+            "email_address": _cell(row, "E_MAIL_ADDRESS", "EMAIL_ADDRESS", "E_MAIL", "EMAIL"),
+            "alternate_email_id": _cell(row, "ALTERNATE_E_MAIL_ID_1", "ALTERNATE_EMAIL_ID_1", "ALTERNATE_EMAIL_ID", "ALTERNATE_E_MAIL_ID"),
+            "accounts_email": _cell(row, "ACCOUNTS", "ACCOUNTS_EMAIL"),
+            "fax_no": _cell(row, "FAX_NO", "FAX"),
+            "representative_1": _cell(row, "REPRESENTATIVE_I", "REPRESENTATIVE_1", "REPRESENTATIVE"),
+            "representative_2": _cell(row, "REPRESENTATIVE_II", "REPRESENTATIVE_2"),
+        }
 
         try:
             if _is_platform_admin(current_user):
@@ -290,6 +342,7 @@ async def bulk_upload_suppliers(
                     contact_phone=contact_phone, alternate_phone=alternate_phone,
                     contact_email=contact_email, alternate_email=alternate_email,
                     gst_number=gst_number, pan_number=pan_number, notes=notes,
+                    **directory,
                 )
                 db.add(supplier)
                 await db.commit()
@@ -300,6 +353,7 @@ async def bulk_upload_suppliers(
                     contact_phone=contact_phone, alternate_phone=alternate_phone,
                     contact_email=contact_email, alternate_email=alternate_email,
                     gst_number=gst_number, pan_number=pan_number, notes=notes,
+                    **directory,
                     submitted_by_id=current_user.id,
                     tenant_id=current_user.tenant_id,
                     status="pending", request_type="new",
@@ -322,15 +376,27 @@ async def download_supplier_template():
     ws = wb.active
     ws.title = "Supplier Template"
 
+    # Directory columns first (exact XLS wording so download -> fill -> upload round-trips),
+    # then the legacy vendor columns so vendor-style rows can still be imported.
     headers = [
-        "VENDOR_NAME", "VENDOR_DISPLAY_NAME", "TYPE",
-        "BRANCHES",
-        "CONTACT_NUMBER", "ALTERNATE_CONTACT_NO",
-        "CONTACT_EMAIL", "ALTERNATE_EMAIL", "GST_NUMBER", "PAN_NUMBER", "REMARKS",
+        "COMPANY NAME", "REGION / CHAPTER", "MEMBERSHIP CATEGORY",
+        "ADD1", "ADD2", "ADD3", "CITY", "PINCODE",
+        "TELEPHONE NOS. & MOBILE NOS.", "WEBSITE",
+        "E.MAIL ADDRESS", "ALTERNATE E-MAIL ID-1", "ACCOUNTS", "FAX NO",
+        "REPRESENTATIVE I", "REPRESENTATIVE II",
+        # --- Legacy vendor fields (optional) ---
+        "TYPE", "BRANCHES", "GST_NUMBER", "PAN_NUMBER", "REMARKS",
     ]
     ws.append(headers)
-    # Sample row showing BRANCHES format
-    ws.append(["Sample Supplier", "Display Name", "Agent", "Delhi|DEL;Mumbai|BOM", "", "", "", "", "", "", ""])
+    # Sample row
+    ws.append([
+        "G.B. Tours and Travels", "ANDHRA PRADESH & TELANGANA STATE CHAPTER (AP & TS)", "ACTIVE",
+        "19-11-9A, First floor, Sarada Nagar", "Tiruchanoor Road", "", "TIRUPATI", "517501",
+        "(T)+91-877-2227390 (M)+91-9441531290", "www.example.com",
+        "gbtravels25@yahoo.co.in; gbtours25@yahoo.com", "", "", "+91-877-2221508",
+        "Mr. Gandikota Bhaskar", "Mrs. G. Chandrika",
+        "", "Delhi|DEL;Mumbai|BOM", "", "", "",
+    ])
 
     bio = BytesIO()
     wb.save(bio)
@@ -405,6 +471,8 @@ async def approve_supplier(
         target.gst_number = approval.gst_number
         target.pan_number = approval.pan_number
         target.notes = approval.notes
+        for _f, _v in _directory_kwargs(approval).items():
+            setattr(target, _f, _v)
 
         approval.status = "approved"
         approval.reviewed_by_id = current_user.id
@@ -424,6 +492,7 @@ async def approve_supplier(
         contact_email=approval.contact_email, alternate_email=approval.alternate_email,
         gst_number=approval.gst_number, pan_number=approval.pan_number,
         notes=approval.notes,
+        **_directory_kwargs(approval),
     )
     db.add(supplier)
     approval.status = "approved"

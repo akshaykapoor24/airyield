@@ -38,6 +38,15 @@ export const INCENTIVE_TYPES = [
   "Segment Incentive","Push Action",
 ];
 
+// Incentives with the standard "contract dates → frequency → flight/class → target"
+// shape. For a B2B Standard deal these become date-wise: the Frequency field and the
+// slab period columns are replaced by explicit Valid From/To dates, and slab class
+// columns narrow by Class. (DI, Ancillary, Cashback, Segment Incentive are shaped
+// differently and are left untouched.)
+export const DATE_WISE_INCENTIVES = new Set([
+  "PLB", "Super PLB", "Transaction Fee", "Marketing Fund", "Frontend", "Backend", "Push Action",
+]);
+
 export const FREQUENCY_OPTIONS    = ["Quarterly","Half Yearly","Yearly"];
 export const FLIGHT_TYPE_OPTIONS  = ["International","Domestic","Both"];
 export const CLASS_OPTIONS        = ["All","Economy","Premium","Business"];
@@ -62,6 +71,15 @@ export const TOUR_CODES         = ["TC001","TC002","TC003","TC004"];
 export const DOMESTIC_CTRS      = ["India","UAE","UK","USA","Australia"];
 export const SOTO_OPTIONS       = ["SOTO All","SOTO within India","SOTO outside India"];
 export const INCL_CLASS_OPTIONS = ["All","Economy","Premium Economy","Business","First"];
+
+// Maps an incentive's coarse Class (from the incentive form) to the airline class
+// master's CLASS_TYPE values (stored upper-cased). "Premium" spans both First and
+// Premium Economy. "All"/unset (no entry here) means every class type.
+export const INCENTIVE_CLASS_TO_MASTER: Record<string, string[]> = {
+  Economy:  ["ECONOMY CLASS"],
+  Business: ["BUSINESS CLASS"],
+  Premium:  ["FIRST CLASS", "PREMIUM ECONOMY CLASS"],
+};
 
 export const FIELD_OPTIONS: Record<string, string[]> = {
   frequency:               FREQUENCY_OPTIONS,
@@ -663,7 +681,13 @@ function freqSlabCols(frequency: string): SlabColDef[] {
   return [quarterly, halfYearly];
 }
 
-export function amountSlabCols(_n: string, flightType: string, frequency = ""): SlabColDef[] {
+// The Domestic/International × Economy/Premium/Business class columns narrow by the
+// selected Class (headers end with the class name). "All"/unset keeps every class.
+function pickClassCols(cols: SlabColDef[], cls: string): SlabColDef[] {
+  return (!cls || cls === "All") ? cols : cols.filter(c => c.header.endsWith(cls));
+}
+
+export function amountSlabCols(_n: string, flightType: string, frequency = "", dateWise = false, cls = ""): SlabColDef[] {
   const domesticCols: SlabColDef[] = [
     { key: "domEconomy",  header: "Domestic Economy",  type: "number" },
     { key: "domPremium",  header: "Domestic Premium",  type: "number" },
@@ -674,13 +698,25 @@ export function amountSlabCols(_n: string, flightType: string, frequency = ""): 
     { key: "intlPremium",  header: "International Premium",  type: "number" },
     { key: "intlBusiness", header: "International Business", type: "number" },
   ];
-  const segmentClassCols =
+  // Columns narrow by Flight Type (Domestic / International / Both) then by Class.
+  const segmentClassCols = pickClassCols(
     flightType === "Domestic"        ? domesticCols
     : flightType === "International" ? intlCols
-    : [...domesticCols, ...intlCols];
+    : [...domesticCols, ...intlCols],
+    cls,
+  );
+
+  // B2B Standard slabs are date-wise (per-row Valid From/To) instead of
+  // frequency-wise (Quarterly / Half-Yearly period columns).
+  const periodCols: SlabColDef[] = dateWise
+    ? [
+        { key: "validFrom", header: "Valid From", type: "date" },
+        { key: "validTo",   header: "Valid To",   type: "date" },
+      ]
+    : freqSlabCols(frequency);
 
   return [
-    ...freqSlabCols(frequency),
+    ...periodCols,
     { key: "baseTargetNumPct",      header: "Base Target (Num / Pct)", type: "select", options: ["Number","Percentage"] },
     { key: "baseTargetAmount",      header: "Base Target Amount",      type: "number" },
     { key: "targetFrom",            header: "Target From",             type: "number" },
@@ -691,7 +727,7 @@ export function amountSlabCols(_n: string, flightType: string, frequency = ""): 
   ];
 }
 
-export function segmentSlabCols(flightType: string, frequency = ""): SlabColDef[] {
+export function segmentSlabCols(flightType: string, frequency = "", dateWise = false, cls = ""): SlabColDef[] {
   const domesticCols: SlabColDef[] = [
     { key: "domEconomy",  header: "Domestic Economy",  type: "number" },
     { key: "domPremium",  header: "Domestic Premium",  type: "number" },
@@ -702,13 +738,25 @@ export function segmentSlabCols(flightType: string, frequency = ""): SlabColDef[
     { key: "intlPremium",  header: "International Premium",  type: "number" },
     { key: "intlBusiness", header: "International Business", type: "number" },
   ];
-  const segmentClassCols =
+  // Columns narrow by Flight Type (Domestic / International / Both) then by Class.
+  const segmentClassCols = pickClassCols(
     flightType === "Domestic"        ? domesticCols
     : flightType === "International" ? intlCols
-    : [...domesticCols, ...intlCols]; // "Both" or unset → all combinations
+    : [...domesticCols, ...intlCols], // "Both" or unset → all combinations
+    cls,
+  );
+
+  // B2B Standard slabs are date-wise (per-row Valid From/To) instead of
+  // frequency-wise (Quarterly / Half-Yearly period columns).
+  const periodCols: SlabColDef[] = dateWise
+    ? [
+        { key: "validFrom", header: "Valid From", type: "date" },
+        { key: "validTo",   header: "Valid To",   type: "date" },
+      ]
+    : freqSlabCols(frequency);
 
   return [
-    ...freqSlabCols(frequency),
+    ...periodCols,
     { key: "targetFrom",           header: "Target From",      type: "number" },
     { key: "targetTo",             header: "Target To",        type: "number" },
     ...segmentClassCols,
@@ -957,9 +1005,27 @@ export function SegmentIncentiveTabContent({ data, onChange }: {
   );
 }
 
+// B2B Standard standard-shaped incentives are date-wise, not frequency-wise: drop
+// the Frequency field and add explicit Travel Date Valid From/To right after the
+// contract dates. Other incentive types are left untouched.
+function b2bStandardFields(name: string, fields: FieldConfig[], b2bStandard: boolean): FieldConfig[] {
+  if (!b2bStandard || !DATE_WISE_INCENTIVES.has(name)) return fields;
+  const out: FieldConfig[] = [];
+  for (const f of fields) {
+    if (f.key === "frequency") continue;   // removed — a date range is captured instead
+    out.push(f);
+    if (f.key === "validTo") {
+      out.push({ key: "travelValidFrom", label: `Travel Date Valid From for ${name}`, type: "date" });
+      out.push({ key: "travelValidTo",   label: `Travel Date Valid To for ${name}`,   type: "date" });
+    }
+  }
+  return out;
+}
+
 // ── incentive tab content ──────────────────────────────────────────────────
-export function IncentiveTabContent({ name, data, onChange }: {
+export function IncentiveTabContent({ name, data, onChange, b2bStandard = false }: {
   name: string; data: Record<string, string>; onChange: (k: string, v: string) => void;
+  b2bStandard?: boolean;
 }) {
   if (name === "Ancillary") {
     return <AncillaryTabContent data={data} onChange={onChange} />;
@@ -968,7 +1034,7 @@ export function IncentiveTabContent({ name, data, onChange }: {
     return <SegmentIncentiveTabContent data={data} onChange={onChange} />;
   }
 
-  const allFields = INCENTIVE_FIELDS[name] ?? [];
+  const allFields = b2bStandardFields(name, INCENTIVE_FIELDS[name] ?? [], b2bStandard);
 
   // Clear downstream fields when a parent field changes
   const handleFieldChange = (key: string, value: string) => {
@@ -995,6 +1061,11 @@ export function IncentiveTabContent({ name, data, onChange }: {
       onChange("cappedIncentive", "");
       onChange("cappedIncentiveAmount", "");
     } else if (key === "flightType") {
+      onChange("amountSlabs", "[]");
+      onChange("segmentSlabs", "[]");
+    } else if (key === "class" && b2bStandard && DATE_WISE_INCENTIVES.has(name)) {
+      // Class narrows the slab class columns (B2B Standard date-wise incentives) —
+      // reset rows so no stale value lingers in a now-hidden column.
       onChange("amountSlabs", "[]");
       onChange("segmentSlabs", "[]");
     } else if (key === "cashbackTargetType") {
@@ -1056,6 +1127,12 @@ export function IncentiveTabContent({ name, data, onChange }: {
   const showAmountSlab  = data["amountBasedType"] === "Slab Based" && data["targetBased"] === "Amount Based";
   const showSegmentSlab = data["amountBasedType"] === "Slab Based" && data["targetBased"] === "Segment Based";
 
+  // B2B Standard standard-shaped incentive slabs are date-wise and their class columns
+  // narrow by the selected Class. Other incentives/deal types keep the frequency-wise,
+  // all-class grid.
+  const dateWiseStd = b2bStandard && DATE_WISE_INCENTIVES.has(name);
+  const slabCls     = dateWiseStd ? (data["class"] ?? "") : "";
+
   // Plain computation (not useMemo) — this function already returns early for
   // Ancillary/Segment Incentive above, so a hook here would be called conditionally.
   let amountSlabRows: Record<string, string>[] = [];
@@ -1075,7 +1152,7 @@ export function IncentiveTabContent({ name, data, onChange }: {
       {showAmountSlab && (
         <SlabGrid
           title={`${name} Amount Slab`}
-          cols={amountSlabCols(name, data["flightType"] ?? "", data["frequency"] ?? "")}
+          cols={amountSlabCols(name, data["flightType"] ?? "", data["frequency"] ?? "", dateWiseStd, slabCls)}
           rows={amountSlabRows}
           onRowsChange={r => onChange("amountSlabs", JSON.stringify(r))}
         />
@@ -1084,7 +1161,7 @@ export function IncentiveTabContent({ name, data, onChange }: {
       {showSegmentSlab && (
         <SlabGrid
           title={`${name} Segment Slab`}
-          cols={segmentSlabCols(data["flightType"] ?? "", data["frequency"] ?? "")}
+          cols={segmentSlabCols(data["flightType"] ?? "", data["frequency"] ?? "", dateWiseStd, slabCls)}
           rows={segmentSlabRows}
           onRowsChange={r => onChange("segmentSlabs", JSON.stringify(r))}
         />
@@ -1094,11 +1171,14 @@ export function IncentiveTabContent({ name, data, onChange }: {
 }
 
 // ── incl/excl tab content (multi-value across all condition fields) ────────
-export function InclExclTabContent({ suffix, isExclusion, data, onChange, viceVersa, onViceVersa, continentOptions, countryGroupOptions }: {
+export function InclExclTabContent({ suffix, isExclusion, data, onChange, viceVersa, onViceVersa, continentOptions, countryGroupOptions, airlineName, incentiveClass }: {
   suffix: string; isExclusion: boolean;
   data: Record<string, IEFieldValue>; onChange: (k: string, v: IEFieldValue) => void;
   viceVersa: boolean; onViceVersa: () => void;
   continentOptions: string[]; countryGroupOptions: string[];
+  // When an airline is supplied (B2B Standard), the Class field offers that airline's
+  // real booking-class CODES from the class master, narrowed by the incentive's Class.
+  airlineName?: string; incentiveClass?: string;
 }) {
   const [originCountries, setOriginCountries] = useState<string[]>([]);
   const [destCountries,   setDestCountries]   = useState<string[]>([]);
@@ -1106,6 +1186,29 @@ export function InclExclTabContent({ suffix, isExclusion, data, onChange, viceVe
   const [destAirports,    setDestAirports]    = useState<string[]>([]);
   const [allCountries,    setAllCountries]    = useState<string[]>([]);
   const [allAirports,     setAllAirports]     = useState<string[]>([]);
+  const [classMaster,     setClassMaster]     = useState<{ class_type: string; class_code: string }[]>([]);
+
+  // Load the airline's class/RBD rows once per airline. Empty airline → no override
+  // (the Class field keeps its default All/Economy/… options).
+  useEffect(() => {
+    const nm = (airlineName ?? "").trim();
+    if (!nm) { setClassMaster([]); return; }
+    api.get<{ class_type: string; class_code: string }[]>("/classes/codes", { params: { airline_name: nm } })
+      .then(r => setClassMaster(r.data))
+      .catch(() => setClassMaster([]));
+  }, [airlineName]);
+
+  // Class options → booking-class codes for the airline, narrowed by the incentive's
+  // Class (Economy/Premium/Business); "All"/unset shows every code. null → no override.
+  const classCodeOptions = useMemo<string[] | null>(() => {
+    if (!(airlineName ?? "").trim()) return null;
+    const wanted = INCENTIVE_CLASS_TO_MASTER[(incentiveClass ?? "").trim()];
+    const codes = classMaster
+      .filter(r => !wanted || wanted.includes((r.class_type ?? "").toUpperCase()))
+      .map(r => r.class_code)
+      .filter(Boolean);
+    return Array.from(new Set(codes));
+  }, [airlineName, incentiveClass, classMaster]);
 
   const asArray = (v: IEFieldValue | undefined): string[] => Array.isArray(v) ? v : v ? [v] : [];
 
@@ -1167,6 +1270,8 @@ export function InclExclTabContent({ suffix, isExclusion, data, onChange, viceVe
     originAirport:      origCountry   ? originAirports  : allAirports,
     destAirport:        destCountry   ? destAirports    : allAirports,
   };
+  // B2B Standard: replace the generic Class options with the airline's class codes.
+  if (classCodeOptions) localOptions.class = classCodeOptions;
 
   type RowField = {
     key: string; label: string;
@@ -1260,6 +1365,8 @@ export function incentiveEntryToForm(entry: Record<string, unknown>): Record<str
       const row: Record<string, string> = { id: `r${i}` };
       if (s.quarterlyFreq)       row.quarterlyFreq = String(s.quarterlyFreq);
       if (s.halfYearlyFreq)      row.halfYearlyFreq = String(s.halfYearlyFreq);
+      if (s.validFrom)           row.validFrom = String(s.validFrom);   // date-wise slab window
+      if (s.validTo)             row.validTo = String(s.validTo);
       if (s.baseTargetAmtNumPct) row.baseTargetNumPct = String(s.baseTargetAmtNumPct);
       if (s.baseTargetAmount)    row.baseTargetAmount = String(s.baseTargetAmount);
       if (s.targetFrom)          row.targetFrom = String(s.targetFrom);
@@ -1300,6 +1407,7 @@ export function incentiveEntryToForm(entry: Record<string, unknown>): Record<str
 // incl_excl_data ({inc: {ruleType: conditions}}) for a single PATCH.
 export function IncentiveRulesModal({
   incentiveTypes, incentiveData, inclExclData, initialIncType, onSave, onClose,
+  b2bStandard = false, airlineName,
 }: {
   incentiveTypes: string[];
   incentiveData: Record<string, Record<string, unknown>>;
@@ -1310,6 +1418,10 @@ export function IncentiveRulesModal({
     inclExclData: Record<string, Record<string, Record<string, IEFieldValue>>>,
   ) => Promise<void>;
   onClose: () => void;
+  // B2B Standard: renders the date-wise incentive shape + airline class codes in
+  // the Class field. Sourced from the deal (deal_type=b2b + deal_tag=standard).
+  b2bStandard?: boolean;
+  airlineName?: string;
 }) {
   const [incForms, setIncForms] = useState<Record<string, Record<string, string>>>(() => {
     const init: Record<string, Record<string, string>> = {};
@@ -1369,7 +1481,7 @@ export function IncentiveRulesModal({
           <>
             <TabBar tabs={incentiveTypes} active={inc} onSelect={setActiveInc} />
             <div className="overflow-y-auto flex-1">
-              <IncentiveTabContent name={inc} data={incForms[inc] ?? {}} onChange={setIncField} />
+              <IncentiveTabContent name={inc} data={incForms[inc] ?? {}} onChange={setIncField} b2bStandard={b2bStandard} />
               <div className="border-t border-gray-100 mt-1 pt-3">
                 <h3 className="px-4 text-[11px] font-bold text-gray-500 uppercase tracking-wide">Inclusion / Exclusion Rules</h3>
                 <div className="px-4 mt-2">
@@ -1395,6 +1507,8 @@ export function IncentiveRulesModal({
                   onViceVersa={toggleViceVersa}
                   continentOptions={continentOptions}
                   countryGroupOptions={countryGroupOptions}
+                  airlineName={b2bStandard ? airlineName : undefined}
+                  incentiveClass={incForms[inc]?.class}
                 />
               </div>
             </div>

@@ -14,7 +14,7 @@ from app.dependencies import get_current_user
 from app.models.airline import Airline
 from app.models.airline_class_master import AirlineClassMaster
 from app.models.approval_workflow import DealApproval, ApprovalActionStatus
-from app.models.uploaded_deal import UploadedDeal, UploadedDealStatus
+from app.models.deal import Deal, DealStatusType
 from app.models.uploaded_ticket import UploadedTicket
 from app.models.user import User
 
@@ -154,10 +154,10 @@ async def get_summary(
     total_tickets = len(tickets)
 
     active_deals_res = await db.execute(
-        select(func.count(UploadedDeal.id)).where(
-            UploadedDeal.tenant_id == tid,
-            UploadedDeal.created_by_id == current_user.id,
-            UploadedDeal.status == UploadedDealStatus.APPROVED,
+        select(func.count(Deal.id)).where(
+            Deal.tenant_id == tid,
+            Deal.created_by_id == current_user.id,
+            Deal.status == DealStatusType.APPROVED,
         )
     )
     active_deals = active_deals_res.scalar_one() or 0
@@ -359,12 +359,12 @@ async def get_pending_actions(
         for u in users_res.scalars():
             users_map[u.id] = u.full_name or u.email or str(u.id)
 
-    # Fetch deal names for 'upload' type approvals
-    upload_deal_ids = {a.deal_id for a in pending_approvals if a.deal_type == "upload"}
-    deals_map: dict[int, UploadedDeal] = {}
-    if upload_deal_ids:
+    # Fetch deal names for unified deal approvals
+    unified_deal_ids = {a.deal_id for a in pending_approvals if a.deal_type == "unified"}
+    deals_map: dict[int, Deal] = {}
+    if unified_deal_ids:
         deals_res = await db.execute(
-            select(UploadedDeal).where(UploadedDeal.id.in_(upload_deal_ids))
+            select(Deal).where(Deal.id.in_(unified_deal_ids))
         )
         for d in deals_res.scalars():
             deals_map[d.id] = d
@@ -384,14 +384,11 @@ async def get_pending_actions(
 
     # --- Extraction Review (deals not yet approved) ---
     review_res = await db.execute(
-        select(UploadedDeal).where(
-            UploadedDeal.tenant_id == tid,
-            UploadedDeal.created_by_id == current_user.id,
-            UploadedDeal.status.in_([
-                UploadedDealStatus.EXTRACTED,
-                UploadedDealStatus.PENDING_APPROVAL,
-            ]),
-        ).order_by(UploadedDeal.created_at.desc()).limit(50)
+        select(Deal).where(
+            Deal.tenant_id == tid,
+            Deal.created_by_id == current_user.id,
+            Deal.status == DealStatusType.PENDING_APPROVAL,
+        ).order_by(Deal.created_at.desc()).limit(50)
     )
     review_deals = review_res.scalars().all()
     extraction_review = [
@@ -442,9 +439,9 @@ async def get_supplier_comparison(
 
     # All deals for this tenant grouped by source_agent
     deals_res = await db.execute(
-        select(UploadedDeal).where(
-            UploadedDeal.tenant_id == tid,
-            UploadedDeal.created_by_id == current_user.id,
+        select(Deal).where(
+            Deal.tenant_id == tid,
+            Deal.created_by_id == current_user.id,
         )
     )
     all_deals = deals_res.scalars().all()

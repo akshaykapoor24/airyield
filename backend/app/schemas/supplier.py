@@ -17,6 +17,22 @@ class SupplierCreate(BaseModel):
     gst_number: Optional[str] = None
     pan_number: Optional[str] = None
     notes: Optional[str] = None
+    # Directory / member-list fields
+    region_chapter: Optional[str] = None
+    membership_category: Optional[str] = None
+    address_1: Optional[str] = None
+    address_2: Optional[str] = None
+    address_3: Optional[str] = None
+    city: Optional[str] = None
+    pincode: Optional[str] = None
+    telephone_mobile: Optional[str] = None
+    website: Optional[str] = None
+    email_address: Optional[str] = None
+    alternate_email_id: Optional[str] = None
+    accounts_email: Optional[str] = None
+    fax_no: Optional[str] = None
+    representative_1: Optional[str] = None
+    representative_2: Optional[str] = None
     request_type: Optional[str] = "new"
     target_id: Optional[int] = None
 
@@ -34,6 +50,22 @@ class SupplierUpdate(BaseModel):
     gst_number: Optional[str] = None
     pan_number: Optional[str] = None
     notes: Optional[str] = None
+    # Directory / member-list fields
+    region_chapter: Optional[str] = None
+    membership_category: Optional[str] = None
+    address_1: Optional[str] = None
+    address_2: Optional[str] = None
+    address_3: Optional[str] = None
+    city: Optional[str] = None
+    pincode: Optional[str] = None
+    telephone_mobile: Optional[str] = None
+    website: Optional[str] = None
+    email_address: Optional[str] = None
+    alternate_email_id: Optional[str] = None
+    accounts_email: Optional[str] = None
+    fax_no: Optional[str] = None
+    representative_1: Optional[str] = None
+    representative_2: Optional[str] = None
     is_active: Optional[bool] = None
 
 
@@ -52,6 +84,22 @@ class SupplierRead(BaseModel):
     gst_number: Optional[str]
     pan_number: Optional[str]
     notes: Optional[str]
+    # Directory / member-list fields
+    region_chapter: Optional[str] = None
+    membership_category: Optional[str] = None
+    address_1: Optional[str] = None
+    address_2: Optional[str] = None
+    address_3: Optional[str] = None
+    city: Optional[str] = None
+    pincode: Optional[str] = None
+    telephone_mobile: Optional[str] = None
+    website: Optional[str] = None
+    email_address: Optional[str] = None
+    alternate_email_id: Optional[str] = None
+    accounts_email: Optional[str] = None
+    fax_no: Optional[str] = None
+    representative_1: Optional[str] = None
+    representative_2: Optional[str] = None
     is_active: bool
 
     model_config = {"from_attributes": True}
@@ -79,6 +127,22 @@ class SupplierApprovalRead(BaseModel):
     gst_number: Optional[str]
     pan_number: Optional[str]
     notes: Optional[str]
+    # Directory / member-list fields
+    region_chapter: Optional[str] = None
+    membership_category: Optional[str] = None
+    address_1: Optional[str] = None
+    address_2: Optional[str] = None
+    address_3: Optional[str] = None
+    city: Optional[str] = None
+    pincode: Optional[str] = None
+    telephone_mobile: Optional[str] = None
+    website: Optional[str] = None
+    email_address: Optional[str] = None
+    alternate_email_id: Optional[str] = None
+    accounts_email: Optional[str] = None
+    fax_no: Optional[str] = None
+    representative_1: Optional[str] = None
+    representative_2: Optional[str] = None
     status: str
     submitted_by: SupplierSubmittedBy
     submitted_at: datetime
@@ -105,6 +169,21 @@ class SupplierApprovalRead(BaseModel):
             "gst_number": obj.gst_number,
             "pan_number": obj.pan_number,
             "notes": obj.notes,
+            "region_chapter": obj.region_chapter,
+            "membership_category": obj.membership_category,
+            "address_1": obj.address_1,
+            "address_2": obj.address_2,
+            "address_3": obj.address_3,
+            "city": obj.city,
+            "pincode": obj.pincode,
+            "telephone_mobile": obj.telephone_mobile,
+            "website": obj.website,
+            "email_address": obj.email_address,
+            "alternate_email_id": obj.alternate_email_id,
+            "accounts_email": obj.accounts_email,
+            "fax_no": obj.fax_no,
+            "representative_1": obj.representative_1,
+            "representative_2": obj.representative_2,
             "status": obj.status,
             "submitted_by": SupplierSubmittedBy.model_validate(obj.submitted_by),
             "submitted_at": obj.submitted_at,

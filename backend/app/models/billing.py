@@ -6,8 +6,11 @@ from app.database import Base
 
 
 class Billing(Base):
-    """A saved billing for a customer over a date period.
+    """A saved billing over a date period, for a customer, an agency, or a corporate.
 
+    Exactly one of `customer_id` / `agency_id` / `corporate_id` is set: customer
+    billings come from the Customer Billing page, agency billings from the Agency
+    Billing page, corporate billings from the Corporate Billing page.
     Snapshot: line_items + totals are computed at save time and stored as-is,
     so a billing stays stable even if the underlying tickets change later.
     Scoped per user: queries filter by tenant_id + created_by_id.
@@ -17,7 +20,9 @@ class Billing(Base):
     id:            Mapped[int]        = mapped_column(primary_key=True)
     tenant_id:     Mapped[int | None] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=True, index=True)
     created_by_id: Mapped[int]        = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    customer_id:   Mapped[int]        = mapped_column(Integer, ForeignKey("customers.id", ondelete="CASCADE"), nullable=False, index=True)
+    customer_id:   Mapped[int | None] = mapped_column(Integer, ForeignKey("customers.id", ondelete="CASCADE"), nullable=True, index=True)
+    agency_id:     Mapped[int | None] = mapped_column(Integer, ForeignKey("agencies.id", ondelete="CASCADE"), nullable=True, index=True)
+    corporate_id:  Mapped[int | None] = mapped_column(Integer, ForeignKey("corporates.id", ondelete="CASCADE"), nullable=True, index=True)
 
     billing_name:  Mapped[str]        = mapped_column(String(200), nullable=False)
     period_from:   Mapped[date]       = mapped_column(Date, nullable=False)

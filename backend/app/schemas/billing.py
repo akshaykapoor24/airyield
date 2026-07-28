@@ -2,10 +2,13 @@ from pydantic import BaseModel
 from typing import Optional
 from datetime import date, datetime
 
+from app.schemas.customer import SoldTicketRead, SoldTicketsSummary
+
 
 class BillingItemInput(BaseModel):
     ticket_id: int
     additional_markup: float = 0
+    discount: float = 0
 
 
 class BillingCreate(BaseModel):
@@ -35,13 +38,16 @@ class BillingLineItem(BaseModel):
     base_amount: float
     markup_amount: float
     additional_markup: float
+    discount: float = 0
     gst_amount: float
     total: float
 
 
 class BillingRead(BaseModel):
     id: int
-    customer_id: int
+    customer_id: Optional[int] = None
+    agency_id: Optional[int] = None
+    corporate_id: Optional[int] = None
     billing_name: str
     period_from: date
     period_to: date
@@ -69,3 +75,25 @@ class BillingListItem(BaseModel):
     grand_total: float
     item_count: int
     created_at: datetime
+
+
+# ── Agency billing ───────────────────────────────────────────────────────────
+
+class AgencyLite(BaseModel):
+    """Minimal agency info returned alongside its billable tickets."""
+    id: int
+    name: str
+    vendor_type: Optional[str] = None
+    gst_number: Optional[str] = None
+    pan_number: Optional[str] = None
+    contact_email: Optional[str] = None
+    contact_phone: Optional[str] = None
+
+    model_config = {"from_attributes": True}
+
+
+class AgencyTicketsResponse(BaseModel):
+    """An agency's tickets (tagged by statement agency) with markup/GST applied."""
+    agency: AgencyLite
+    tickets: list[SoldTicketRead]
+    summary: SoldTicketsSummary

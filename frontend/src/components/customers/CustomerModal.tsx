@@ -15,12 +15,20 @@ export type Customer = {
   title: string | null;
   phone: string | null;
   email: string | null;
+  // Customer-local naming (gst_no / pan_no) — the profile/supplier modules use
+  // gst_number / pan_number; intentionally kept separate. Only the regexes are shared.
+  gst_registered: boolean;
   gst_no: string | null;
+  pan_no: string | null;
   markup_type: MarkupType | null;
   markup_value: number | null;
   billing_type: BillingType | null;
   is_active: boolean;
 };
+
+// Shared with ProfileInfoSection / signup: GSTIN = 15 chars, PAN = 10 chars.
+const PAN_RE = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
+const GSTIN_RE = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
 
 const LABEL = "block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1";
 const INPUT =
@@ -43,6 +51,9 @@ export default function CustomerModal({
     title: customer?.title ?? "",
     phone: customer?.phone ?? "",
     email: customer?.email ?? "",
+    gst_registered: customer?.gst_registered ? "true" : "false",
+    gst_no: customer?.gst_no ?? "",
+    pan_no: customer?.pan_no ?? "",
     markup_type: customer?.markup_type ?? "",
     markup_value: customer?.markup_value != null ? String(customer.markup_value) : "",
     billing_type: customer?.billing_type ?? "",
@@ -61,6 +72,17 @@ export default function CustomerModal({
       setError("Markup value must be a number.");
       return;
     }
+    const registered = form.gst_registered === "true";
+    const gstNo = form.gst_no.trim().toUpperCase();
+    const panNo = form.pan_no.trim().toUpperCase();
+    if (registered && !GSTIN_RE.test(gstNo)) {
+      setError("A valid 15-character GST No is required for registered customers (e.g. 27ABCDE1234F1Z5).");
+      return;
+    }
+    if (panNo && !PAN_RE.test(panNo)) {
+      setError("Invalid PAN No (e.g. ABCDE1234F).");
+      return;
+    }
     setSaving(true);
     setError("");
     const payload = {
@@ -70,6 +92,9 @@ export default function CustomerModal({
       title: form.title.trim() || null,
       phone: form.phone.trim() || null,
       email: form.email.trim() || null,
+      gst_registered: registered,
+      gst_no: registered ? (gstNo || null) : null,
+      pan_no: panNo || null,
       markup_type: form.markup_type || null,
       markup_value: form.markup_value ? Number(form.markup_value) : null,
       billing_type: form.billing_type || null,
@@ -169,6 +194,46 @@ export default function CustomerModal({
               <option value="reseller">Reseller</option>
               <option value="agency">Agency</option>
             </select>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className={LABEL}>GST Registration</label>
+              <select
+                value={form.gst_registered}
+                onChange={(e) => {
+                  set("gst_registered", e.target.value);
+                  if (e.target.value === "false") set("gst_no", "");
+                }}
+                className={INPUT}
+              >
+                <option value="false">Unregistered</option>
+                <option value="true">Registered</option>
+              </select>
+            </div>
+            {form.gst_registered === "true" && (
+              <div>
+                <label className={LABEL}>GST No *</label>
+                <input
+                  value={form.gst_no}
+                  onChange={(e) => set("gst_no", e.target.value.toUpperCase())}
+                  placeholder="27ABCDE1234F1Z5"
+                  maxLength={15}
+                  className={`${INPUT} uppercase`}
+                />
+              </div>
+            )}
+          </div>
+
+          <div>
+            <label className={LABEL}>PAN No</label>
+            <input
+              value={form.pan_no}
+              onChange={(e) => set("pan_no", e.target.value.toUpperCase())}
+              placeholder="ABCDE1234F (optional)"
+              maxLength={10}
+              className={`${INPUT} uppercase`}
+            />
           </div>
 
           {error && <p className="text-[11px] text-red-500">{error}</p>}

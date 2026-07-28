@@ -81,6 +81,8 @@ def build_billing_pdf(billing, customer, agency: dict | None = None) -> io.Bytes
         to_cell.append(Paragraph(customer.phone, body))
     if getattr(customer, "gst_no", None):
         to_cell.append(Paragraph(f"GST No: {customer.gst_no}", body))
+    if getattr(customer, "pan_no", None):
+        to_cell.append(Paragraph(f"PAN No: {customer.pan_no}", body))
     to_cell.append(Paragraph(f"Billing period: {period}", body))
 
     parties = Table([[from_cell, to_cell]], colWidths=[95 * mm, 80 * mm])

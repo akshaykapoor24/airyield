@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import api from "@/lib/api";
 import Pagination from "@/components/ui/Pagination";
+import { INCENTIVE_TYPE_COLS } from "@/lib/incentives";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -107,20 +108,6 @@ type UploadedTicket = {
   business_email: string | null;
   tax_breakup: Record<string, number> | null;
 };
-
-const INCENTIVE_TYPE_COLS = [
-  { key: "PLB",                    label: "PLB Inc."       },
-  { key: "Super PLB",              label: "Super PLB"      },
-  { key: "Transaction Fee",        label: "Trans. Fee"     },
-  { key: "Deposit Incentive (DI)", label: "DI Inc."        },
-  { key: "Marketing Fund",         label: "Mktg Fund"      },
-  { key: "Ancillary",              label: "Ancillary Inc." },
-  { key: "Frontend",               label: "Frontend Inc."  },
-  { key: "Backend",                label: "Backend Inc."   },
-  { key: "Cashback",               label: "Cashback"       },
-  { key: "Segment Incentive",      label: "Seg. Inc."      },
-  { key: "Push Action",            label: "Push Act."      },
-] as const;
 
 type RunCalcResult = {
   ticket_id: number;

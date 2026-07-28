@@ -15,6 +15,21 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
 
+    # Frontend base URL — used to build email verification links
+    FRONTEND_URL: str = "http://localhost:3000"
+
+    # Email / SMTP (verification links). When EMAILS_ENABLED is False or SMTP is
+    # not configured, the verification link is logged instead of sent, so local
+    # dev works with no mail server. Fill these in .env to enable real emails.
+    EMAILS_ENABLED: bool = True
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM: str = "no-reply@airyield.local"
+    SMTP_USE_TLS: bool = True
+    EMAIL_TOKEN_EXPIRE_HOURS: int = 48
+
     # Redis / Celery
     REDIS_URL: str = "redis://localhost:6379/0"
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
@@ -23,6 +38,8 @@ class Settings(BaseSettings):
     # File uploads
     UPLOAD_DIR: str = "uploads"
     MAX_UPLOAD_SIZE_MB: int = 50
+    # BSP settlement PDFs can be 1000-2000 pages, so they need a larger cap.
+    BSP_MAX_UPLOAD_MB: int = 200
 
     # CORS
     CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
@@ -33,6 +50,7 @@ class Settings(BaseSettings):
     # GCP Cloud Storage
     GCS_DEALS_BUCKET_NAME: str = ""
     GCS_TICKETS_BUCKET_NAME: str = ""
+    GCS_BSP_BUCKET_NAME: str = ""   # falls back to GCS_TICKETS_BUCKET_NAME when empty
     GCS_SERVICE_ACCOUNT_EMAIL: str = ""
     GCS_SERVICE_ACCOUNT_PRIVATE_KEY: str = ""
     GCS_PROJECT_ID: str = ""

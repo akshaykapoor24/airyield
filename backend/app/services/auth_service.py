@@ -3,11 +3,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from app.config import settings
 from app.models.user import User, UserRole
 from app.models.tenant import Tenant, TenantType
-from app.schemas.user import UserCreate, SignupPayload, LoginPayload, TokenWithUser
+from app.schemas.user import UserCreate, SignupPayload, LoginPayload, TokenWithUser, SignupResult
 from app.core.email_domains import extract_domain, is_public_domain
-from app.utils.security import hash_password, verify_password, create_access_token
+from app.services.email_service import send_verification_email
+from app.utils.security import (
+    hash_password, verify_password, create_access_token,
+    create_email_token, verify_email_token,
+)
 
 
 async def _get_or_create_tenant(
@@ -41,6 +46,10 @@ class AuthService:
             role=payload.role,
             department=payload.department,
             tenant_id=tenant_id,
+            # admin-created teammates are trusted (no email verification needed),
+            # but still run the first-login onboarding to set up their own data.
+            is_verified=True,
+            onboarding_complete=False,
         )
         db.add(user)
         await db.commit()
@@ -49,7 +58,7 @@ class AuthService:
 
     # ── Public signup: corporate (domain-based) or individual (private) ────
     @staticmethod
-    async def signup(db: AsyncSession, payload: SignupPayload) -> TokenWithUser:
+    async def signup(db: AsyncSession, payload: SignupPayload) -> SignupResult:
         # email uniqueness applies to both flows
         existing_email = await db.execute(select(User).where(User.email == payload.email))
         if existing_email.scalar_one_or_none():
@@ -60,26 +69,61 @@ class AuthService:
         else:
             tenant = await AuthService._signup_individual_tenant(db, payload)
 
-        # the signing-up user is always super_admin of their own tenant
+        # the signing-up user is always super_admin of their own tenant. The
+        # account starts unverified — no session is issued until the emailed
+        # verification link is confirmed.
         user = User(
             email=payload.email,
             full_name=payload.full_name,
             hashed_password=hash_password(payload.password),
             role=UserRole.SUPER_ADMIN,
             department=payload.company_name or None,
+            is_verified=False,
+            onboarding_complete=False,
             tenant=tenant,                      # set relationship so tenant_type serialises
         )
         db.add(user)
         await db.commit()
+        await db.refresh(user)
 
-        # reload with tenant eager-loaded for the response (tenant_type)
-        result = await db.execute(
-            select(User).options(selectinload(User.tenant)).where(User.id == user.id)
+        link = f"{settings.FRONTEND_URL}/verify-email?token={create_email_token(user.id)}"
+        await send_verification_email(user.email, link)
+
+        return SignupResult(
+            email=user.email,
+            is_verified=False,
+            message="Account created. We've emailed you a verification link — "
+                    "verify your email, then sign in.",
+            verification_url=link if settings.DEBUG else None,   # dev convenience only
         )
-        user = result.scalar_one()
 
-        token = create_access_token({"sub": str(user.id), "role": user.role})
-        return TokenWithUser(access_token=token, user=user)
+    # ── Email verification ─────────────────────────────────────────────────
+    @staticmethod
+    async def verify_email(db: AsyncSession, token: str) -> User:
+        user_id = verify_email_token(token)
+        if not user_id:
+            raise HTTPException(
+                status_code=400,
+                detail="This verification link is invalid or has expired. Please request a new one.",
+            )
+        result = await db.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+        if not user:
+            raise HTTPException(status_code=404, detail="Account not found.")
+        if not user.is_verified:
+            user.is_verified = True
+            await db.commit()
+        return user
+
+    @staticmethod
+    async def resend_verification(db: AsyncSession, email: str) -> None:
+        """Resend the link if the account exists and is unverified. Always
+        succeeds silently to avoid leaking which emails are registered."""
+        result = await db.execute(select(User).where(User.email == email))
+        user = result.scalar_one_or_none()
+        if user and not user.is_verified:
+            link = f"{settings.FRONTEND_URL}/verify-email?token={create_email_token(user.id)}"
+            await send_verification_email(user.email, link)
 
     # ── Corporate: discover/create a company tenant by work-email domain ───
     @staticmethod
@@ -149,6 +193,12 @@ class AuthService:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Your account has been deactivated. Contact your admin.",
+            )
+        if not user.is_verified:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Please verify your email before signing in — check your inbox "
+                       "for the verification link.",
             )
 
         token = create_access_token({"sub": str(user.id), "role": user.role})

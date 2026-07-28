@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import DateTime, ForeignKey, Numeric, Boolean, Text, String
+from sqlalchemy import DateTime, ForeignKey, Numeric, Boolean, Text, String, Integer
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
@@ -9,7 +9,8 @@ class IncomeRecord(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     ticket_id: Mapped[int] = mapped_column(ForeignKey("tickets.id"), unique=True, nullable=False)
-    deal_id: Mapped[int] = mapped_column(ForeignKey("legacy_deals.id"), nullable=False)
+    # legacy_deals table has been removed; kept as a plain int (no FK). Legacy/unused.
+    deal_id: Mapped[int] = mapped_column(Integer, nullable=False)
 
     base_fare: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
 
@@ -34,6 +35,5 @@ class IncomeRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     ticket: Mapped["Ticket"] = relationship("Ticket", back_populates="income_record")  # noqa: F821
-    deal: Mapped["UploadedDeal"] = relationship("UploadedDeal")  # noqa: F821
     override_by: Mapped["User"] = relationship("User", foreign_keys=[override_by_id])  # noqa: F821
     approved_by: Mapped["User"] = relationship("User", foreign_keys=[approved_by_id])  # noqa: F821
