@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.v1 import auth, users, airlines, suppliers, airports, routes, deals, tickets, income, documents, reports, classes, approval_workflows, dashboard, customers, corporates, entities, login_ids, iata_commissions, user_entities, user_login_ids, agencies, agency_entities, agency_login_ids, agency_billing, adjustments, airline_adjustments, statements, bsp, bsp_summary, bsp_reconciliation, customer_statements, lcc_detailed, ticket_details
+from app.api.v1 import auth, users, airlines, suppliers, airports, routes, deals, tickets, income, documents, reports, classes, approval_workflows, dashboard, customers, corporates, entities, login_ids, iata_commissions, user_entities, user_login_ids, agencies, agency_entities, agency_login_ids, agency_billing, adjustments, airline_adjustments, statements, bsp, bsp_summary, bsp_reconciliation, bsp_commission, customer_statements, lcc_detailed, ticket_details
 
 router = APIRouter()
 
@@ -37,4 +37,5 @@ router.include_router(ticket_details.router, prefix="/ticket-details", tags=["Ti
 router.include_router(bsp.router, prefix="/bsp", tags=["Tickets - BSP Statements"])
 router.include_router(bsp_summary.router, prefix="/bsp", tags=["Tickets - BSP Summary"])
 router.include_router(bsp_reconciliation.router, prefix="/bsp-reconciliation", tags=["Tickets - BSP Reconciliation"])
+router.include_router(bsp_commission.router, prefix="/bsp-commission", tags=["Vendors - Commission Income"])
 router.include_router(customer_statements.router, prefix="/customer-statements", tags=["Customer Statements"])

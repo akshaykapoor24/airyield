@@ -1,12 +1,16 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.database import get_db
 from app.dependencies import get_current_user
+from app.models.tenant import Tenant, TenantType
 from app.models.user import User, UserRole
+from app.models.user_entity import UserEntity
+from app.models.user_entity_access import UserEntityAccess
 from app.schemas.user import (
-    UserRead, UserUpdate, UserCreate, UserRoleUpdate, ProfileRead, ProfileUpdate,
+    UserRead, UserUpdate, UserCreate, UserRoleUpdate, UserEntitiesUpdate,
+    ProfileRead, ProfileUpdate,
 )
 
 router = APIRouter()
@@ -25,6 +29,84 @@ def _require_admin(current_user: User = Depends(get_current_user)) -> User:
     if current_user.role not in ADMIN_ROLES:
         raise HTTPException(status_code=403, detail="Admin access required")
     return current_user
+
+
+async def _require_team_workspace(db: AsyncSession, current_user: User) -> None:
+    """Only CORPORATE tenants may hold more than one user.
+
+    An individual account is a private single-person workspace, so team
+    management is not available to it. The UI hides the Add User button, but the
+    rule is enforced here too — a hidden button is not a restriction.
+    """
+    if current_user.tenant_id is None:
+        raise HTTPException(status_code=400, detail="Your account is not attached to a workspace.")
+    tenant = (await db.execute(
+        select(Tenant).where(Tenant.id == current_user.tenant_id)
+    )).scalar_one_or_none()
+    if tenant is not None and tenant.tenant_type == TenantType.INDIVIDUAL:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Individual accounts are private single-person workspaces and cannot "
+                "have additional users. Use a corporate account to add a team."
+            ),
+        )
+
+
+async def _entity_map(db: AsyncSession, user_ids: list[int]) -> dict[int, list[UserEntity]]:
+    """{user_id: [assigned entities]} for a set of members, in one query."""
+    if not user_ids:
+        return {}
+    rows = (await db.execute(
+        select(UserEntityAccess.user_id, UserEntity)
+        .join(UserEntity, UserEntity.id == UserEntityAccess.entity_id)
+        .where(UserEntityAccess.user_id.in_(user_ids))
+        .order_by(UserEntity.name)
+    )).all()
+    out: dict[int, list[UserEntity]] = {}
+    for uid, entity in rows:
+        out.setdefault(uid, []).append(entity)
+    return out
+
+
+def _with_entities(user: User, entities: list[UserEntity]) -> UserRead:
+    read = UserRead.model_validate(user)
+    read.entity_ids = [e.id for e in entities]
+    read.entity_names = [e.name for e in entities]
+    return read
+
+
+async def _resolve_admin_entities(
+    db: AsyncSession, admin: User, entity_ids: list[int],
+) -> list[UserEntity]:
+    """The admin's own entities matching these ids.
+
+    Assignment is limited to entities the admin actually owns — the list the
+    dropdown was built from — so a crafted id cannot grant access to someone
+    else's entity.
+    """
+    ids = list(dict.fromkeys(entity_ids or []))
+    if not ids:
+        return []
+    entities = (await db.execute(
+        select(UserEntity).where(UserEntity.id.in_(ids), UserEntity.user_id == admin.id)
+    )).scalars().all()
+    missing = set(ids) - {e.id for e in entities}
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown entity id(s): {sorted(missing)}. Pick from your own entities.",
+        )
+    return list(entities)
+
+
+async def _set_entity_access(
+    db: AsyncSession, member: User, admin: User, entities: list[UserEntity],
+) -> None:
+    """Replace the member's grants with exactly this set (no commit)."""
+    await db.execute(delete(UserEntityAccess).where(UserEntityAccess.user_id == member.id))
+    for entity in entities:
+        db.add(UserEntityAccess(user_id=member.id, entity_id=entity.id, granted_by_id=admin.id))
 
 
 # ── Current user ───────────────────────────────────────────────────────────
@@ -117,7 +199,26 @@ async def list_users(
         .where(User.tenant_id == current_user.tenant_id)
         .offset(skip).limit(limit)
     )
-    return result.scalars().all()
+    users = result.scalars().all()
+    by_user = await _entity_map(db, [u.id for u in users])
+    return [_with_entities(u, by_user.get(u.id, [])) for u in users]
+
+
+@router.get("/assignable-entities", response_model=list[dict])
+async def list_assignable_entities(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(_require_admin),
+):
+    """The admin's own entities — the options for the Add User form's Entities field.
+
+    Same rows as My Profile → Entities, i.e. what was captured during onboarding.
+    """
+    entities = (await db.execute(
+        select(UserEntity)
+        .where(UserEntity.user_id == current_user.id, UserEntity.is_active.is_(True))
+        .order_by(UserEntity.name)
+    )).scalars().all()
+    return [{"id": e.id, "name": e.name, "code": e.code} for e in entities]
 
 
 # ── Admin: create user in same tenant ─────────────────────────────────────
@@ -128,6 +229,9 @@ async def create_user(
     current_user: User = Depends(_require_admin),
 ):
     from app.services.auth_service import AuthService
+
+    # individual accounts are single-person workspaces
+    await _require_team_workspace(db, current_user)
 
     # enforce same domain
     admin_domain = current_user.email.split("@")[-1].lower()
@@ -148,7 +252,36 @@ async def create_user(
             detail="Super Admin can assign only company_admin, operations_user, finance_user, approver, viewer roles.",
         )
 
-    return await AuthService.register(db, payload, tenant_id=current_user.tenant_id)
+    # Validate the entity picks BEFORE creating the user, so a bad id can never
+    # leave a member behind with no assignments.
+    entities = await _resolve_admin_entities(db, current_user, payload.entity_ids)
+
+    user = await AuthService.register(db, payload, tenant_id=current_user.tenant_id)
+    if entities:
+        await _set_entity_access(db, user, current_user, entities)
+        await db.commit()
+    return _with_entities(user, entities)
+
+
+# ── Admin: replace a member's entity assignments ──────────────────────────
+@router.patch("/{user_id}/entities", response_model=UserRead)
+async def update_user_entities(
+    user_id: int,
+    payload: UserEntitiesUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(_require_admin),
+):
+    result = await db.execute(
+        select(User).where(User.id == user_id, User.tenant_id == current_user.tenant_id)
+    )
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    entities = await _resolve_admin_entities(db, current_user, payload.entity_ids)
+    await _set_entity_access(db, user, current_user, entities)
+    await db.commit()
+    return _with_entities(user, entities)
 
 
 # ── Admin: get single user (same tenant only) ──────────────────────────────

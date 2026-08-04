@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import uuid
 from datetime import datetime, date
 from typing import Optional
@@ -25,9 +26,14 @@ from app.models.user import User
 from app.schemas.uploaded_ticket import (
     TicketExtractionPreview,
     TicketRow,
+    ManualTicketPreviewPayload,
+    AppendTicketsPayload,
     ConfirmTicketUploadPayload,
     ConfirmTicketUploadResult,
     UploadedTicketRead,
+    UploadedTicketWithStatement,
+    UploadedTicketsPage,
+    UploadedTicketFacets,
     RunCalculationResult,
     BatchRunCalculationResult,
     UploadedTicketUpdate,
@@ -41,11 +47,17 @@ from app.services.deal_matching import DealMatchingService
 from app.services.exclusion_evaluator import evaluate_exclusion_for_payout, evaluate_inclusion_for_payout
 from app.services.ticket_extraction import (
     TicketExtractionService, TEMPLATE_HEADERS, AIRLINE_TEMPLATE_HEADERS,
+    derive_ticket_rows,
 )
 
 router = APIRouter()
 
 _CREDIT_TYPES = {"credit note", "refund"}
+
+# Statements punched by hand have no source file, but ticket_statements.file_name
+# is NOT NULL and confirm copies it onto every ticket — so this doubles as the
+# provenance marker the UI reads to show a "Manually punched" pill.
+MANUAL_ENTRY_FILE_NAME = "Manual Entry"
 
 
 def _classify_ticket(ticket_number: str | None, invoice_type: str | None) -> tuple[str | None, str | None]:
@@ -169,26 +181,18 @@ async def extract_ticket_file(
     )
 
 
-# ── Upload flow: Step 2 — confirm / save ──────────────────────────────────
+# ── Shared row construction (upload confirm + manual append) ───────────────
+# One builder, so a ticket saved by either path lands with the same columns, the
+# same airline resolution and the same ADM/ACM/RA classification.
 
-@router.post(
-    "/upload/confirm",
-    response_model=ConfirmTicketUploadResult,
-    status_code=status.HTTP_201_CREATED,
-)
-async def confirm_ticket_upload(
-    payload: ConfirmTicketUploadPayload,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Step 2 — User has reviewed the preview and confirms. Save rows to DB."""
-    if not payload.rows:
-        raise HTTPException(status_code=400, detail="No rows to save.")
-
+async def _resolve_airlines(
+    rows: list[TicketRow], db: AsyncSession,
+) -> tuple[dict[str, Airline], dict[str, Airline]]:
+    """Bidirectional airline lookup: code -> Airline, lowercased name -> Airline."""
     # ── Bidirectional airline resolution ─────────────────────────────────────
     # Collect all codes (with numeric zero-padding + uppercase variants) and names
     all_codes: set[str] = set()
-    for r in payload.rows:
+    for r in rows:
         if r.airlines_code:
             raw = r.airlines_code.strip()
             all_codes.add(raw)
@@ -196,7 +200,7 @@ async def confirm_ticket_upload(
             if raw.isdigit():
                 all_codes.add(raw.zfill(3))
 
-    all_names = {r.airline_name.strip().lower() for r in payload.rows if r.airline_name}
+    all_names = {r.airline_name.strip().lower() for r in rows if r.airline_name}
 
     # code (IATA or ICAO, uppercased) → Airline
     code_to_airline: dict[str, Airline] = {}
@@ -227,25 +231,30 @@ async def confirm_ticket_upload(
         for a in res.scalars():
             name_to_airline[a.name.lower()] = a
 
-    batch_id = str(uuid.uuid4())
-    now = datetime.utcnow()
-    auto_name = f"{payload.statement_type} - {payload.agency} - {payload.valid_from}"
+    return code_to_airline, name_to_airline
 
-    statement = TicketStatement(
-        batch_id=batch_id,
-        tenant_id=current_user.tenant_id,
-        statement_type=payload.statement_type,
-        statement_name=auto_name,
-        agency=payload.agency,
-        valid_from=payload.valid_from,
-        valid_to=payload.valid_to,
-        file_name=payload.file_name,
-        created_by_id=current_user.id,
-        created_at=now,
-    )
-    db.add(statement)
 
-    for row in payload.rows:
+async def _build_uploaded_tickets(
+    rows:           list[TicketRow],
+    db:             AsyncSession,
+    *,
+    batch_id:       str,
+    file_name:      str,
+    statement_type: str,
+    tenant_id:      int,
+    created_by_id:  int,
+    now:            datetime,
+) -> list[UploadedTicket]:
+    """Build UploadedTicket rows from preview rows. Not added to the session.
+
+    Left unset on purpose: ticket_status (server default 'draft'), raw_data,
+    is_billed/billing_id, and the whole matched_deal_* / incentive block — those
+    belong to run-calculation.
+    """
+    code_to_airline, name_to_airline = await _resolve_airlines(rows, db)
+    built: list[UploadedTicket] = []
+
+    for row in rows:
         # Try code lookup (numeric zero-padding + uppercase for alphabetic)
         raw_code = (row.airlines_code or "").strip()
         code_variants = [raw_code, raw_code.upper()]
@@ -263,13 +272,13 @@ async def confirm_ticket_upload(
 
         adm_acm_ra, invoice_override = _classify_ticket(row.ticket_number, row.invoice_type)
 
-        ticket = UploadedTicket(
+        built.append(UploadedTicket(
             batch_id=batch_id,
-            file_name=payload.file_name,
-            tenant_id=current_user.tenant_id,
-            created_by_id=current_user.id,
+            file_name=file_name,
+            tenant_id=tenant_id,
+            created_by_id=created_by_id,
             created_at=now,
-            statement_type=payload.statement_type,
+            statement_type=statement_type,
             # ── shared / B2B ───────────────────────────────────────────────
             booking_ref=row.booking_ref,
             segment_type=row.segment_type,
@@ -360,12 +369,235 @@ async def confirm_ticket_upload(
             entity_address=row.entity_address,
             tax_breakup=row.tax_breakup,
             segments=row.segments,
-        )
+        ))
+
+    return built
+
+
+# ── Upload flow: Step 2 — confirm / save ──────────────────────────────────
+
+@router.post(
+    "/upload/confirm",
+    response_model=ConfirmTicketUploadResult,
+    status_code=status.HTTP_201_CREATED,
+)
+async def confirm_ticket_upload(
+    payload: ConfirmTicketUploadPayload,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Step 2 — User has reviewed the preview and confirms. Save rows to DB."""
+    if not payload.rows:
+        raise HTTPException(status_code=400, detail="No rows to save.")
+
+    now = datetime.utcnow()
+    batch_id = str(uuid.uuid4())
+
+    db.add(TicketStatement(
+        batch_id=batch_id,
+        tenant_id=current_user.tenant_id,
+        statement_type=payload.statement_type,
+        statement_name=(payload.statement_name or "").strip()
+                       or f"{payload.statement_type} - {payload.agency} - {payload.valid_from}",
+        agency=payload.agency,
+        valid_from=payload.valid_from,
+        valid_to=payload.valid_to,
+        file_name=payload.file_name,
+        created_by_id=current_user.id,
+        created_at=now,
+    ))
+
+    for ticket in await _build_uploaded_tickets(
+        payload.rows, db,
+        batch_id=batch_id,
+        file_name=payload.file_name,
+        statement_type=payload.statement_type,
+        tenant_id=current_user.tenant_id,
+        created_by_id=current_user.id,
+        now=now,
+    ):
         db.add(ticket)
 
     await db.commit()
     return ConfirmTicketUploadResult(batch_id=batch_id, created_count=len(payload.rows))
 
+
+# ── Append tickets to an existing statement (manual entry) ─────────────────
+
+@router.post(
+    "/statements/{batch_id}/tickets",
+    response_model=ConfirmTicketUploadResult,
+    status_code=status.HTTP_201_CREATED,
+)
+async def append_tickets_to_statement(
+    batch_id:     str,
+    payload:      AppendTicketsPayload,
+    db:           AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Add manually punched rows to a statement that already exists.
+
+    Lets a single hand-punched ticket join its peers instead of spawning a
+    one-ticket statement. The rows go through the same builder as upload confirm,
+    and inherit the statement's own type so a B2B statement can never end up
+    holding an AIRLINE row.
+    """
+    if not payload.rows:
+        raise HTTPException(status_code=400, detail="No rows to save.")
+
+    res = await db.execute(
+        select(TicketStatement).where(
+            TicketStatement.batch_id == batch_id,
+            TicketStatement.tenant_id == current_user.tenant_id,
+            TicketStatement.created_by_id == current_user.id,
+        )
+    )
+    statement = res.scalar_one_or_none()
+    if not statement:
+        raise HTTPException(status_code=404, detail="Statement not found.")
+
+    for ticket in await _build_uploaded_tickets(
+        payload.rows, db,
+        batch_id=batch_id,
+        # Keep the statement's own file_name so provenance stays consistent; a
+        # manual top-up of an uploaded statement still belongs to that file.
+        file_name=statement.file_name,
+        statement_type=statement.statement_type,
+        tenant_id=current_user.tenant_id,
+        created_by_id=current_user.id,
+        now=datetime.utcnow(),
+    ):
+        db.add(ticket)
+
+    await db.commit()
+    return ConfirmTicketUploadResult(batch_id=batch_id, created_count=len(payload.rows))
+
+
+# ── Manual entry: derive + split punched rows ──────────────────────────────
+
+# Fields the server owns. A manual form may echo them back (TicketRow accepts
+# them), but split_type/statement_type are set by the derivation, adm_acm_ra by
+# _classify_ticket at confirm, and the rest by run-calculation.
+_SERVER_OWNED_KEYS = (
+    "split_type", "statement_type", "adm_acm_ra",
+    "matched_deal_id", "matched_deal_type", "matched_deal_name",
+    "calculated_incentive", "iata_commission", "incentive_breakdown",
+    "exclusion_reason",
+)
+
+_SECTOR_B2B_RE     = re.compile(r"^[A-Z]{3}(/[A-Z]{3})+$")
+_SECTOR_AIRLINE_RE = re.compile(r"^[A-Z]{3}/[A-Z]{3}( +[A-Z]{3}/[A-Z]{3})*$")
+
+
+def _manual_row_warnings(rows: list[dict], statement_type: str) -> list[str]:
+    """Soft checks on punched rows.
+
+    Deliberately warnings, never errors: the XLS path never rejects a row, and a
+    user must be able to punch a partial ticket, buffer it and fix it later. Each
+    one names a downstream consequence rather than just flagging a blank.
+    """
+    warnings: list[str] = []
+    sector_re = _SECTOR_AIRLINE_RE if statement_type == "AIRLINE" else _SECTOR_B2B_RE
+    seen_splits: set[str] = set()
+
+    def warn(message: str) -> None:
+        # A split ticket arrives here as N legs that share a ticket number and
+        # therefore produce N identical messages. Emit each one once.
+        if message not in warnings:
+            warnings.append(message)
+
+    for i, row in enumerate(rows, start=1):
+        label = row.get("ticket_number") or f"row {i}"
+
+        if not row.get("airlines_code"):
+            warn(
+                f"{label}: no airline code — this ticket can never be matched to a deal."
+            )
+        if not row.get("ticket_date") and not row.get("departure_datetime"):
+            warn(
+                f"{label}: no ticket date and no departure date — deal matching will "
+                f"fail with 'could not parse travel date'."
+            )
+        if not row.get("booking_class"):
+            warn(
+                f"{label}: booking class is blank — deal matching treats a blank class "
+                f"as Economy, so Business/First deals will never match."
+            )
+        sector = (row.get("sector") or "").strip().upper()
+        if sector and not sector_re.match(sector):
+            warn(
+                f"{label}: sector '{sector}' is not in AAA/BBB form — segment type "
+                f"detection and multi-sector splitting may be wrong."
+            )
+        if statement_type == "B2B" and not row.get("segment_type"):
+            warn(
+                f"{label}: segment type is blank — Domestic/International deal filters "
+                f"will not match."
+            )
+
+    # One note per split group rather than per resulting leg.
+    for row in rows:
+        if row.get("split_type") != "split":
+            continue
+        key = str(row.get("ticket_number") or "")
+        if key in seen_splits:
+            continue
+        seen_splits.add(key)
+        n = sum(1 for r in rows
+                if r.get("split_type") == "split"
+                and str(r.get("ticket_number") or "") == key)
+        warnings.append(
+            f"{key or 'multi-sector ticket'}: {n} legs — saved as {n} rows, with sell "
+            f"fare, sell tax, tax YQ and sale YR divided by {n}."
+        )
+
+    return warnings
+
+
+@router.post("/manual/preview", response_model=TicketExtractionPreview)
+async def preview_manual_tickets(
+    payload:      ManualTicketPreviewPayload,
+    current_user: User = Depends(get_current_user),
+):
+    """Normalize and split manually punched rows exactly as the XLS path would.
+
+    Read-only — no DB session, no writes. The returned rows are posted verbatim
+    to POST /tickets/upload/confirm, so a hand-punched ticket lands identical to
+    an uploaded one.
+    """
+    statement_type = (payload.statement_type or "B2B").strip().upper()
+    if statement_type not in ("B2B", "AIRLINE"):
+        raise HTTPException(
+            status_code=422,
+            detail="statement_type must be 'B2B' or 'AIRLINE'.",
+        )
+    if not payload.rows:
+        raise HTTPException(status_code=400, detail="No rows to preview.")
+
+    raw: list[dict] = []
+    for i, row in enumerate(payload.rows, start=1):
+        # exclude_none is load-bearing, not tidiness: _split_multi_sector_rows
+        # and derive_ticket_row use setdefault(), which leaves a present-but-None
+        # key alone. Dumping with None values would land split_type=NULL on every
+        # non-split manual ticket instead of 'normal'.
+        d = row.model_dump(exclude_none=True)
+        for key in _SERVER_OWNED_KEYS:
+            d.pop(key, None)
+        d["row_order"] = d.get("row_order") or i
+        raw.append(d)
+
+    derived = derive_ticket_rows(raw, is_airline=(statement_type == "AIRLINE"))
+
+    return TicketExtractionPreview(
+        file_name=MANUAL_ENTRY_FILE_NAME,
+        total_rows=len(derived),
+        rows=[TicketRow(**r) for r in derived],
+        warnings=_manual_row_warnings(derived, statement_type),
+        xls_columns=[],
+        suggested_mapping={},
+        is_template_match=True,
+        sample_row={},
+    )
 
 
 # ── Statement listing ──────────────────────────────────────────────────────
@@ -679,6 +911,120 @@ async def list_uploaded_tickets(
 
     result = await db.execute(q)
     return result.scalars().all()
+
+
+# NOTE: must stay above /uploads/{ticket_id} — declared after it, "page" would be
+# captured as a ticket_id and fail int validation.
+@router.get("/uploads/page", response_model=UploadedTicketsPage)
+async def list_uploaded_tickets_paged(
+    offset:     int = 0,
+    limit:      int = Query(50, le=500),
+    search:     Optional[str] = Query(None, description="Ticket no, PNR, pax, sector, customer"),
+    airline:    Optional[str] = Query(None),
+    statement_type: Optional[str] = Query(None),
+    ticket_status:  Optional[str] = Query(None),
+    batch_id:   Optional[str] = Query(None),
+    date_from:  Optional[str] = Query(None, description="ticket_date >= (YYYY-MM-DD)"),
+    date_to:    Optional[str] = Query(None, description="ticket_date <= (YYYY-MM-DD)"),
+    db:           AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Every ticket the user owns, across all statements, paginated server-side.
+
+    Backs the Internal Statement "All tickets" view. Separate from GET /uploads
+    because that one returns an unbounded list with no total, which cannot drive
+    a pager once a tenant has tens of thousands of rows.
+    """
+    filters = [
+        UploadedTicket.tenant_id == current_user.tenant_id,
+        UploadedTicket.created_by_id == current_user.id,
+    ]
+    if batch_id:
+        filters.append(UploadedTicket.batch_id == batch_id)
+    if airline:
+        filters.append(UploadedTicket.airlines_code == airline)
+    if statement_type:
+        filters.append(UploadedTicket.statement_type == statement_type)
+    if ticket_status:
+        filters.append(UploadedTicket.ticket_status == ticket_status)
+    # ticket_date is stored as a YYYY-MM-DD string, so a lexical compare is also
+    # a chronological one — no cast needed.
+    if date_from:
+        filters.append(UploadedTicket.ticket_date >= date_from)
+    if date_to:
+        filters.append(UploadedTicket.ticket_date <= date_to)
+    if search:
+        like = f"%{search.strip()}%"
+        filters.append(or_(
+            UploadedTicket.ticket_number.ilike(like),
+            UploadedTicket.gds_pnr.ilike(like),
+            UploadedTicket.air_pnr.ilike(like),
+            UploadedTicket.pax_name.ilike(like),
+            UploadedTicket.last_name.ilike(like),
+            UploadedTicket.first_name.ilike(like),
+            UploadedTicket.sector.ilike(like),
+            UploadedTicket.customer_name.ilike(like),
+            UploadedTicket.airline_name.ilike(like),
+            UploadedTicket.invoice_no.ilike(like),
+        ))
+
+    total = (await db.execute(
+        select(func.count()).select_from(UploadedTicket).where(*filters)
+    )).scalar() or 0
+
+    rows = (await db.execute(
+        select(UploadedTicket).where(*filters)
+        .order_by(UploadedTicket.created_at.desc(), UploadedTicket.id.desc())
+        .offset(offset).limit(limit)
+    )).scalars().all()
+
+    # Statement context for the rows on this page only — the flat view shows which
+    # statement each ticket came from, and one lookup beats a join per row.
+    batch_ids = {r.batch_id for r in rows}
+    statements: dict[str, TicketStatement] = {}
+    if batch_ids:
+        res = await db.execute(
+            select(TicketStatement).where(TicketStatement.batch_id.in_(batch_ids))
+        )
+        statements = {s.batch_id: s for s in res.scalars()}
+
+    return UploadedTicketsPage(
+        total=total,
+        offset=offset,
+        limit=limit,
+        rows=[
+            UploadedTicketWithStatement(
+                **UploadedTicketRead.model_validate(r).model_dump(),
+                statement_agency=(statements.get(r.batch_id).agency if statements.get(r.batch_id) else None),
+                statement_name=(statements.get(r.batch_id).statement_name if statements.get(r.batch_id) else None),
+            )
+            for r in rows
+        ],
+    )
+
+
+@router.get("/uploads/facets", response_model=UploadedTicketFacets)
+async def uploaded_ticket_facets(
+    db:           AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Distinct values for the All-tickets filter dropdowns."""
+    scope = [
+        UploadedTicket.tenant_id == current_user.tenant_id,
+        UploadedTicket.created_by_id == current_user.id,
+    ]
+
+    async def distinct(col):
+        res = await db.execute(
+            select(col).where(*scope, col.isnot(None)).distinct().order_by(col)
+        )
+        return [v for v in res.scalars() if v]
+
+    return UploadedTicketFacets(
+        airlines=await distinct(UploadedTicket.airlines_code),
+        statuses=await distinct(UploadedTicket.ticket_status),
+        statement_types=await distinct(UploadedTicket.statement_type),
+    )
 
 
 @router.get("/uploads/{ticket_id}", response_model=UploadedTicketRead)

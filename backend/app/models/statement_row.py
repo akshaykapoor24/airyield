@@ -9,7 +9,7 @@ supported with no fixed Tax1..Tax20 columns). Slug → dedicated model via
 """
 from datetime import datetime
 
-from sqlalchemy import String, DateTime, Integer, ForeignKey
+from sqlalchemy import String, DateTime, Integer, Boolean, ForeignKey, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -34,13 +34,39 @@ class _StatementBase:
     taxes:         Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
 
-class TgqHmpr(_StatementBase, Base):
-    """TGQ HMPR statement rows — one row per ticket line."""
+class _SplitMixin:
+    """Per-sector leg expansion + declared-grand-total marking (airline ticket types).
+
+    An airline statement line covers a whole ticket; ingest expands it into one row per
+    flown sector with the money allocated across the legs (services/sector_split.py).
+    Applied only to the ticket-shaped tables — the ledger-shaped ones have no sectors.
+
+    ``orig_data``/``orig_taxes`` deliberately do NOT reuse ``_NormalizedBase.raw_data``:
+    that name means *pre-normalization*, this means *pre-split*, and declaring the same
+    mapped_column in two places on one MRO is a trap. Keeping them distinct also lets a
+    batch be re-split later (e.g. under a different allocation rule) without re-upload.
+    """
+
+    row_seq:      Mapped[int | None]  = mapped_column(Integer, nullable=True)   # 1-based source line
+    sector_index: Mapped[int | None]  = mapped_column(Integer, nullable=True)   # 1-based leg ("2" of 2/4)
+    sector_count: Mapped[int | None]  = mapped_column(Integer, nullable=True)   # NULL ⇒ never processed
+    split_status: Mapped[str | None]  = mapped_column(String(20), nullable=True)  # single|split|split_partial|unparsed|total
+    is_total:     Mapped[bool]        = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    # none_as_null: without it SQLAlchemy writes Python None as the JSON scalar `null`,
+    # which is NOT SQL NULL — `orig_data IS NULL` would never match and
+    # `coalesce(orig_data, data)` would resolve to JSON null instead of falling through.
+    orig_data:    Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)  # pre-split row, verbatim
+    orig_taxes:   Mapped[list | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+
+
+class TgqHmpr(_SplitMixin, _StatementBase, Base):
+    """TGQ HMPR statement rows — one row per flown sector (see _SplitMixin)."""
     __tablename__ = "tgq_hmpr"
 
 
-class Ndc(_StatementBase, Base):
-    """NDC statement rows — one row per ticket line."""
+class Ndc(_SplitMixin, _StatementBase, Base):
+    """NDC statement rows — one row per ticket line (splitting available, not yet enabled
+    in statement_spec.STATEMENT_SPECS["ndc"])."""
     __tablename__ = "ndc"
 
 

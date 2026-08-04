@@ -376,7 +376,7 @@ async def _flush_chunk(db, txns, errs, batch_id, tenant_id, user_id, processed_p
 async def _parse_bsp_statement(batch_id: str, tenant_id: int, user_id: int):
     from sqlalchemy import select, delete
     from app.models.bsp_statement import BspStatement, BspStatementRow, BspParseError
-    from app.services import gcs
+    from app.services import file_store
     from app.services.bsp_pdf_parser import iter_page_results, has_text_layer
 
     engine, Session = _new_engine()
@@ -412,7 +412,7 @@ async def _parse_bsp_statement(batch_id: str, tenant_id: int, user_id: int):
                 return
 
             # ── Download the PDF from GCS ───────────────────────────────────
-            pdf_bytes = await gcs.download_bytes(file_url, _bsp_bucket())
+            pdf_bytes = await file_store.load(file_url, _bsp_bucket())
 
             # ── Guard: scanned/image PDFs have no text layer ────────────────
             if not has_text_layer(pdf_bytes):
@@ -549,7 +549,7 @@ def parse_bsp_summary(self, batch_id: str, tenant_id: int, user_id: int):
 async def _parse_bsp_summary(batch_id: str, tenant_id: int, user_id: int):
     from sqlalchemy import select, delete, update, insert
     from app.models.bsp_summary import BspSummaryStatement, BspSummaryRow
-    from app.services import gcs
+    from app.services import file_store
     from app.services.bsp_pdf_parser import parse_bsp_summary_pdf, has_text_layer
 
     engine, Session = _new_engine()
@@ -577,7 +577,7 @@ async def _parse_bsp_summary(batch_id: str, tenant_id: int, user_id: int):
                 await _fail_summary(db, batch_id, "No file attached to this summary.")
                 return
 
-            pdf_bytes = await gcs.download_bytes(file_url, _bsp_bucket())
+            pdf_bytes = await file_store.load(file_url, _bsp_bucket())
             if not has_text_layer(pdf_bytes):
                 await _fail_summary(db, batch_id,
                                     "PDF has no extractable text (looks scanned/image-only). OCR is not supported.")

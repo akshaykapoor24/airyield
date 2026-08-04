@@ -5,197 +5,22 @@ import { useDropzone } from "react-dropzone";
 import {
   Upload, CheckCircle, AlertCircle, RefreshCw, ChevronLeft,
   FileSpreadsheet, X, Download, ArrowRight, ChevronDown, Trash2, Plus, Search,
-  Building2, Calendar, FileText,
+  FileText,
 } from "lucide-react";
 import api from "@/lib/api";
+import StatementFormPanel, { isStatementComplete as statementComplete, type StatementType } from "@/components/tickets/StatementFormPanel";
+import {
+  mappingFieldsFor, reviewColGroups,
+  type ReviewColGroup as TColGroup,
+  type TicketRow, type TicketExtractionPreview as ExtractionPreview,
+} from "@/lib/ticketFields";
+
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 
-// ── types ──────────────────────────────────────────────────────────────────
-type TicketRow = {
-  row_order:            number;
-  booking_ref?:         string | null;
-  segment_type?:        string | null;
-  invoice_type?:        string | null;
-  invoice_no?:          string | null;
-  ticket_date?:         string | null;
-  last_name?:           string | null;
-  first_name?:          string | null;
-  sector?:              string | null;
-  booking_class?:       string | null;
-  departure_datetime?:  string | null;
-  gds_pnr?:             string | null;
-  airlines_code?:       string | null;
-  ticket_number?:       string | null;
-  sell_fare?:           number | null;
-  sell_tax?:            number | null;
-  sell_tax_yq?:         number | null;
-  sale_yr?:             number | null;
-  sale_k3?:             number | null;
-  rei_sell?:            number | null;
-  seat_selection?:      number | null;
-  excess_baggage?:      number | null;
-  meals?:               number | null;
-  rfd_sell?:            number | null;
-  can_charge?:          number | null;
-  booking_fee_sell?:    number | null;
-  cgst_sell?:           number | null;
-  sgst_sell?:           number | null;
-  igst_sell?:           number | null;
-  comm_sell?:           number | null;
-  adm?:                 number | null;
-  incentive_sell?:      number | null;
-  dis_sell?:            number | null;
-  tds_sell?:            number | null;
-  total_amt?:           number | null;
-  paid_by_credit_card?: number | null;
-  net_amt?:             number | null;
-  cc?:                  string | null;
-  acc_code?:            string | null;
-  sold_to?:             string | null;
-  customer_name?:       string | null;
-  airline_name?:        string | null;
-  split_type?:          string | null;
-};
-
-type ExtractionPreview = {
-  file_name:         string;
-  total_rows:        number;
-  rows:              TicketRow[];
-  warnings:          string[];
-  xls_columns:       string[];
-  suggested_mapping: Record<string, string>;
-  is_template_match: boolean;
-  sample_row:        Record<string, string>;
-};
-
-type StatementType = "B2B" | "AIRLINE";
-
-const AIRLINE_AGENCIES = ["BSP", "NDC", "TGHMPR", "TGQ"] as const;
-
-type FieldDef = { key: string; label: string; required: boolean; onlyFor?: StatementType };
-
-const OUR_FIELDS: FieldDef[] = [
-  // ── Core (both types) ────────────────────────────────────────────────────
-  { key: "ticket_number",      label: "Ticket Number",       required: true  },
-  { key: "airlines_code",      label: "Airline Code",        required: true  },
-  { key: "sector",             label: "Sector / Sectors",    required: true  },
-  { key: "ticket_date",        label: "Ticket Date",         required: false },
-  { key: "departure_datetime", label: "Departure Date/Time", required: false },
-  { key: "booking_class",      label: "Booking Class",       required: false },
-  { key: "gds_pnr",            label: "GDS / Gal PNR",       required: false },
-  { key: "airline_name",       label: "Airline Name",        required: false },
-  { key: "invoice_type",       label: "Invoice Type",        required: false },
-  { key: "invoice_no",         label: "Invoice No",          required: false },
-  { key: "segment_type",       label: "Segment Type",        required: false },
-  { key: "sell_fare",          label: "Sell / Base Fare",    required: false },
-  { key: "sell_tax",           label: "Sell Tax / Total Tax",required: false },
-  { key: "sell_tax_yq",        label: "Tax YQ",              required: false },
-  { key: "sale_yr",            label: "Sale YR",             required: false },
-  { key: "sale_k3",            label: "Sale K3",             required: false },
-  { key: "total_amt",          label: "Total Fare / Amt",    required: false },
-  { key: "comm_sell",          label: "Comm Sell / Comm Amt",required: false },
-  { key: "net_amt",            label: "Net AMT / Net Remit", required: false },
-  { key: "customer_name",      label: "Customer / Client",   required: false },
-  { key: "tour_code",          label: "Tour Code",           required: false },
-  { key: "acc_code",           label: "Acc Code / AC_ACCT",  required: false },
-  // ── B2B-primary ───────────────────────────────────────────────────────────
-  { key: "booking_ref",        label: "Booking Ref",         required: false, onlyFor: "B2B" },
-  { key: "last_name",          label: "Last Name",           required: false, onlyFor: "B2B" },
-  { key: "first_name",         label: "First Name",          required: false, onlyFor: "B2B" },
-  { key: "sold_to",            label: "Sold To",             required: false, onlyFor: "B2B" },
-  { key: "cc",                 label: "CC",                  required: false, onlyFor: "B2B" },
-  { key: "rei_sell",           label: "REI Sell",            required: false, onlyFor: "B2B" },
-  { key: "seat_selection",     label: "Seat Selection",      required: false, onlyFor: "B2B" },
-  { key: "excess_baggage",     label: "Excess Baggage",      required: false, onlyFor: "B2B" },
-  { key: "meals",              label: "Meals",               required: false, onlyFor: "B2B" },
-  { key: "rfd_sell",           label: "RFD Sell",            required: false, onlyFor: "B2B" },
-  { key: "can_charge",         label: "CAN Charge",          required: false, onlyFor: "B2B" },
-  { key: "booking_fee_sell",   label: "Booking Fee Sell",    required: false, onlyFor: "B2B" },
-  { key: "cgst_sell",          label: "CGST Sell",           required: false, onlyFor: "B2B" },
-  { key: "sgst_sell",          label: "SGST Sell",           required: false, onlyFor: "B2B" },
-  { key: "igst_sell",          label: "IGST Sell",           required: false, onlyFor: "B2B" },
-  { key: "adm",                label: "ADM",                 required: false, onlyFor: "B2B" },
-  { key: "incentive_sell",     label: "Incentive Sell",      required: false, onlyFor: "B2B" },
-  { key: "dis_sell",           label: "Dis Sell",            required: false, onlyFor: "B2B" },
-  { key: "tds_sell",           label: "TDS Sell",            required: false, onlyFor: "B2B" },
-  { key: "paid_by_credit_card",label: "Paid By Credit Card", required: false, onlyFor: "B2B" },
-  // ── Airline-primary ───────────────────────────────────────────────────────
-  { key: "pax_name",           label: "Pax Name",            required: false, onlyFor: "AIRLINE" },
-  { key: "air_pnr",            label: "Air PNR",             required: false, onlyFor: "AIRLINE" },
-  { key: "pcc",                label: "PCC",                 required: false, onlyFor: "AIRLINE" },
-  { key: "booking_signon",     label: "Booking Sign-on",     required: false, onlyFor: "AIRLINE" },
-  { key: "booking_agency_name",label: "Booking Agency Name", required: false, onlyFor: "AIRLINE" },
-  { key: "ticketing_signon",   label: "Ticketing Sign-on",   required: false, onlyFor: "AIRLINE" },
-  { key: "document_type",      label: "Document Type",       required: false, onlyFor: "AIRLINE" },
-  { key: "fare_basis",         label: "Fare Basis",          required: false, onlyFor: "AIRLINE" },
-  { key: "fare_const_type",    label: "Fare Const Type",     required: false, onlyFor: "AIRLINE" },
-  { key: "transaction_type",   label: "Transaction Type",    required: false, onlyFor: "AIRLINE" },
-  { key: "fop",                label: "FOP",                 required: false, onlyFor: "AIRLINE" },
-  { key: "fop_details",        label: "FOP Details",         required: false, onlyFor: "AIRLINE" },
-  { key: "flight_no",          label: "Flight No",           required: false, onlyFor: "AIRLINE" },
-  { key: "travel_dt",          label: "Travel Dt",           required: false, onlyFor: "AIRLINE" },
-  { key: "net_fare",           label: "Net Fare",            required: false, onlyFor: "AIRLINE" },
-  { key: "comm_percent",       label: "Comm (%)",            required: false, onlyFor: "AIRLINE" },
-  { key: "roe",                label: "ROE",                 required: false, onlyFor: "AIRLINE" },
-  { key: "nuc",                label: "NUC",                 required: false, onlyFor: "AIRLINE" },
-  { key: "gstn",               label: "GSTN",                required: false, onlyFor: "AIRLINE" },
-];
-
-type TColDef   = { key: keyof TicketRow; label: string; type: "text"|"date"|"number" };
-type TColGroup = { label: string; color: string; cols: TColDef[] };
-
-const TICKET_COL_GROUPS: TColGroup[] = [
-  { label:"Passenger & Booking", color:"#1e3a5f", cols:[
-    { key:"booking_ref",         label:"Booking Ref",   type:"text"   },
-    { key:"segment_type",        label:"Segment Type",  type:"text"   },
-    { key:"invoice_type",        label:"Invoice Type",  type:"text"   },
-    { key:"invoice_no",          label:"Invoice No",    type:"text"   },
-    { key:"ticket_date",         label:"Ticket Date",   type:"date"   },
-    { key:"last_name",           label:"Last Name",     type:"text"   },
-    { key:"first_name",          label:"First Name",    type:"text"   },
-  ]},
-  { label:"Flight Info", color:"#4f46e5", cols:[
-    { key:"sector",              label:"Sector",        type:"text"   },
-    { key:"booking_class",       label:"Class",         type:"text"   },
-    { key:"departure_datetime",  label:"Departure",     type:"date"   },
-    { key:"gds_pnr",             label:"GDS PNR",       type:"text"   },
-    { key:"airlines_code",       label:"Airline Code",  type:"text"   },
-    { key:"airline_name",        label:"Airline Name",  type:"text"   },
-    { key:"ticket_number",       label:"Ticket #",      type:"text"   },
-  ]},
-  { label:"Financial", color:"#059669", cols:[
-    { key:"sell_fare",           label:"Sell Fare",     type:"number" },
-    { key:"sell_tax",            label:"Sell Tax",      type:"number" },
-    { key:"sell_tax_yq",         label:"Tax YQ",        type:"number" },
-    { key:"sale_yr",             label:"Sale YR",       type:"number" },
-    { key:"sale_k3",             label:"Sale K3",       type:"number" },
-    { key:"rei_sell",            label:"REI Sell",      type:"number" },
-    { key:"seat_selection",      label:"Seat Sel.",     type:"number" },
-    { key:"excess_baggage",      label:"Excess Bag.",   type:"number" },
-    { key:"meals",               label:"Meals",         type:"number" },
-    { key:"rfd_sell",            label:"RFD Sell",      type:"number" },
-    { key:"can_charge",          label:"CAN Charge",    type:"number" },
-    { key:"booking_fee_sell",    label:"Booking Fee",   type:"number" },
-    { key:"cgst_sell",           label:"CGST",          type:"number" },
-    { key:"sgst_sell",           label:"SGST",          type:"number" },
-    { key:"igst_sell",           label:"IGST",          type:"number" },
-    { key:"comm_sell",           label:"Comm Sell",     type:"number" },
-    { key:"adm",                 label:"ADM",           type:"number" },
-    { key:"incentive_sell",      label:"Incentive",     type:"number" },
-    { key:"dis_sell",            label:"Dis Sell",      type:"number" },
-    { key:"tds_sell",            label:"TDS Sell",      type:"number" },
-    { key:"total_amt",           label:"Total Amt",     type:"number" },
-    { key:"paid_by_credit_card", label:"Paid CC",       type:"number" },
-    { key:"net_amt",             label:"Net AMT",       type:"number" },
-  ]},
-  { label:"Account", color:"#9333ea", cols:[
-    { key:"cc",                  label:"CC",            type:"text"   },
-    { key:"acc_code",            label:"Acc Code",      type:"text"   },
-    { key:"sold_to",             label:"Sold To",       type:"text"   },
-    { key:"customer_name",       label:"Customer Name", type:"text"   },
-  ]},
-];
+// Field metadata lives in @/lib/ticketFields so the mapping step, the review
+// grid, the manual punch form and the edit modal cannot drift apart.
+const TICKET_COL_GROUPS: TColGroup[] = reviewColGroups();
 
 // Agency options are fetched live from the supplier master API
 
@@ -208,7 +33,7 @@ function TicketReviewTable({
 }:{
   rows: TicketRow[];
   colGroups: TColGroup[];
-  onChange: (idx: number, key: keyof TicketRow, val: string) => void;
+  onChange: (idx: number, key: string, val: string) => void;
   onDelete: (idx: number) => void;
   onAdd: () => void;
   filterText: string;
@@ -281,7 +106,7 @@ function TicketReviewTable({
                     : <span className="inline-flex px-2 py-0.5 rounded-full text-[10px] font-semibold bg-gray-100 text-gray-500">Normal</span>}
                 </td>
                 {allCols.map(col=>{
-                  const raw=row[col.key];
+                  const raw=row[col.key as keyof TicketRow];
                   const val=raw==null?"":String(raw);
                   return(
                     <td key={col.key} className="px-1 py-1 border-l border-gray-100">
@@ -314,230 +139,6 @@ function TicketReviewTable({
   );
 }
 
-// ── Agency custom dropdown (always opens downward) ─────────────────────────
-function AgencyDropdown({ agency, setAgency, agencyOptions, touched, fieldCls }: {
-  agency: string; setAgency: (v: string) => void;
-  agencyOptions: string[]; touched: boolean;
-  fieldCls: (v: string) => string;
-}) {
-  const [open, setOpen]     = useState(false);
-  const [query, setQuery]   = useState("");
-  const ref                 = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, []);
-
-  const filtered = agencyOptions.filter(a => a.toLowerCase().includes(query.toLowerCase()));
-
-  const handleSelect = (a: string) => { setAgency(a); setOpen(false); setQuery(""); };
-
-  return (
-    <div>
-      <label className="block text-xs font-semibold text-gray-600 mb-1.5 uppercase tracking-wide">
-        <Building2 className="w-3.5 h-3.5 inline mr-1" />
-        Statement Agency <span className="text-red-500">*</span>
-      </label>
-      <div className="relative" ref={ref}>
-        <button
-          type="button"
-          onClick={() => setOpen(o => !o)}
-          className={`${fieldCls(agency)} w-full text-left flex items-center justify-between pr-8`}
-        >
-          <span className={agency ? "text-gray-800" : "text-gray-400"}>
-            {agency || "— Select agency —"}
-          </span>
-          <ChevronDown className="w-4 h-4 text-gray-400 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-        </button>
-
-        {open && (
-          <div className="absolute z-50 top-full left-0 right-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg">
-            <div className="p-2 border-b border-gray-100">
-              <div className="relative">
-                <Search className="w-3.5 h-3.5 text-gray-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
-                <input
-                  autoFocus
-                  value={query}
-                  onChange={e => setQuery(e.target.value)}
-                  placeholder="Search Agency..."
-                  className="w-full pl-8 pr-3 py-1.5 text-xs border border-gray-200 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-400 bg-gray-50"
-                />
-              </div>
-            </div>
-            <ul className="max-h-48 overflow-y-auto py-1">
-              {filtered.length === 0 ? (
-                <li className="px-3 py-2 text-xs text-gray-400 italic">No agencies found</li>
-              ) : filtered.map(a => (
-                <li key={a}>
-                  <button
-                    type="button"
-                    onClick={() => handleSelect(a)}
-                    className={`w-full text-left px-3 py-2 text-xs hover:bg-blue-50 transition-colors ${
-                      a === agency ? "bg-blue-50 text-blue-700 font-semibold" : "text-gray-700"
-                    }`}
-                  >
-                    {a}
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-      </div>
-      {touched && !agency && (
-        <p className="text-[11px] text-red-500 mt-1">Agency is required</p>
-      )}
-    </div>
-  );
-}
-
-// ── Statement form panel ───────────────────────────────────────────────────
-function StatementFormPanel({
-  statementType, setStatementType,
-  agency, setAgency,
-  agencyOptions,
-  validFrom, setValidFrom,
-  validTo, setValidTo,
-  touched, isComplete,
-}: {
-  statementType: StatementType; setStatementType: (v: StatementType) => void;
-  agency: string; setAgency: (v: string) => void;
-  agencyOptions: string[];
-  validFrom: string; setValidFrom: (v: string) => void;
-  validTo: string; setValidTo: (v: string) => void;
-  touched: boolean;
-  isComplete: boolean;
-}) {
-  const fieldCls = (val: string) =>
-    `w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 ${
-      touched && !val.trim()
-        ? "border-red-300 bg-red-50"
-        : "border-gray-200 bg-white"
-    }`;
-  const dateError = touched && validFrom && validTo && validTo < validFrom;
-
-  return (
-    <div className="bg-white border border-gray-200 rounded-xl overflow-hidden h-fit sticky top-4">
-      {/* panel header */}
-      <div className="px-5 py-4 border-b border-gray-100" style={{background:"#1e3a5f"}}>
-        <div className="flex items-center gap-2.5">
-          <FileText className="w-4 h-4 text-white/80" />
-          <h2 className="text-sm font-semibold text-white">Statement Details</h2>
-        </div>
-        <p className="text-xs text-white/60 mt-1">Fill in the statement information before saving</p>
-      </div>
-
-      <div className="px-5 py-5 space-y-4">
-        {/* Statement Type */}
-        <div>
-          <label className="block text-xs font-semibold text-gray-600 mb-1.5 uppercase tracking-wide">
-            Statement Type <span className="text-red-500">*</span>
-          </label>
-          <div className="flex rounded-lg border border-gray-200 overflow-hidden text-sm font-medium">
-            {(["B2B", "AIRLINE"] as StatementType[]).map(t => (
-              <button
-                key={t}
-                type="button"
-                onClick={() => { setStatementType(t); setAgency(""); }}
-                className={`flex-1 py-2 transition-colors ${
-                  statementType === t
-                    ? "bg-[#1e3a5f] text-white"
-                    : "bg-white text-gray-600 hover:bg-gray-50"
-                }`}
-              >
-                {t}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Agency — conditional on statement type */}
-        {statementType === "AIRLINE" ? (
-          <div>
-            <label className="block text-xs font-semibold text-gray-600 mb-1.5 uppercase tracking-wide">
-              <Building2 className="w-3.5 h-3.5 inline mr-1" />
-              Statement Agency <span className="text-red-500">*</span>
-            </label>
-            <select
-              value={agency}
-              onChange={e => setAgency(e.target.value)}
-              className={fieldCls(agency)}
-            >
-              <option value="">— Select agency —</option>
-              {AIRLINE_AGENCIES.map(a => (
-                <option key={a} value={a}>{a}</option>
-              ))}
-            </select>
-            {touched && !agency && (
-              <p className="text-[11px] text-red-500 mt-1">Agency is required</p>
-            )}
-          </div>
-        ) : (
-          <AgencyDropdown
-            agency={agency}
-            setAgency={setAgency}
-            agencyOptions={agencyOptions}
-            touched={touched}
-            fieldCls={fieldCls}
-          />
-        )}
-
-        {/* Valid From */}
-        <div>
-          <label className="block text-xs font-semibold text-gray-600 mb-1.5 uppercase tracking-wide">
-            <Calendar className="w-3.5 h-3.5 inline mr-1" />
-            Statement Valid From <span className="text-red-500">*</span>
-          </label>
-          <input
-            type="date"
-            value={validFrom}
-            onChange={e => setValidFrom(e.target.value)}
-            onClick={e => { try { (e.target as HTMLInputElement).showPicker(); } catch {} }}
-            className={fieldCls(validFrom)}
-          />
-          {touched && !validFrom && (
-            <p className="text-[11px] text-red-500 mt-1">Valid from date is required</p>
-          )}
-        </div>
-
-        {/* Valid To */}
-        <div>
-          <label className="block text-xs font-semibold text-gray-600 mb-1.5 uppercase tracking-wide">
-            <Calendar className="w-3.5 h-3.5 inline mr-1" />
-            Statement Valid To <span className="text-red-500">*</span>
-          </label>
-          <input
-            type="date"
-            value={validTo}
-            min={validFrom || undefined}
-            onChange={e => setValidTo(e.target.value)}
-            onClick={e => { try { (e.target as HTMLInputElement).showPicker(); } catch {} }}
-            className={dateError ? "w-full border border-red-300 bg-red-50 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" : fieldCls(validTo)}
-          />
-          {touched && !validTo && (
-            <p className="text-[11px] text-red-500 mt-1">Valid to date is required</p>
-          )}
-          {dateError && (
-            <p className="text-[11px] text-red-500 mt-1">Valid to must be on or after valid from</p>
-          )}
-        </div>
-
-        {/* completion indicator */}
-        <div className={`flex items-center gap-2 px-3 py-2.5 rounded-lg text-xs font-medium ${
-          isComplete ? "bg-green-50 text-green-700 border border-green-200" : "bg-gray-50 text-gray-400 border border-gray-200"
-        }`}>
-          <CheckCircle className={`w-4 h-4 ${isComplete ? "text-green-600" : "text-gray-300"}`} />
-          {isComplete ? "Statement details complete" : "Complete all fields above"}
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ── component ──────────────────────────────────────────────────────────────
 export default function UploadTicketsPage() {
   const router = useRouter();
@@ -558,6 +159,7 @@ export default function UploadTicketsPage() {
   // ── Statement form state ───────────────────────────────────────────────────
   const [statementType, setStatementType] = useState<StatementType>("B2B");
   const [agency,        setAgency]        = useState("");
+  const [statementName, setStatementName] = useState("");
   const [agencyOptions, setAgencyOptions] = useState<string[]>([]);
 
   useEffect(() => {
@@ -569,14 +171,10 @@ export default function UploadTicketsPage() {
   const [validTo,     setValidTo]     = useState("");
   const [formTouched, setFormTouched] = useState(false);
 
-  const isStatementComplete =
-    agency !== "" &&
-    validFrom !== "" &&
-    validTo !== "" &&
-    validTo >= validFrom;
+  const isStatementComplete = statementComplete(agency, validFrom, validTo);
 
   // ── Editable row handlers ─────────────────────────────────────────────────
-  const handleTicketRowChange = useCallback((idx: number, key: keyof TicketRow, val: string) => {
+  const handleTicketRowChange = useCallback((idx: number, key: string, val: string) => {
     setRows(prev => prev.map((r, i) => {
       if (i !== idx) return r;
       const col = TICKET_COL_GROUPS.flatMap(g => g.cols).find(c => c.key === key);
@@ -690,8 +288,8 @@ export default function UploadTicketsPage() {
     }
   };
 
-  const activeFields    = OUR_FIELDS.filter(f => !f.onlyFor || f.onlyFor === statementType);
-  const requiredKeys    = activeFields.filter(f => f.required).map(f => f.key);
+  const activeFields    = mappingFieldsFor(statementType);
+  const requiredKeys    = activeFields.filter(f => f.mapRequired).map(f => f.key);
   const missingRequired = requiredKeys.filter(k => !mapping[k] || mapping[k] === SKIP);
 
   // ── Step 3: confirm → save ────────────────────────────────────────────────
@@ -708,6 +306,7 @@ export default function UploadTicketsPage() {
           rows,
           statement_type: statementType,
           agency,
+          statement_name: statementName.trim() || null,
           valid_from:     validFrom,
           valid_to:       validTo,
         },
@@ -739,7 +338,8 @@ export default function UploadTicketsPage() {
   const reset = () => {
     setStep("drop"); setPreview(null); setStoredFile(null);
     setMapping({}); setBatchId(null); setError(null); setRows([]); resetFilter();
-    setStatementType("B2B"); setAgency(""); setValidFrom(""); setValidTo(""); setFormTouched(false);
+    setStatementType("B2B"); setAgency(""); setStatementName("");
+    setValidFrom(""); setValidTo(""); setFormTouched(false);
   };
 
   const isDone = step === "done";
@@ -847,6 +447,7 @@ export default function UploadTicketsPage() {
           <StatementFormPanel
             statementType={statementType} setStatementType={setStatementType}
             agency={agency}               setAgency={setAgency}
+            statementName={statementName}   setStatementName={setStatementName}
             agencyOptions={agencyOptions}
             validFrom={validFrom}         setValidFrom={setValidFrom}
             validTo={validTo}             setValidTo={setValidTo}
@@ -979,8 +580,8 @@ export default function UploadTicketsPage() {
                 return (
                   <div key={field.key} className="flex items-center px-5 py-2.5 gap-4">
                     <div className="w-48 shrink-0">
-                      <span className="text-xs font-medium text-gray-700">{field.label}</span>
-                      {field.required && <span className="text-red-500 ml-0.5 text-xs">*</span>}
+                      <span className="text-xs font-medium text-gray-700">{field.mapLabel ?? field.label}</span>
+                      {field.mapRequired && <span className="text-red-500 ml-0.5 text-xs">*</span>}
                     </div>
                     <ArrowRight className="w-3.5 h-3.5 text-gray-300 shrink-0" />
                     <div className="flex-1 relative">
@@ -989,7 +590,7 @@ export default function UploadTicketsPage() {
                         onChange={e => setMapping(prev => ({ ...prev, [field.key]: e.target.value }))}
                         className={`w-full appearance-none text-xs border rounded-lg px-3 py-1.5 pr-7 focus:outline-none focus:ring-1 focus:ring-blue-400 ${
                           isSkipped
-                            ? field.required
+                            ? field.mapRequired
                               ? "border-red-300 bg-red-50 text-red-600"
                               : "border-gray-200 bg-gray-50 text-gray-400"
                             : "border-green-300 bg-green-50 text-green-800"
@@ -1021,7 +622,7 @@ export default function UploadTicketsPage() {
                     <div className="w-20 shrink-0 text-right">
                       {!isSkipped
                         ? <span className="inline-flex items-center gap-1 text-[10px] font-medium text-green-700 bg-green-100 px-2 py-0.5 rounded-full"><CheckCircle className="w-2.5 h-2.5" /> Mapped</span>
-                        : field.required
+                        : field.mapRequired
                           ? <span className="text-[10px] font-medium text-red-500">Required</span>
                           : <span className="text-[10px] text-gray-300">Optional</span>}
                     </div>
@@ -1035,7 +636,7 @@ export default function UploadTicketsPage() {
             <div className="text-xs text-gray-500">
               {missingRequired.length > 0 && !preview.is_template_match && (
                 <span className="text-red-500">
-                  Required fields not mapped: {missingRequired.map(k => activeFields.find(f => f.key === k)?.label).join(", ")}
+                  Required fields not mapped: {missingRequired.map(k => activeFields.find(f => f.key === k)?.mapLabel).join(", ")}
                 </span>
               )}
             </div>

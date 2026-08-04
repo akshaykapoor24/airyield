@@ -7,11 +7,14 @@ import {
   ChevronLeft, Search, RefreshCw, FileSpreadsheet, Calculator,
   CheckCircle2, Pencil, Trash2, X, Save, AlertTriangle,
   FileSearch, ChevronDown, ChevronRight, Building2, Calendar, Hash, FileText,
-  AlertCircle, TrendingUp,
+  AlertCircle, TrendingUp, SquarePen, FilePlus,
 } from "lucide-react";
 import api from "@/lib/api";
 import Pagination from "@/components/ui/Pagination";
 import { INCENTIVE_TYPE_COLS } from "@/lib/incentives";
+import {
+  MANUAL_ENTRY_FILE_NAME, FIELD_GROUPS, editableFieldsForTicket,
+} from "@/lib/ticketFields";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -308,58 +311,6 @@ const AIRLINE_NUM_HEADERS: { key: keyof UploadedTicket; label: string }[] = [
   { key: "nuc",         label: "NUC"       },
 ];
 
-const EDITABLE_FIELDS: { key: keyof UploadedTicket; label: string; type: "text"|"date"|"number"|"select"; options?: string[] }[] = [
-  { key: "ticket_number",      label: "Ticket Number",       type: "text"   },
-  { key: "booking_ref",        label: "Booking Ref",         type: "text"   },
-  { key: "last_name",          label: "Last Name",           type: "text"   },
-  { key: "first_name",         label: "First Name",          type: "text"   },
-  { key: "sector",             label: "Sector",              type: "text"   },
-  { key: "booking_class",      label: "Booking Class",       type: "text"   },
-  { key: "airline_name",       label: "Airline Name",        type: "text"   },
-  { key: "airlines_code",      label: "Airline Code",        type: "text"   },
-  { key: "gds_pnr",            label: "GDS PNR",             type: "text"   },
-  { key: "ticket_date",        label: "Ticket Date",         type: "date"   },
-  { key: "departure_datetime", label: "Departure",           type: "date"   },
-  { key: "segment_type",       label: "Segment Type",        type: "text"   },
-  { key: "invoice_type",       label: "Invoice Type",        type: "text"   },
-  { key: "invoice_no",         label: "Invoice No",          type: "text"   },
-  { key: "sell_fare",          label: "Sell Fare",           type: "number" },
-  { key: "sell_tax",           label: "Sell Tax",            type: "number" },
-  { key: "sell_tax_yq",        label: "Sell Tax YQ",         type: "number" },
-  { key: "sale_yr",            label: "Sale YR",             type: "number" },
-  { key: "sale_k3",            label: "Sale K3",             type: "number" },
-  { key: "rei_sell",           label: "REI Sell",            type: "number" },
-  { key: "seat_selection",     label: "Seat Selection",      type: "number" },
-  { key: "excess_baggage",     label: "Excess Baggage",      type: "number" },
-  { key: "meals",              label: "Meals",               type: "number" },
-  { key: "rfd_sell",           label: "RFD Sell",            type: "number" },
-  { key: "can_charge",         label: "CAN Charge",          type: "number" },
-  { key: "booking_fee_sell",   label: "Booking Fee",         type: "number" },
-  { key: "cgst_sell",          label: "CGST",                type: "number" },
-  { key: "sgst_sell",          label: "SGST",                type: "number" },
-  { key: "igst_sell",          label: "IGST",                type: "number" },
-  { key: "comm_sell",          label: "Comm Sell",           type: "number" },
-  { key: "adm",                label: "ADM",                 type: "number" },
-  { key: "incentive_sell",     label: "Incentive Sell",      type: "number" },
-  { key: "dis_sell",           label: "Dis Sell",            type: "number" },
-  { key: "tds_sell",           label: "TDS Sell",            type: "number" },
-  { key: "total_amt",          label: "Total Amt",           type: "number" },
-  { key: "paid_by_credit_card",label: "Paid By CC",          type: "number" },
-  { key: "net_amt",            label: "Net AMT",             type: "number" },
-  { key: "cc",                 label: "CC",                  type: "text"   },
-  { key: "acc_code",           label: "Acc Code",            type: "text"   },
-  { key: "sold_to",            label: "Sold To",             type: "select", options: ["customer", "agency"] },
-  { key: "customer_name",      label: "Customer Name",       type: "text"   },
-  { key: "ticket_status",      label: "Status",              type: "text"   },
-];
-
-const EDIT_GROUPS = [
-  { label: "Passenger & Trip", keys: ["ticket_number","booking_ref","last_name","first_name","sector","booking_class","ticket_date","departure_datetime","segment_type","invoice_type","invoice_no"] },
-  { label: "Flight Info",      keys: ["airline_name","airlines_code","gds_pnr"] },
-  { label: "Financial",        keys: ["sell_fare","sell_tax","sell_tax_yq","sale_yr","sale_k3","rei_sell","seat_selection","excess_baggage","meals","rfd_sell","can_charge","booking_fee_sell","cgst_sell","sgst_sell","igst_sell","comm_sell","adm","incentive_sell","dis_sell","tds_sell","total_amt","paid_by_credit_card","net_amt"] },
-  { label: "Account / Other",  keys: ["cc","acc_code","sold_to","customer_name","ticket_status"] },
-];
-
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 function fmt(v: number | null | undefined) {
@@ -592,6 +543,10 @@ export default function StatementDetailPage() {
 
   // ── Edit handlers ──────────────────────────────────────────────────────
   const openEdit = (t: UploadedTicket) => { setEditTicket(t); setEditDraft({ ...t }); };
+  const editFields = useMemo(
+    () => (editTicket ? editableFieldsForTicket(editTicket.statement_type, editTicket as unknown as Record<string, unknown>) : []),
+    [editTicket],
+  );
   const saveEdit = async () => {
     if (!editTicket) return;
     setSaving(true);
@@ -763,8 +718,12 @@ export default function StatementDetailPage() {
               </span>
             </div>
             <div className="text-center">
-              <p className="text-[11px] text-white/50 uppercase tracking-wide mb-0.5">File</p>
-              {statement.file_url ? (
+              <p className="text-[11px] text-white/50 uppercase tracking-wide mb-0.5">Source</p>
+              {statement.file_name === MANUAL_ENTRY_FILE_NAME ? (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-400/25 text-amber-100 border border-amber-300/40 whitespace-nowrap">
+                  <SquarePen className="w-3 h-3" /> Manually punched
+                </span>
+              ) : statement.file_url ? (
                 <button
                   onClick={async () => {
                     try {
@@ -845,6 +804,13 @@ export default function StatementDetailPage() {
           {selected.size > 0 && (
             <span className="text-xs text-gray-500">{selected.size} selected</span>
           )}
+          <Link
+            href={`/tickets/create?statement=${batchId}`}
+            title="Punch a ticket into this statement"
+            className="flex items-center gap-1.5 px-3.5 py-2 border border-gray-200 rounded-lg text-xs font-medium text-gray-600 hover:bg-gray-50"
+          >
+            <FilePlus className="w-3.5 h-3.5" /> Add Ticket
+          </Link>
           <button
             onClick={runBatch}
             disabled={batchCalcing}
@@ -1199,13 +1165,14 @@ export default function StatementDetailPage() {
               <button onClick={() => setEditTicket(null)} className="p-1 hover:bg-gray-100 rounded-lg"><X className="w-4 h-4 text-gray-500" /></button>
             </div>
             <div className="overflow-y-auto flex-1 px-6 py-4 space-y-6">
-              {EDIT_GROUPS.map(group => (
-                <div key={group.label}>
+              {FIELD_GROUPS.map(group => {
+                const groupFields = editFields.filter(f => f.group === group.id);
+                if (groupFields.length === 0) return null;
+                return (
+                <div key={group.id}>
                   <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-3">{group.label}</p>
                   <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                    {group.keys.map(k => {
-                      const f = EDITABLE_FIELDS.find(ef => ef.key === k);
-                      if (!f) return null;
+                    {groupFields.map(f => {
                       const val = editDraft[f.key as keyof UploadedTicket];
                       return (
                         <div key={f.key}>
@@ -1238,7 +1205,24 @@ export default function StatementDetailPage() {
                     })}
                   </div>
                 </div>
-              ))}
+                );
+              })}
+
+              {/* Workflow state — not a ticket data field, so it sits on its own. */}
+              <div>
+                <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-3">Status</p>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="block text-[10px] font-semibold text-gray-500 mb-1">Ticket Status</label>
+                    <input
+                      type="text"
+                      value={editDraft.ticket_status == null ? "" : String(editDraft.ticket_status)}
+                      onChange={e => setEditDraft(prev => ({ ...prev, ticket_status: e.target.value || undefined }))}
+                      className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400"
+                    />
+                  </div>
+                </div>
+              </div>
             </div>
             <div className="px-6 py-4 border-t border-gray-100 flex items-center justify-end gap-2">
               <button onClick={() => setEditTicket(null)} className="px-4 py-2 border border-gray-200 text-xs rounded-lg text-gray-600 hover:bg-gray-50">Cancel</button>

@@ -1,10 +1,5 @@
-import ComingSoon from "@/components/ui/ComingSoon";
+import CommissionIncomeView from "@/components/commission/CommissionIncomeView";
 
 export default function CommissionIncomePage() {
-  return (
-    <ComingSoon
-      title="Commission income"
-      description="Vendor commission income will be tracked here."
-    />
-  );
+  return <CommissionIncomeView />;
 }

@@ -228,7 +228,7 @@ export default function HomePage() {
       </section>
 
       {/* ══ How it works ═══════════════════════════════════════════════ */}
-      <section id="how" className="relative overflow-hidden border-y border-slate-100 bg-slate-50/70">
+      <section className="relative overflow-hidden border-y border-slate-100 bg-slate-50/70">
         <div className="mx-auto max-w-6xl px-5 py-16 sm:px-6 sm:py-24">
           <Reveal className="mx-auto max-w-2xl text-center">
             <span className="inline-flex items-center gap-1.5 rounded-full bg-blue-50 px-3.5 py-1.5 text-xs font-semibold uppercase tracking-wider text-blue-700">
@@ -276,7 +276,7 @@ export default function HomePage() {
       </section>
 
       {/* ══ Features ═══════════════════════════════════════════════════ */}
-      <section id="platform" className="mx-auto max-w-6xl px-5 py-16 sm:px-6 sm:py-24">
+      <section className="mx-auto max-w-6xl px-5 py-16 sm:px-6 sm:py-24">
         <Reveal className="mx-auto max-w-2xl text-center">
           <h2 className="text-3xl font-bold tracking-tight sm:text-4xl">
             One platform, the whole incentive lifecycle
@@ -302,7 +302,7 @@ export default function HomePage() {
       </section>
 
       {/* ══ Reconciliation showcase ════════════════════════════════════ */}
-      <section id="reconcile" className="border-y border-slate-100 bg-slate-50/70">
+      <section className="border-y border-slate-100 bg-slate-50/70">
         <div className="mx-auto grid max-w-6xl items-center gap-12 px-5 py-16 sm:px-6 sm:py-24 lg:grid-cols-2">
           <Reveal>
             <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-3.5 py-1.5 text-xs font-semibold uppercase tracking-wider text-emerald-700">

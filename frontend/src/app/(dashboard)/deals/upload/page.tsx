@@ -7,6 +7,7 @@ import {
   Plus, Trash2, ChevronDown, ArrowRight, Info, Settings2, Search,
 } from "lucide-react";
 import * as XLSX from "xlsx";
+import Link from "next/link";
 import api from "@/lib/api";
 import { useRouter } from "next/navigation";
 import {
@@ -1368,6 +1369,9 @@ export default function UploadDealPage(){
   const [dealTag,       setDealTag]       = useState("standard");   // "standard" | "adhoc"
   const [supplierName,  setSupplierName]  = useState("");
   const [supplierOptions, setSupplierOptions] = useState<string[]>([]);
+  // Entity the deal is signed under — the user's own entities from My Profile.
+  const [entity,        setEntity]        = useState("");
+  const [entityOptions, setEntityOptions] = useState<string[]>([]);
   const [validFromDate, setValidFromDate] = useState("");
   const [file,          setFile]          = useState<File|null>(null);
   const [dragging,     setDragging]     = useState(false);
@@ -1454,6 +1458,11 @@ export default function UploadDealPage(){
   useEffect(()=>{
     api.get<{id:number;name:string}[]>("/suppliers/?limit=5000")
       .then(r=>setSupplierOptions(r.data.map(s=>s.name)))
+      .catch(()=>{});
+    // My Profile → Entities. Names only; the deal stores the name in deals.entity.
+    api.get<{id:number;name:string;is_active:boolean}[]>("/user-entities/",{params:{limit:1000}})
+      .then(r=>setEntityOptions(
+        Array.from(new Set(r.data.filter(e=>e.is_active).map(e=>e.name).filter(Boolean)))))
       .catch(()=>{});
   },[]);
 
@@ -1780,6 +1789,7 @@ export default function UploadDealPage(){
           valid_to:        getContractVal("c__valid_to")||null,
           trigger_type:    dealType==="airline"?(getContractVal("c__trigger_type")||null):null,
           payout_type:     dealType==="airline"?(getContractVal("c__payout_type")||null):null,
+          entity:          entity||null,
           entity_lcc:      getContractVal("c__entity_lcc")||null,
           business_type:   getContractVal("c__business_type")||null,
           login_id:        getContractVal("c__login_id")||null,
@@ -1973,6 +1983,20 @@ export default function UploadDealPage(){
                   value={dealTag==="adhoc"?"Adhoc":"Standard"}
                   onChange={v=>setDealTag(v.toLowerCase())}
                 />
+                <SearchSelectField
+                  label="Entity"
+                  placeholder={entityOptions.length?"Search entity…":"No entities in your profile"}
+                  options={entityOptions}
+                  value={entity}
+                  onChange={setEntity}
+                />
+                {entityOptions.length===0&&(
+                  <p className="text-[10px] text-gray-400">
+                    Add entities under{" "}
+                    <Link href="/profile" className="text-blue-600 hover:underline">My Profile → Entities</Link>
+                    {" "}to file deals against one.
+                  </p>
+                )}
                 <div>
                   <label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">Valid From Date</label>
                   <input

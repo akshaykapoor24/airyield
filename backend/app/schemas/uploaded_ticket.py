@@ -131,6 +131,29 @@ class ConfirmTicketUploadPayload(BaseModel):
     agency:         str
     valid_from:     date
     valid_to:       date
+    # User-supplied label for the statement. Blank falls back to the derived
+    # "<type> - <agency> - <valid_from>" name.
+    statement_name: Optional[str] = None
+
+
+class AppendTicketsPayload(BaseModel):
+    """POST body for adding manually punched rows to an existing statement.
+
+    No statement metadata: type, agency and validity are inherited from the
+    statement being appended to.
+    """
+    rows: list[TicketRow]
+
+
+class ManualTicketPreviewPayload(BaseModel):
+    """Raw manually-punched rows, before derivation.
+
+    POST /tickets/manual/preview runs these through the same derivation the XLS
+    parser uses and returns a TicketExtractionPreview, whose rows are posted
+    verbatim to POST /tickets/upload/confirm.
+    """
+    rows:           list[TicketRow]
+    statement_type: str = "B2B"
 
 
 class TicketStatementRead(BaseModel):
@@ -184,6 +207,26 @@ class UploadedTicketRead(TicketRow):
     ticket_status:   str = "draft"
 
     model_config = {"from_attributes": True}
+
+
+class UploadedTicketWithStatement(UploadedTicketRead):
+    """A ticket plus the statement it belongs to — the flat All-tickets view needs
+    to show provenance without the client fetching every statement."""
+    statement_agency: Optional[str] = None
+    statement_name:   Optional[str] = None
+
+
+class UploadedTicketsPage(BaseModel):
+    total:  int
+    offset: int
+    limit:  int
+    rows:   list[UploadedTicketWithStatement]
+
+
+class UploadedTicketFacets(BaseModel):
+    airlines:        list[str] = []
+    statuses:        list[str] = []
+    statement_types: list[str] = []
 
 
 class ConfirmTicketUploadResult(BaseModel):
@@ -276,6 +319,49 @@ class UploadedTicketUpdate(BaseModel):
     gstn:                 Optional[str]   = None
     business_phone:       Optional[str]   = None
     business_email:       Optional[str]   = None
+    # Remaining ticket fields. These are creatable (manual entry punches them,
+    # the XLS parser maps them) but used to be absent here — and because
+    # extra="ignore" drops unknown keys silently, PATCHing them was a no-op with
+    # no error. tour_code in particular is read by the exclusion evaluator for
+    # payout rules, so a typo in it could never be corrected from any screen.
+    # Deliberately still excluded: statement_type and the calc-owned fields
+    # (matched_deal_*, calculated_incentive, iata_commission,
+    # incentive_breakdown) — the detail page PATCHes the whole ticket object
+    # back, so listing them here would let the browser overwrite them.
+    tour_code:            Optional[str]   = None
+    booking_signon:       Optional[str]   = None
+    booking_pcc:          Optional[str]   = None
+    booking_agency_name:  Optional[str]   = None
+    ticketing_signon:     Optional[str]   = None
+    document_type:        Optional[str]   = None
+    fare_const_type:      Optional[str]   = None
+    base_fare_currency:   Optional[str]   = None
+    exchanged_for:        Optional[str]   = None
+    stock_control_no:     Optional[str]   = None
+    stp_no:               Optional[str]   = None
+    void_date:            Optional[str]   = None
+    coupon_status:        Optional[str]   = None
+    refund_type:          Optional[str]   = None
+    trip_id:              Optional[str]   = None
+    ai_code:              Optional[str]   = None
+    value_code:           Optional[str]   = None
+    multiple_receivables: Optional[str]   = None
+    wo_tax:               Optional[float] = None
+    other_tax:            Optional[float] = None
+    comm_percent:         Optional[float] = None
+    net_remit:            Optional[float] = None
+    net_fare:             Optional[float] = None
+    invoice_fare:         Optional[float] = None
+    total_refund_amount:  Optional[float] = None
+    roe:                  Optional[float] = None
+    nuc:                  Optional[float] = None
+    fop_details:          Optional[str]   = None
+    cc_auth:              Optional[str]   = None
+    cc_do_expiry:         Optional[str]   = None
+    fare_ladder:          Optional[str]   = None
+    entity_address:       Optional[str]   = None
+    tax_breakup:          Optional[Dict[str, float]]     = None
+    segments:             Optional[List[Dict[str, Any]]] = None
 
     model_config = ConfigDict(extra="ignore")
 

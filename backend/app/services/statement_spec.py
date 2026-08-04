@@ -39,6 +39,78 @@ _TGQ_HMPR_HEADERS = [
 # the source file — used only to build a friendly blank template.
 _TGQ_HMPR_TAX_AFTER = "BaseFareCurrency"
 
+# ── TGQ HMPR: per-sector expansion ───────────────────────────────────────────
+# An airline statement carries one line per TICKET, but `Sectors` holds every flown
+# sector ("BOM/DEL DEL/MNL MNL/DEL DEL/BOM") and FlightNo / TravelDt / Class /
+# Coupon_Status run parallel to it, space-separated. On ingest we expand that into one
+# row per sector and allocate every money column across the legs (see
+# services/sector_split.py). Field keys below are `norm()` outputs, not raw headers.
+_TGQ_SPLIT = {
+    "sector_field": "sectors",
+    "parallel_fields": [
+        # "pad" leaves a leg blank when the source has too few tokens — inventing a
+        # flight number or a travel date would be worse than showing nothing.
+        {"field": "flightno", "on_short": "pad"},
+        {"field": "traveldt", "on_short": "pad"},
+        # A single "V" against 4 sectors genuinely means V on every leg.
+        {"field": "class", "on_short": "broadcast"},
+        {"field": "coupon_status", "on_short": "broadcast"},
+    ],
+    # Ticket-level amounts. NOT divided: `comm` (a percentage — and comm_amount/base_fare
+    # stays correct when both are divided), `roe` (dividing it would break the
+    # NUC x ROE ~= Base_Fare identity that dividing nuc and base_fare together preserves),
+    # `fare_ladder` (describes the whole ticket), `multiple_receivables` (not a currency),
+    # and `fop_details` (an amount can be embedded in free text — not safely parseable).
+    "divide_fields": [
+        "base_fare", "wotax", "yqtax", "other_tax", "total_tax", "airlinefee",
+        "total_fare", "comm_amount", "net_remit", "net_fare",
+        "actual_selling_fare", "invoice_fare", "total_refund_amount", "nuc",
+    ],
+    "divide_taxes": True,   # mandatory, or a leg's taxes stop summing to its Total_Tax
+    "precision": 2,         # set 0 to allocate in whole rupees (also sum-preserving)
+    "mode": "equal",        # "fare_ladder" (NUC-weighted) reserved — see sector_split docs
+}
+
+# Ticket_No arrives as "<airline accounting code> <document serial>" — "098 5805708071"
+# (098 = Air India), "618 5800920932-933". Lift the code into its own column so Ticket_No
+# holds only the document number. `before` positions the new column in the display order.
+_TGQ_TICKET_NO = {
+    "source": "ticket_no",
+    "code_field": "airline_code",
+    "header": "Airline_Code",
+    "before": "Ticket_No",
+}
+
+# Drives the drill-in filter toolbar. "select" is an exact match fed by /records/facets;
+# "text" is a case-insensitive contains.
+_TGQ_FILTERS = [
+    {"field": "airline",     "label": "Airline",      "type": "select"},
+    {"field": "air_name",    "label": "Airline Name", "type": "select"},
+    {"field": "ticket_date", "label": "Ticket Date",  "type": "select"},
+    {"field": "traveldt",    "label": "Travel Date",  "type": "select"},
+    {"field": "ticket_no",   "label": "Ticket No",    "type": "text"},
+    {"field": "air_pnr",     "label": "Air PNR",      "type": "text"},
+    {"field": "gal_pnr",     "label": "Gal PNR",      "type": "text"},
+    {"field": "pax_name",    "label": "Pax Name",     "type": "text"},
+]
+
+# Totalled over the whole filtered set and shown in the slab above the table.
+_TGQ_SUMMARY = [
+    {"field": "base_fare",   "label": "Base Fare"},
+    {"field": "total_tax",   "label": "Total Tax"},
+    {"field": "total_fare",  "label": "Total Fare"},
+    {"field": "airlinefee",  "label": "Airline Fee"},
+    {"field": "comm_amount", "label": "Commission"},
+    {"field": "net_remit",   "label": "Net Remit"},
+]
+
+# TGQ exports end with a grand-total line. Both conditions are ANDed so a real PCC or
+# agency literally named "TOTAL" is never mistaken for it.
+_TGQ_TOTAL_ROW = {
+    "value_in": ["total", "totals", "grand total", "grand totals"],
+    "require_blank": ["ticket_no", "pax_name", "sectors"],
+}
+
 STATEMENT_SPECS: dict[str, dict] = {
     "tgq-hmpr": {
         "label": "TGQ HMPR",
@@ -46,6 +118,11 @@ STATEMENT_SPECS: dict[str, dict] = {
         "fold_taxes": True,
         "tax_after": _TGQ_HMPR_TAX_AFTER,
         "template_tax_pairs": 20,   # how many Tax_TypeN/TaxN pairs to seed in the blank template
+        "split_sectors": _TGQ_SPLIT,
+        "split_ticket_no": _TGQ_TICKET_NO,
+        "filters": _TGQ_FILTERS,
+        "summary": _TGQ_SUMMARY,
+        "total_row": _TGQ_TOTAL_ROW,
     },
     "ndc": {
         "label": "NDC",
@@ -53,6 +130,10 @@ STATEMENT_SPECS: dict[str, dict] = {
         "fold_taxes": True,
         "tax_after": _TGQ_HMPR_TAX_AFTER,
         "template_tax_pairs": 20,
+        # NDC shares the TGQ HMPR column shape, so per-sector splitting, filters and the
+        # summary slab work here too — the `ndc` table already carries the leg columns.
+        # Add "split_sectors": _TGQ_SPLIT, "filters": _TGQ_FILTERS, "summary": _TGQ_SUMMARY,
+        # "total_row": _TGQ_TOTAL_ROW to switch it on (then re-upload or re-process batches).
     },
     # LCC Detailed Statement now has its OWN dedicated batch+rows schema, wizard router
     # (api/v1/lcc_detailed.py) and spec (services/lcc_detailed_spec.py) — it is no longer
@@ -144,6 +225,50 @@ def parser(slug: str) -> str | None:
 def fold_taxes(slug: str) -> bool:
     s = spec_for(slug)
     return bool(s and s.get("fold_taxes"))
+
+
+# ── Optional, opt-in behaviours ──────────────────────────────────────────────
+# Every accessor below returns None/[] for a slug that doesn't declare the key, so the
+# router and the shared frontend view short-circuit and behave exactly as before.
+
+def split_config(slug: str) -> dict | None:
+    """Per-sector expansion config, or None when this type is one row per ticket."""
+    s = spec_for(slug)
+    return s.get("split_sectors") if s else None
+
+
+def ticket_no_config(slug: str) -> dict | None:
+    """How to split the ticket-number cell into airline code + serial, or None."""
+    s = spec_for(slug)
+    return s.get("split_ticket_no") if s else None
+
+
+def filter_specs(slug: str) -> list[dict]:
+    """Ordered [{field, label, type}] driving the drill-in filter toolbar."""
+    s = spec_for(slug)
+    return list(s.get("filters") or []) if s else []
+
+
+def summary_fields(slug: str) -> list[dict]:
+    """Ordered [{field, label}] totalled over the filtered set for the summary slab."""
+    s = spec_for(slug)
+    return list(s.get("summary") or []) if s else []
+
+
+def total_row_config(slug: str) -> dict | None:
+    """How to recognise the file's own declared grand-total line, or None."""
+    s = spec_for(slug)
+    return s.get("total_row") if s else None
+
+
+def money_fields(slug: str) -> set[str]:
+    """Fields the UI should right-align and thousands-format (divided ∪ summarised)."""
+    s = spec_for(slug)
+    if not s:
+        return set()
+    out = set((s.get("split_sectors") or {}).get("divide_fields") or [])
+    out |= {f["field"] for f in (s.get("summary") or [])}
+    return out
 
 
 def template_headers(slug: str) -> list[str]:

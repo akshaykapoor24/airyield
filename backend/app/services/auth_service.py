@@ -30,6 +30,20 @@ async def _get_or_create_tenant(
     return tenant
 
 
+async def _needs_onboarding(db: AsyncSession, tenant_id: int | None) -> bool:
+    """Whether a new user of this tenant should see the first-login wizard.
+
+    Only CORPORATE workspaces do: entities and airline login IDs are company
+    setup. An individual account is a private single-person workspace with
+    nothing to configure up front, so it starts already onboarded and adds those
+    from My Profile whenever it wants.
+    """
+    if tenant_id is None:
+        return False
+    tenant = (await db.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one_or_none()
+    return bool(tenant and tenant.tenant_type == TenantType.CORPORATE)
+
+
 class AuthService:
 
     # ── Admin-created user ─────────────────────────────────────────────────
@@ -47,9 +61,9 @@ class AuthService:
             department=payload.department,
             tenant_id=tenant_id,
             # admin-created teammates are trusted (no email verification needed),
-            # but still run the first-login onboarding to set up their own data.
+            # but still run the first-login onboarding when it applies to them.
             is_verified=True,
-            onboarding_complete=False,
+            onboarding_complete=not await _needs_onboarding(db, tenant_id),
         )
         db.add(user)
         await db.commit()
@@ -64,7 +78,8 @@ class AuthService:
         if existing_email.scalar_one_or_none():
             raise HTTPException(status_code=400, detail="An account with this email already exists.")
 
-        if payload.account_type == "corporate":
+        is_corporate = payload.account_type == "corporate"
+        if is_corporate:
             tenant = await AuthService._signup_corporate_tenant(db, payload)
         else:
             tenant = await AuthService._signup_individual_tenant(db, payload)
@@ -79,7 +94,9 @@ class AuthService:
             role=UserRole.SUPER_ADMIN,
             department=payload.company_name or None,
             is_verified=False,
-            onboarding_complete=False,
+            # Only corporate workspaces run the first-login setup wizard; an
+            # individual account is born onboarded (see _needs_onboarding).
+            onboarding_complete=not is_corporate,
             tenant=tenant,                      # set relationship so tenant_type serialises
         )
         db.add(user)

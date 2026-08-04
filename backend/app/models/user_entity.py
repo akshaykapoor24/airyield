@@ -26,6 +26,12 @@ class UserEntity(Base):
     state:      Mapped[str | None] = mapped_column(String(100), nullable=True)
     city:       Mapped[str | None] = mapped_column(String(100), nullable=True)
 
+    # Tax registration, per entity. An entity is a billing/legal unit, so each one
+    # carries its own GSTIN (state-specific) and PAN — they are not inherited from
+    # the tenant, which only records the signup's own numbers.
+    gst_number: Mapped[str | None] = mapped_column(String(15),  nullable=True)
+    pan_number: Mapped[str | None] = mapped_column(String(10),  nullable=True)
+
     is_active:  Mapped[bool]       = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime]   = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime]   = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

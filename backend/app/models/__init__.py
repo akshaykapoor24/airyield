@@ -43,6 +43,11 @@ from app.models.deal_batch import DealBatch
 from app.models.agency import Agency
 from app.models.agency_entity import AgencyEntity
 from app.models.agency_login_id import AgencyLoginId
+# Per-user profile data (My Profile → Entities / Login IDs) and the grants that
+# share an admin's entities with the team members they add.
+from app.models.user_entity import UserEntity
+from app.models.user_login_id import UserLoginId
+from app.models.user_entity_access import UserEntityAccess
 from app.models.deal import (
     DealStatement,
     Deal,
@@ -66,6 +71,7 @@ from app.models.deal import (
 __all__ = [
     "Tenant",
     "User", "UserRole",
+    "UserEntity", "UserLoginId", "UserEntityAccess",
     "Airline", "AirlineApproval",
     "Supplier", "SupplierApproval",
     "Airport", "AirportApproval",

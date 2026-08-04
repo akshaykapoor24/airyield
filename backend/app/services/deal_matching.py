@@ -26,6 +26,7 @@ from __future__ import annotations
 import calendar
 from datetime import date
 from dataclasses import dataclass, field
+from typing import Awaitable, Callable
 
 from dateutil import parser as _du
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -52,6 +53,21 @@ _FIRST_CLASSES    = {"F", "A", "P"}
 # Everything else → Economy
 
 
+# ── "criterion not printed by the source document" ─────────────────────────
+# A BSP settlement PDF prints no cabin class and no travel date. Passing None
+# for those is NOT the same as skipping them: _resolve_cabin_groups turns an
+# empty booking class into {"Economy"}, so an Economy-only deal would match by
+# accident and a Business deal could never match. Callers name the criteria
+# their source cannot supply and the dependent filters are bypassed instead.
+SKIP_CLASS       = "class"
+SKIP_TRAVEL_DATE = "travel_date"
+
+# Sums the achieved base for an airline over a period, for slab band selection.
+# Defaults to the uploaded-ticket scan (_period_cumulative_base); BSP runs pass
+# their own provider so the band reflects the airline's own settlement.
+CumulativeProvider = Callable[[str, date, date, "str | None", "str | None"], Awaitable[float]]
+
+
 def _normalize_class_type(raw: str) -> str:
     """'ECONOMY CLASS' → 'Economy', 'BUSINESS CLASS' → 'Business', 'FIRST CLASS' → 'First'."""
     r = raw.upper()
@@ -67,21 +83,32 @@ async def _resolve_cabin_groups(
     airline_name: str,
     booking_class: str | None,
 ) -> set[str]:
-    """Query AirlineClassMaster for per-airline class mapping; fall back to hardcoded sets."""
+    """Query AirlineClassMaster for per-airline class mapping; fall back to hardcoded sets.
+
+    The master lookup is memoised per session (`db.info`), which matters once BSP rows carry
+    a real booking class: this then fires once per row in the matcher AND once per `class`
+    rule field in the exclusion evaluator, over tens of thousands of rows. Only the resolved
+    {code: group} strings are cached — never ORM rows, which the run's periodic commits
+    would expire.
+    """
     if not booking_class:
         return {"Economy"}
     codes = [p.strip().upper() for p in booking_class.replace(" ", "").split("/") if p.strip()]
     if not codes:
         return {"Economy"}
 
-    res = await db.execute(
-        select(AirlineClassMaster).where(
-            func.lower(AirlineClassMaster.airline_name) == airline_name.lower(),
-            AirlineClassMaster.class_code.in_(codes),
-            AirlineClassMaster.is_active == True,
+    airline_key = (airline_name or "").lower()
+    cache: dict[str, dict[str, str]] = db.info.setdefault("_class_master_cache", {})
+    master_map = cache.get(airline_key)
+    if master_map is None:
+        res = await db.execute(
+            select(AirlineClassMaster).where(
+                func.lower(AirlineClassMaster.airline_name) == airline_key,
+                AirlineClassMaster.is_active == True,
+            )
         )
-    )
-    master_map = {row.class_code: _normalize_class_type(row.class_type) for row in res.scalars()}
+        master_map = {row.class_code: _normalize_class_type(row.class_type) for row in res.scalars()}
+        cache[airline_key] = master_map
 
     groups: set[str] = set()
     for code in codes:
@@ -408,8 +435,18 @@ def _slab_seg_key(segment_type: str | None) -> str:
     return "dom"   # default / domestic
 
 
-def _slab_class_key(cabin_groups: set[str] | None) -> str:
-    g = {x.lower() for x in (cabin_groups or set())}
+def _slab_class_key(cabin_groups: set[str] | None, config_class: str | None = None) -> str:
+    """Slab rate cell class. When the source has no cabin class (cabin_groups is
+    None), fall back to the class the incentive itself is written for, so a
+    Business-only deal reads its Business rate instead of an Economy one."""
+    if cabin_groups is None:
+        c = (config_class or "").strip().lower()
+        if c in ("business", "first"):
+            return "Business"
+        if "premium" in c:
+            return "Premium"
+        return "Economy"
+    g = {x.lower() for x in cabin_groups}
     if "business" in g or "first" in g:
         return "Business"
     if any("premium" in x for x in g):
@@ -499,12 +536,13 @@ async def _compute_slab_cumulative_detailed(
     tenant_id: int,
     created_by_id: int,
     airline_name: str,
+    cumulative_provider: CumulativeProvider | None = None,
 ) -> tuple[float | None, dict]:
     """Slab incentive for one ticket + a human-readable breakdown for the diagnosis
     popup. Find the period band from the cumulative achieved sales, then apply the
     band's segment×class %. No cap (out of scope)."""
     base = _calc_base(sell_fare, sell_tax_yq, sale_yr, config.target_calc_cols)
-    seg_key, class_key = _slab_seg_key(segment_type), _slab_class_key(cabin_groups)
+    seg_key, class_key = _slab_seg_key(segment_type), _slab_class_key(cabin_groups, config.class_)
     cell_label = f"{_SEG_LABEL.get(seg_key, 'Domestic')} {class_key}"
     num_pct = (config.incentive_num_pct or "Percentage").strip().lower()
     det: dict = {"cell_label": cell_label, "base": round(base, 2), "num_pct": "Percentage" if "percent" in num_pct else "Number"}
@@ -540,9 +578,14 @@ async def _compute_slab_cumulative_detailed(
         "period_range": f"{start:%d %b %Y} → {end:%d %b %Y}",
     })
 
-    cumulative = await _period_cumulative_base(
-        db, airline_name, start, end, config.flight_type, config.target_calc_cols, tenant_id, created_by_id,
-    )
+    if cumulative_provider is not None:
+        cumulative = await cumulative_provider(
+            airline_name, start, end, config.flight_type, config.target_calc_cols,
+        )
+    else:
+        cumulative = await _period_cumulative_base(
+            db, airline_name, start, end, config.flight_type, config.target_calc_cols, tenant_id, created_by_id,
+        )
     det["achieved"] = round(cumulative, 2)
 
     if candidates is None:
@@ -602,10 +645,12 @@ async def _compute_slab_cumulative(
     tenant_id: int,
     created_by_id: int,
     airline_name: str,
+    cumulative_provider: CumulativeProvider | None = None,
 ) -> float | None:
     inc, _ = await _compute_slab_cumulative_detailed(
         db, config, deal, travel_date, segment_type, cabin_groups,
         sell_fare, sell_tax_yq, sale_yr, tenant_id, created_by_id, airline_name,
+        cumulative_provider=cumulative_provider,
     )
     return inc
 
@@ -650,6 +695,8 @@ class DealMatchingService:
         meals:           float | None = None,
         supplier_agency: str | None = None,
         statement_type:  str | None = None,
+        skip_criteria:   set[str] | None = None,
+        cumulative_provider: CumulativeProvider | None = None,
     ) -> list[DealMatchResult]:
         """
         Search the unified deals table, return ALL matching deals sorted by
@@ -659,11 +706,22 @@ class DealMatchingService:
           "B2B"     → only deals with deal_type="b2b"; supplier match enforced.
           "AIRLINE" → only deals with deal_type="airline".
           None/other → both deal types.
+
+        skip_criteria names the filters the caller's source cannot evaluate
+        (SKIP_CLASS / SKIP_TRAVEL_DATE) — used by BSP settlement rows, which
+        print no cabin class and no travel date. cumulative_provider overrides
+        where slab achievement is summed from.
         """
         airline_lower = airline_name.lower()
         is_b2b     = (statement_type or "").upper() == "B2B"
         is_airline = (statement_type or "").upper() == "AIRLINE"
-        cabin_groups = await _resolve_cabin_groups(db, airline_name, booking_class)
+        skips = skip_criteria or set()
+        # None = "unknown", which the slab cell picker reads differently from an
+        # empty set; never fabricate {"Economy"} for a source without a class.
+        cabin_groups = (
+            None if SKIP_CLASS in skips
+            else await _resolve_cabin_groups(db, airline_name, booking_class)
+        )
         matches: list[DealMatchResult] = []
 
         # Contract validity keys off the ticket ISSUE date; travel/slab checks keep
@@ -718,7 +776,7 @@ class DealMatchingService:
             for config in deal.incentives:
                 if not _flight_type_matches(segment_type, config.flight_type):
                     continue
-                if not _class_matches_groups(cabin_groups, config.class_):
+                if SKIP_CLASS not in skips and not _class_matches_groups(cabin_groups or set(), config.class_):
                     continue
                 vf = config.contract_valid_from
                 vt = config.contract_valid_to
@@ -728,7 +786,7 @@ class DealMatchingService:
                 # bounds are set; NULL on legacy/airline deals ⇒ no travel filter.
                 tvf = config.travel_valid_from
                 tvt = config.travel_valid_to
-                if tvf and tvt and not (tvf <= travel_date <= tvt):
+                if SKIP_TRAVEL_DATE not in skips and tvf and tvt and not (tvf <= travel_date <= tvt):
                     continue
                 if config.ancillary_items:
                     # Ancillary → from the ticket's own fee columns, not the base fare.
@@ -740,6 +798,7 @@ class DealMatchingService:
                     inc = await _compute_slab_cumulative(
                         db, config, deal, travel_date, segment_type, cabin_groups,
                         sell_fare, sell_tax_yq, sale_yr, tenant_id, created_by_id, airline_name,
+                        cumulative_provider=cumulative_provider,
                     )
                 else:
                     inc = _compute_incentive_from_config(
@@ -789,6 +848,9 @@ class DealMatchingService:
         supplier_agency:     str | None = None,
         tour_code:           str | None = None,
         statement_type:      str | None = None,
+        skip_criteria:       set[str] | None = None,
+        rule_skip_fields:    set[str] | None = None,
+        cumulative_provider: CumulativeProvider | None = None,
     ) -> list:
         """
         Return a full step-by-step diagnostic for every approved deal belonging to this
@@ -797,13 +859,25 @@ class DealMatchingService:
           "B2B"     → only deal_type="b2b"; supplier match enforced.
           "AIRLINE" → only deal_type="airline".
         Never short-circuits — every PLB step is evaluated.
+
+        skip_criteria mirrors find_all_deals: named criteria the source cannot
+        supply are reported as skipped rather than failed.
+
+        rule_skip_fields mirrors the incl/excl `skip_fields` the *runner* passes. Without
+        it the diagnosis evaluates rule fields the run bypassed, so the popup would
+        contradict the result it is explaining.
         """
         from app.schemas.uploaded_ticket import (
             MatchStepResult, PLBDiagnostic, DealDiagnostic,
         )
 
         airline_lower = airline_name.lower()
-        cabin_groups, _ = await _resolve_cabin_groups_with_detail(db, airline_name, booking_class)
+        skips = skip_criteria or set()
+        if SKIP_CLASS in skips:
+            cabin_groups = None
+        else:
+            cabin_groups, _ = await _resolve_cabin_groups_with_detail(db, airline_name, booking_class)
+        cabin_label = "not printed" if cabin_groups is None else "/".join(sorted(cabin_groups))
         results: list[DealDiagnostic] = []
 
         # Contract validity keys off the ticket ISSUE date; travel-window + slab use
@@ -881,18 +955,27 @@ class DealMatchingService:
 
                 # Booking class
                 cls_key = config.class_
-                cls_pass = _class_matches_groups(cabin_groups, cls_key)
-                steps.append(MatchStepResult(
-                    step="Booking Class",
-                    passed=cls_pass,
-                    ticket_value=f"{booking_class or '—'} → {'/'.join(sorted(cabin_groups))}",
-                    deal_value=cls_key or "Any",
-                    detail=(
-                        f"booking_class='{booking_class}' resolved to {cabin_groups}; "
-                        f"config class='{cls_key}'; "
-                        + ("match" if cls_pass else f"MISMATCH — change config class to '{'/'.join(sorted(cabin_groups))}' or 'All'")
-                    ),
-                ))
+                if SKIP_CLASS in skips:
+                    steps.append(MatchStepResult(
+                        step="Booking Class",
+                        passed=True,
+                        ticket_value="not printed",
+                        deal_value=cls_key or "Any",
+                        detail="this statement does not print a cabin class — class filter skipped",
+                    ))
+                else:
+                    cls_pass = _class_matches_groups(cabin_groups or set(), cls_key)
+                    steps.append(MatchStepResult(
+                        step="Booking Class",
+                        passed=cls_pass,
+                        ticket_value=f"{booking_class or '—'} → {cabin_label}",
+                        deal_value=cls_key or "Any",
+                        detail=(
+                            f"booking_class='{booking_class}' resolved to {cabin_groups}; "
+                            f"config class='{cls_key}'; "
+                            + ("match" if cls_pass else f"MISMATCH — change config class to '{cabin_label}' or 'All'")
+                        ),
+                    ))
 
                 # Trigger type (airline deals only)
                 if deal_type_str == "airline":
@@ -947,7 +1030,15 @@ class DealMatchingService:
                 # ticket TRAVEL/departure date). Enforced only when both bounds are set.
                 tvf_cfg = config.travel_valid_from
                 tvt_cfg = config.travel_valid_to
-                if tvf_cfg and tvt_cfg:
+                if tvf_cfg and tvt_cfg and SKIP_TRAVEL_DATE in skips:
+                    steps.append(MatchStepResult(
+                        step="Travel Date Validity",
+                        passed=True,
+                        ticket_value="not printed",
+                        deal_value=f"{tvf_cfg} → {tvt_cfg}",
+                        detail="this statement does not print a travel date — travel window skipped",
+                    ))
+                elif tvf_cfg and tvt_cfg:
                     tv_pass = tvf_cfg <= travel_date <= tvt_cfg
                     tv_detail = (
                         f"config travelValidFrom='{tvf_cfg}', travelValidTo='{tvt_cfg}', travel_date={travel_date}; "
@@ -973,6 +1064,7 @@ class DealMatchingService:
                     inc, det = await _compute_slab_cumulative_detailed(
                         db, config, deal, travel_date, segment_type, cabin_groups,
                         sell_fare, sell_tax_yq, sale_yr, tenant_id, created_by_id, airline_name,
+                        cumulative_provider=cumulative_provider,
                     )
                     breakdown_diag = {
                         "incentive_type": config.incentive_type,
@@ -1038,6 +1130,7 @@ class DealMatchingService:
                             departure_raw=ticket_departure_raw,
                             airline_name=ticket_airline_name or airline_name,
                             tour_code=tour_code,
+                            skip_fields=rule_skip_fields,
                         )
                     elif rule.rule_category == "payout_exclusion" and excl_diagnostic is None:
                         excl_diagnostic = await diagnose_exclusion_for_payout(
@@ -1048,6 +1141,7 @@ class DealMatchingService:
                             departure_raw=ticket_departure_raw,
                             airline_name=ticket_airline_name or airline_name,
                             tour_code=tour_code,
+                            skip_fields=rule_skip_fields,
                         )
 
                 plb_diagnostics.append(PLBDiagnostic(
@@ -1152,6 +1246,8 @@ class DealMatchingService:
         meals:           float | None = None,
         supplier_agency: str | None = None,
         statement_type:  str | None = None,
+        skip_criteria:   set[str] | None = None,
+        cumulative_provider: CumulativeProvider | None = None,
     ) -> DealMatchResult | None:
         """Return the single best (highest incentive) matching deal."""
         matches = await DealMatchingService.find_all_deals(
@@ -1163,6 +1259,8 @@ class DealMatchingService:
             seat_selection=seat_selection, excess_baggage=excess_baggage, meals=meals,
             supplier_agency=supplier_agency,
             statement_type=statement_type,
+            skip_criteria=skip_criteria,
+            cumulative_provider=cumulative_provider,
         )
         return matches[0] if matches else None
 

@@ -1,11 +1,12 @@
+import logging
 import uuid
 from collections import defaultdict, OrderedDict
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import select, func, or_, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,8 +16,9 @@ from app.dependencies import get_current_user
 from app.models.user import User
 from app.models.airline import Airline
 from app.models.bsp_statement import BspStatement, BspStatementRow, BspTaxBreakup, BspParseError
-from app.services import gcs
+from app.services import file_store
 from app.services.bsp_extraction import BspExtractionService
+from app.utils.security import create_file_token, verify_file_token
 from app.schemas.bsp_statement import (
     BspExtractionPreview,
     BspRow,
@@ -32,6 +34,7 @@ from app.schemas.bsp_statement import (
 from app.schemas.bsp_summary import BspSummaryRowRead
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _bsp_bucket() -> str:
@@ -103,12 +106,14 @@ async def upload_bsp_pdf(
     batch_id = str(uuid.uuid4())
     now = datetime.utcnow()
 
-    # Upload the source PDF to GCS.
-    blob_name = f"bsp/{current_user.tenant_id}/{batch_id}/{file.filename}"
-    try:
-        await gcs.upload_bytes(content, blob_name, "application/pdf", _bsp_bucket())
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"Could not store the file: {exc}")
+    # Store the source PDF. Falls back to local disk when the bucket is unreachable, so
+    # a storage outage delays nothing — the parse only needs the bytes.
+    file_url, remote = await file_store.store(
+        content, f"bsp/{current_user.tenant_id}/{batch_id}/{file.filename}",
+        "application/pdf", _bsp_bucket(),
+    )
+    if not remote:
+        logger.warning("[BSP] Stored %s locally — remote storage unavailable.", file.filename)
 
     label = airline_name or airline_code or "Statement"
     stmt = BspStatement(
@@ -121,7 +126,7 @@ async def upload_bsp_pdf(
         period_from=period_from,
         period_to=period_to,
         file_name=file.filename,
-        file_url=blob_name,
+        file_url=file_url,
         status="pending",
         group_id=group_id,
         created_at=now,
@@ -513,18 +518,53 @@ async def reparse_bsp_statement(
     return {"batch_id": batch_id, "status": "pending"}
 
 
-# ── Signed URL for the source PDF ───────────────────────────────────────────
+# ── Openable URL for the source PDF ─────────────────────────────────────────
+_FILE_KIND = "bsp_detail"
+
+
 @router.get("/statements/{batch_id}/file-url")
 async def get_bsp_file_url(
     batch_id: str,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """A URL the browser can open directly — a GCS signed URL, or a tokenised link to
+    the endpoint below when the PDF is held locally."""
     stmt = await _get_owned_statement(batch_id, db, current_user)
     if not stmt.file_url:
         raise HTTPException(status_code=404, detail="No source file attached.")
-    url = await gcs.generate_signed_url(stmt.file_url, _bsp_bucket(), expiry_minutes=60, inline=True)
+    url = await file_store.signed_url(stmt.file_url, _bsp_bucket(), expiry_minutes=60, inline=True)
+    if url is None:
+        token = create_file_token(batch_id, _FILE_KIND)
+        url = f"{request.url_for('stream_bsp_file', batch_id=batch_id)}?token={token}"
     return {"url": url}
+
+
+@router.get("/statements/{batch_id}/file", name="stream_bsp_file")
+async def stream_bsp_file(
+    batch_id: str,
+    token: str = Query(..., description="Short-lived file-access token from /file-url"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Serve a locally-stored source PDF.
+
+    Deliberately not behind `get_current_user`: this is opened via window.open, which
+    sends no Authorization header. The single-batch, short-lived token from /file-url —
+    itself issued only to the statement's owner — is the authorisation.
+    """
+    if not verify_file_token(token, batch_id, _FILE_KIND):
+        raise HTTPException(status_code=403, detail="Invalid or expired file link.")
+    stmt = await db.scalar(select(BspStatement).where(BspStatement.batch_id == batch_id))
+    if not stmt or not stmt.file_url:
+        raise HTTPException(status_code=404, detail="No source file attached.")
+    try:
+        content = await file_store.load(stmt.file_url, _bsp_bucket())
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="The stored file is no longer available.")
+    name = stmt.file_name or file_store.file_name(stmt.file_url) or "statement.pdf"
+    return Response(content, media_type="application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="{name}"'})
 
 
 # ── XLS export of the detailed rows ─────────────────────────────────────────
@@ -576,4 +616,4 @@ async def delete_bsp_statement(
     await db.delete(stmt)  # cascade removes rows → tax breakups + parse errors
     await db.commit()
     if blob:
-        await gcs.delete_blob(blob, _bsp_bucket())
+        await file_store.delete(blob, _bsp_bucket())

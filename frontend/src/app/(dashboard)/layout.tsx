@@ -33,11 +33,18 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   if (!ready) return null;
 
   // First-login onboarding: block the dashboard with the wizard until finished.
-  // Only tenant users created via signup carry onboarding_complete === false;
-  // platform admins and already-onboarded users skip it.
+  // CORPORATE workspaces only — entities and airline login IDs are company setup.
+  // An individual account is a private single-person workspace with nothing to
+  // configure up front, so it goes straight to the dashboard and can still add
+  // entities and login IDs later from My Profile.
+  // Platform admins and already-onboarded users skip it either way.
   const user = reduxUser ?? getUser();
   const showOnboarding =
-    !onboardingDone && !!user && !isPlatformAdmin(user.role) && user.onboarding_complete === false;
+    !onboardingDone &&
+    !!user &&
+    !isPlatformAdmin(user.role) &&
+    user.tenant_type === "corporate" &&
+    user.onboarding_complete === false;
 
   return (
     <div className="flex h-screen overflow-hidden">

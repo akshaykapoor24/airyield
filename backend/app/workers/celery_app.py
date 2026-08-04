@@ -5,7 +5,12 @@ celery_app = Celery(
     "airyield",
     broker=settings.CELERY_BROKER_URL,
     backend=settings.CELERY_RESULT_BACKEND,
-    include=["app.workers.deal_tasks", "app.workers.bsp_tasks", "app.workers.lcc_tasks"],
+    include=[
+        "app.workers.deal_tasks",
+        "app.workers.bsp_tasks",
+        "app.workers.bsp_commission_tasks",
+        "app.workers.lcc_tasks",
+    ],
 )
 
 celery_app.conf.task_serializer = "json"

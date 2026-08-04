@@ -388,6 +388,109 @@ def _derive_from_transaction_type(
     return existing_invoice_type, None
 
 
+# ── Shared row derivation (XLS upload + manual entry) ────────────────────────
+# Everything below the column mapping is pure dict work, so the manual-entry
+# endpoint can run the exact same pipeline the parser does. Keeping one
+# implementation is the whole point: a ticket punched by hand must be
+# indistinguishable from an uploaded one, and a second copy of these rules would
+# drift silently — producing wrong money rather than an error.
+
+def derive_ticket_row(row: dict[str, Any], is_airline: bool) -> dict[str, Any]:
+    """Row-level derivations applied after canonical column mapping.
+
+    `row` must already use canonical field names, with `tax_breakup`, `pax_name`
+    and `travel_dt` pre-filled by the caller (the XLS path reads those from
+    source columns the alias map does not cover).
+
+    A field whose value is unknown must be ABSENT, not None — `setdefault` and
+    `if not row.get(...)` both treat a present None differently from a missing
+    key. Callers building rows from Pydantic models must use
+    `model_dump(exclude_none=True)`.
+
+    Mutates and returns `row`.
+    """
+    # Normalize ticket_date to YYYY-MM-DD so <input type="date"> can display it
+    if row.get("ticket_date"):
+        row["ticket_date"] = _normalize_date(row["ticket_date"])
+
+    if is_airline:
+        # ── Tax breakup from Tax_Type/Tax pairs ───────────────────
+        tax_breakup = row.get("tax_breakup") or {}
+        if tax_breakup:
+            row["tax_breakup"] = tax_breakup
+            # Derive individual tax columns used by deal matching
+            if "YR" in tax_breakup and row.get("sale_yr") is None:
+                row["sale_yr"] = tax_breakup["YR"]
+            if "K3" in tax_breakup and row.get("sale_k3") is None:
+                row["sale_k3"] = tax_breakup["K3"]
+            # sell_tax_yq: prefer YQTax column already mapped; fallback to YQ in breakup
+            if row.get("sell_tax_yq") is None and "YQ" in tax_breakup:
+                row["sell_tax_yq"] = tax_breakup["YQ"]
+
+        # ── Pax_Name → last_name / first_name ────────────────────
+        raw_pax = row.get("pax_name")
+        if raw_pax:
+            row["pax_name"] = raw_pax
+            last, first = _parse_pax_name(raw_pax)
+            if not row.get("last_name"):
+                row["last_name"] = last
+            if not row.get("first_name"):
+                row["first_name"] = first
+
+        # ── TravelDt → departure_datetime (first leg date) ────────
+        raw_travel_dt = row.get("travel_dt")
+        if raw_travel_dt:
+            row["travel_dt"] = raw_travel_dt
+            if not row.get("departure_datetime"):
+                row["departure_datetime"] = _parse_first_date(raw_travel_dt)
+
+        # ── Segment type auto-detection ────────────────────────────
+        if not row.get("segment_type"):
+            row["segment_type"] = _detect_segment_type_from_sector(row.get("sector"))
+
+        # ── invoice_type + adm_acm_ra from transaction_type ────────
+        inv_type, adm_cat = _derive_from_transaction_type(
+            row.get("transaction_type"),
+            row.get("ticket_number"),
+            row.get("invoice_type"),
+        )
+        if inv_type:
+            row["invoice_type"] = inv_type
+        if adm_cat:
+            row["adm_acm_ra"] = adm_cat
+
+        # ── Segments JSONB ─────────────────────────────────────────
+        segs = _build_segments(
+            row.get("sector"),
+            row.get("flight_no"),
+            row.get("travel_dt"),
+            row.get("booking_class"),
+        )
+        if segs:
+            row["segments"] = segs
+
+        # ── store statement_type on each row ──────────────────────
+        row["statement_type"] = "AIRLINE"
+
+    else:
+        row.setdefault("statement_type", "B2B")
+
+    # Normalize departure_datetime to YYYY-MM-DD (drop time)
+    if row.get("departure_datetime"):
+        row["departure_datetime"] = _normalize_date(row["departure_datetime"])
+
+    return row
+
+
+def derive_ticket_rows(rows: list[dict[str, Any]], is_airline: bool) -> list[dict[str, Any]]:
+    """derive_ticket_row over a list, plus the B2B multi-sector split — i.e. the
+    exact post-mapping pipeline TicketExtractionService.extract runs."""
+    out = [derive_ticket_row(dict(r), is_airline) for r in rows]
+    if not is_airline:
+        out = _split_multi_sector_rows(out)
+    return out
+
+
 class TicketExtractionService:
 
     @staticmethod
@@ -462,83 +565,29 @@ class TicketExtractionService:
                         s = s.strip().lower()
                     row[canon] = s
 
-            # Normalize ticket_date to YYYY-MM-DD so <input type="date"> can display it
-            if row.get("ticket_date"):
-                row["ticket_date"] = _normalize_date(row["ticket_date"])
-
             if is_airline:
-                # ── Tax breakup from Tax_Type/Tax pairs ───────────────────
+                # DataFrame-only pre-fills: source columns the canonical alias
+                # map does not cover. Everything past this point is dict work
+                # and lives in derive_ticket_row, shared with manual entry.
+                # Each guard preserves key-absence, which derive_ticket_row and
+                # _split_multi_sector_rows rely on (see their docstrings).
                 tax_breakup = _build_tax_breakup(raw, xls_columns, raw)
                 if tax_breakup:
                     row["tax_breakup"] = tax_breakup
-                    # Derive individual tax columns used by deal matching
-                    if "YR" in tax_breakup and row.get("sale_yr") is None:
-                        row["sale_yr"] = tax_breakup["YR"]
-                    if "K3" in tax_breakup and row.get("sale_k3") is None:
-                        row["sale_k3"] = tax_breakup["K3"]
-                    # sell_tax_yq: prefer YQTax column already mapped; fallback to YQ in breakup
-                    if row.get("sell_tax_yq") is None and "YQ" in tax_breakup:
-                        row["sell_tax_yq"] = tax_breakup["YQ"]
 
-                # ── Pax_Name → last_name / first_name ────────────────────
-                raw_pax = row.get("pax_name") or _to_str(
-                    next((raw.get(c) for c in xls_columns
-                          if c.strip().lower() in ("pax_name", "paxname")), None)
-                )
-                if raw_pax:
-                    row["pax_name"] = raw_pax
-                    last, first = _parse_pax_name(raw_pax)
-                    if not row.get("last_name"):
-                        row["last_name"] = last
-                    if not row.get("first_name"):
-                        row["first_name"] = first
+                if not row.get("pax_name"):
+                    v = _to_str(next((raw.get(c) for c in xls_columns
+                                      if c.strip().lower() in ("pax_name", "paxname")), None))
+                    if v:
+                        row["pax_name"] = v
 
-                # ── TravelDt → departure_datetime (first leg date) ────────
-                raw_travel_dt = row.get("travel_dt") or _to_str(
-                    next((raw.get(c) for c in xls_columns
-                          if c.strip().lower() in ("traveldt", "travel_dt")), None)
-                )
-                if raw_travel_dt:
-                    row["travel_dt"] = raw_travel_dt
-                    if not row.get("departure_datetime"):
-                        row["departure_datetime"] = _parse_first_date(raw_travel_dt)
+                if not row.get("travel_dt"):
+                    v = _to_str(next((raw.get(c) for c in xls_columns
+                                      if c.strip().lower() in ("traveldt", "travel_dt")), None))
+                    if v:
+                        row["travel_dt"] = v
 
-                # ── Segment type auto-detection ────────────────────────────
-                if not row.get("segment_type"):
-                    row["segment_type"] = _detect_segment_type_from_sector(row.get("sector"))
-
-                # ── invoice_type + adm_acm_ra from transaction_type ────────
-                inv_type, adm_cat = _derive_from_transaction_type(
-                    row.get("transaction_type"),
-                    row.get("ticket_number"),
-                    row.get("invoice_type"),
-                )
-                if inv_type:
-                    row["invoice_type"] = inv_type
-                if adm_cat:
-                    row["adm_acm_ra"] = adm_cat
-
-                # ── Segments JSONB ─────────────────────────────────────────
-                segs = _build_segments(
-                    row.get("sector"),
-                    row.get("flight_no"),
-                    row.get("travel_dt"),
-                    row.get("booking_class"),
-                )
-                if segs:
-                    row["segments"] = segs
-
-                # ── store statement_type on each row ──────────────────────
-                row["statement_type"] = "AIRLINE"
-
-            else:
-                row.setdefault("statement_type", "B2B")
-
-            # Normalize departure_datetime to YYYY-MM-DD (drop time)
-            if row.get("departure_datetime"):
-                row["departure_datetime"] = _normalize_date(row["departure_datetime"])
-
-            rows.append(row)
+            rows.append(derive_ticket_row(row, is_airline))
 
         # Multi-sector splitting (B2B style — only when not airline BSP format)
         if not is_airline:

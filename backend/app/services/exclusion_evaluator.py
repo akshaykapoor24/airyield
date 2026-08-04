@@ -8,6 +8,7 @@ All 18 rule fields are now evaluable, including soto, tourCode, fareTypeCategory
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
@@ -74,11 +75,48 @@ def _city_match(rule_vals: list[str], city_airport_name: str) -> bool:
     return any(rv in cn for rv in rule_vals)
 
 
-async def _get_airport(db: AsyncSession, iata: str) -> Airport | None:
-    res = await db.execute(
-        select(Airport).where(func.upper(Airport.iata_code) == iata.upper())
-    )
-    return res.scalar_one_or_none()
+@dataclass(frozen=True)
+class _AirportView:
+    """The four fields the rule loops read off an airport.
+
+    A plain value object rather than the ORM row: the cache below outlives the periodic
+    commits inside a BSP commission run, and a detached/expired instance would be a
+    landmine. Attribute names match `Airport`, so the evaluator body is unchanged.
+    """
+    iata_code: str
+    country: str | None
+    categorization: str | None
+    continent: str | None
+    city_airport_name: str | None
+
+
+async def _get_airport(db: AsyncSession, iata: str) -> "_AirportView | None":
+    """Airport master lookup, memoised for the life of the session.
+
+    Bounded by the master itself (~1.2k airports), so a 15k-row BSP commission run does at
+    most one query per distinct IATA code instead of one per row per airport-dependent rule
+    field. `db.info` is per-session, which means per-run in the Celery worker and
+    per-request in the API — no plumbing, no cross-request leakage. Misses are cached too:
+    an unknown code must not be re-queried on every row.
+    """
+    key = (iata or "").strip().upper()
+    if not key:
+        return None
+    cache: dict[str, "_AirportView | None"] = db.info.setdefault("_airport_cache", {})
+    if key in cache:
+        return cache[key]
+    apt = (await db.execute(
+        select(Airport).where(func.upper(Airport.iata_code) == key)
+    )).scalar_one_or_none()
+    view = _AirportView(
+        iata_code=apt.iata_code,
+        country=apt.country,
+        categorization=apt.categorization,
+        continent=apt.continent,
+        city_airport_name=apt.city_airport_name,
+    ) if apt is not None else None
+    cache[key] = view
+    return view
 
 
 def _parse_rule_date(raw: Any) -> date | None:
@@ -103,20 +141,20 @@ def _parse_ticket_date(raw: str | None) -> date | None:
         return None
 
 
-def _build_dates(
-    ticket: UploadedTicket,
+def _build_dates_values(
+    ticket_date_raw: str | None,
+    departure_raw: str | None,
     use_ticket: bool,
     use_travel: bool,
 ) -> list[date]:
     """Build the list of dates that validFrom/validTo should be checked against."""
     out: list[date] = []
     if use_ticket:
-        d = _parse_ticket_date(ticket.ticket_date)
+        d = _parse_ticket_date(ticket_date_raw)
         if d:
             out.append(d)
     if use_travel:
-        d = (_parse_ticket_date(ticket.departure_datetime)
-             or _parse_ticket_date(ticket.ticket_date))
+        d = _parse_ticket_date(departure_raw) or _parse_ticket_date(ticket_date_raw)
         if d:
             out.append(d)
     return out
@@ -131,6 +169,7 @@ async def diagnose_inclusion_for_payout(
     departure_raw: str | None,
     airline_name: str | None,
     tour_code: str | None = None,
+    skip_fields: set[str] | None = None,
 ):
     """
     Non-short-circuiting version of evaluate_inclusion_for_payout.
@@ -185,7 +224,7 @@ async def diagnose_inclusion_for_payout(
     for field, rule_value in incl_data.items():
         if rule_value is None or rule_value == "" or rule_value == []:
             continue
-        if field in _UNMAPPABLE_FIELDS or field in _FLAG_FIELDS:
+        if field in _UNMAPPABLE_FIELDS or field in _FLAG_FIELDS or field in (skip_fields or set()):
             continue
 
         ticket_value_str = "—"
@@ -392,6 +431,7 @@ async def diagnose_exclusion_for_payout(
     departure_raw: str | None,
     airline_name: str | None,
     tour_code: str | None = None,
+    skip_fields: set[str] | None = None,
 ):
     """
     Non-short-circuiting version of evaluate_exclusion_for_payout.
@@ -446,7 +486,7 @@ async def diagnose_exclusion_for_payout(
     for field, rule_value in excl_data.items():
         if rule_value is None or rule_value == "" or rule_value == []:
             continue
-        if field in _UNMAPPABLE_FIELDS or field in _FLAG_FIELDS:
+        if field in _UNMAPPABLE_FIELDS or field in _FLAG_FIELDS or field in (skip_fields or set()):
             continue
 
         ticket_value_str = "—"
@@ -642,32 +682,43 @@ async def diagnose_exclusion_for_payout(
     return ExclusionRuleDiagnostic(rule_name="Exclusion For Payout", is_excluded=is_excluded, reason=reason, steps=steps)
 
 
-async def evaluate_inclusion_for_payout(
-    ticket: UploadedTicket,
-    incl_data: dict,
+async def _evaluate_rule_values(
     db: AsyncSession,
-) -> tuple[bool, str]:
-    """
-    Returns (is_included, reason_string).
-    AND logic: all non-empty incl_data fields must match the ticket.
-    If all match → ticket IS in the inclusion set → is_included=True.
-    If any field does not match → ticket is NOT included → is_included=False.
-    Empty / no evaluable fields → is_included=True (include all by default).
-    """
-    if not incl_data:
-        return True, ""
+    rule_data: dict,
+    *,
+    sector:          str | None,
+    booking_class:   str | None,
+    ticket_date_raw: str | None,
+    departure_raw:   str | None,
+    airline_name:    str | None,
+    tour_code:       str | None = None,
+    skip_fields:     set[str] | None = None,
+) -> tuple[bool, list[str], str | None]:
+    """Evaluate a flattened incl/excl rule dict against loose values.
 
-    use_ticket_date = incl_data.get("dateExclusionTicket") == "true"
-    use_travel_date = incl_data.get("dateExclusionTravel") == "true"
+    Returns (all_matched, matched_fields, first_failed_field). AND logic: the
+    first field that does not match short-circuits.
+
+    A field that cannot be resolved from the values given (no sector, no airport
+    row, …) is *skipped*, not failed — that is what lets a BSP settlement row,
+    which prints no sector at all, still be evaluated against the rest of a rule.
+    `skip_fields` forces a field to be skipped even when it could be resolved;
+    BSP passes {"class"} because an empty booking class would otherwise resolve
+    to Economy and silently match.
+    """
+    skip = skip_fields or set()
+
+    use_ticket_date = rule_data.get("dateExclusionTicket") == "true"
+    use_travel_date = rule_data.get("dateExclusionTravel") == "true"
     if not use_ticket_date and not use_travel_date:
         use_travel_date = True
 
-    sector = (ticket.sector or "").strip()
-    parts = [p.strip().upper() for p in sector.split("/") if p.strip()]
+    parts = [p.strip().upper() for p in (sector or "").split("/") if p.strip()]
     origin_iata = parts[0] if parts else None
     dest_iata   = parts[-1] if len(parts) > 1 else None
 
-    _origin_apt: Airport | None | bool = False
+    # Lazily fetched airport rows (avoid unnecessary DB hits)
+    _origin_apt: Airport | None | bool = False   # False = not yet fetched
     _dest_apt:   Airport | None | bool = False
 
     async def get_origin():
@@ -682,251 +733,37 @@ async def evaluate_inclusion_for_payout(
             _dest_apt = await _get_airport(db, dest_iata) if dest_iata else None
         return _dest_apt
 
-    matched_fields: list[str] = []
-
-    for field, rule_value in incl_data.items():
-        if rule_value is None or rule_value == "" or rule_value == []:
-            continue
-        if field in _UNMAPPABLE_FIELDS or field in _FLAG_FIELDS:
-            continue
-
-        field_matched: bool | None = None
-
-        if field == "validFrom":
-            rule_date = _parse_rule_date(rule_value)
-            if rule_date is None:
-                continue
-            dates = _build_dates(ticket, use_ticket_date, use_travel_date)
-            if not dates:
-                continue
-            field_matched = all(d >= rule_date for d in dates)
-
-        elif field == "validTo":
-            rule_date = _parse_rule_date(rule_value)
-            if rule_date is None:
-                continue
-            dates = _build_dates(ticket, use_ticket_date, use_travel_date)
-            if not dates:
-                continue
-            field_matched = all(d <= rule_date for d in dates)
-
-        else:
-            rv_list = _val_to_list(rule_value)
-            if not rv_list:
-                continue
-
-            if field == "originAirport":
-                if not origin_iata:
-                    continue
-                field_matched = _match_any(rv_list, origin_iata)
-
-            elif field == "destAirport":
-                if not dest_iata:
-                    continue
-                field_matched = _match_any(rv_list, dest_iata)
-
-            elif field == "originContinents":
-                apt = await get_origin()
-                if not apt or not apt.continent:
-                    continue
-                field_matched = _match_any(rv_list, apt.continent)
-
-            elif field == "destContinents":
-                apt = await get_dest()
-                if not apt or not apt.continent:
-                    continue
-                field_matched = _match_any(rv_list, apt.continent)
-
-            elif field == "continents":
-                o_apt = await get_origin()
-                d_apt = await get_dest()
-                o_cont = (o_apt.continent or "") if o_apt else ""
-                d_cont = (d_apt.continent or "") if d_apt else ""
-                if not o_cont and not d_cont:
-                    continue
-                field_matched = (o_cont and _match_any(rv_list, o_cont)) or (d_cont and _match_any(rv_list, d_cont))
-
-            elif field == "originCountry":
-                apt = await get_origin()
-                if not apt or not apt.country:
-                    continue
-                field_matched = _match_any(rv_list, apt.country)
-
-            elif field == "destCountry":
-                apt = await get_dest()
-                if not apt or not apt.country:
-                    continue
-                field_matched = _match_any(rv_list, apt.country)
-
-            elif field == "originCountryGroup":
-                apt = await get_origin()
-                if not apt or not apt.categorization:
-                    continue
-                field_matched = _cat_match(rv_list, apt.categorization)
-
-            elif field == "destCountryGroup":
-                apt = await get_dest()
-                if not apt or not apt.categorization:
-                    continue
-                field_matched = _cat_match(rv_list, apt.categorization)
-
-            elif field == "countryGroup":
-                o_apt = await get_origin()
-                d_apt = await get_dest()
-                o_cat = (o_apt.categorization or "") if o_apt else ""
-                d_cat = (d_apt.categorization or "") if d_apt else ""
-                if not o_cat and not d_cat:
-                    continue
-                field_matched = (o_cat and _cat_match(rv_list, o_cat)) or (d_cat and _cat_match(rv_list, d_cat))
-
-            elif field == "city":
-                o_apt = await get_origin()
-                d_apt = await get_dest()
-                o_city = (o_apt.city_airport_name or "") if o_apt else ""
-                d_city = (d_apt.city_airport_name or "") if d_apt else ""
-                if not o_city and not d_city:
-                    continue
-                field_matched = (o_city and _city_match(rv_list, o_city)) or (d_city and _city_match(rv_list, d_city))
-
-            elif field == "class":
-                airline_name = ticket.airline_name or ""
-                cabin_groups = await _resolve_cabin_groups(db, airline_name, ticket.booking_class)
-                field_matched = (
-                    any(_class_matches_groups(cabin_groups, rv) for rv in rv_list)   # legacy/airline: group names
-                    or _class_code_matches(ticket.booking_class, rv_list)            # B2B Standard: raw class codes
-                )
-
-            elif field == "soto":
-                o_apt = await get_origin()
-                d_apt = await get_dest()
-                o_country = (o_apt.country or "").strip().lower() if o_apt else ""
-                d_country = (d_apt.country or "").strip().lower() if d_apt else ""
-                if not o_country and not d_country:
-                    continue
-                field_matched = False
-                for sv in rv_list:
-                    if sv == "soto all" and o_country == "india":
-                        field_matched = True; break
-                    elif sv == "soto within india" and d_country == "india" and o_country != "india":
-                        field_matched = True; break
-                    elif sv == "soto outside india" and d_country and d_country != "india":
-                        field_matched = True; break
-
-            elif field == "tourCode":
-                tc = (ticket.tour_code or "").strip().lower()
-                field_matched = bool(tc) and tc in rv_list
-
-            elif field == "fareTypeCategory":
-                bclass_parts = {p.strip().upper() for p in (ticket.booking_class or "").split("/") if p.strip()}
-                has_tour_code = bool((ticket.tour_code or "").strip())
-                field_matched = False
-                for fc in rv_list:
-                    if fc == "normal":
-                        field_matched = True; break
-                    elif fc == "group" and "G" in bclass_parts:
-                        field_matched = True; break
-                    elif fc in {"corporate", "tour", "excursion"} and has_tour_code:
-                        field_matched = True; break
-
-            elif field == "domesticCountry":
-                o_apt = await get_origin()
-                d_apt = await get_dest()
-                o_country = (o_apt.country or "").strip().lower() if o_apt else ""
-                d_country = (d_apt.country or "").strip().lower() if d_apt else ""
-                if not o_country or not d_country:
-                    continue
-                field_matched = any(o_country == rv and d_country == rv for rv in rv_list)
-
-            else:
-                continue
-
-        if field_matched is False:
-            # AND logic: one field doesn't match → ticket is NOT in inclusion set
-            return False, f"Not included: '{field}' did not match inclusion rule"
-
-        if field_matched is True:
-            matched_fields.append(field)
-
-    if not matched_fields:
-        # No evaluable non-empty fields → include all by default
-        return True, ""
-
-    reason = f"Included by Inclusion For Payout rule (matched: {', '.join(matched_fields)})"
-    return True, reason
-
-
-async def evaluate_exclusion_for_payout(
-    ticket: UploadedTicket,
-    excl_data: dict,
-    db: AsyncSession,
-) -> tuple[bool, str]:
-    """
-    Returns (is_excluded, reason_string).
-    AND logic: all non-empty excl_data fields must match the ticket.
-    """
-    if not excl_data:
-        return False, ""
-
-    # Pre-read date exclusion flags to determine which date(s) validFrom/validTo check
-    use_ticket_date = excl_data.get("dateExclusionTicket") == "true"
-    use_travel_date = excl_data.get("dateExclusionTravel") == "true"
-    if not use_ticket_date and not use_travel_date:
-        use_travel_date = True  # backward-compat default
-
-    # Parse sector into origin / dest IATA codes
-    sector = (ticket.sector or "").strip()
-    parts = [p.strip().upper() for p in sector.split("/") if p.strip()]
-    origin_iata = parts[0] if parts else None
-    dest_iata   = parts[-1] if len(parts) > 1 else None
-
-    # Lazily fetched airport objects (avoid unnecessary DB hits)
-    _origin_apt: Airport | None | bool = False  # False = not yet fetched
-    _dest_apt:   Airport | None | bool = False
-
-    async def get_origin():
-        nonlocal _origin_apt
-        if _origin_apt is False:
-            _origin_apt = await _get_airport(db, origin_iata) if origin_iata else None
-        return _origin_apt
-
-    async def get_dest():
-        nonlocal _dest_apt
-        if _dest_apt is False:
-            _dest_apt = await _get_airport(db, dest_iata) if dest_iata else None
-        return _dest_apt
+    def dates() -> list[date]:
+        return _build_dates_values(ticket_date_raw, departure_raw, use_ticket_date, use_travel_date)
 
     matched_fields: list[str] = []
 
-    for field, rule_value in excl_data.items():
-        # Skip empty rule values
+    for field, rule_value in rule_data.items():
         if rule_value is None or rule_value == "" or rule_value == []:
             continue
-
-        # Skip fields we can't evaluate from ticket data
-        if field in _UNMAPPABLE_FIELDS or field in _FLAG_FIELDS:
+        if field in _UNMAPPABLE_FIELDS or field in _FLAG_FIELDS or field in skip:
             continue
 
-        ticket_value: Any = None
-        field_matched: bool | None = None  # None = couldn't evaluate → skip
+        field_matched: bool | None = None   # None = couldn't evaluate → skip
 
         # ── Date range ────────────────────────────────────────────────────
         if field == "validFrom":
             rule_date = _parse_rule_date(rule_value)
             if rule_date is None:
                 continue
-            dates = _build_dates(ticket, use_ticket_date, use_travel_date)
-            if not dates:
+            ds = dates()
+            if not ds:
                 continue
-            field_matched = all(d >= rule_date for d in dates)
+            field_matched = all(d >= rule_date for d in ds)
 
         elif field == "validTo":
             rule_date = _parse_rule_date(rule_value)
             if rule_date is None:
                 continue
-            dates = _build_dates(ticket, use_ticket_date, use_travel_date)
-            if not dates:
+            ds = dates()
+            if not ds:
                 continue
-            field_matched = all(d <= rule_date for d in dates)
+            field_matched = all(d <= rule_date for d in ds)
 
         else:
             rv_list = _val_to_list(rule_value)
@@ -1013,11 +850,10 @@ async def evaluate_exclusion_for_payout(
 
             # ── Booking class (cabin group) ─────────────────────────────────
             elif field == "class":
-                airline_name = ticket.airline_name or ""
-                cabin_groups = await _resolve_cabin_groups(db, airline_name, ticket.booking_class)
+                cabin_groups = await _resolve_cabin_groups(db, airline_name or "", booking_class)
                 field_matched = (
                     any(_class_matches_groups(cabin_groups, rv) for rv in rv_list)   # legacy/airline: group names
-                    or _class_code_matches(ticket.booking_class, rv_list)            # B2B Standard: raw class codes
+                    or _class_code_matches(booking_class, rv_list)                   # B2B Standard: raw class codes
                 )
 
             # ── SOTO (India origin/destination rule) ──────────────────────────
@@ -1039,13 +875,13 @@ async def evaluate_exclusion_for_payout(
 
             # ── Tour code match ────────────────────────────────────────────────
             elif field == "tourCode":
-                tc = (ticket.tour_code or "").strip().lower()
+                tc = (tour_code or "").strip().lower()
                 field_matched = bool(tc) and tc in rv_list
 
             # ── Fare type category ─────────────────────────────────────────────
             elif field == "fareTypeCategory":
-                bclass_parts = {p.strip().upper() for p in (ticket.booking_class or "").split("/") if p.strip()}
-                has_tour_code = bool((ticket.tour_code or "").strip())
+                bclass_parts = {p.strip().upper() for p in (booking_class or "").split("/") if p.strip()}
+                has_tour_code = bool((tour_code or "").strip())
                 field_matched = False
                 for fc in rv_list:
                     if fc == "normal":
@@ -1069,15 +905,112 @@ async def evaluate_exclusion_for_payout(
                 continue
 
         if field_matched is False:
-            # AND logic: one field doesn't match → ticket is NOT excluded
-            return False, ""
+            return False, matched_fields, field
 
         if field_matched is True:
             matched_fields.append(field)
 
+    return True, matched_fields, None
+
+
+async def evaluate_inclusion_for_payout_values(
+    db: AsyncSession,
+    incl_data: dict,
+    *,
+    sector:          str | None,
+    booking_class:   str | None,
+    ticket_date_raw: str | None,
+    departure_raw:   str | None,
+    airline_name:    str | None,
+    tour_code:       str | None = None,
+    skip_fields:     set[str] | None = None,
+) -> tuple[bool, str]:
+    """
+    Returns (is_included, reason_string).
+    AND logic: all non-empty incl_data fields must match.
+    If all match → IS in the inclusion set → is_included=True.
+    If any field does not match → NOT included → is_included=False.
+    Empty / no evaluable fields → is_included=True (include all by default).
+    """
+    if not incl_data:
+        return True, ""
+
+    all_matched, matched_fields, failed = await _evaluate_rule_values(
+        db, incl_data,
+        sector=sector, booking_class=booking_class,
+        ticket_date_raw=ticket_date_raw, departure_raw=departure_raw,
+        airline_name=airline_name, tour_code=tour_code, skip_fields=skip_fields,
+    )
+    if not all_matched:
+        return False, f"Not included: '{failed}' did not match inclusion rule"
+    if not matched_fields:
+        # No evaluable non-empty fields → include all by default
+        return True, ""
+    return True, f"Included by Inclusion For Payout rule (matched: {', '.join(matched_fields)})"
+
+
+async def evaluate_exclusion_for_payout_values(
+    db: AsyncSession,
+    excl_data: dict,
+    *,
+    sector:          str | None,
+    booking_class:   str | None,
+    ticket_date_raw: str | None,
+    departure_raw:   str | None,
+    airline_name:    str | None,
+    tour_code:       str | None = None,
+    skip_fields:     set[str] | None = None,
+) -> tuple[bool, str]:
+    """
+    Returns (is_excluded, reason_string).
+    AND logic: all non-empty excl_data fields must match for the exclusion to bite.
+    """
+    if not excl_data:
+        return False, ""
+
+    all_matched, matched_fields, _failed = await _evaluate_rule_values(
+        db, excl_data,
+        sector=sector, booking_class=booking_class,
+        ticket_date_raw=ticket_date_raw, departure_raw=departure_raw,
+        airline_name=airline_name, tour_code=tour_code, skip_fields=skip_fields,
+    )
+    if not all_matched:
+        return False, ""
     if not matched_fields:
         # No evaluable non-empty fields matched (all were skipped or empty)
         return False, ""
+    return True, f"Excluded by Exclusion For Payout rule (matched: {', '.join(matched_fields)})"
 
-    reason = f"Excluded by Exclusion For Payout rule (matched: {', '.join(matched_fields)})"
-    return True, reason
+
+# ── Ticket-object wrappers (unchanged behaviour for the ticket calc engine) ──
+
+async def evaluate_inclusion_for_payout(
+    ticket: UploadedTicket,
+    incl_data: dict,
+    db: AsyncSession,
+) -> tuple[bool, str]:
+    return await evaluate_inclusion_for_payout_values(
+        db, incl_data,
+        sector=ticket.sector,
+        booking_class=ticket.booking_class,
+        ticket_date_raw=ticket.ticket_date,
+        departure_raw=ticket.departure_datetime,
+        airline_name=ticket.airline_name,
+        tour_code=ticket.tour_code,
+    )
+
+
+async def evaluate_exclusion_for_payout(
+    ticket: UploadedTicket,
+    excl_data: dict,
+    db: AsyncSession,
+) -> tuple[bool, str]:
+    return await evaluate_exclusion_for_payout_values(
+        db, excl_data,
+        sector=ticket.sector,
+        booking_class=ticket.booking_class,
+        ticket_date_raw=ticket.ticket_date,
+        departure_raw=ticket.departure_datetime,
+        airline_name=ticket.airline_name,
+        tour_code=ticket.tour_code,
+    )

@@ -16,6 +16,9 @@ class UserCreate(BaseModel):
     password: str
     role: UserRole = UserRole.VIEWER
     department: Optional[str] = None
+    # Entities (from the admin's own My Profile → Entities list) this member works
+    # on. Optional — a member can be assigned entities later.
+    entity_ids: list[int] = []
 
 
 class UserUpdate(BaseModel):
@@ -26,6 +29,11 @@ class UserUpdate(BaseModel):
 
 class UserRoleUpdate(BaseModel):
     role: UserRole
+
+
+class UserEntitiesUpdate(BaseModel):
+    """Replace a member's entity assignments with exactly this set."""
+    entity_ids: list[int] = []
 
 
 class UserRead(BaseModel):
@@ -40,6 +48,10 @@ class UserRead(BaseModel):
     created_at: datetime
     tenant_id: Optional[int] = None
     tenant_type: Optional[str] = None   # "corporate" | "individual" (derived from tenant)
+    # Entities this member is assigned to. Populated by the admin user endpoints;
+    # empty elsewhere (e.g. /users/me) since it needs a separate lookup.
+    entity_ids: list[int] = []
+    entity_names: list[str] = []
 
     model_config = {"from_attributes": True}
 

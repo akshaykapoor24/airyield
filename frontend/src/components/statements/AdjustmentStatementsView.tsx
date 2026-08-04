@@ -1,14 +1,16 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Upload, RefreshCw, Trash2, Download, Eye, X, AlertTriangle, ArrowLeft,
-  FileSpreadsheet, CheckCircle2, Loader2, ChevronLeft, ChevronRight, FolderOpen,
+  FileSpreadsheet, CheckCircle2, Loader2, ChevronLeft, ChevronRight, FolderOpen, Search, Split,
 } from "lucide-react";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 
 const PAGE = 50;
+const SELECT_CLS =
+  "border border-slate-200 rounded-lg px-2 py-1.5 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-400";
 
 type Batch = {
   batch_id: string;
@@ -18,8 +20,26 @@ type Batch = {
   has_file: boolean;
   created_by_name: string | null;
 };
-type Column = { header: string; field: string };
+// `kind: "money"` is set by the backend for amount columns so they right-align and format.
+type Column = { header: string; field: string; kind?: string };
 type Row = Record<string, string | number | null> & { id: number };
+
+// Declared per statement type in the backend spec; absent for types that have no filters,
+// in which case the toolbar and the slab below simply never render.
+type FilterSpec = { field: string; label: string; type: "select" | "text" };
+type Summary = {
+  fields: { field: string; label: string }[];
+  computed: Record<string, string>;
+  declared: Record<string, string | null> | null;
+  declared_comparable: boolean;
+  declared_note: string | null;
+  row_count: number;
+  leg_count: number;
+};
+type RecordsResponse = {
+  total: number; columns: Column[]; rows: Row[];
+  filters?: FilterSpec[]; summary?: Summary; needs_reprocess?: boolean;
+};
 
 function fmtDate(s: string): string {
   try { return new Date(s).toLocaleString(); } catch { return s; }
@@ -27,6 +47,13 @@ function fmtDate(s: string): string {
 function errMsg(e: unknown, fallback: string): string {
   const m = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
   return typeof m === "string" ? m : fallback;
+}
+/** Indian grouping for amounts; anything non-numeric is passed through untouched. */
+function fmtMoney(v: string | number | null | undefined): string {
+  if (v == null || v === "") return "—";
+  const n = Number(String(v).replace(/,/g, ""));
+  if (!Number.isFinite(n)) return String(v);
+  return n.toLocaleString("en-IN", { maximumFractionDigits: 2 });
 }
 
 /** XLS/CSV upload modal for one adjustment type. */
@@ -44,8 +71,13 @@ function UploadModal({ apiBase, title, onClose, onDone }: { apiBase: string; tit
     setUploading(true);
     try {
       const fd = new FormData(); fd.append("file", file);
-      const { data } = await api.post<{ inserted: number; matched_columns: number }>(`${apiBase}/upload`, fd);
-      toast.success(`Imported ${data.inserted} ${title} row${data.inserted === 1 ? "" : "s"}.`);
+      const { data } = await api.post<{ inserted: number; matched_columns: number; source_rows?: number; leg_rows?: number }>(`${apiBase}/upload`, fd);
+      // Sector-split types insert more rows than the file has lines — say so, or "imported
+      // 518" against a 223-line file reads like a bug.
+      const split = data.source_rows != null && data.leg_rows != null && data.leg_rows !== data.source_rows;
+      toast.success(split
+        ? `Imported ${data.source_rows} ${title} ticket line${data.source_rows === 1 ? "" : "s"} as ${data.leg_rows} sector rows.`
+        : `Imported ${data.inserted} ${title} row${data.inserted === 1 ? "" : "s"}.`);
       onDone();
     } catch (e) { toast.error(errMsg(e, "Failed to import the file.")); }
     finally { setUploading(false); }
@@ -95,6 +127,64 @@ function UploadModal({ apiBase, title, onClose, onDone }: { apiBase: string; tit
   );
 }
 
+function Stat({ label, value, sub, accent }: { label: string; value: string; sub?: ReactNode; accent?: string }) {
+  return (
+    <div className="bg-white border border-slate-200 rounded-xl px-3 py-2.5">
+      <p className="text-[10px] uppercase tracking-wide text-slate-400">{label}</p>
+      <p className={`text-sm font-bold mt-0.5 tabular-nums ${accent ?? "text-slate-800"}`}>{value}</p>
+      {sub && <p className="text-[10px] mt-0.5 tabular-nums text-slate-400">{sub}</p>}
+    </div>
+  );
+}
+
+/**
+ * Totals for the whole filtered set, lifted out of the table body.
+ *
+ * Statements carry their own grand-total line, and it does not always agree with the
+ * column it claims to total. Rather than pick a winner, both figures are shown: the
+ * computed total on top, the vendor's declared figure beneath, and an amber tint when
+ * they disagree.
+ */
+function SummarySlab({ summary }: { summary: Summary }) {
+  const { fields, computed, declared, declared_comparable, declared_note, row_count, leg_count } = summary;
+  const split = leg_count > row_count;
+  return (
+    <div className="mb-3">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7 gap-2">
+        <Stat
+          label={split ? "Tickets · Sectors" : "Rows"}
+          value={split ? `${row_count.toLocaleString("en-IN")} · ${leg_count.toLocaleString("en-IN")}` : row_count.toLocaleString("en-IN")}
+          sub={split ? "split by sector" : undefined}
+        />
+        {fields.map((f) => {
+          const c = computed[f.field];
+          const d = declared?.[f.field];
+          const differs = declared_comparable && d != null && d !== "" &&
+            Math.abs(Number(String(c).replace(/,/g, "")) - Number(String(d).replace(/,/g, ""))) > 0.005;
+          return (
+            <Stat key={f.field} label={f.label} value={fmtMoney(c)}
+              accent={differs ? "text-amber-700" : undefined}
+              sub={
+                d == null || d === "" ? undefined
+                  : declared_comparable
+                    ? <span className={differs ? "text-amber-600" : "text-emerald-600"}>
+                        {differs ? "≠" : "✓"} file {fmtMoney(d)}
+                      </span>
+                    : <span className="text-slate-300">file {fmtMoney(d)}</span>
+              } />
+          );
+        })}
+      </div>
+      {declared_note && <p className="mt-1.5 text-[11px] text-amber-700">{declared_note}</p>}
+      {declared && !declared_comparable && (
+        <p className="mt-1.5 text-[11px] text-slate-400">
+          Filters are active — these totals cover the filtered rows only, so they are not comparable to the file&apos;s own Total line.
+        </p>
+      )}
+    </div>
+  );
+}
+
 export default function AdjustmentStatementsView({ apiBase, slug, title }: { apiBase: string; slug: string; title: string; blurb?: string }) {
   const [batches, setBatches] = useState<Batch[]>([]);
   const [loading, setLoading] = useState(true);
@@ -110,6 +200,19 @@ export default function AdjustmentStatementsView({ apiBase, slug, title }: { api
   const [roffset, setRoffset] = useState(0);
   const [rloading, setRloading] = useState(false);
 
+  // Opt-in extras — only ever populated for statement types whose spec declares them.
+  const [filters, setFilters] = useState<FilterSpec[]>([]);
+  const [fvals, setFvals] = useState<Record<string, string>>({});
+  const [facets, setFacets] = useState<Record<string, string[]>>({});
+  const [summary, setSummary] = useState<Summary | null>(null);
+  const [needsReprocess, setNeedsReprocess] = useState(false);
+  const [reprocessing, setReprocessing] = useState(false);
+  // Opening a batch should feel instant; only filter edits are worth debouncing.
+  const skipDebounce = useRef(true);
+
+  const hasFilters = Object.values(fvals).some(Boolean);
+  const hasSelects = filters.some((f) => f.type === "select");
+
   const fetchBatches = useCallback(async () => {
     setLoading(true);
     try { const { data } = await api.get<Batch[]>(`${apiBase}/batches`); setBatches(data); }
@@ -117,19 +220,58 @@ export default function AdjustmentStatementsView({ apiBase, slug, title }: { api
     finally { setLoading(false); }
   }, [apiBase, title]);
 
-  useEffect(() => { setSelected(null); fetchBatches(); }, [fetchBatches, slug]);
+  useEffect(() => {
+    setSelected(null); setFvals({}); setFilters([]); setFacets({}); setSummary(null);
+    fetchBatches();
+  }, [fetchBatches, slug]);
 
   const loadRecords = useCallback(async (batchId: string, offset: number) => {
     setRloading(true);
     try {
-      const { data } = await api.get<{ total: number; columns: Column[]; rows: Row[] }>(
-        `${apiBase}/records`, { params: { batch_id: batchId, offset, limit: PAGE } });
+      const params: Record<string, string | number> = { batch_id: batchId, offset, limit: PAGE };
+      for (const [k, v] of Object.entries(fvals)) if (v) params[`f.${k}`] = v;
+      const { data } = await api.get<RecordsResponse>(`${apiBase}/records`, { params });
       setColumns(data.columns); setRows(data.rows); setRtotal(data.total); setRoffset(offset);
+      setFilters(data.filters ?? []); setSummary(data.summary ?? null);
+      setNeedsReprocess(!!data.needs_reprocess);
     } catch { toast.error("Failed to load rows."); }
     finally { setRloading(false); }
-  }, [apiBase]);
+  }, [apiBase, fvals]);
 
-  const openBatch = (b: Batch) => { setSelected(b); loadRecords(b.batch_id, 0); };
+  // One effect covers both typing and dropdowns, and always returns to page 1 — a filtered
+  // view paged to offset 300 would otherwise land on an empty page.
+  useEffect(() => {
+    if (!selected) return;
+    const delay = skipDebounce.current ? 0 : 250;
+    skipDebounce.current = false;
+    const t = setTimeout(() => loadRecords(selected.batch_id, 0), delay);
+    return () => clearTimeout(t);
+  }, [selected, loadRecords]);
+
+  // Facet values are per batch, not per filter, so the options don't disappear as you narrow.
+  useEffect(() => {
+    if (!selected || !hasSelects) return;
+    api.get<Record<string, string[]>>(`${apiBase}/records/facets`, { params: { batch_id: selected.batch_id } })
+      .then((r) => setFacets(r.data ?? {}))
+      .catch(() => {});   // types without facets simply 404 — not an error worth surfacing
+  }, [apiBase, selected, hasSelects]);
+
+  const openBatch = (b: Batch) => { skipDebounce.current = true; setFvals({}); setSelected(b); };
+  const closeBatch = () => { setSelected(null); setFvals({}); setFilters([]); setSummary(null); };
+  const clearFilters = () => setFvals({});
+
+  const reprocess = async () => {
+    if (!selected) return;
+    setReprocessing(true);
+    try {
+      const { data } = await api.post<{ source_rows: number; leg_rows: number }>(
+        `${apiBase}/batches/${selected.batch_id}/resplit`);
+      toast.success(`Split ${data.source_rows} ticket line${data.source_rows === 1 ? "" : "s"} into ${data.leg_rows} sector rows.`);
+      await fetchBatches();
+      await loadRecords(selected.batch_id, 0);
+    } catch (e) { toast.error(errMsg(e, "Failed to re-process this upload.")); }
+    finally { setReprocessing(false); }
+  };
 
   const downloadFile = async (b: Batch) => {
     try { const { data } = await api.get<{ url: string }>(`${apiBase}/batches/${b.batch_id}/file-url`, { params: { inline: false } }); window.open(data.url, "_blank"); }
@@ -176,10 +318,15 @@ export default function AdjustmentStatementsView({ apiBase, slug, title }: { api
     return (
       <div>
         <div className="flex items-center gap-2 mb-3">
-          <button onClick={() => setSelected(null)} className="flex items-center gap-1 text-xs text-slate-400 hover:text-slate-700"><ArrowLeft className="w-3.5 h-3.5" /> Back to uploads</button>
+          <button onClick={closeBatch} className="flex items-center gap-1 text-xs text-slate-400 hover:text-slate-700"><ArrowLeft className="w-3.5 h-3.5" /> Back to uploads</button>
           <span className="text-slate-300">|</span>
           <h3 className="text-sm font-semibold text-slate-800 truncate max-w-[320px]" title={selected.source_file ?? undefined}>{title} · {selected.source_file || "upload"}</h3>
-          <span className="text-[11px] text-slate-400">· {selected.row_count} entries · {fmtDate(selected.uploaded_at)}</span>
+          <span className="text-[11px] text-slate-400">
+            {/* the filtered count, not the batch's — those differ the moment you filter */}
+            · {rtotal.toLocaleString("en-IN")} {rtotal === 1 ? "row" : "rows"}
+            {hasFilters && <span className="text-amber-600"> (filtered from {selected.row_count.toLocaleString("en-IN")})</span>}
+            {" "}· {fmtDate(selected.uploaded_at)}
+          </span>
           {selected.has_file && (
             <div className="ml-auto flex items-center gap-2">
               <button onClick={() => previewFile(selected)} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-blue-700 border border-blue-200 bg-blue-50 rounded-lg hover:bg-blue-100">
@@ -191,27 +338,81 @@ export default function AdjustmentStatementsView({ apiBase, slug, title }: { api
             </div>
           )}
         </div>
+        {needsReprocess && (
+          <div className="flex items-center gap-2 mb-3 px-3 py-2.5 rounded-xl border border-amber-200 bg-amber-50 text-xs text-amber-800">
+            <Split className="w-4 h-4 shrink-0" />
+            <span>This upload predates per-sector splitting. Re-process it to show one row per flown sector, with the fare and taxes divided across the legs, and to lift the file&apos;s Total line out of the table.</span>
+            <button onClick={reprocess} disabled={reprocessing}
+              className="ml-auto shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-amber-600 rounded-lg hover:bg-amber-700 disabled:opacity-50">
+              {reprocessing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Split className="w-3.5 h-3.5" />}
+              {reprocessing ? "Re-processing…" : "Re-process"}
+            </button>
+          </div>
+        )}
+
+        {summary && <SummarySlab summary={summary} />}
+
         <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+          {filters.length > 0 && (
+            <div className="flex items-center gap-2 flex-wrap px-3 py-2.5 border-b border-slate-100 bg-slate-50/40">
+              {filters.map((f) => (
+                f.type === "select" ? (
+                  <select key={f.field} value={fvals[f.field] ?? ""} className={SELECT_CLS}
+                    onChange={(e) => setFvals((p) => ({ ...p, [f.field]: e.target.value }))}>
+                    <option value="">All {f.label}</option>
+                    {(facets[f.field] ?? []).map((v) => <option key={v} value={v}>{v}</option>)}
+                  </select>
+                ) : (
+                  <div key={f.field} className="relative">
+                    <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
+                    <input value={fvals[f.field] ?? ""} placeholder={f.label}
+                      onChange={(e) => setFvals((p) => ({ ...p, [f.field]: e.target.value }))}
+                      className="pl-8 pr-3 py-1.5 border border-slate-200 rounded-lg text-xs w-36 bg-white focus:outline-none focus:ring-1 focus:ring-blue-400" />
+                  </div>
+                )
+              ))}
+              {hasFilters && (
+                <button onClick={clearFilters} className="inline-flex items-center gap-1 text-xs text-slate-500 hover:text-slate-800">
+                  <X className="w-3.5 h-3.5" /> Clear
+                </button>
+              )}
+              <span className="ml-auto text-[11px] text-slate-400">{rtotal.toLocaleString("en-IN")} rows</span>
+            </div>
+          )}
           <div className="overflow-x-auto">
             <table className="text-left border-collapse text-sm">
               <thead>
                 <tr className="bg-slate-50 border-b border-slate-200 text-[11px] uppercase tracking-wide text-slate-400">
-                  {columns.map((c) => <th key={c.field} className="px-3 py-2 font-semibold whitespace-nowrap">{c.header}</th>)}
+                  {columns.map((c) => <th key={c.field} className={`px-3 py-2 font-semibold whitespace-nowrap ${c.kind === "money" ? "text-right" : ""}`}>{c.header}</th>)}
                 </tr>
               </thead>
               <tbody>
                 {rloading ? (
                   <tr><td colSpan={columns.length || 1} className="px-3 py-8 text-center text-slate-400">Loading…</td></tr>
                 ) : rows.length === 0 ? (
-                  <tr><td colSpan={columns.length || 1} className="px-3 py-8 text-center text-slate-400">No rows.</td></tr>
-                ) : rows.map((r) => (
-                  <tr key={r.id} className="border-b border-slate-100 hover:bg-slate-50/60">
+                  <tr><td colSpan={columns.length || 1} className="px-3 py-8 text-center text-slate-400">
+                    {hasFilters ? "No rows match these filters." : "No rows."}
+                  </td></tr>
+                ) : rows.map((r) => {
+                  const legs = Number(r.__legs__ ?? 1);
+                  return (
+                  <tr key={r.id} className={`border-b border-slate-100 hover:bg-slate-50/60 ${legs > 1 ? "border-l-2 border-l-amber-200" : ""}`}>
                     {columns.map((c) => {
                       const v = r[c.field];
-                      return <td key={c.field} className="px-3 py-1.5 text-xs text-slate-700 whitespace-nowrap max-w-[240px] truncate" title={v != null ? String(v) : undefined}>{v != null && v !== "" ? String(v) : <span className="text-slate-300">—</span>}</td>;
+                      if (c.field === "__leg__") {
+                        return <td key={c.field} className="px-3 py-1.5 text-xs whitespace-nowrap">
+                          {legs > 1
+                            ? <span className="inline-block px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200 font-medium tabular-nums" title={`Sector ${v} of this ticket — fare and taxes divided across ${legs} legs`}>{String(v)}</span>
+                            : <span className="text-slate-300">—</span>}
+                        </td>;
+                      }
+                      const money = c.kind === "money";
+                      const text = v != null && v !== "" ? (money ? fmtMoney(v) : String(v)) : null;
+                      return <td key={c.field} className={`px-3 py-1.5 text-xs text-slate-700 whitespace-nowrap max-w-[240px] truncate ${money ? "text-right tabular-nums" : ""}`} title={v != null ? String(v) : undefined}>{text ?? <span className="text-slate-300">—</span>}</td>;
                     })}
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>

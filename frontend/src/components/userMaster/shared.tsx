@@ -12,8 +12,12 @@ export type EntityRow = {
   address: string | null;
   state: string | null;
   city: string | null;
+  gst_number?: string | null;
+  pan_number?: string | null;
   is_active: boolean;
 };
+
+export type BulkCreateResult = BulkResult & { created: EntityRow[] };
 
 export type LoginIdRow = {
   id: number;
@@ -153,10 +157,16 @@ export function UploadBox({
   );
 }
 
-export function ModalShell({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+export function ModalShell({ title, onClose, children, wide }: {
+  title: string;
+  onClose: () => void;
+  children: React.ReactNode;
+  /** Roomier shell for forms that repeat a row (e.g. adding several entities). */
+  wide?: boolean;
+}) {
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+      <div className={`bg-white rounded-2xl shadow-2xl w-full max-h-[90vh] overflow-y-auto ${wide ? "max-w-3xl" : "max-w-lg"}`}>
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 sticky top-0 bg-white">
           <h2 className="text-sm font-bold text-gray-900">{title}</h2>
           <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-lg"><X className="w-4 h-4 text-gray-500" /></button>
