@@ -53,6 +53,31 @@ class BspStatement(Base):
     gt_balance_payable:  Mapped[float | None] = mapped_column(Numeric(16, 2), nullable=True)
     gt_doc_count:        Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # ── Commission-income run state (Vendors → Commission income) ────────────
+    # A commission run matches every settlement row against the user's approved
+    # AIRLINE deals and stores the estimated incentive on the row. The run is a
+    # Celery job (statements reach ~50k rows), so it carries its own progress +
+    # roll-up totals, exactly like the parse `status`/`processed_rows` pair above.
+    commission_status:          Mapped[str] = mapped_column(String(12), nullable=False, default="idle", server_default="idle", index=True)  # idle|queued|processing|completed|failed
+    commission_total_rows:      Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    commission_processed_rows:  Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    commission_error:           Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Liveness of the current run: stamped when queued and refreshed on every
+    # progress flush. A queued/processing run whose heartbeat has gone quiet has
+    # lost its worker, and the API lets a new run take over — so the UI can never
+    # wedge on a run that will never finish. A genuinely slow run keeps beating.
+    commission_heartbeat_at:    Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    commission_calculated_at:   Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    commission_total_incentive: Mapped[float | None] = mapped_column(Numeric(16, 2), nullable=True)
+    commission_iata_total:      Mapped[float | None] = mapped_column(Numeric(16, 2), nullable=True)
+    commission_matched_rows:    Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    commission_unmatched_rows:  Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    commission_excluded_rows:   Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    commission_skipped_rows:    Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    # How many rows found a TGQ HMPR counterpart, so the UI can distinguish "the deals
+    # don't apply" from "the other half of the data hasn't been uploaded".
+    commission_enriched_rows:   Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+
     created_at:     Mapped[datetime]   = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -118,6 +143,34 @@ class BspStatementRow(Base):
     # ── Matching (Phase 2) ──────────────────────────────────────────────────
     matched_ticket_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("uploaded_tickets.id", ondelete="SET NULL"), nullable=True, index=True)
     match_status:   Mapped[str]        = mapped_column(String(12), nullable=False, default="unmatched", server_default="unmatched")  # matched|unmatched|ambiguous
+
+    # ── Commission income (deal match + estimated incentive) ────────────────
+    # Mirrors the derived block on uploaded_tickets. BSP prints no cabin class,
+    # no sector and no travel date, so the criteria that could not be evaluated
+    # are listed in `skipped_criteria` rather than silently defaulted.
+    matched_deal_id:      Mapped[int | None]   = mapped_column(Integer, nullable=True, index=True)   # no FK — deals may be deleted (same as uploaded_tickets)
+    matched_deal_type:    Mapped[str | None]   = mapped_column(String(20), nullable=True)            # always 'airline' for BSP
+    matched_deal_name:    Mapped[str | None]   = mapped_column(String(300), nullable=True)
+    calculated_incentive: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)        # negative on a refund reversal
+    iata_commission:      Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)        # deal IATA % × fare_amount; NOT part of the total
+    incentive_breakdown:  Mapped[dict | None]  = mapped_column(JSONB, nullable=True)                 # {incentive_type: amount}
+    commission_status:    Mapped[str]          = mapped_column(String(12), nullable=False, default="pending", server_default="pending", index=True)  # pending|calculated|excluded|reversed|skipped|unmatched
+    commission_reason:    Mapped[str | None]   = mapped_column(String(500), nullable=True)
+    skipped_criteria:     Mapped[list | None]  = mapped_column(JSONB, nullable=True)                 # what this row could NOT evaluate; [] = nothing skipped
+    commission_calculated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # ── TGQ HMPR enrichment — the three fields BSP does not print ───────────
+    # Resolved at run time by joining tgq_hmpr on (airline accounting code, ticket no) and
+    # folding the ticket's N flown sectors back into one journey. Persisted so the grid can
+    # show what the match was actually based on and a past run stays auditable.
+    # enrichment_source NULL = no TGQ counterpart, and the three criteria stay skipped.
+    enriched_sector:             Mapped[str | None]  = mapped_column(String(200), nullable=True)  # 'BOM/DEL/MNL/DEL/BOM'
+    enriched_booking_class:      Mapped[str | None]  = mapped_column(String(60), nullable=True)   # 'L/U' (distinct across legs)
+    enriched_travel_date:        Mapped[date | None] = mapped_column(Date, nullable=True)         # first leg
+    enriched_travel_date_source: Mapped[str | None]  = mapped_column(String(12), nullable=True)   # explicit|inferred
+    enriched_leg_count:          Mapped[int | None]  = mapped_column(Integer, nullable=True)
+    enrichment_source:           Mapped[str | None]  = mapped_column(String(20), nullable=True)   # None | 'tgq_hmpr'
+    enrichment_ref:              Mapped[str | None]  = mapped_column(String(100), nullable=True)  # winning tgq_hmpr.batch_id
 
     raw_data:       Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at:     Mapped[datetime]   = mapped_column(DateTime, default=datetime.utcnow)

@@ -9,7 +9,7 @@ import {
   Plane, Building, Building2, MapPin, Route, Tag, DollarSign,
   Calculator, Upload, ClipboardCheck, CheckSquare,
   Edit3, Users, Shield, GitMerge, Search,
-  BookOpen, History, LayoutGrid, Plus, Contact, Percent,
+  BookOpen, History, LayoutGrid, Plus, Contact, Percent, FilePlus,
 } from "lucide-react";
 import { loadDashboards, type CustomDashboard } from "@/lib/customDashboards";
 import { cn } from "@/lib/utils";
@@ -45,8 +45,8 @@ const TENANT_NAV: NavItem[] = [
     children: [
       { label: "Incoming deals", href: "/deals", icon: FolderOpen },
       // TODO: wire badge to real count
-      { label: "Statements", href: "/vendors/statements", icon: FileText, badge: 6 },
-      { label: "Ticket Details", href: "/ticket-details", icon: Search },
+      { label: "Statements", href: "/vendors/statements", icon: FileText },
+      { label: "Ticket Search", href: "/ticket-details", icon: Search },
       { label: "Reconciliation", href: "/tickets/bsp-reconciliation", icon: GitMerge },
       { label: "Commission income", href: "/vendors/commission-income", icon: DollarSign },
     ],
@@ -61,7 +61,7 @@ const TENANT_NAV: NavItem[] = [
       { label: "Floated deals", href: "/deals?direction=outbound", icon: FolderOutput },
       { label: "Statements", href: "/customers/statements", icon: FileText },
       { label: "Reconciliation", href: "/customers/reconciliation", icon: GitMerge },
-      { label: "Billing and invoices", href: "/billing/agency", icon: DollarSign },
+      // { label: "Billing and invoices", href: "/billing/agency", icon: DollarSign },
     ],
   },
 
@@ -70,6 +70,7 @@ const TENANT_NAV: NavItem[] = [
     children: [
       { label: "Internal Statement", href: "/tickets", icon: BookOpen },
       { label: "Upload Statement", href: "/tickets/upload", icon: Upload },
+      { label: "Create Tickets", href: "/tickets/create", icon: FilePlus },
       { label: "Income Statement", href: "/tickets/income-summary", icon: DollarSign },
     ],
   },
@@ -209,6 +210,7 @@ export default function Sidebar() {
         (pathname.startsWith("/tickets/") &&
           !pathname.startsWith("/tickets/income-summary") &&
           !pathname.startsWith("/tickets/upload") &&
+          !pathname.startsWith("/tickets/create") &&
           !pathname.startsWith("/tickets/bsp") &&
           !pathname.startsWith("/tickets/adjustments"))
     : pathname === href || pathname.startsWith(href + "/");

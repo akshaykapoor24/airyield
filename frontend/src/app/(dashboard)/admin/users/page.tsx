@@ -6,6 +6,11 @@ import {
   Shield, User, ChevronDown, X, Check, RefreshCw,
 } from "lucide-react";
 import api from "@/lib/api";
+import MultiSelectDropdown from "@/components/ui/MultiSelectDropdown";
+
+// Entities come from the admin's own My Profile → Entities list — the ones they
+// captured during onboarding. Assigning them here says which the member works on.
+type AssignableEntity = { id: number; name: string; code: string };
 
 // ── Role definitions ───────────────────────────────────────────────────────
 const ROLES = [
@@ -76,6 +81,8 @@ type UserRow = {
   department: string | null;
   is_active: boolean;
   created_at: string;
+  entity_ids?: number[];
+  entity_names?: string[];
 };
 
 // ── role badge ─────────────────────────────────────────────────────────────
@@ -91,12 +98,14 @@ function RoleBadge({ role }: { role: RoleValue }) {
 
 // ── add/edit modal ─────────────────────────────────────────────────────────
 function UserModal({
-  user, onClose, onSave, adminDomain,
+  user, onClose, onSave, adminDomain, entities, entitiesLoading,
 }: {
   user: Partial<UserRow> | null;
   onClose: () => void;
-  onSave: (u: Partial<UserRow> & { password?: string }) => void;
+  onSave: (u: Partial<UserRow> & { password?: string; entity_ids?: number[] }) => void;
   adminDomain: string;
+  entities: AssignableEntity[];
+  entitiesLoading: boolean;
 }) {
   const isEdit = !!user?.id;
   const [form, setForm] = useState({
@@ -106,6 +115,7 @@ function UserModal({
     role:       (user?.role      ?? "viewer") as RoleValue,
     department: user?.department ?? "",
   });
+  const [entityIds, setEntityIds] = useState<number[]>(user?.entity_ids ?? []);
   const [roleOpen, setRoleOpen] = useState(false);
   const [domainError, setDomainError] = useState("");
 
@@ -215,6 +225,31 @@ function UserModal({
             </div>
           </div>
 
+          {/* entities — options are the admin's own entities from My Profile */}
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Entities</label>
+            {entitiesLoading ? (
+              <p className="text-[11px] text-gray-400 py-2">Loading your entities…</p>
+            ) : entities.length === 0 ? (
+              <p className="text-[11px] text-gray-400 border border-dashed border-gray-200 rounded-lg px-3 py-2 leading-snug">
+                You haven&apos;t added any entities yet. Add them under{" "}
+                <span className="font-semibold">My Profile → Entities</span>, then assign them here.
+              </p>
+            ) : (
+              <>
+                <MultiSelectDropdown
+                  options={entities.map(e => ({ value: e.id, label: e.name, sublabel: e.code }))}
+                  selected={entityIds}
+                  onChange={setEntityIds}
+                  placeholder="Select entities…"
+                />
+                <p className="text-[10px] text-gray-400 mt-1">
+                  Which of your entities this user works on. Leave empty to assign later.
+                </p>
+              </>
+            )}
+          </div>
+
           {/* role description */}
           <div className={`px-3 py-2.5 rounded-lg border text-[11px] leading-snug ${roleInfo(form.role).color}`}>
             <span className="font-semibold">{roleInfo(form.role).label}: </span>
@@ -228,7 +263,7 @@ function UserModal({
             Cancel
           </button>
           <button
-            onClick={() => onSave({ ...user, ...form })}
+            onClick={() => onSave({ ...user, ...form, entity_ids: entityIds })}
             disabled={!form.full_name || !form.email || (!isEdit && !form.password) || !!domainError}
             className="flex-1 bg-[#1e3a5f] text-white rounded-lg py-2 text-sm font-medium hover:bg-[#16304f] disabled:opacity-50 disabled:cursor-not-allowed">
             {isEdit ? "Save Changes" : "Create User"}
@@ -249,6 +284,8 @@ export default function UserManagementPage() {
   const [statusFilter, setStatus]   = useState<"all" | "active" | "inactive">("all");
   const [modal, setModal]           = useState<Partial<UserRow> | null | false>(false);
   const [menuOpen, setMenuOpen]     = useState<number | null>(null);
+  const [entities, setEntities]     = useState<AssignableEntity[]>([]);
+  const [entitiesLoading, setEntitiesLoading] = useState(true);
 
   // derive admin context from the logged-in user stored in localStorage
   const storedUser = typeof window !== "undefined" ? (() => { try { return JSON.parse(localStorage.getItem("ay_user") ?? "{}"); } catch { return {}; } })() : {};
@@ -273,6 +310,17 @@ export default function UserManagementPage() {
   }, []);
 
   useEffect(() => { fetchUsers(); }, [fetchUsers]);
+
+  // The Entities dropdown options — the admin's own entities from My Profile.
+  useEffect(() => {
+    if (isIndividual) { setEntitiesLoading(false); return; }
+    let alive = true;
+    api.get<AssignableEntity[]>("/users/assignable-entities")
+      .then(({ data }) => { if (alive) setEntities(data); })
+      .catch(() => { if (alive) setEntities([]); })
+      .finally(() => { if (alive) setEntitiesLoading(false); });
+    return () => { alive = false; };
+  }, [isIndividual]);
 
   // ── filtered list ─────────────────────────────────────────────────────
   const filtered = users.filter(u => {
@@ -306,7 +354,7 @@ export default function UserManagementPage() {
   };
 
   // ── create / update user ──────────────────────────────────────────────
-  const handleSave = async (data: Partial<UserRow> & { password?: string }) => {
+  const handleSave = async (data: Partial<UserRow> & { password?: string; entity_ids?: number[] }) => {
     try {
       if (data.id) {
         // update role if changed
@@ -314,8 +362,18 @@ export default function UserManagementPage() {
         if (original?.role !== data.role) {
           await api.patch(`/users/${data.id}/role`, { role: data.role });
         }
+        // entity assignments are replaced wholesale by the API
+        const next = data.entity_ids ?? [];
+        const before = original?.entity_ids ?? [];
+        const changed =
+          next.length !== before.length || next.some(id => !before.includes(id));
+        let updated: UserRow | null = null;
+        if (changed) {
+          const res = await api.patch<UserRow>(`/users/${data.id}/entities`, { entity_ids: next });
+          updated = res.data;
+        }
         // update name/department via register-style patch (reuse /users/me for self, or just refetch)
-        setUsers(p => p.map(u => u.id === data.id ? { ...u, ...data } as UserRow : u));
+        setUsers(p => p.map(u => u.id === data.id ? { ...u, ...data, ...(updated ?? {}) } as UserRow : u));
       } else {
         const { data: created } = await api.post<UserRow>("/users/", {
           full_name:  data.full_name,
@@ -323,6 +381,7 @@ export default function UserManagementPage() {
           password:   data.password,
           role:       data.role ?? "viewer",
           department: data.department ?? null,
+          entity_ids: data.entity_ids ?? [],
         });
         setUsers(p => [...p, created]);
       }
@@ -412,7 +471,7 @@ export default function UserManagementPage() {
           <table className="w-full">
             <thead>
               <tr style={{ background: "#1e3a5f" }}>
-                {["User", "Role", "Department", "Status", "Created", "Actions"].map(h => (
+                {["User", "Role", "Department", "Entities", "Status", "Created", "Actions"].map(h => (
                   <th key={h} className="px-4 py-2.5 text-left text-[10px] font-semibold text-white uppercase tracking-wider whitespace-nowrap">
                     {h}
                   </th>
@@ -422,18 +481,18 @@ export default function UserManagementPage() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={6} className="px-4 py-12 text-center text-xs text-gray-400">
+                  <td colSpan={7} className="px-4 py-12 text-center text-xs text-gray-400">
                     <RefreshCw className="w-4 h-4 animate-spin mx-auto mb-2 text-gray-300"/>
                     Loading users...
                   </td>
                 </tr>
               ) : apiError ? (
                 <tr>
-                  <td colSpan={6} className="px-4 py-12 text-center text-xs text-red-400">{apiError}</td>
+                  <td colSpan={7} className="px-4 py-12 text-center text-xs text-red-400">{apiError}</td>
                 </tr>
               ) : filtered.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="px-4 py-12 text-center text-xs text-gray-400">No users found.</td>
+                  <td colSpan={7} className="px-4 py-12 text-center text-xs text-gray-400">No users found.</td>
                 </tr>
               ) : filtered.map((u, idx) => (
                 <tr key={u.id}
@@ -459,6 +518,19 @@ export default function UserManagementPage() {
 
                   {/* department */}
                   <td className="px-4 py-3 text-xs text-gray-600">{u.department || "—"}</td>
+
+                  {/* entities */}
+                  <td className="px-4 py-3">
+                    {u.entity_names?.length ? (
+                      <div className="flex flex-wrap gap-1 max-w-56">
+                        {u.entity_names.map(n => (
+                          <span key={n} className="inline-flex items-center bg-blue-50 text-blue-700 border border-blue-200 rounded px-1.5 py-0.5 text-[10px] font-medium">
+                            {n}
+                          </span>
+                        ))}
+                      </div>
+                    ) : <span className="text-xs text-gray-300">—</span>}
+                  </td>
 
                   {/* status */}
                   <td className="px-4 py-3">
@@ -537,6 +609,8 @@ export default function UserManagementPage() {
           onClose={() => setModal(false)}
           onSave={handleSave}
           adminDomain={adminDomain}
+          entities={entities}
+          entitiesLoading={entitiesLoading}
         />
       )}
 

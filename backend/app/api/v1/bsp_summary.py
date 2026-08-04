@@ -8,13 +8,14 @@ Mounted at prefix ``/bsp`` alongside the detailed BSP router:
   GET    /bsp/groups/{group_id}      per-line summary-vs-detailed comparison
   DELETE /bsp/groups/{group_id}      delete both legs + files
 """
+import logging
 import uuid
 from datetime import datetime
 from decimal import Decimal
 from typing import Optional, List
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,13 +25,15 @@ from app.dependencies import get_current_user
 from app.models.user import User
 from app.models.bsp_statement import BspStatement
 from app.models.bsp_summary import BspSummaryStatement, BspSummaryRow
-from app.services import gcs
+from app.services import file_store
+from app.utils.security import create_file_token, verify_file_token
 from app.schemas.bsp_summary import (
     BspSummaryUploadResponse, BspSummaryRead, BspSummaryRowRead,
     BspGroupRead, BspGroupComparison, BspComparisonLine,
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 GT_LINES = ("issues", "refunds", "debit_memos", "credit_memos",
             "std_comm", "sup_comm", "tax_on_comm", "balance_payable")
@@ -74,15 +77,18 @@ async def upload_bsp_summary(
     group_id = str(uuid.uuid4())
     now = datetime.utcnow()
 
-    blob_name = f"bsp-summary/{current_user.tenant_id}/{batch_id}/{file.filename}"
-    try:
-        await gcs.upload_bytes(content, blob_name, "application/pdf", _bsp_bucket())
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"Could not store the file: {exc}")
+    # Falls back to local disk when the bucket is unreachable — a storage outage must
+    # not stop the statement being parsed (the bytes are already in hand).
+    file_url, remote = await file_store.store(
+        content, f"bsp-summary/{current_user.tenant_id}/{batch_id}/{file.filename}",
+        "application/pdf", _bsp_bucket(),
+    )
+    if not remote:
+        logger.warning("[BSP] Stored summary %s locally — remote storage unavailable.", file.filename)
 
     db.add(BspSummaryStatement(
         batch_id=batch_id, tenant_id=current_user.tenant_id, created_by_id=current_user.id,
-        group_id=group_id, file_name=file.filename, file_url=blob_name,
+        group_id=group_id, file_name=file.filename, file_url=file_url,
         status="pending", created_at=now,
     ))
     await db.commit()
@@ -140,15 +146,45 @@ async def reparse_bsp_summary(batch_id: str, db: AsyncSession = Depends(get_db),
     return {"batch_id": batch_id, "status": "pending"}
 
 
+_FILE_KIND = "bsp_summary"
+
+
 @router.get("/summary/{batch_id}/file-url")
-async def get_bsp_summary_file_url(batch_id: str, db: AsyncSession = Depends(get_db),
+async def get_bsp_summary_file_url(batch_id: str, request: Request,
+                                   db: AsyncSession = Depends(get_db),
                                    current_user: User = Depends(get_current_user)):
-    """Signed GCS URL to view the source summary PDF (opens inline, 60 min)."""
+    """URL to view the source summary PDF inline — a signed GCS URL, or a tokenised
+    link to the endpoint below when the PDF is held locally."""
     s = await _owned_summary(batch_id, db, current_user)
     if not s.file_url:
         raise HTTPException(status_code=404, detail="No file attached to this summary.")
-    url = await gcs.generate_signed_url(s.file_url, _bsp_bucket(), expiry_minutes=60, inline=True)
+    url = await file_store.signed_url(s.file_url, _bsp_bucket(), expiry_minutes=60, inline=True)
+    if url is None:
+        token = create_file_token(batch_id, _FILE_KIND)
+        url = f"{request.url_for('stream_bsp_summary_file', batch_id=batch_id)}?token={token}"
     return {"url": url}
+
+
+@router.get("/summary/{batch_id}/file", name="stream_bsp_summary_file")
+async def stream_bsp_summary_file(
+    batch_id: str,
+    token: str = Query(..., description="Short-lived file-access token from /file-url"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Serve a locally-stored summary PDF. Authorised by the short-lived token rather
+    than a header, because this is opened with window.open (see bsp.stream_bsp_file)."""
+    if not verify_file_token(token, batch_id, _FILE_KIND):
+        raise HTTPException(status_code=403, detail="Invalid or expired file link.")
+    s = await db.scalar(select(BspSummaryStatement).where(BspSummaryStatement.batch_id == batch_id))
+    if not s or not s.file_url:
+        raise HTTPException(status_code=404, detail="No file attached to this summary.")
+    try:
+        content = await file_store.load(s.file_url, _bsp_bucket())
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="The stored file is no longer available.")
+    name = s.file_name or file_store.file_name(s.file_url) or "summary.pdf"
+    return Response(content, media_type="application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="{name}"'})
 
 
 @router.get("/summary/{batch_id}/xlsx")
@@ -265,7 +301,7 @@ async def delete_bsp_group(group_id: str, db: AsyncSession = Depends(get_db),
     for b in blobs:
         if b:
             try:
-                await gcs.delete_blob(b, _bsp_bucket())
+                await file_store.delete(b, _bsp_bucket())
             except Exception:  # noqa: BLE001
                 pass
     return None

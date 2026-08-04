@@ -625,6 +625,12 @@ async def _attach_unified_deal_relations(
         for rule_order, rule_type in enumerate(incl_excl_types):
             category = _RULE_CAT_MAP.get(rule_type, rule_type.lower().replace(" ", "_"))
             fields, rule_vv = _resolve_rule_payload(incl_excl_data, vice_versa, rule_type, inc_type)
+            # A rule with no conditions constrains nothing — build_rule_dict returns {} and
+            # every consumer skips it. Writing the empty container anyway produced 4 rows per
+            # incentive of pure noise. Matches _rebuild_unified_relations, which already
+            # skips them, so create and edit finally agree.
+            if not fields and not rule_vv:
+                continue
             rule = DealRule(
                 incentive_id=inc_obj.id,
                 rule_category=category,

@@ -13,7 +13,9 @@ from app.dependencies import get_current_user
 from app.models.user_entity import UserEntity
 from app.models.user import User
 from app.schemas.user_entity import (
-    UserEntityCreate, UserEntityUpdate, UserEntityRead, BulkUploadResult,
+    UserEntityCreate, UserEntityUpdate, UserEntityRead,
+    UserEntityBulkCreate, BulkCreateResult, BulkUploadResult,
+    tax_id_error,
 )
 
 router = APIRouter()
@@ -86,8 +88,19 @@ async def create_entity(
         raise HTTPException(status_code=400, detail="name and code are required.")
     if await _code_exists(db, current_user, code):
         raise HTTPException(status_code=400, detail=f"An entity with code '{code}' already exists.")
+    tax_err = tax_id_error(payload.gst_number, payload.pan_number)
+    if tax_err:
+        raise HTTPException(status_code=400, detail=tax_err)
 
-    entity = UserEntity(
+    entity = _build_entity(payload, current_user, name, code)
+    db.add(entity)
+    await db.commit()
+    await db.refresh(entity)
+    return entity
+
+
+def _build_entity(payload: UserEntityCreate, current_user: User, name: str, code: str) -> UserEntity:
+    return UserEntity(
         user_id=current_user.id,
         tenant_id=current_user.tenant_id,
         name=name,
@@ -95,12 +108,68 @@ async def create_entity(
         address=(payload.address or "").strip() or None,
         state=(payload.state or "").strip() or None,
         city=(payload.city or "").strip() or None,
+        gst_number=payload.gst_number,   # already normalised + validated by the schema
+        pan_number=payload.pan_number,
         is_active=payload.is_active if payload.is_active is not None else True,
     )
-    db.add(entity)
-    await db.commit()
-    await db.refresh(entity)
-    return entity
+
+
+@router.post("/bulk", response_model=BulkCreateResult, status_code=status.HTTP_201_CREATED)
+async def bulk_create_entities(
+    payload: UserEntityBulkCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Create several entities in one submit (the Add Entity form's '+ Add another').
+
+    Valid rows are saved even if others fail, and every rejection is reported with
+    its row number — so one typo never costs the user the whole batch.
+    """
+    rows = payload.entities or []
+    if not rows:
+        raise HTTPException(status_code=400, detail="No entities supplied.")
+
+    errors: list[str] = []
+    created: list[UserEntity] = []
+    seen_codes: set[str] = set()
+
+    for i, item in enumerate(rows, start=1):
+        name = (item.name or "").strip()
+        code = (item.code or "").strip()
+        if not name or not code:
+            errors.append(f"Entity {i}: name and code are required.")
+            continue
+        # Duplicates inside the submitted batch would otherwise fail confusingly
+        # on the DB unique constraint, one commit later.
+        if code.lower() in seen_codes:
+            errors.append(f"Entity {i}: code '{code}' is repeated in this form.")
+            continue
+        if await _code_exists(db, current_user, code):
+            errors.append(f"Entity {i}: an entity with code '{code}' already exists.")
+            continue
+        tax_err = tax_id_error(item.gst_number, item.pan_number)
+        if tax_err:
+            errors.append(f"Entity {i}: {tax_err}")
+            continue
+        seen_codes.add(code.lower())
+
+        entity = _build_entity(item, current_user, name, code)
+        db.add(entity)
+        try:
+            await db.commit()
+            await db.refresh(entity)
+            created.append(entity)
+        except Exception as e:              # noqa: BLE001
+            await db.rollback()
+            errors.append(f"Entity {i}: {e}")
+
+    return BulkCreateResult(
+        total=len(rows),
+        success=len(created),
+        failed=len(rows) - len(created),
+        errors=errors,
+        created=[UserEntityRead.model_validate(e) for e in created],
+    )
 
 
 @router.post("/bulk-upload", response_model=BulkUploadResult)
@@ -171,6 +240,15 @@ async def bulk_upload_entities(
         active_raw = _cell(row.get("ACTIVE")).lower()
         is_active = active_raw not in ("0", "no", "false", "inactive", "n")
 
+        # Tax ids are optional, but a malformed one is a data error worth naming
+        # rather than storing silently. Accepts GST_NUMBER / GST / GSTIN headers.
+        gst = (_cell(row.get("GST_NUMBER")) or _cell(row.get("GST")) or _cell(row.get("GSTIN"))).upper() or None
+        pan = (_cell(row.get("PAN_NUMBER")) or _cell(row.get("PAN"))).upper() or None
+        tax_err = tax_id_error(gst, pan)
+        if tax_err:
+            errors.append(f"Row {row_num}: {tax_err}")
+            continue
+
         try:
             db.add(UserEntity(
                 user_id=current_user.id,
@@ -180,6 +258,8 @@ async def bulk_upload_entities(
                 address=_cell(row.get("ADDRESS")) or None,
                 state=_cell(row.get("STATE")) or None,
                 city=_cell(row.get("CITY")) or None,
+                gst_number=gst,
+                pan_number=pan,
                 is_active=is_active,
             ))
             await db.commit()
@@ -198,8 +278,9 @@ async def download_entity_template():
     wb = Workbook()
     ws = wb.active
     ws.title = "Entity Template"
-    ws.append(["NAME", "CODE", "ADDRESS", "STATE", "CITY", "ACTIVE"])
-    ws.append(["Acme Pvt Ltd", "ENT-001", "12 MG Road", "Maharashtra", "Mumbai", "yes"])
+    ws.append(["NAME", "CODE", "ADDRESS", "STATE", "CITY", "GST_NUMBER", "PAN_NUMBER", "ACTIVE"])
+    ws.append(["Acme Pvt Ltd", "ENT-001", "12 MG Road", "Maharashtra", "Mumbai",
+               "27ABCDE1234F1Z5", "ABCDE1234F", "yes"])
 
     bio = BytesIO()
     wb.save(bio)
@@ -229,6 +310,13 @@ async def update_entity(
 ):
     obj = await _get_scoped_entity(entity_id, db, current_user)
     data = payload.model_dump(exclude_unset=True)
+    # Check the values this PATCH would leave on the row, not just what it sends.
+    tax_err = tax_id_error(
+        data.get("gst_number", obj.gst_number),
+        data.get("pan_number", obj.pan_number),
+    )
+    if tax_err:
+        raise HTTPException(status_code=400, detail=tax_err)
     if "code" in data:
         new_code = (data["code"] or "").strip()
         if not new_code:

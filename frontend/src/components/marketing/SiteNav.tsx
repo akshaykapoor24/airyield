@@ -6,12 +6,6 @@ import { ArrowRight, Menu, X } from "lucide-react";
 import { isAuthenticated } from "@/lib/auth";
 import Logo from "./Logo";
 
-const LINKS = [
-  { href: "#platform", label: "Platform" },
-  { href: "#how", label: "How it works" },
-  { href: "#reconcile", label: "Reconciliation" },
-];
-
 // Auth lives in localStorage — an external store. `useSyncExternalStore` reads it
 // without a setState-in-effect, and the server snapshot keeps the first client
 // render identical to the SSR output (no hydration mismatch). Subscribing to
@@ -58,18 +52,6 @@ export default function SiteNav() {
           <Logo />
         </Link>
 
-        <nav className="hidden items-center gap-1 md:flex">
-          {LINKS.map((l) => (
-            <a
-              key={l.href}
-              href={l.href}
-              className="relative rounded-lg px-3.5 py-2 text-[15px] font-medium text-slate-600 transition-colors hover:text-slate-900"
-            >
-              {l.label}
-            </a>
-          ))}
-        </nav>
-
         <div className="flex items-center gap-2">
           {authed ? (
             <Link
@@ -104,29 +86,19 @@ export default function SiteNav() {
             onClick={() => setOpen((o) => !o)}
             aria-label={open ? "Close menu" : "Open menu"}
             aria-expanded={open}
-            className="grid h-10 w-10 place-items-center rounded-xl border border-slate-200 bg-white/70 text-slate-700 transition-colors hover:bg-slate-50 md:hidden"
+            className="grid h-10 w-10 place-items-center rounded-xl border border-slate-200 bg-white/70 text-slate-700 transition-colors hover:bg-slate-50 sm:hidden"
           >
             {open ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
           </button>
         </div>
       </div>
 
-      {/* Mobile sheet */}
+      {/* Mobile sheet — the inline auth buttons appear from `sm` up, so this only
+          has to cover the narrowest widths. */}
       {open && (
-        <div className="animate-fade-in border-t border-slate-200/70 bg-white/95 backdrop-blur md:hidden">
+        <div className="animate-fade-in border-t border-slate-200/70 bg-white/95 backdrop-blur sm:hidden">
           <nav className="mx-auto max-w-6xl px-5 py-4">
-            {LINKS.map((l, i) => (
-              <a
-                key={l.href}
-                href={l.href}
-                onClick={() => setOpen(false)}
-                className="animate-fade-up block rounded-xl px-3 py-3 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-50"
-                style={{ animationDelay: `${i * 60}ms` }}
-              >
-                {l.label}
-              </a>
-            ))}
-            <div className="mt-3 grid gap-2 border-t border-slate-100 pt-4">
+            <div className="grid gap-2">
               {authed ? (
                 <Link
                   href="/dashboard"

@@ -50,3 +50,31 @@ def verify_email_token(token: str) -> Optional[int]:
         return int(payload["sub"])
     except (KeyError, ValueError, TypeError):
         return None
+
+
+# ── Source-file access tokens ───────────────────────────────────────────────
+# The local equivalent of a GCS signed URL: a file kept on local disk (because the
+# bucket was unreachable at upload time) still has to be openable by a plain
+# window.open, which sends no Authorization header. So the capability travels in the
+# URL instead — short-lived, scoped to one batch and one file kind, and carrying a
+# purpose claim so it can never be replayed as an access token.
+FILE_ACCESS_PURPOSE = "file_access"
+
+
+def create_file_token(batch_id: str, kind: str, expires_minutes: int = 60) -> str:
+    expire = datetime.utcnow() + timedelta(minutes=expires_minutes)
+    return jwt.encode(
+        {"sub": batch_id, "kind": kind, "purpose": FILE_ACCESS_PURPOSE, "exp": expire},
+        settings.SECRET_KEY, algorithm=settings.ALGORITHM,
+    )
+
+
+def verify_file_token(token: str, batch_id: str, kind: str) -> bool:
+    """True only for an unexpired file token issued for exactly this batch and kind."""
+    payload = verify_token(token)
+    return bool(
+        payload
+        and payload.get("purpose") == FILE_ACCESS_PURPOSE
+        and payload.get("sub") == batch_id
+        and payload.get("kind") == kind
+    )
