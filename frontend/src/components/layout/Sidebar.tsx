@@ -9,7 +9,7 @@ import {
   Plane, Building, Building2, MapPin, Route, Tag, DollarSign,
   Calculator, Upload, ClipboardCheck, CheckSquare,
   Edit3, Users, Shield, GitMerge, Search,
-  BookOpen, History, LayoutGrid, Plus, Contact, Percent, FilePlus,
+  BookOpen, History, LayoutGrid, Plus, Contact, Percent, FilePlus, Layers,
 } from "lucide-react";
 import { loadDashboards, type CustomDashboard } from "@/lib/customDashboards";
 import { cn } from "@/lib/utils";
@@ -46,6 +46,7 @@ const TENANT_NAV: NavItem[] = [
       { label: "Incoming deals", href: "/deals", icon: FolderOpen },
       // TODO: wire badge to real count
       { label: "Statements", href: "/vendors/statements", icon: FileText },
+      { label: "Series/SIT/MICE", href: "/vendors/series-sit-mice", icon: Layers },
       { label: "Ticket Search", href: "/ticket-details", icon: Search },
       { label: "Reconciliation", href: "/tickets/bsp-reconciliation", icon: GitMerge },
       { label: "Commission income", href: "/vendors/commission-income", icon: DollarSign },
@@ -105,14 +106,16 @@ const TENANT_NAV: NavItem[] = [
   },
 
   {
-    id: "system-master", label: "System master", icon: Settings,
+    // "update", not "master": a tenant user submits changes here and sees their
+    // own submissions. The master data itself belongs to Master Governance,
+    // which only a platform admin can reach. Income heads and calculation rules
+    // are omitted until they hold real data.
+    id: "system-master", label: "System master update", icon: Settings,
     children: [
       { label: "Suppliers", href: "/masters/suppliers", icon: Building2 },
       { label: "Airlines", href: "/masters/airlines", icon: Plane },
       { label: "Airports", href: "/masters/airports", icon: MapPin },
       { label: "Classes / RBD", href: "/masters/classes", icon: Tag },
-      { label: "Income heads", href: "/masters/income-heads", icon: DollarSign },
-      { label: "Calculation rules", href: "/masters/calculation-rules", icon: Calculator },
     ],
   },
 

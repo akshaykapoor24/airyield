@@ -1,11 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import toast from "react-hot-toast";
 import {
-  AlertCircle, ChevronDown, ChevronLeft, RefreshCw, RotateCcw, Save, Search,
+  AlertCircle, ChevronLeft, RefreshCw, RotateCcw, Save,
 } from "lucide-react";
 import api from "@/lib/api";
 import { apiError } from "@/components/userMaster/shared";
@@ -15,138 +15,23 @@ import TicketFilingCard, {
 import TicketFieldGroupCard from "@/components/tickets/TicketFieldGroupCard";
 import TicketFieldInput from "@/components/tickets/TicketFieldInput";
 import TaxBreakupEditor from "@/components/tickets/TaxBreakupEditor";
-import SegmentsEditor from "@/components/tickets/SegmentsEditor";
+import ItineraryLegsEditor from "@/components/tickets/ItineraryLegsEditor";
 import LegPreview from "@/components/tickets/LegPreview";
+import AirlinePicker from "@/components/tickets/AirlinePicker";
 import {
-  MANUAL_ENTRY_FILE_NAME, REQUIRED_KEYS, SECTOR_RE,
-  coerceFieldValue, fieldByKey, groupedFieldsFor, predictAdmAcmRa,
-  type FieldGroupId, type StatementType, type TicketExtractionPreview,
-  type TicketRow, type TicketSegment,
+  BLANK_LEG, LEG_SECTOR_RE, MANUAL_ENTRY_FILE_NAME, REQUIRED_KEYS,
+  coerceFieldValue, composeLegs, fieldByKey, groupedFieldsFor, legFieldKeys,
+  predictAdmAcmRa,
+  type FieldGroupId, type ItineraryLeg, type StatementType,
+  type TicketExtractionPreview, type TicketRow,
 } from "@/lib/ticketFields";
 
 type Draft = Record<string, unknown>;
-type Airline = { id: number; name: string; iata_code: string; icao_code: string | null };
 
 const DEFAULT_OPEN: FieldGroupId[] = ["identity", "passenger", "itinerary", "fare"];
 const PREVIEW_DEBOUNCE_MS = 400;
 
 const isBlank = (v: unknown) => v === null || v === undefined || v === "";
-
-// ── Airline picker ───────────────────────────────────────────────────────────
-
-function AirlinePicker({
-  code, name, onPick, onCodeChange, invalid,
-}: {
-  code: string;
-  name: string;
-  onPick: (a: Airline) => void;
-  onCodeChange: (v: string) => void;
-  invalid?: boolean;
-}) {
-  const [open, setOpen] = useState(false);
-  const [query, setQuery] = useState("");
-  const [options, setOptions] = useState<Airline[]>([]);
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    api.get<Airline[]>("/airlines/", { params: { limit: 5000 } })
-      .then((r) => setOptions(r.data))
-      .catch(() => {});
-  }, []);
-
-  useEffect(() => {
-    const h = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", h);
-    return () => document.removeEventListener("mousedown", h);
-  }, []);
-
-  const q = query.trim().toLowerCase();
-  const filtered = q
-    ? options.filter((a) =>
-        a.name.toLowerCase().includes(q) ||
-        a.iata_code?.toLowerCase().includes(q) ||
-        a.icao_code?.toLowerCase().includes(q))
-    : options;
-
-  // Mirrors the resolution the server does: IATA or ICAO, case-insensitive, plus
-  // zero-padding for numeric accounting codes.
-  const trimmed = code.trim();
-  const variants = new Set([trimmed.toUpperCase()]);
-  if (/^\d+$/.test(trimmed)) variants.add(trimmed.padStart(3, "0"));
-  const known = !trimmed || options.length === 0 || options.some((a) =>
-    variants.has((a.iata_code ?? "").toUpperCase()) ||
-    variants.has((a.icao_code ?? "").toUpperCase()));
-
-  return (
-    <div className="min-w-0" ref={ref}>
-      <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-1">
-        Airline<span className="text-red-500 ml-0.5">*</span>
-      </label>
-      <div className="relative">
-        <div className="flex gap-1.5">
-          <input
-            value={code}
-            placeholder="AI"
-            onChange={(e) => onCodeChange(e.target.value.toUpperCase())}
-            className={`w-16 shrink-0 border rounded-lg px-2 py-1.5 text-xs font-mono uppercase focus:outline-none focus:ring-1 ${
-              invalid ? "border-red-300 bg-red-50 focus:ring-red-400" : "border-gray-200 focus:ring-blue-400"
-            }`}
-          />
-          <button
-            type="button"
-            onClick={() => setOpen((o) => !o)}
-            className="flex-1 min-w-0 border border-gray-200 rounded-lg px-2 py-1.5 text-xs text-left flex items-center justify-between gap-1 hover:bg-gray-50"
-          >
-            <span className={`truncate ${name ? "text-gray-800" : "text-gray-400"}`}>
-              {name || "search…"}
-            </span>
-            <ChevronDown className="w-3.5 h-3.5 text-gray-400 shrink-0" />
-          </button>
-        </div>
-
-        {open && (
-          <div className="absolute z-50 top-full left-0 right-0 mt-1 min-w-[260px] bg-white border border-gray-200 rounded-lg shadow-lg">
-            <div className="p-2 border-b border-gray-100">
-              <div className="relative">
-                <Search className="w-3.5 h-3.5 text-gray-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
-                <input
-                  autoFocus
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Search by name or code…"
-                  className="w-full pl-8 pr-3 py-1.5 text-xs border border-gray-200 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-400 bg-gray-50"
-                />
-              </div>
-            </div>
-            <ul className="max-h-56 overflow-y-auto py-1">
-              {filtered.length === 0 ? (
-                <li className="px-3 py-2 text-xs text-gray-400 italic">No airlines found</li>
-              ) : filtered.slice(0, 200).map((a) => (
-                <li key={a.id}>
-                  <button
-                    type="button"
-                    onClick={() => { onPick(a); setOpen(false); setQuery(""); }}
-                    className="w-full text-left px-3 py-2 text-xs hover:bg-blue-50 flex items-center gap-2"
-                  >
-                    <span className="font-mono text-[10px] text-gray-500 w-8 shrink-0">{a.iata_code}</span>
-                    <span className="truncate text-gray-700">{a.name}</span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-      </div>
-      {!known && (
-        <p className="text-[10px] text-amber-600 mt-1 leading-snug">
-          Not in the airline master — this ticket will save but can never match a deal.
-        </p>
-      )}
-    </div>
-  );
-}
 
 // ── Page ─────────────────────────────────────────────────────────────────────
 
@@ -164,14 +49,15 @@ export default function CreateTicketPage() {
   const [validFrom, setValidFrom] = useState("");
   const [validTo, setValidTo] = useState("");
 
-  // Ticket
+  // Ticket. Itinerary lives outside `draft` because it is repeatable — the two
+  // are folded together by composeLegs into the single row the API takes.
   const [draft, setDraft] = useState<Draft>({});
+  const [legs, setLegs] = useState<ItineraryLeg[]>([BLANK_LEG]);
   const [touched, setTouched] = useState(false);
   const [openGroups, setOpenGroups] = useState<Set<FieldGroupId>>(new Set(DEFAULT_OPEN));
-  const [segmentOverride, setSegmentOverride] = useState(false);
 
   // Server-derived view of the current draft
-  const [previewRows, setPreviewRows] = useState<TicketRow[]>([]);
+  const [rows, setRows] = useState<TicketRow[]>([]);
   const [previewWarnings, setPreviewWarnings] = useState<string[]>([]);
   const [previewing, setPreviewing] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
@@ -208,10 +94,21 @@ export default function CreateTicketPage() {
     : (selectedStatement?.statement_type ?? "B2B");
 
   const groups = useMemo(() => groupedFieldsFor(effectiveType), [effectiveType]);
+
+  /**
+   * The row actually sent to the server: the flat draft with the punched legs
+   * folded in. Everything downstream — preview, validation, the group counters
+   * and save — reads this, so none of them can disagree about what a leg holds.
+   */
+  const composed = useMemo<Draft>(
+    () => ({ ...draft, ...composeLegs(legs, effectiveType) }),
+    [draft, legs, effectiveType],
+  );
+
   const draftIsEmpty = useMemo(
-    () => Object.values(draft).every(
+    () => Object.values(composed).every(
       (v) => isBlank(v) || (typeof v === "object" && v !== null && Object.keys(v).length === 0)),
-    [draft],
+    [composed],
   );
 
   // ── Preview: the single source of truth for what gets saved ───────────────
@@ -229,15 +126,15 @@ export default function CreateTicketPage() {
 
   useEffect(() => {
     if (draftIsEmpty) {
-      setPreviewRows([]); setPreviewWarnings([]); setPreviewError(null);
+      setRows([]); setPreviewWarnings([]); setPreviewError(null);
       return;
     }
     const ctrl = new AbortController();
     const t = setTimeout(async () => {
       setPreviewing(true);
       try {
-        const data = await requestPreview([draft], ctrl.signal);
-        setPreviewRows(data.rows);
+        const data = await requestPreview([composed], ctrl.signal);
+        setRows(data.rows);
         setPreviewWarnings(data.warnings);
         setPreviewError(null);
       } catch {
@@ -250,16 +147,7 @@ export default function CreateTicketPage() {
       }
     }, PREVIEW_DEBOUNCE_MS);
     return () => { clearTimeout(t); ctrl.abort(); };
-  }, [draft, draftIsEmpty, requestPreview]);
-
-  // A manual segments override must be re-applied over the response: the server
-  // rebuilds `segments` from sector/flight/date/class whenever it can.
-  const rows = useMemo<TicketRow[]>(() => {
-    if (!segmentOverride) return previewRows;
-    const override = draft.segments as TicketSegment[] | undefined;
-    if (!override) return previewRows;
-    return previewRows.map((r) => ({ ...r, segments: override }));
-  }, [previewRows, segmentOverride, draft.segments]);
+  }, [composed, draftIsEmpty, requestPreview]);
 
   const setField = (key: string, value: unknown) =>
     setDraft((prev) => {
@@ -269,25 +157,31 @@ export default function CreateTicketPage() {
     });
 
   // ── Validation ────────────────────────────────────────────────────────────
-  const sectorRaw = String(draft.sector ?? "").trim().toUpperCase();
-  const sectorMalformed = sectorRaw !== "" && !SECTOR_RE[effectiveType].test(sectorRaw);
-  const missingRequired = REQUIRED_KEYS.filter((k) => isBlank(draft[k]));
+  // Each block holds exactly one leg, so the shape is checked per block rather
+  // than against the composed multi-leg string.
+  const punchedLegs = legs.filter((l) => (l.sector ?? "").trim() !== "");
+  const legMalformed = punchedLegs.some(
+    (l) => !LEG_SECTOR_RE.test((l.sector ?? "").trim().toUpperCase()),
+  );
+  const missingRequired = REQUIRED_KEYS.filter((k) => isBlank(composed[k]));
   const filingReady = isNew
     ? agency !== "" && validFrom !== "" && validTo !== "" && validTo >= validFrom
     : !!selectedStatement;
-  const ticketReady = missingRequired.length === 0 && !sectorMalformed && rows.length > 0;
+  const ticketReady = missingRequired.length === 0 && !legMalformed && rows.length > 0;
   const canSave = filingReady && ticketReady && !previewing && !saving;
 
+  // Leg-owned keys are flagged inside the leg editor, not by the flat grid.
+  const legKeys = new Set(legFieldKeys(effectiveType));
   const invalidKeys = new Set(
-    touched ? [...missingRequired, ...(sectorMalformed ? ["sector"] : [])] : [],
+    touched ? missingRequired.filter((k) => !legKeys.has(k)) : [],
   );
 
   const predicted = predictAdmAcmRa(draft.ticket_number as string);
   const derived = rows[0];
 
   const reset = () => {
-    setDraft({}); setTouched(false); setSegmentOverride(false);
-    setPreviewRows([]); setPreviewWarnings([]); setPreviewError(null);
+    setDraft({}); setLegs([BLANK_LEG]); setTouched(false);
+    setRows([]); setPreviewWarnings([]); setPreviewError(null);
   };
 
   // ── Save ──────────────────────────────────────────────────────────────────
@@ -298,13 +192,8 @@ export default function CreateTicketPage() {
     try {
       // Re-derive server-side immediately before saving, in case Save landed
       // while the debounce was still pending.
-      const fresh = await requestPreview([draft]);
-      let out = fresh.rows;
-      const override = draft.segments as TicketSegment[] | undefined;
-      if (segmentOverride && override?.length) {
-        out = out.map((r) => ({ ...r, segments: override }));
-      }
-      out = out.map((r, i) => ({ ...r, row_order: i + 1 }));
+      const fresh = await requestPreview([composed]);
+      const out: TicketRow[] = fresh.rows.map((r, i) => ({ ...r, row_order: i + 1 }));
 
       const batchId = isNew
         ? (await api.post<{ batch_id: string; created_count: number }>(
@@ -401,12 +290,10 @@ export default function CreateTicketPage() {
         <Chip label="Segment type" value={derived?.segment_type ?? "—"} />
         <Chip label="Invoice type" value={derived?.invoice_type ?? "—"} />
         <Chip label="Departure" value={derived?.departure_datetime ?? "—"} />
-        {effectiveType === "AIRLINE" && (
-          <Chip label="YQ / YR / K3"
-            value={[derived?.sell_tax_yq, derived?.sale_yr, derived?.sale_k3].some((v) => v != null)
-              ? `${derived?.sell_tax_yq ?? "—"} / ${derived?.sale_yr ?? "—"} / ${derived?.sale_k3 ?? "—"}`
-              : "—"} />
-        )}
+        <Chip label="YQ / YR / K3"
+          value={[derived?.sell_tax_yq, derived?.sale_yr, derived?.sale_k3].some((v) => v != null)
+            ? `${derived?.sell_tax_yq ?? "—"} / ${derived?.sale_yr ?? "—"} / ${derived?.sale_k3 ?? "—"}`
+            : "—"} />
         {previewing && <RefreshCw className="w-3 h-3 text-blue-400 animate-spin ml-auto" />}
       </div>
 
@@ -424,10 +311,12 @@ export default function CreateTicketPage() {
       {/* field groups */}
       {groups.map(({ group, fields }) => {
         const open = openGroups.has(group.id);
-        const filled = fields.filter((f) => !isBlank(draft[f.key])).length
-          + (group.custom === "tax_breakup" && draft.tax_breakup ? 1 : 0)
-          + (group.custom === "segments" && Array.isArray(draft.segments) && (draft.segments as []).length ? 1 : 0);
-        const invalidCount = fields.filter((f) => invalidKeys.has(f.key)).length;
+        // Counted off `composed`, so a leg-owned field reads as filled the
+        // moment any leg carries it — no special case for the repeater.
+        const filled = fields.filter((f) => !isBlank(composed[f.key])).length
+          + (group.custom === "tax_breakup" && draft.tax_breakup ? 1 : 0);
+        const invalidCount = fields.filter((f) => invalidKeys.has(f.key)).length
+          + (group.id === "itinerary" && touched && (legMalformed || isBlank(composed.sector)) ? 1 : 0);
 
         return (
           <TicketFieldGroupCard
@@ -448,18 +337,21 @@ export default function CreateTicketPage() {
                 value={draft.tax_breakup as Record<string, number> | null}
                 onChange={(v) => setField("tax_breakup", v)}
               />
-            ) : group.custom === "segments" ? (
-              <SegmentsEditor
-                derived={derived?.segments ?? []}
-                override={segmentOverride}
-                segments={(draft.segments as TicketSegment[]) ?? []}
-                onToggleOverride={(on) => { setSegmentOverride(on); if (!on) setField("segments", null); }}
-                onChange={(v) => setField("segments", v)}
-              />
             ) : (
               <div className="space-y-3">
+                {group.id === "itinerary" && (
+                  <ItineraryLegsEditor
+                    legs={legs}
+                    statementType={effectiveType}
+                    onChange={setLegs}
+                    showErrors={touched}
+                  />
+                )}
+
                 <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-x-4 gap-y-3">
                   {fields.map((f) => {
+                    // Leg-owned fields are rendered per leg by the repeater above.
+                    if (group.id === "itinerary" && legKeys.has(f.key)) return null;
                     // Airline code and name are one decision, so they share one
                     // control backed by the airline master.
                     if (f.key === "airlines_code") {
@@ -468,6 +360,7 @@ export default function CreateTicketPage() {
                           key={f.key}
                           code={String(draft.airlines_code ?? "")}
                           name={String(draft.airline_name ?? "")}
+                          required
                           invalid={invalidKeys.has("airlines_code")}
                           onCodeChange={(v) => setField("airlines_code", v)}
                           onPick={(a) => {
@@ -528,9 +421,9 @@ export default function CreateTicketPage() {
             Required: {missingRequired.map((k) => fieldByKey[k]?.label ?? k).join(", ")}
           </span>
         )}
-        {touched && sectorMalformed && (
+        {touched && legMalformed && (
           <span className="text-[11px] text-red-500">
-            Sector must look like DEL/BOM{effectiveType === "AIRLINE" ? " (space-separated pairs)" : ""}
+            Each sector block must hold one leg, written as DEL/BOM
           </span>
         )}
         {touched && !filingReady && (

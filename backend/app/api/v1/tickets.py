@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import re
 import uuid
 from datetime import datetime, date
@@ -419,7 +420,30 @@ async def confirm_ticket_upload(
         db.add(ticket)
 
     await db.commit()
+    await _rematch_series_contracts(
+        db, tenant_id=current_user.tenant_id, created_by_id=current_user.id, batch_id=batch_id,
+    )
     return ConfirmTicketUploadResult(batch_id=batch_id, created_count=len(payload.rows))
+
+
+async def _rematch_series_contracts(db: AsyncSession, *, tenant_id: int, created_by_id: int, batch_id: str) -> None:
+    """Refresh Series/SIT/MICE contract rollups after tickets land.
+
+    Best-effort by design: a block-booking contract going stale is a reporting
+    problem, losing a ticket save is a data problem. Never let the former cause
+    the latter. Same posture as the auto-reconcile in workers/bsp_tasks.
+
+    Imported locally to keep the service out of this module's import graph.
+    """
+    try:
+        from app.services.series_contract_matching import SeriesContractMatchingService
+        await SeriesContractMatchingService.run(db, tenant_id=tenant_id, created_by_id=created_by_id)
+        await db.commit()
+    except Exception as ex:  # noqa: BLE001
+        logging.getLogger(__name__).warning(
+            "Series contract matching failed after batch %s: %s", batch_id, ex
+        )
+        await db.rollback()
 
 
 # ── Append tickets to an existing statement (manual entry) ─────────────────
@@ -470,6 +494,9 @@ async def append_tickets_to_statement(
         db.add(ticket)
 
     await db.commit()
+    await _rematch_series_contracts(
+        db, tenant_id=current_user.tenant_id, created_by_id=current_user.id, batch_id=batch_id,
+    )
     return ConfirmTicketUploadResult(batch_id=batch_id, created_count=len(payload.rows))
 
 
@@ -485,7 +512,10 @@ _SERVER_OWNED_KEYS = (
     "exclusion_reason",
 )
 
-_SECTOR_B2B_RE     = re.compile(r"^[A-Z]{3}(/[A-Z]{3})+$")
+# B2B accepts both the slash chain it has always used ("DEL/BOM/HYD") and the
+# space-separated pairs the manual form composes from punched legs
+# ("DEL/BOM BOM/HYD") — the latter is the only form that can express an open jaw.
+_SECTOR_B2B_RE     = re.compile(r"^[A-Z]{3}(/[A-Z]{3})+( +[A-Z]{3}/[A-Z]{3})*$")
 _SECTOR_AIRLINE_RE = re.compile(r"^[A-Z]{3}/[A-Z]{3}( +[A-Z]{3}/[A-Z]{3})*$")
 
 
@@ -548,7 +578,8 @@ def _manual_row_warnings(rows: list[dict], statement_type: str) -> list[str]:
                 and str(r.get("ticket_number") or "") == key)
         warnings.append(
             f"{key or 'multi-sector ticket'}: {n} legs — saved as {n} rows, with sell "
-            f"fare, sell tax, tax YQ and sale YR divided by {n}."
+            f"fare, sell tax, tax YQ, sale YR, sale K3 and every tax breakup "
+            f"component divided by {n}."
         )
 
     return warnings

@@ -132,6 +132,7 @@ export function SelectField({ label, placeholder="Select...", options, value, on
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, []);
+  const unique = useMemo(() => [...new Set(options)], [options]);
   return (
     <div className="relative" ref={ref}>
       {label && <label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">{label}</label>}
@@ -145,7 +146,7 @@ export function SelectField({ label, placeholder="Select...", options, value, on
       </button>
       {open && (
         <div className="absolute z-50 w-full mt-0.5 bg-white border border-gray-200 rounded-md shadow-lg max-h-44 overflow-y-auto">
-          {options.map(opt => (
+          {unique.map(opt => (
             <button key={opt} type="button" onClick={() => { onChange(opt); setOpen(false); }}
               className="w-full text-left px-2.5 py-1.5 text-xs hover:bg-blue-50 text-gray-700">{opt}</button>
           ))}
@@ -170,7 +171,12 @@ export function SearchSelectField({ label, placeholder="Search and select", opti
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, []);
-  const filtered = options.filter(o => o.toLowerCase().includes(search.toLowerCase()));
+  // Masters hold one row per branch, so a name repeats — the supplier list
+  // returns "Riya Travel" 14 times. These controls store the NAME, so those rows
+  // are indistinguishable once picked: listing them is noise, and a value-keyed
+  // list would collide. Collapse to distinct values.
+  const unique = useMemo(() => [...new Set(options)], [options]);
+  const filtered = unique.filter(o => o.toLowerCase().includes(search.toLowerCase()));
   return (
     <div className="relative" ref={ref}>
       {label && <label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">{label}</label>}
@@ -217,6 +223,7 @@ export function MultiCheckboxDropdown({ label, placeholder="Select...", options,
   const toggle = (opt: string) => {
     onChange(values.includes(opt) ? values.filter(v => v !== opt) : [...values, opt]);
   };
+  const unique = useMemo(() => [...new Set(options)], [options]);
   const display = values.length ? values.join(", ") : null;
   return (
     <div className="relative" ref={ref}>
@@ -231,7 +238,7 @@ export function MultiCheckboxDropdown({ label, placeholder="Select...", options,
       </button>
       {open && (
         <div className="absolute z-50 w-full mt-0.5 bg-white border border-gray-200 rounded-md shadow-lg">
-          {options.map(opt => (
+          {unique.map(opt => (
             <label key={opt} className="flex items-center gap-2 px-2.5 py-1.5 text-xs text-gray-700 hover:bg-blue-50 cursor-pointer">
               <input type="checkbox" checked={values.includes(opt)} onChange={() => toggle(opt)}
                 className="w-3.5 h-3.5 rounded border-gray-300 accent-blue-600"/>
@@ -259,7 +266,8 @@ export function MultiSearchSelectField({ label, placeholder="Search and select",
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, []);
-  const filtered = options.filter(o => o.toLowerCase().includes(search.toLowerCase()));
+  const unique = useMemo(() => [...new Set(options)], [options]);
+  const filtered = unique.filter(o => o.toLowerCase().includes(search.toLowerCase()));
   const toggle = (opt: string) => onChange(values.includes(opt) ? values.filter(v => v !== opt) : [...values, opt]);
   const display = values.length ? values.join(", ") : null;
   return (

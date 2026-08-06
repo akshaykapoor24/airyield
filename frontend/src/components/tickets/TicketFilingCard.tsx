@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Building2, Calendar, ChevronDown, FilePlus, Layers, Lock, Search, Tag, X } from "lucide-react";
 import { AIRLINE_AGENCIES, type StatementType } from "@/lib/ticketFields";
 
@@ -209,7 +209,12 @@ function AgencySelect({
     return () => document.removeEventListener("mousedown", h);
   }, []);
 
-  const filtered = options.filter((a) => a.toLowerCase().includes(query.trim().toLowerCase()));
+  // The supplier master holds one row per branch, so a name repeats — "Riya
+  // Travel" comes back 14 times. This control stores the NAME, so those rows are
+  // indistinguishable once picked: listing them all is noise, and a name-keyed
+  // list would collide. Collapse to distinct names, first occurrence wins.
+  const unique = useMemo(() => [...new Set(options)], [options]);
+  const filtered = unique.filter((a) => a.toLowerCase().includes(query.trim().toLowerCase()));
 
   return (
     <div ref={ref}>

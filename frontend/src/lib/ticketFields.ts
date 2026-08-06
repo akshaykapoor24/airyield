@@ -21,6 +21,12 @@ export type TicketSegment = {
   flight_no?: string | null;
   class?: string | null;
   travel_date?: string | null;
+  /**
+   * Per-leg Domestic/International. The parallel sector/flight/date strings
+   * cannot express it, so the manual form carries it here — the server reads it
+   * back in _split_multi_sector_rows when it cuts the ticket into leg rows.
+   */
+  segment_type?: string | null;
 };
 
 /** Mirrors TicketRow in backend/app/schemas/uploaded_ticket.py. */
@@ -147,8 +153,7 @@ export type FieldGroupId =
   | "gst_payment"
   | "accounting"
   | "bsp_doc"
-  | "tax_breakup"
-  | "segments";
+  | "tax_breakup";
 
 export type TicketField = {
   key: string;
@@ -190,7 +195,7 @@ export type FieldGroup = {
   defaultOpen: boolean;
   onlyFor?: StatementType;
   /** Renders a bespoke editor rather than a grid of inputs. */
-  custom?: "tax_breakup" | "segments";
+  custom?: "tax_breakup";
   description?: string;
 };
 
@@ -202,7 +207,7 @@ export const FIELD_GROUPS: FieldGroup[] = [
   { id: "passenger",   label: "Passenger & Customer",          color: "#1e3a5f", defaultOpen: true,
     description: "Who flew, and who we billed." },
   { id: "itinerary",   label: "Itinerary",                     color: "#4f46e5", defaultOpen: true,
-    description: "Sector, class and dates — these drive deal matching." },
+    description: "One block per sector flown — these drive deal matching." },
   { id: "fare",        label: "Fare & Taxes",                  color: "#059669", defaultOpen: true,
     description: "The published fare breakdown. Basic, YQ and YR feed incentive calculation." },
   { id: "commission",  label: "Commission & Settlement",       color: "#059669", defaultOpen: false,
@@ -215,17 +220,14 @@ export const FIELD_GROUPS: FieldGroup[] = [
   { id: "bsp_doc",     label: "BSP Document Control",          color: "#9333ea", defaultOpen: false,
     onlyFor: "AIRLINE" },
   { id: "tax_breakup", label: "Tax Breakup",                   color: "#059669", defaultOpen: false,
-    onlyFor: "AIRLINE", custom: "tax_breakup",
-    description: "One row per tax code, as printed on the BSP statement." },
-  { id: "segments",    label: "Segments",                      color: "#4f46e5", defaultOpen: false,
-    onlyFor: "AIRLINE", custom: "segments",
-    description: "Derived from sector, flight number, travel date and class." },
+    custom: "tax_breakup",
+    description: "One row per tax code, as printed on the statement." },
 ];
 
 // ── Fields ───────────────────────────────────────────────────────────────────
-// 84 plain fields. Plus the two JSONB fields (tax_breakup, segments) driven by
-// the custom group editors, plus the 11 server-owned fields listed below, that
-// accounts for all 97 TicketRow fields.
+// 84 plain fields. Plus the two JSONB fields — tax_breakup from its custom group
+// editor, segments composed from the itinerary legs — plus the 11 server-owned
+// fields listed below, that accounts for all 97 TicketRow fields.
 
 export const TICKET_FIELDS: TicketField[] = [
   // ── Ticket & Document ─────────────────────────────────────────────────────
@@ -266,20 +268,20 @@ export const TICKET_FIELDS: TicketField[] = [
   // ── Itinerary ─────────────────────────────────────────────────────────────
   { key: "sector",             label: "Sector", mapLabel: "Sector / Sectors",          type: "text", group: "itinerary", mappable: true, mapRequired: true, reviewCol: true, editable: true,
     placeholder: "DEL/BOM",
-    hint: "Three or more airports splits the ticket into one row per leg." },
+    hint: "One flown leg. Each leg is saved as its own row." },
   { key: "booking_class",      label: "Booking Class", shortLabel: "Class",   type: "text", group: "itinerary", mappable: true, reviewCol: true, editable: true,
     placeholder: "Y",
-    hint: "Leave blank and deal matching treats this ticket as Economy." },
+    hint: "Leave blank and deal matching treats this leg as Economy." },
   { key: "departure_datetime", label: "Departure Date", mapLabel: "Departure Date/Time", shortLabel: "Departure",  type: "date", group: "itinerary", mappable: true, reviewCol: true, editable: true,
     hint: "Used as the travel date for deal validity; falls back to ticket date." },
   { key: "segment_type",       label: "Segment Type",    type: "select", group: "itinerary", mappable: true, reviewCol: true, editable: true,
     options: ["Domestic", "International"],
-    hint: "Filters Domestic/International incentives." },
+    hint: "Filters Domestic/International incentives. Left blank, it is derived from this leg's airports." },
   { key: "flight_no",          label: "Flight No",       type: "text", group: "itinerary", onlyFor: "AIRLINE", mappable: true, editable: true,
-    placeholder: "AI-101 AI-102" },
+    placeholder: "AI-101" },
   { key: "travel_dt",          label: "Travel Dt",       type: "text", group: "itinerary", onlyFor: "AIRLINE", mappable: true, editable: true,
     placeholder: "16MAY 24MAY",
-    hint: "First token fills the departure date when it is blank. A bare day+month resolves to the current year." },
+    hint: "Recorded verbatim from the BSP statement. Per-leg departure dates above take precedence." },
   { key: "fare_basis",         label: "Fare Basis",      type: "text", group: "itinerary", onlyFor: "AIRLINE", mappable: true, editable: true },
   { key: "fare_const_type",    label: "Fare Const Type", type: "text", group: "itinerary", onlyFor: "AIRLINE", mappable: true, editable: true },
 
@@ -508,10 +510,97 @@ export function predictAdmAcmRa(ticketNumber: string | null | undefined): "RA" |
   return null;
 }
 
-export const SECTOR_RE: Record<StatementType, RegExp> = {
-  B2B: /^[A-Z]{3}(\/[A-Z]{3})+$/,
-  AIRLINE: /^[A-Z]{3}\/[A-Z]{3}( +[A-Z]{3}\/[A-Z]{3})*$/,
+/**
+ * A single flown leg: AAA/BBB and nothing else. What one itinerary block holds.
+ *
+ * There is no whole-row sector regex any more — the form validates one block at
+ * a time and composes a string the server's own grammar accepts by construction
+ * (_SECTOR_B2B_RE / _SECTOR_AIRLINE_RE in backend/app/api/v1/tickets.py).
+ */
+export const LEG_SECTOR_RE = /^[A-Z]{3}\/[A-Z]{3}$/;
+
+// ── Itinerary legs ───────────────────────────────────────────────────────────
+
+/**
+ * One punched leg of an itinerary.
+ *
+ * Keys are the canonical field names deliberately, so the leg editor can render
+ * straight from the TICKET_FIELDS catalog instead of carrying its own labels.
+ */
+export type ItineraryLeg = {
+  sector?:             string | null;
+  booking_class?:      string | null;
+  departure_datetime?: string | null;
+  segment_type?:       string | null;
+  flight_no?:          string | null;
 };
+
+export const BLANK_LEG: ItineraryLeg = {};
+
+/** Punching more legs than this is a data-entry mistake, not an itinerary. */
+export const MAX_LEGS = 16;
+
+/** Catalog keys the leg repeater owns, in render order. The rest of the group stays row-level. */
+export const legFieldKeys = (t: StatementType): string[] =>
+  t === "AIRLINE"
+    ? ["sector", "flight_no", "booking_class", "departure_datetime", "segment_type"]
+    : ["sector", "booking_class", "departure_datetime", "segment_type"];
+
+const clean = (v: string | null | undefined) => (v ?? "").trim();
+
+/**
+ * Flatten punched legs into the single row the API takes.
+ *
+ * The row-level strings keep the grammar the server already parses — sectors as
+ * space-separated pairs, classes slash-joined, flight numbers space-joined — and
+ * `segments` carries what those strings cannot express: a departure date and a
+ * segment type per leg. `_split_multi_sector_rows` reads `segments` back and
+ * cuts the row into one row per leg.
+ *
+ * Shared by the debounced preview and save() so the two can never disagree about
+ * what is being sent.
+ */
+export function composeLegs(
+  legs: ItineraryLeg[],
+  t: StatementType,
+): Record<string, unknown> {
+  const filled = legs.filter((l) => clean(l.sector) !== "");
+  if (filled.length === 0) {
+    // Nothing punched yet — clear the row-level keys so a half-deleted leg can
+    // never leave a stale sector behind in the draft.
+    return {
+      sector: null, booking_class: null, departure_datetime: null,
+      segment_type: null, segments: null,
+      ...(t === "AIRLINE" ? { flight_no: null } : {}),
+    };
+  }
+
+  const sectors = filled.map((l) => clean(l.sector).toUpperCase());
+  const classes = filled.map((l) => clean(l.booking_class).toUpperCase());
+  const flights = filled.map((l) => clean(l.flight_no).toUpperCase());
+
+  const segments: TicketSegment[] = filled.map((l, i) => {
+    const [origin, destination] = sectors[i].split("/");
+    return {
+      origin:       origin || null,
+      destination:  destination || null,
+      flight_no:    flights[i] || null,
+      class:        classes[i] || null,
+      travel_date:  clean(l.departure_datetime) || null,
+      segment_type: clean(l.segment_type) || null,
+    };
+  });
+
+  return {
+    sector:             sectors.join(" "),
+    booking_class:      classes.some(Boolean) ? classes.join("/") : null,
+    departure_datetime: segments[0].travel_date,
+    segment_type:       segments[0].segment_type,
+    segments,
+    // travel_dt is BSP provenance the user types verbatim — never composed over.
+    ...(t === "AIRLINE" ? { flight_no: flights.some(Boolean) ? flights.join(" ") : null } : {}),
+  };
+}
 
 export const inr = (v: number | string | null | undefined): string => {
   if (v === null || v === undefined || v === "") return "—";
