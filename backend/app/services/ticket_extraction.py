@@ -20,6 +20,8 @@ from typing import Any
 
 import pandas as pd
 
+from app.services import sector_split
+
 logger = logging.getLogger(__name__)
 
 # ── B2B template headers ──────────────────────────────────────────────────────
@@ -179,8 +181,11 @@ NUMERIC_COLS = {
     "invoice_fare", "total_refund_amount", "roe", "nuc",
 }
 
-# Columns split equally across multi-sector legs
-_SPLIT_FIN_COLS = {"sell_fare", "sell_tax", "sell_tax_yq", "sale_yr"}
+# Columns split equally across multi-sector legs. sale_k3 belongs here for the
+# same reason the other three do — it is a per-ticket tax, and a leg carrying the
+# whole ticket's K3 next to its own share of YQ/YR is simply wrong. It is not
+# read by deal_matching or the incentive base, so nothing calculated moves.
+_SPLIT_FIN_COLS = {"sell_fare", "sell_tax", "sell_tax_yq", "sale_yr", "sale_k3"}
 
 # BSP transaction_type → invoice_type + adm_acm_ra
 _TRANSACTION_TYPE_MAP: dict[str, tuple[str, str | None]] = {
@@ -201,32 +206,129 @@ _INDIA_AIRPORTS: frozenset[str] = frozenset({
 })
 
 
+def _leg_classes(raw: str | None, n: int) -> list[str]:
+    """Per-leg booking classes from one class string.
+
+    Slash-delimited is the B2B form ("Y/J"); HMPR airline exports use spaces
+    ("L L U U"). Slash is tried first and wins whenever it yields structure,
+    because that is what the B2B split has always done — and a list longer than
+    `n` is truncated by indexing, not rejected. A single value broadcasts: "Y"
+    across three legs genuinely means Y on every leg.
+    """
+    s = (raw or "").strip()
+    parts = [c.strip() for c in s.split("/") if c.strip()]
+    if len(parts) < 2:
+        whitespace = s.split()
+        if len(whitespace) > 1:
+            parts = whitespace
+    while len(parts) < n:
+        parts.append(parts[-1] if parts else "")
+    return parts
+
+
 def _split_multi_sector_rows(rows: list[dict]) -> list[dict]:
-    """Expand multi-sector B2B rows (3+ airports) into one row per leg."""
+    """Expand a multi-sector row into one row per flown leg.
+
+    Both sector grammars are understood, via `sector_split.leg_sectors`:
+    the B2B slash chain ("DEL/BOM/HYD") and the airline space-separated pairs
+    ("DEL/BOM BOM/HYD"). A sector that does not parse leaves the row untouched
+    rather than being guessed at — dividing money by a leg count we are not sure
+    of would silently corrupt it.
+
+    Per-leg values come from `segments` when the caller supplied one entry per
+    leg. That is how the manual entry form carries a distinct travel date and
+    segment type per leg, neither of which the parallel strings can express.
+    Without `segments` the historical positional-token behaviour applies, so XLS
+    rows and legacy single-string payloads split exactly as they always have.
+    """
     result: list[dict] = []
     for row in rows:
-        sector = (row.get("sector") or "").strip()
-        airports = [a.strip() for a in sector.split("/") if a.strip()]
-        n = len(airports) - 1
+        legs, status = sector_split.leg_sectors(row.get("sector"))
+        n = len(legs)
 
-        if n <= 1:
+        # One segment per leg means the caller punched the legs individually.
+        raw_segments = row.get("segments")
+        segments = raw_segments if isinstance(raw_segments, list) and len(raw_segments) == n else None
+
+        if n <= 1 or status == sector_split.UNPARSED:
             row.setdefault("split_type", "normal")
+            # A one-leg ticket still carries a punched segment, and its date and
+            # segment type are just as real as a split ticket's. Reading them
+            # here is what keeps one leg from being a special case the form has
+            # to work around.
+            if segments:
+                seg = segments[0]
+                if seg.get("travel_date") and not row.get("departure_datetime"):
+                    row["departure_datetime"] = _normalize_date(seg["travel_date"])
+                if seg.get("segment_type"):
+                    row["segment_type"] = seg["segment_type"]
+                row["segments"] = [{**seg, "segment_type": row.get("segment_type")}]
             result.append(row)
             continue
 
-        raw_cls_str = (row.get("booking_class") or "").strip()
-        classes = [c.strip() for c in raw_cls_str.split("/") if c.strip()]
-        while len(classes) < n:
-            classes.append(classes[-1] if classes else "")
+        classes  = _leg_classes(row.get("booking_class"), n)
+        flights  = sector_split.tokens(row.get("flight_no"), n)
+        journeys = sector_split.tokens(row.get("travel_dt"), n)
 
         for i in range(n):
             r = dict(row)
-            r["sector"] = f"{airports[i]}/{airports[i + 1]}"
-            r["booking_class"] = classes[i]
+            seg = segments[i] if segments else {}
+
+            r["sector"] = legs[i]
             r["split_type"] = "split"
+            r["booking_class"] = seg.get("class") or classes[i]
+
+            if flight := (seg.get("flight_no") or (flights[i] if i < len(flights) else None)):
+                r["flight_no"] = flight
+            if journey := (seg.get("travel_date") or (journeys[i] if i < len(journeys) else None)):
+                r["travel_dt"] = journey
+
+            # This leg's own date, falling back to the whole-ticket one.
+            departure = seg.get("travel_date") or (journeys[i] if i < len(journeys) else None)
+            if departure:
+                r["departure_datetime"] = _normalize_date(departure)
+
+            # The leg's own airports are better evidence than a whole-ticket
+            # value, so they outrank it — but only when the caller punched legs
+            # individually. A mapped SegmentType column on an XLS row still wins.
+            if segments:
+                r["segment_type"] = (
+                    seg.get("segment_type")
+                    or _detect_segment_type_from_sector(legs[i])
+                    or row.get("segment_type")
+                )
+            else:
+                r["segment_type"] = (
+                    row.get("segment_type") or _detect_segment_type_from_sector(legs[i])
+                )
+
+            # Keep the stored segment agreeing with the columns it produced —
+            # a leg whose JSONB says one thing and whose column says another is
+            # a bug waiting to be read by whichever of the two a caller trusts.
+            if segments:
+                origin, _, destination = legs[i].partition("/")
+                r["segments"] = [{
+                    **seg,
+                    "origin":       seg.get("origin") or origin,
+                    "destination":  seg.get("destination") or destination,
+                    "flight_no":    r.get("flight_no"),
+                    "class":        r["booking_class"] or None,
+                    "travel_date":  seg.get("travel_date") or r.get("departure_datetime"),
+                    "segment_type": r["segment_type"],
+                }]
+
             for col in _SPLIT_FIN_COLS:
                 if row.get(col) is not None:
                     r[col] = round(row[col] / n, 2)
+
+            # The breakup has to follow the columns it fed, or a leg's YR would
+            # no longer agree with the YR printed in its own breakup.
+            if isinstance(row.get("tax_breakup"), dict):
+                r["tax_breakup"] = {
+                    code: round(amount / n, 2) if isinstance(amount, (int, float)) else amount
+                    for code, amount in row["tax_breakup"].items()
+                }
+
             r["row_order"] = row.get("row_order", 0) * 1000 + i
             result.append(r)
     return result
@@ -413,20 +515,33 @@ def derive_ticket_row(row: dict[str, Any], is_airline: bool) -> dict[str, Any]:
     if row.get("ticket_date"):
         row["ticket_date"] = _normalize_date(row["ticket_date"])
 
-    if is_airline:
-        # ── Tax breakup from Tax_Type/Tax pairs ───────────────────
-        tax_breakup = row.get("tax_breakup") or {}
-        if tax_breakup:
-            row["tax_breakup"] = tax_breakup
-            # Derive individual tax columns used by deal matching
-            if "YR" in tax_breakup and row.get("sale_yr") is None:
-                row["sale_yr"] = tax_breakup["YR"]
-            if "K3" in tax_breakup and row.get("sale_k3") is None:
-                row["sale_k3"] = tax_breakup["K3"]
-            # sell_tax_yq: prefer YQTax column already mapped; fallback to YQ in breakup
-            if row.get("sell_tax_yq") is None and "YQ" in tax_breakup:
-                row["sell_tax_yq"] = tax_breakup["YQ"]
+    # ── Tax breakup → the tax columns deal matching reads ─────────
+    # Not airline-only: a B2B ticket can be punched with a tax breakup too, and
+    # the same codes mean the same things. Non-destructive by design — an
+    # explicitly supplied column always wins, the breakup only fills a blank.
+    tax_breakup = row.get("tax_breakup") or {}
+    if tax_breakup:
+        row["tax_breakup"] = tax_breakup
+        if "YR" in tax_breakup and row.get("sale_yr") is None:
+            row["sale_yr"] = tax_breakup["YR"]
+        if "K3" in tax_breakup and row.get("sale_k3") is None:
+            row["sale_k3"] = tax_breakup["K3"]
+        # sell_tax_yq: prefer YQTax column already mapped; fallback to YQ in breakup
+        if row.get("sell_tax_yq") is None and "YQ" in tax_breakup:
+            row["sell_tax_yq"] = tax_breakup["YQ"]
 
+    # ── Segment type auto-detection ───────────────────────────────
+    # Also not airline-only. A blank segment type does not block deal matching
+    # but defeats the Domestic/International filter, so deriving it from the
+    # airports is strictly better than leaving it null. Only fills a blank.
+    # Per-leg detection happens in _split_multi_sector_rows, once the sector has
+    # been narrowed to a single pair.
+    if not row.get("segment_type"):
+        detected = _detect_segment_type_from_sector(row.get("sector"))
+        if detected:
+            row["segment_type"] = detected
+
+    if is_airline:
         # ── Pax_Name → last_name / first_name ────────────────────
         raw_pax = row.get("pax_name")
         if raw_pax:
@@ -444,10 +559,6 @@ def derive_ticket_row(row: dict[str, Any], is_airline: bool) -> dict[str, Any]:
             if not row.get("departure_datetime"):
                 row["departure_datetime"] = _parse_first_date(raw_travel_dt)
 
-        # ── Segment type auto-detection ────────────────────────────
-        if not row.get("segment_type"):
-            row["segment_type"] = _detect_segment_type_from_sector(row.get("sector"))
-
         # ── invoice_type + adm_acm_ra from transaction_type ────────
         inv_type, adm_cat = _derive_from_transaction_type(
             row.get("transaction_type"),
@@ -460,14 +571,19 @@ def derive_ticket_row(row: dict[str, Any], is_airline: bool) -> dict[str, Any]:
             row["adm_acm_ra"] = adm_cat
 
         # ── Segments JSONB ─────────────────────────────────────────
-        segs = _build_segments(
-            row.get("sector"),
-            row.get("flight_no"),
-            row.get("travel_dt"),
-            row.get("booking_class"),
-        )
-        if segs:
-            row["segments"] = segs
+        # Only built when the caller did not supply them. The manual entry form
+        # posts one segment per punched leg, carrying a per-leg travel date and
+        # segment type that the parallel sector/flight/date strings cannot
+        # express — rebuilding here would throw that away.
+        if not row.get("segments"):
+            segs = _build_segments(
+                row.get("sector"),
+                row.get("flight_no"),
+                row.get("travel_dt"),
+                row.get("booking_class"),
+            )
+            if segs:
+                row["segments"] = segs
 
         # ── store statement_type on each row ──────────────────────
         row["statement_type"] = "AIRLINE"
@@ -483,12 +599,17 @@ def derive_ticket_row(row: dict[str, Any], is_airline: bool) -> dict[str, Any]:
 
 
 def derive_ticket_rows(rows: list[dict[str, Any]], is_airline: bool) -> list[dict[str, Any]]:
-    """derive_ticket_row over a list, plus the B2B multi-sector split — i.e. the
-    exact post-mapping pipeline TicketExtractionService.extract runs."""
+    """derive_ticket_row over a list, plus the multi-sector split.
+
+    The manual entry path only. It splits BOTH statement types, because a ticket
+    punched leg by leg is meant to land as one row per leg whichever type it is.
+
+    TicketExtractionService.extract deliberately does NOT call this — it runs
+    derive_ticket_row itself and splits only B2B, so an uploaded BSP file still
+    lands as one row per ticket document.
+    """
     out = [derive_ticket_row(dict(r), is_airline) for r in rows]
-    if not is_airline:
-        out = _split_multi_sector_rows(out)
-    return out
+    return _split_multi_sector_rows(out)
 
 
 class TicketExtractionService:

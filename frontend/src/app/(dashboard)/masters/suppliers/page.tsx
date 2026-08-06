@@ -827,7 +827,12 @@ export default function SuppliersPage() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [tab, setTab] = useState<"list" | "approvals">("list");
+  // The master list is Master Governance's to show; a tenant user only ever
+  // sees what they themselves submitted. Defaulting the tab by role is what
+  // enforces that — there is no control to switch back to the list.
+  const [tab, setTab] = useState<"list" | "approvals">(
+    isPlatformAdmin ? "list" : "approvals",
+  );
   const [showAdd, setShowAdd] = useState(false);
   const [editTarget, setEditTarget] = useState<Supplier | null>(null);
   const [rejectTarget, setRejectTarget] = useState<Approval | null>(null);
@@ -921,11 +926,17 @@ export default function SuppliersPage() {
       </div>
 
       <div className="grid grid-cols-3 gap-3">
-        {[
+        {/* Counts of master records are Master Governance's to show. A tenant
+            user gets the shape of their own submissions instead. */}
+        {(isPlatformAdmin ? [
           { label: "Total Suppliers", value: totalCount, icon: Building2, color: "text-violet-600 bg-violet-50" },
           { label: "Active Suppliers", value: suppliers.filter(s => s.is_active).length, icon: TrendingUp, color: "text-emerald-600 bg-emerald-50" },
           { label: "Pending Approvals", value: pendingCount, icon: Upload, color: "text-orange-600 bg-orange-50" },
-        ].map(({ label, value, icon: Icon, color }) => (
+        ] : [
+          { label: "My Submissions", value: approvals.length, icon: Building2, color: "text-violet-600 bg-violet-50" },
+          { label: "Awaiting Approval", value: pendingCount, icon: Upload, color: "text-orange-600 bg-orange-50" },
+          { label: "Approved", value: approvals.filter(a => a.status === "approved").length, icon: TrendingUp, color: "text-emerald-600 bg-emerald-50" },
+        ]).map(({ label, value, icon: Icon, color }) => (
           <div key={label} className="bg-white rounded-xl border border-gray-100 px-3 py-2 flex items-center gap-3 shadow-sm">
             <div className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 ${color}`}>
               <Icon className="w-4 h-4" />
@@ -938,7 +949,7 @@ export default function SuppliersPage() {
         ))}
       </div>
 
-      {canOpenRequestsTab && (
+      {canOpenRequestsTab && isPlatformAdmin && (
         <div className="flex gap-1 bg-gray-100 rounded-xl p-1 w-fit">
           {(["list", "approvals"] as const).map(t => (
             <button key={t} onClick={() => setTab(t)}
@@ -958,7 +969,7 @@ export default function SuppliersPage() {
         </div>
       )}
 
-      {tab === "list" && (
+      {tab === "list" && isPlatformAdmin && (
         <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
           <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-100 flex-wrap">
             <div className="relative flex-1 min-w-48">
@@ -1045,6 +1056,18 @@ export default function SuppliersPage() {
             </table>
           </div>
           <Pagination page={page} pageSize={PAGE_SIZE} total={totalCount} onPageChange={p => setPage(p)} />
+        </div>
+      )}
+
+      {/* A viewer can neither manage the master nor submit to it, so neither
+          panel above applies. Say so rather than rendering an empty page. */}
+      {!isPlatformAdmin && !canOpenRequestsTab && (
+        <div className="bg-white rounded-xl border border-gray-100 shadow-sm px-4 py-16 text-center">
+          <p className="text-sm font-medium text-gray-600">Nothing to show here</p>
+          <p className="text-xs text-gray-400 mt-1 max-w-md mx-auto leading-relaxed">
+            The master list is maintained by the platform team. Your role cannot submit
+            master updates, so there are no submissions of your own to display.
+          </p>
         </div>
       )}
 

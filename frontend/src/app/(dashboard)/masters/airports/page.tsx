@@ -578,7 +578,12 @@ export default function AirportsPage() {
   const isPlatformAdmin = canManageGlobalMasters(user?.role);
   const canSubmitRequest = canSubmitMasterRequest(user?.role);
   const canOpenRequestsTab = canViewMasterRequests(user?.role);
-  const [tab, setTab]               = useState<"list" | "approvals">("list");
+  // The master list is Master Governance's to show; a tenant user only ever
+  // sees what they themselves submitted. Defaulting the tab by role is what
+  // enforces that — there is no control to switch back to the list.
+  const [tab, setTab]               = useState<"list" | "approvals">(
+    isPlatformAdmin ? "list" : "approvals",
+  );
   const [airports, setAirports]     = useState<Airport[]>([]);
   const [approvals, setApprovals]   = useState<Approval[]>([]);
   const [loading, setLoading]       = useState(true);
@@ -689,13 +694,19 @@ export default function AirportsPage() {
       </div>
 
       {/* ── stats ──────────────────────────────────────────────────────── */}
-      <div className="grid grid-cols-4 gap-3">
-        {[
+      <div className={`grid ${isPlatformAdmin ? "grid-cols-4" : "grid-cols-3"} gap-3`}>
+        {/* Counts of master records are Master Governance's to show. A tenant
+            user gets the shape of their own submissions instead. */}
+        {(isPlatformAdmin ? [
           { label: "Total Airports", value: totalCount, color: "text-teal-600 bg-teal-50" },
           { label: "Countries",       value: new Set(airports.map(a => a.country)).size, color: "text-blue-600 bg-blue-50" },
           { label: "Continents",      value: new Set(airports.map(a => a.continent).filter(Boolean)).size, color: "text-violet-600 bg-violet-50" },
           { label: "Pending Approvals", value: pendingCount, color: "text-orange-600 bg-orange-50" },
-        ].map(({ label, value, color }) => (
+        ] : [
+          { label: "My Submissions",    value: approvals.length, color: "text-teal-600 bg-teal-50" },
+          { label: "Awaiting Approval", value: pendingCount, color: "text-orange-600 bg-orange-50" },
+          { label: "Approved",          value: approvals.filter(a => a.status === "approved").length, color: "text-emerald-600 bg-emerald-50" },
+        ]).map(({ label, value, color }) => (
           <div key={label} className="bg-white rounded-xl border border-gray-100 px-3 py-2 flex items-center gap-3 shadow-sm">
             <div className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 ${color}`}>
               <MapPin className="w-4 h-4" />
@@ -709,7 +720,7 @@ export default function AirportsPage() {
       </div>
 
       {/* ── tabs ───────────────────────────────────────────────────────── */}
-      {canOpenRequestsTab && (
+      {canOpenRequestsTab && isPlatformAdmin && (
         <div className="flex gap-1 bg-gray-100 rounded-xl p-1 w-fit">
           {(["list", "approvals"] as const).map(t => (
             <button key={t} onClick={() => setTab(t)}
@@ -730,7 +741,7 @@ export default function AirportsPage() {
       )}
 
       {/* ── airport list tab ───────────────────────────────────────────── */}
-      {tab === "list" && (
+      {tab === "list" && isPlatformAdmin && (
         <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
           {/* toolbar */}
           <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-100 flex-wrap">
@@ -812,6 +823,18 @@ export default function AirportsPage() {
       )}
 
       {/* ── approvals / submissions tab ────────────────────────────────── */}
+      {/* A viewer can neither manage the master nor submit to it, so neither
+          panel above applies. Say so rather than rendering an empty page. */}
+      {!isPlatformAdmin && !canOpenRequestsTab && (
+        <div className="bg-white rounded-xl border border-gray-100 shadow-sm px-4 py-16 text-center">
+          <p className="text-sm font-medium text-gray-600">Nothing to show here</p>
+          <p className="text-xs text-gray-400 mt-1 max-w-md mx-auto leading-relaxed">
+            The master list is maintained by the platform team. Your role cannot submit
+            master updates, so there are no submissions of your own to display.
+          </p>
+        </div>
+      )}
+
       {tab === "approvals" && canOpenRequestsTab && (
         <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
           <div className="px-4 py-3 border-b border-gray-100">
