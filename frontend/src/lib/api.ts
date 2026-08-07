@@ -18,12 +18,20 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
+// Endpoints that answer 401 as a normal outcome rather than "your session
+// died". A failed login is the obvious one: nuking auth and hard-reloading
+// there wipes the "Invalid email or password." message before it can be read.
+const PUBLIC_AUTH_ROUTES =
+  /\/auth\/(login|login-form|signup|register|verify-email|resend-verification|forgot-password|reset-password)$/;
+
 api.interceptors.response.use(
   (res) => res,
   (err) => {
-    if (err.response?.status === 401) {
+    const url: string = err.config?.url ?? "";
+    if (err.response?.status === 401 && !PUBLIC_AUTH_ROUTES.test(url)) {
       clearAuth();
-      window.location.href = "/login";
+      // Guard against a redirect loop when the 401 happened on /login itself.
+      if (window.location.pathname !== "/login") window.location.href = "/login";
     }
     return Promise.reject(err);
   }

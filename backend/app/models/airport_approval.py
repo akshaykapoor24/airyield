@@ -1,5 +1,6 @@
 from datetime import datetime
 from sqlalchemy import String, DateTime, Integer, ForeignKey, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
@@ -10,7 +11,8 @@ class AirportApproval(Base):
     id:               Mapped[int]      = mapped_column(primary_key=True)
     iata_code:        Mapped[str]      = mapped_column(String(3),   nullable=False)
     country:          Mapped[str]      = mapped_column(String(100), nullable=False)
-    categorization:   Mapped[str|None] = mapped_column(String(50),  nullable=True)
+    # Slash-joined base groups — must match airports.categorization width.
+    categorization:   Mapped[str|None] = mapped_column(String(255), nullable=True)
     continent:        Mapped[str|None] = mapped_column(String(50),  nullable=True)
     city_airport_name:Mapped[str]      = mapped_column(String(255), nullable=False)
 
@@ -32,8 +34,19 @@ class AirportApproval(Base):
     reviewed_at:      Mapped[datetime|None] = mapped_column(DateTime, nullable=True)
     rejection_reason: Mapped[str|None]      = mapped_column(Text, nullable=True)
 
+    # ── platform-admin edit before approval ────────────────────────────────
+    # Snapshot of the business columns as the submitter left them, written on
+    # the FIRST admin edit only. NULL means no admin changed anything, which is
+    # exactly the case where the submitter has nothing extra to see.
+    original_payload: Mapped[dict | None]     = mapped_column(JSONB, nullable=True)
+    edited_by_id:     Mapped[int | None]      = mapped_column(
+                          Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+                      )
+    edited_at:        Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
     submitted_by: Mapped["User"] = relationship("User", foreign_keys=[submitted_by_id])  # noqa: F821
     reviewed_by:  Mapped["User"] = relationship("User", foreign_keys=[reviewed_by_id])   # noqa: F821
+    edited_by:    Mapped["User"] = relationship("User", foreign_keys=[edited_by_id])     # noqa: F821
 
     # new vs update distinction
     request_type:      Mapped[str]      = mapped_column(String(10), default="new")

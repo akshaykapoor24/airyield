@@ -9,6 +9,7 @@ import api from "@/lib/api";
 import { canManageGlobalMasters, canSubmitMasterRequest, canViewMasterRequests } from "@/lib/rbac";
 import { useAppSelector } from "@/store/hooks";
 import Pagination from "@/components/ui/Pagination";
+import MasterDiffModal, { DiffFieldSpec } from "@/components/masters/MasterDiffModal";
 
 type SupplierBranch = { name: string; iata_code: string };
 
@@ -72,6 +73,13 @@ type Approval = {
   rejection_reason: string | null;
   request_type: "new" | "update";
   target_id: number | null;
+  // ── platform-admin edit state ────────────────────────────────────────────
+  /** True only when an admin changed something the submitter should see. */
+  edited?: boolean;
+  /** The business values as the submitter originally sent them. */
+  original_payload?: Record<string, unknown> | null;
+  edited_by?: { id: number; full_name: string; email: string } | null;
+  edited_at?: string | null;
 } & SupplierDirectory;
 
 const VENDOR_TYPES = ["Agent", "Corporate", "OTA", "TMC", "GSA", "Other"];
@@ -94,6 +102,51 @@ const DIRECTORY_FIELDS: { key: keyof SupplierDirectory; label: string; wide?: bo
   { key: "fax_no", label: "Fax No" },
   { key: "representative_1", label: "Representative I" },
   { key: "representative_2", label: "Representative II" },
+];
+
+/** Branch list as chips — shared by the table and the diff modal. */
+function BranchChips({ branches }: { branches: SupplierBranch[] }) {
+  if (!branches || branches.length === 0) return <span className="text-[11px] text-gray-400">—</span>;
+  return (
+    <div className="flex flex-wrap gap-1">
+      {branches.map((b, i) => (
+        <span key={i} className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-50 text-blue-700 border border-blue-100">
+          {b.name}{b.iata_code ? <span className="font-mono font-bold"> {b.iata_code}</span> : null}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+// ── diff field map ─────────────────────────────────────────────────────────
+// Directory labels come from DIRECTORY_FIELDS so those 15 names live in one place.
+const SUPPLIER_DIFF_FIELDS: DiffFieldSpec[] = [
+  { key: "name",            label: "Vendor Name" },
+  { key: "vendor_name",     label: "Display Name" },
+  { key: "vendor_type",     label: "Type" },
+  {
+    key: "branches",
+    label: "Branches",
+    render: v => <BranchChips branches={(v as SupplierBranch[]) ?? []} />,
+    // Branch order carries no meaning, so canonicalise before comparing —
+    // reordering the list must not read as an admin edit.
+    equals: (a, b) => {
+      const canon = (bs: unknown) =>
+        ((bs as SupplierBranch[]) ?? [])
+          .map(x => `${x?.name ?? ""}|${x?.iata_code ?? ""}`)
+          .sort()
+          .join(";");
+      return canon(a) === canon(b);
+    },
+  },
+  { key: "contact_phone",   label: "Contact Number" },
+  { key: "alternate_phone", label: "Alternate Contact" },
+  { key: "contact_email",   label: "Contact Email" },
+  { key: "alternate_email", label: "Alternate Email" },
+  { key: "gst_number",      label: "GST Number" },
+  { key: "pan_number",      label: "PAN Number" },
+  { key: "notes",           label: "Remarks" },
+  ...DIRECTORY_FIELDS.map(f => ({ key: f.key as string, label: f.label })),
 ];
 
 const emptyDirectory: Record<keyof SupplierDirectory, string> = {
@@ -493,6 +546,204 @@ function AddSupplierModal({
   );
 }
 
+// ── platform admin edits a pending request ────────────────────────────────
+
+function EditRequestModal({
+  approval, onClose, onSaved,
+}: { approval: Approval; onClose: () => void; onSaved: () => void }) {
+  const [form, setForm] = useState({
+    name: approval.name,
+    vendor_type: approval.vendor_type ?? "",
+    vendor_name: approval.vendor_name ?? "",
+    contact_phone: approval.contact_phone ?? "",
+    alternate_phone: approval.alternate_phone ?? "",
+    contact_email: approval.contact_email ?? "",
+    alternate_email: approval.alternate_email ?? "",
+    gst_number: approval.gst_number ?? "",
+    pan_number: approval.pan_number ?? "",
+    notes: approval.notes ?? "",
+    ...(Object.fromEntries(DIRECTORY_FIELDS.map(f => [f.key, approval[f.key] ?? ""])) as Record<keyof SupplierDirectory, string>),
+  });
+  const [branches, setBranches] = useState<SupplierBranch[]>(approval.branches ?? []);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const set = (k: keyof typeof form, v: string) => setForm(p => ({ ...p, [k]: v }));
+  const addBranch = () => setBranches(p => [...p, { name: "", iata_code: "" }]);
+  const removeBranch = (i: number) => setBranches(p => p.filter((_, idx) => idx !== i));
+  const updateBranch = (i: number, k: keyof SupplierBranch, v: string) =>
+    setBranches(p => p.map((b, idx) => idx === i ? { ...b, [k]: v } : b));
+
+  /** Returns true when the edit saved, so the caller can chain approve. */
+  const save = async (): Promise<boolean> => {
+    if (!form.name.trim()) { setError("Vendor name is required."); return false; }
+    setError("");
+    try {
+      await api.patch(`/suppliers/approvals/${approval.id}`, {
+        name: form.name.trim(),
+        vendor_type: form.vendor_type || null,
+        vendor_name: form.vendor_name.trim() || null,
+        // A new array, never a mutation of the loaded one — JSON columns here
+        // have no mutation tracking.
+        branches: branches.filter(b => b.name.trim())
+          .map(b => ({ name: b.name.trim(), iata_code: b.iata_code.trim().toUpperCase() })),
+        contact_phone: form.contact_phone || null,
+        alternate_phone: form.alternate_phone || null,
+        contact_email: form.contact_email || null,
+        alternate_email: form.alternate_email || null,
+        gst_number: form.gst_number || null,
+        pan_number: form.pan_number || null,
+        notes: form.notes || null,
+        ...Object.fromEntries(DIRECTORY_FIELDS.map(f => [f.key, form[f.key] || null])),
+      });
+      return true;
+    } catch (e: unknown) {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setError(msg ?? "Failed to save changes."); return false;
+    }
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    if (await save()) { onSaved(); onClose(); }
+    setSaving(false);
+  };
+
+  const handleSaveAndApprove = async () => {
+    setSaving(true);
+    if (await save()) {
+      try {
+        await api.patch(`/suppliers/approvals/${approval.id}/approve`);
+        onSaved(); onClose();
+      } catch (e: unknown) {
+        // The edit is already persisted and the request is still pending — say
+        // so rather than closing and losing the admin's work.
+        const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+        setError(`Changes saved, but approval failed: ${msg ?? "please try again."}`);
+        onSaved();
+      }
+    }
+    setSaving(false);
+  };
+
+  const field = "w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-400 bg-gray-50";
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+        <div className="flex items-start justify-between px-6 py-4 border-b border-gray-100">
+          <div>
+            <h2 className="text-sm font-bold text-gray-900">Edit Request — {approval.name}</h2>
+            <p className="text-[10px] text-gray-400 mt-0.5">
+              Submitted by {approval.submitted_by.full_name} · they will see what you change
+            </p>
+          </div>
+          <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-lg">
+            <X className="w-4 h-4 text-gray-500" />
+          </button>
+        </div>
+        <div className="px-6 py-4 space-y-3">
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Vendor Name *</label>
+              <input value={form.name} onChange={e => set("name", e.target.value)} className={field} />
+            </div>
+            <div>
+              <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Display Name</label>
+              <input value={form.vendor_name} onChange={e => set("vendor_name", e.target.value)}
+                placeholder="Short / trade name" className={field} />
+            </div>
+          </div>
+          <div>
+            <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Type</label>
+            <select value={form.vendor_type} onChange={e => set("vendor_type", e.target.value)} className={field}>
+              <option value="">— Select —</option>
+              {VENDOR_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </div>
+          <div>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Branches</label>
+              <button type="button" onClick={addBranch}
+                className="text-[11px] text-violet-600 font-medium hover:text-violet-800">+ Add Branch</button>
+            </div>
+            {branches.map((b, i) => (
+              <div key={i} className="flex gap-2 items-center mb-1.5">
+                <input value={b.name} onChange={e => updateBranch(i, "name", e.target.value)} placeholder="City / Branch name"
+                  className="flex-1 border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-violet-400 bg-gray-50" />
+                <input value={b.iata_code} onChange={e => updateBranch(i, "iata_code", e.target.value.toUpperCase().slice(0, 3))}
+                  placeholder="IATA" maxLength={3}
+                  className="w-16 border border-gray-200 rounded-lg px-2 py-1.5 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-violet-400 bg-gray-50 text-center uppercase" />
+                <button type="button" onClick={() => removeBranch(i)}
+                  className="p-1 hover:bg-red-50 rounded text-gray-400 hover:text-red-500 flex-shrink-0">
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            ))}
+            {branches.length === 0 && (
+              <p className="text-[11px] text-gray-400 italic py-1">No branches added.</p>
+            )}
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Contact Number</label>
+              <input value={form.contact_phone} onChange={e => set("contact_phone", e.target.value)} className={field} />
+            </div>
+            <div>
+              <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Alternate Contact No</label>
+              <input value={form.alternate_phone} onChange={e => set("alternate_phone", e.target.value)} className={field} />
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Contact Email</label>
+              <input type="email" value={form.contact_email} onChange={e => set("contact_email", e.target.value)} className={field} />
+            </div>
+            <div>
+              <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Alternate Email</label>
+              <input type="email" value={form.alternate_email} onChange={e => set("alternate_email", e.target.value)} className={field} />
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">GST Number</label>
+              <input value={form.gst_number} onChange={e => set("gst_number", e.target.value.toUpperCase())}
+                className={`${field} font-mono`} />
+            </div>
+            <div>
+              <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">PAN Number</label>
+              <input value={form.pan_number} onChange={e => set("pan_number", e.target.value.toUpperCase())}
+                className={`${field} font-mono`} />
+            </div>
+          </div>
+          <div>
+            <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Remarks</label>
+            <textarea value={form.notes} onChange={e => set("notes", e.target.value)} rows={2}
+              className={`${field} resize-none`} />
+          </div>
+
+          <DirectoryFields form={form} set={(k, v) => set(k, v)} />
+
+          {error && <p className="text-[11px] text-red-500">{error}</p>}
+        </div>
+        <div className="px-6 pb-5 flex gap-2">
+          <button onClick={onClose} disabled={saving}
+            className="flex-1 border border-gray-200 rounded-lg py-2 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50">
+            Cancel
+          </button>
+          <button onClick={handleSave} disabled={saving}
+            className="flex-1 border border-violet-500 text-violet-600 rounded-lg py-2 text-xs font-semibold hover:bg-violet-50 disabled:opacity-50">
+            {saving ? "..." : "Save Changes"}
+          </button>
+          <button onClick={handleSaveAndApprove} disabled={saving}
+            className="flex-1 bg-green-500 hover:bg-green-600 text-white rounded-lg py-2 text-xs font-semibold disabled:opacity-50">
+            {saving ? "..." : "Save & Approve"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function EditSupplierModal({
   supplier, onClose, onSaved,
 }: { supplier: Supplier; onClose: () => void; onSaved: () => void }) {
@@ -709,93 +960,6 @@ function RejectModal({
   );
 }
 
-function SupplierDiffModal({
-  approval, current, loading, onClose,
-}: { approval: Approval; current: Supplier | null; loading: boolean; onClose: () => void }) {
-  const fields: { label: string; ak: keyof Approval; ck: keyof Supplier }[] = [
-    { label: "Vendor Name",        ak: "name",           ck: "name" },
-    { label: "Display Name",       ak: "vendor_name",    ck: "vendor_name" },
-    { label: "Type",               ak: "vendor_type",    ck: "vendor_type" },
-    { label: "Contact Number",     ak: "contact_phone",  ck: "contact_phone" },
-    { label: "Alternate Contact",  ak: "alternate_phone",ck: "alternate_phone" },
-    { label: "Contact Email",      ak: "contact_email",  ck: "contact_email" },
-    { label: "Alternate Email",    ak: "alternate_email",ck: "alternate_email" },
-    { label: "GST Number",         ak: "gst_number",     ck: "gst_number" },
-    { label: "PAN Number",         ak: "pan_number",     ck: "pan_number" },
-    { label: "Remarks",            ak: "notes",          ck: "notes" },
-    ...DIRECTORY_FIELDS.map(f => ({ label: f.label, ak: f.key as keyof Approval, ck: f.key as keyof Supplier })),
-  ];
-  const branchesStr = (bs: SupplierBranch[] | null | undefined) =>
-    (bs ?? []).map(b => `${b.name}${b.iata_code ? ` (${b.iata_code})` : ""}`).join(", ") || "—";
-  return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-xl max-h-[90vh] overflow-y-auto">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <div>
-            <h2 className="text-sm font-bold text-gray-900">Change Diff — {approval.name}</h2>
-            <p className="text-[10px] text-gray-400 mt-0.5">Updating Supplier ID #{approval.target_id}</p>
-          </div>
-          <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-lg"><X className="w-4 h-4 text-gray-500" /></button>
-        </div>
-        <div className="px-6 py-4">
-          {loading ? (
-            <div className="py-8 text-center text-xs text-gray-400">
-              <RefreshCw className="w-4 h-4 animate-spin mx-auto mb-2 text-gray-300" /> Loading current record...
-            </div>
-          ) : !current ? (
-            <p className="text-xs text-red-500 py-4 text-center">Could not load the current supplier record.</p>
-          ) : (
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="border-b border-gray-100">
-                  <th className="text-left py-2 pr-3 text-[10px] font-semibold text-gray-400 uppercase tracking-wide w-36">Field</th>
-                  <th className="text-left py-2 pr-3 text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Current</th>
-                  <th className="text-left py-2 text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Proposed</th>
-                </tr>
-              </thead>
-              <tbody>
-                {fields.map(({ label, ak, ck }) => {
-                  const cur = String(current[ck] ?? "");
-                  const proposed = String(approval[ak] ?? "");
-                  const changed = cur !== proposed;
-                  return (
-                    <tr key={label} className={`border-b border-gray-50 ${changed ? "bg-amber-50/60" : ""}`}>
-                      <td className="py-2 pr-3 font-semibold text-gray-600 text-[11px]">{label}</td>
-                      <td className="py-2 pr-3 text-gray-500">{cur || "—"}</td>
-                      <td className={`py-2 font-medium ${changed ? "text-amber-700" : "text-gray-700"}`}>
-                        {proposed || "—"}
-                        {changed && <span className="ml-1.5 text-[9px] bg-amber-200 text-amber-800 px-1 py-0.5 rounded font-bold">CHANGED</span>}
-                      </td>
-                    </tr>
-                  );
-                })}
-                {(() => {
-                  const cur = branchesStr(current.branches);
-                  const proposed = branchesStr(approval.branches);
-                  const changed = cur !== proposed;
-                  return (
-                    <tr className={`border-b border-gray-50 ${changed ? "bg-amber-50/60" : ""}`}>
-                      <td className="py-2 pr-3 font-semibold text-gray-600 text-[11px]">Branches</td>
-                      <td className="py-2 pr-3 text-gray-500">{cur}</td>
-                      <td className={`py-2 font-medium ${changed ? "text-amber-700" : "text-gray-700"}`}>
-                        {proposed}
-                        {changed && <span className="ml-1.5 text-[9px] bg-amber-200 text-amber-800 px-1 py-0.5 rounded font-bold">CHANGED</span>}
-                      </td>
-                    </tr>
-                  );
-                })()}
-              </tbody>
-            </table>
-          )}
-        </div>
-        <div className="px-6 pb-4">
-          <button onClick={onClose} className="w-full border border-gray-200 rounded-lg py-2 text-sm text-gray-600 hover:bg-gray-50">Close</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function RequestTypeBadge({ type }: { type: "new" | "update" }) {
   return type === "update"
     ? <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-50 text-amber-700 border border-amber-200">Update</span>
@@ -840,6 +1004,7 @@ export default function SuppliersPage() {
   const [diffTarget, setDiffTarget] = useState<Approval | null>(null);
   const [diffRecord, setDiffRecord] = useState<Supplier | null>(null);
   const [loadingDiff, setLoadingDiff] = useState(false);
+  const [editRequestTarget, setEditRequestTarget] = useState<Approval | null>(null);
   const [page, setPage] = useState(1);
   const [totalCount, setTotalCount] = useState(0);
   const PAGE_SIZE = 100;
@@ -889,10 +1054,12 @@ export default function SuppliersPage() {
   };
 
   const handleViewDiff = async (approval: Approval) => {
-    if (!approval.target_id) return;
     setDiffTarget(approval);
-    setLoadingDiff(true);
     setDiffRecord(null);
+    // A "new" request has no master record to compare against — the modal just
+    // drops that column and shows the admin's edit on its own.
+    if (!approval.target_id) return;
+    setLoadingDiff(true);
     try {
       const { data } = await api.get<Supplier>(`/suppliers/${approval.target_id}`);
       setDiffRecord(data);
@@ -1116,7 +1283,17 @@ export default function SuppliersPage() {
                     <td className="px-3 py-2 text-[11px] text-gray-500">{a.contact_phone ?? "—"}</td>
                     <td className="px-3 py-2 text-[11px] font-mono text-gray-600">{a.gst_number ?? "—"}</td>
                     <td className="px-3 py-2 text-[11px] font-mono text-gray-600">{a.pan_number ?? "—"}</td>
-                    <td className="px-3 py-2"><RequestTypeBadge type={a.request_type} /></td>
+                    <td className="px-3 py-2">
+                      <div className="flex items-center gap-1 flex-wrap">
+                        <RequestTypeBadge type={a.request_type} />
+                        {/* So a second admin can tell this row has been touched. */}
+                        {a.edited && (
+                          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100 text-amber-800 border border-amber-300">
+                            Edited
+                          </span>
+                        )}
+                      </div>
+                    </td>
                     {isPlatformAdmin ? (
                       <>
                         <td className="px-3 py-2">
@@ -1128,12 +1305,18 @@ export default function SuppliersPage() {
                         </td>
                         <td className="px-3 py-2">
                           <div className="flex items-center gap-1.5 flex-wrap">
-                            {a.request_type === "update" && (
+                            {/* Also meaningful on a "new" request once edited —
+                                the modal then shows submitted vs. edited. */}
+                            {(a.request_type === "update" || a.edited) && (
                               <button onClick={() => handleViewDiff(a)}
                                 className="px-2.5 py-1 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-[10px] font-semibold">
                                 View Changes
                               </button>
                             )}
+                            <button onClick={() => setEditRequestTarget(a)}
+                              className="flex items-center gap-1 px-2.5 py-1 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-[10px] font-semibold">
+                              <Edit2 className="w-3 h-3" /> Edit
+                            </button>
                             <button onClick={() => handleApprove(a.id)} disabled={approvingId === a.id}
                               className="flex items-center gap-1 px-2.5 py-1 bg-green-500 hover:bg-green-600 text-white rounded-lg text-[10px] font-semibold disabled:opacity-50">
                               <Check className="w-3 h-3" />
@@ -1148,7 +1331,18 @@ export default function SuppliersPage() {
                       </>
                     ) : (
                       <>
-                        <td className="px-3 py-2"><StatusBadge status={a.status} /></td>
+                        <td className="px-3 py-2">
+                          <StatusBadge status={a.status} />
+                          {/* Lives inside the STATUS cell so no column is added.
+                              Shows for pending, approved and rejected alike. */}
+                          {a.edited && (
+                            <button onClick={() => handleViewDiff(a)}
+                              title="See what the platform admin changed"
+                              className="mt-1 flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100">
+                              <Edit2 className="w-2.5 h-2.5" /> Edited by admin
+                            </button>
+                          )}
+                        </td>
                         <td className="px-3 py-2 text-[11px] text-gray-500">
                           {new Date(a.submitted_at).toLocaleDateString()}
                         </td>
@@ -1186,10 +1380,29 @@ export default function SuppliersPage() {
           onDone={() => { fetchApprovals(); }}
         />
       )}
+      {editRequestTarget && (
+        <EditRequestModal
+          approval={editRequestTarget}
+          onClose={() => setEditRequestTarget(null)}
+          onSaved={() => { fetchApprovals(); fetchSuppliers(); }}
+        />
+      )}
       {diffTarget && (
-        <SupplierDiffModal
-          approval={diffTarget}
-          current={diffRecord}
+        <MasterDiffModal
+          title={`Change Diff — ${diffTarget.name}`}
+          subtitle={diffTarget.request_type === "update"
+            ? `Updating Supplier ID #${diffTarget.target_id}`
+            : "New supplier request"}
+          fields={SUPPLIER_DIFF_FIELDS}
+          // "Current" only exists for an update request.
+          master={diffTarget.request_type === "update" ? diffRecord : null}
+          // Once edited, the middle column is what the submitter actually sent;
+          // otherwise the request row IS what they sent.
+          submitted={diffTarget.edited ? (diffTarget.original_payload ?? {}) : diffTarget}
+          edited={diffTarget.edited ? diffTarget : null}
+          submittedLabel={isPlatformAdmin ? "User proposed" : "You submitted"}
+          editedBy={diffTarget.edited_by}
+          editedAt={diffTarget.edited_at}
           loading={loadingDiff}
           onClose={() => { setDiffTarget(null); setDiffRecord(null); }}
         />

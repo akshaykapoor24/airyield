@@ -15,7 +15,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
-from app.models.airport import Airport
+from app.models.airport import Airport, split_categorization
 from app.models.uploaded_ticket import UploadedTicket
 from app.services.deal_matching import _resolve_cabin_groups, _class_matches_groups
 
@@ -64,8 +64,13 @@ def _cat_match(rule_vals: list[str], apt_categorization: str) -> bool:
     if not apt_categorization:
         return False
     apt_lower = apt_categorization.strip().lower()
-    # Split compound categorization into parts (e.g. "MEAI/SAARC" → {"meai","saarc"})
-    apt_parts = {p.strip().lower() for p in apt_categorization.split("/")}
+    # split_categorization knows the canonical group names, so a combination such
+    # as "GCC/MIDDLE EAST/APAC" yields {"gcc/middle east", "apac"} rather than
+    # shredding the one canonical name that legitimately contains a slash.
+    apt_parts = {p.strip().lower() for p in split_categorization(apt_categorization)}
+    # Keep the naive split too: pre-existing data may hold values that predate
+    # the canonical list, and dropping them here would silently relax a rule.
+    apt_parts |= {p.strip().lower() for p in apt_categorization.split("/")}
     return any(rv == apt_lower or rv in apt_parts for rv in rule_vals)
 
 

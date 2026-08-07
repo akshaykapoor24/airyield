@@ -18,8 +18,9 @@ from app.models.supplier_approval import SupplierApproval
 from app.models.user import User, UserRole
 from app.schemas.supplier import (
     SupplierRead, SupplierCreate, SupplierUpdate, SupplierBulkUploadResult,
-    SupplierApprovalRead, SupplierApprovalAction,
+    SupplierApprovalRead, SupplierApprovalAction, SupplierApprovalEdit,
 )
+from app.services.master_approval_edit import apply_admin_edit, SUPPLIER_CORE_FIELDS
 
 router = APIRouter()
 PLATFORM = UserRole.PLATFORM_ADMIN
@@ -47,6 +48,11 @@ DIRECTORY_FIELDS = (
 def _directory_kwargs(obj) -> dict:
     """Extract the directory fields from a payload/ORM object as a kwargs dict."""
     return {f: getattr(obj, f, None) for f in DIRECTORY_FIELDS}
+
+
+# Everything a platform admin may change on a pending request. Composed from
+# DIRECTORY_FIELDS so that constant stays the single source for those 15 names.
+SUPPLIER_FIELDS = (*SUPPLIER_CORE_FIELDS, *DIRECTORY_FIELDS)
 
 
 def _is_platform_admin(user: User) -> bool:
@@ -418,14 +424,26 @@ async def list_approvals(
     if _is_platform_admin(current_user):
         result = await db.execute(
             select(SupplierApproval)
-            .options(selectinload(SupplierApproval.submitted_by))
+            .options(
+                selectinload(SupplierApproval.submitted_by),
+                # SupplierApprovalRead.model_validate reads obj.edited_by
+                # directly, so it must be eager-loaded or serialisation raises
+                # MissingGreenlet — but only once a row has been edited.
+                selectinload(SupplierApproval.edited_by),
+            )
             .where(pending_filter)
             .order_by(SupplierApproval.submitted_at.desc())
         )
     else:
         result = await db.execute(
             select(SupplierApproval)
-            .options(selectinload(SupplierApproval.submitted_by))
+            .options(
+                selectinload(SupplierApproval.submitted_by),
+                # SupplierApprovalRead.model_validate reads obj.edited_by
+                # directly, so it must be eager-loaded or serialisation raises
+                # MissingGreenlet — but only once a row has been edited.
+                selectinload(SupplierApproval.edited_by),
+            )
             .where(SupplierApproval.submitted_by_id == current_user.id)
             .order_by(SupplierApproval.submitted_at.desc())
         )
@@ -523,6 +541,74 @@ async def reject_supplier(
     approval.reviewed_at = datetime.utcnow()
     await db.commit()
     return {"status": "rejected"}
+
+
+# ── platform admin edits a pending request ─────────────────────────────────
+# Declared before "/{supplier_id}": FastAPI matches in declaration order, so
+# below it this path would bind there and 422 on the literal "approvals".
+
+@router.patch("/approvals/{approval_id}", response_model=SupplierApprovalRead)
+async def edit_supplier_approval(
+    approval_id: int,
+    payload: SupplierApprovalEdit,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role(PLATFORM)),
+):
+    """Correct a pending request before approving it.
+
+    Approve already copies this row onto the master, so editing the row in place
+    is all that is needed for the corrected values to land — this endpoint only
+    has to record what the submitter originally sent so they can see the change.
+    """
+    result = await db.execute(
+        select(SupplierApproval).where(SupplierApproval.id == approval_id)
+    )
+    approval = result.scalar_one_or_none()
+    if not approval:
+        raise HTTPException(status_code=404, detail="Approval request not found.")
+    if (approval.status or "").lower() != "pending":
+        raise HTTPException(status_code=400, detail=f"Request is already '{approval.status}'.")
+
+    if (approval.request_type or "new").lower() == "update":
+        # Editing a request whose target was deleted can only produce a row that
+        # approve will auto-reject, so refuse rather than waste the admin's work.
+        target = await db.execute(
+            select(Supplier.id).where(Supplier.id == approval.target_supplier_id)
+        )
+        if not target.scalar_one_or_none():
+            raise HTTPException(
+                status_code=409,
+                detail="The supplier this request targets no longer exists; it can only be rejected.",
+            )
+
+    changes = payload.model_dump(exclude_unset=True)
+    # branches arrives as a list of SupplierBranchIn; model_dump has already
+    # turned it into plain dicts, which is what the JSON column stores. Assign
+    # the new list wholesale — these columns have no mutation tracking.
+
+    try:
+        apply_admin_edit(
+            approval,
+            fields=SUPPLIER_FIELDS,
+            changes=changes,
+            editor_id=current_user.id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    await db.commit()
+
+    # edited_by was set by id, so the relationship is not loaded; re-select with
+    # both eager loads rather than lazy-loading them during serialisation.
+    fresh = await db.execute(
+        select(SupplierApproval)
+        .options(
+            selectinload(SupplierApproval.submitted_by),
+            selectinload(SupplierApproval.edited_by),
+        )
+        .where(SupplierApproval.id == approval_id)
+    )
+    return SupplierApprovalRead.model_validate(fresh.scalar_one())
 
 
 @router.get("/{supplier_id}", response_model=SupplierRead)

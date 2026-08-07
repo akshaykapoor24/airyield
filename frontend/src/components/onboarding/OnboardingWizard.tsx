@@ -55,7 +55,7 @@ export default function OnboardingWizard({ onComplete }: { onComplete: () => voi
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[92vh] flex flex-col overflow-hidden">
         {/* header */}
         <div className="px-6 py-5 border-b border-gray-100" style={{ background: "linear-gradient(135deg, #1e3a5f 0%, #1e4d8c 60%, #1a3f7a 100%)" }}>
-          <h2 className="text-white text-lg font-bold">Welcome to AirYield 👋</h2>
+          <h2 className="text-white text-lg font-bold">Welcome to Fareqube 👋</h2>
           <p className="text-white/70 text-xs mt-0.5">Let&apos;s set up your workspace — this only takes a minute.</p>
 
           {/* stepper */}

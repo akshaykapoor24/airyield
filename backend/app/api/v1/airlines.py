@@ -17,8 +17,9 @@ from app.models.airline_approval import AirlineApproval
 from app.models.user import User, UserRole
 from app.schemas.airline import (
     AirlineRead, AirlineCreate, AirlineUpdate, AirlineBulkUploadResult,
-    AirlineApprovalRead, AirlineApprovalAction,
+    AirlineApprovalRead, AirlineApprovalAction, AirlineApprovalEdit,
 )
+from app.services.master_approval_edit import apply_admin_edit, AIRLINE_FIELDS
 
 router = APIRouter()
 PLATFORM = UserRole.PLATFORM_ADMIN
@@ -316,14 +317,24 @@ async def list_approvals(
     if _is_platform_admin(current_user):
         result = await db.execute(
             select(AirlineApproval)
-            .options(selectinload(AirlineApproval.submitted_by))
+            .options(
+                selectinload(AirlineApproval.submitted_by),
+                # Without this, edited_by lazy-loads during serialisation and
+                # raises MissingGreenlet — but only once a row has been edited.
+                selectinload(AirlineApproval.edited_by),
+            )
             .where(pending_filter)
             .order_by(AirlineApproval.submitted_at.desc())
         )
     else:
         result = await db.execute(
             select(AirlineApproval)
-            .options(selectinload(AirlineApproval.submitted_by))
+            .options(
+                selectinload(AirlineApproval.submitted_by),
+                # Without this, edited_by lazy-loads during serialisation and
+                # raises MissingGreenlet — but only once a row has been edited.
+                selectinload(AirlineApproval.edited_by),
+            )
             .where(AirlineApproval.submitted_by_id == current_user.id)
             .order_by(AirlineApproval.submitted_at.desc())
         )
@@ -418,6 +429,86 @@ async def reject_airline(
     approval.reviewed_at = datetime.utcnow()
     await db.commit()
     return {"status": "rejected"}
+
+
+# ── platform admin edits a pending request ─────────────────────────────────
+# Declared before "/{airline_id}": FastAPI matches in declaration order, so
+# below it this path would bind there and 422 on the literal "approvals".
+
+@router.patch("/approvals/{approval_id}", response_model=AirlineApprovalRead)
+async def edit_airline_approval(
+    approval_id: int,
+    payload: AirlineApprovalEdit,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role(PLATFORM)),
+):
+    """Correct a pending request before approving it.
+
+    Approve already copies this row onto the master, so editing the row in place
+    is all that is needed for the corrected values to land — this endpoint only
+    has to record what the submitter originally sent so they can see the change.
+    """
+    result = await db.execute(
+        select(AirlineApproval).where(AirlineApproval.id == approval_id)
+    )
+    approval = result.scalar_one_or_none()
+    if not approval:
+        raise HTTPException(status_code=404, detail="Approval request not found.")
+    if (approval.status or "").lower() != "pending":
+        raise HTTPException(status_code=400, detail=f"Request is already '{approval.status}'.")
+
+    changes = payload.model_dump(exclude_unset=True)
+
+    if (approval.request_type or "new").lower() == "update":
+        # Editing a request whose target was deleted can only produce a row that
+        # approve will auto-reject, so refuse rather than waste the admin's work.
+        target = await db.execute(
+            select(Airline.id).where(Airline.id == approval.target_airline_id)
+        )
+        if not target.scalar_one_or_none():
+            raise HTTPException(
+                status_code=409,
+                detail="The airline this request targets no longer exists; it can only be rejected.",
+            )
+
+    # iata_code is unique on the master. Approve auto-rejects a colliding "new"
+    # request — destroying the submission — and for an "update" does not check at
+    # all and would raise a raw IntegrityError. Catch it while it is still fixable.
+    new_iata = changes.get("iata_code")
+    if new_iata and new_iata != approval.iata_code:
+        clash = await db.execute(
+            select(Airline.id).where(
+                Airline.iata_code == new_iata,
+                Airline.id != (approval.target_airline_id or -1),
+            )
+        )
+        if clash.scalar_one_or_none():
+            raise HTTPException(
+                status_code=409,
+                detail=f"Airline '{new_iata}' already exists in the master.",
+            )
+
+    try:
+        apply_admin_edit(
+            approval,
+            fields=AIRLINE_FIELDS,
+            changes=changes,
+            editor_id=current_user.id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    await db.commit()
+
+    fresh = await db.execute(
+        select(AirlineApproval)
+        .options(
+            selectinload(AirlineApproval.submitted_by),
+            selectinload(AirlineApproval.edited_by),
+        )
+        .where(AirlineApproval.id == approval_id)
+    )
+    return fresh.scalar_one()
 
 
 @router.get("/{airline_id}", response_model=AirlineRead)

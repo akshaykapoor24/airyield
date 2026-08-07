@@ -20,6 +20,7 @@ import api from "@/lib/api";
 import { canManageGlobalMasters, canSubmitMasterRequest, canViewMasterRequests } from "@/lib/rbac";
 import { useAppSelector } from "@/store/hooks";
 import Pagination from "@/components/ui/Pagination";
+import MasterDiffModal, { DiffFieldSpec } from "@/components/masters/MasterDiffModal";
 
 type AirlineClassMaster = {
   id: number;
@@ -46,7 +47,22 @@ type ClassApproval = {
   rejection_reason: string | null;
   request_type: "new" | "update";
   target_id: number | null;
+  // ── platform-admin edit state ────────────────────────────────────────────
+  /** True only when an admin changed something the submitter should see. */
+  edited?: boolean;
+  /** The business values as the submitter originally sent them. */
+  original_payload?: Record<string, unknown> | null;
+  edited_by?: { id: number; full_name: string; email: string } | null;
+  edited_at?: string | null;
 };
+
+const CLASS_DIFF_FIELDS: DiffFieldSpec[] = [
+  { key: "airline_name", label: "Airline Name" },
+  { key: "class_type",   label: "Class Type" },
+  { key: "class_code",   label: "Class Code" },
+  { key: "airline_type", label: "Airline Type" },
+  { key: "class_note",   label: "Class Note" },
+];
 
 const emptyForm = {
   airline_name: "",
@@ -436,6 +452,134 @@ function AddClassesModal({
   );
 }
 
+// ── platform admin edits a pending request ────────────────────────────────
+
+function EditRequestModal({
+  approval, onClose, onSaved,
+}: { approval: ClassApproval; onClose: () => void; onSaved: () => void }) {
+  const [form, setForm] = useState({
+    airline_name: approval.airline_name,
+    class_type: approval.class_type,
+    class_code: approval.class_code,
+    airline_type: approval.airline_type ?? "",
+    class_note: approval.class_note ?? "",
+  });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const set = (k: keyof typeof form, v: string) => setForm(p => ({ ...p, [k]: v }));
+
+  /** Returns true when the edit saved, so the caller can chain approve. */
+  const save = async (): Promise<boolean> => {
+    if (!form.airline_name.trim() || !form.class_type.trim() || !form.class_code.trim()) {
+      setError("AIRLINE_NAME, CLASS_TYPE and CLASS_CODE are required."); return false;
+    }
+    setError("");
+    try {
+      await api.patch(`/classes/approvals/${approval.id}`, {
+        airline_name: form.airline_name,
+        class_type: form.class_type,
+        class_code: form.class_code,
+        airline_type: form.airline_type.trim() || null,
+        class_note: form.class_note.trim() || null,
+      });
+      return true;
+    } catch (e: unknown) {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setError(msg ?? "Failed to save changes."); return false;
+    }
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    if (await save()) { onSaved(); onClose(); }
+    setSaving(false);
+  };
+
+  const handleSaveAndApprove = async () => {
+    setSaving(true);
+    if (await save()) {
+      try {
+        await api.patch(`/classes/approvals/${approval.id}/approve`);
+        onSaved(); onClose();
+      } catch (e: unknown) {
+        // The edit is already persisted and the request is still pending — say
+        // so rather than closing and losing the admin's work.
+        const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+        setError(`Changes saved, but approval failed: ${msg ?? "please try again."}`);
+        onSaved();
+      }
+    }
+    setSaving(false);
+  };
+
+  const field = "w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 bg-gray-50";
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md">
+        <div className="flex items-start justify-between px-6 py-4 border-b border-gray-100">
+          <div>
+            <h2 className="text-sm font-bold text-gray-900">Edit Request — {approval.class_code}</h2>
+            <p className="text-[10px] text-gray-400 mt-0.5">
+              Submitted by {approval.submitted_by.full_name} · they will see what you change
+            </p>
+          </div>
+          <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-lg">
+            <X className="w-4 h-4 text-gray-500" />
+          </button>
+        </div>
+        <div className="px-6 py-4 space-y-3">
+          <div>
+            <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Airline Name *</label>
+            <input value={form.airline_name} onChange={e => set("airline_name", e.target.value.toUpperCase())}
+              className={`${field} uppercase`} />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Class Type *</label>
+              <input value={form.class_type} onChange={e => set("class_type", e.target.value.toUpperCase())}
+                className={`${field} uppercase`} />
+            </div>
+            <div>
+              <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Class Code *</label>
+              <input value={form.class_code} onChange={e => set("class_code", e.target.value.toUpperCase())}
+                maxLength={10} className={`${field} font-mono uppercase`} />
+            </div>
+          </div>
+          <div>
+            <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Airline Type</label>
+            <select value={form.airline_type} onChange={e => set("airline_type", e.target.value)} className={field}>
+              <option value="">Select...</option>
+              <option value="GDS">GDS</option>
+              <option value="LCC">LCC</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Class Note</label>
+            <textarea value={form.class_note} onChange={e => set("class_note", e.target.value)} rows={2}
+              className={`${field} resize-none`} />
+          </div>
+          {error && <p className="text-[11px] text-red-500">{error}</p>}
+        </div>
+        <div className="px-6 pb-5 flex gap-2">
+          <button onClick={onClose} disabled={saving}
+            className="flex-1 border border-gray-200 rounded-lg py-2 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50">
+            Cancel
+          </button>
+          <button onClick={handleSave} disabled={saving}
+            className="flex-1 border border-emerald-500 text-emerald-600 rounded-lg py-2 text-xs font-semibold hover:bg-emerald-50 disabled:opacity-50">
+            {saving ? "..." : "Save Changes"}
+          </button>
+          <button onClick={handleSaveAndApprove} disabled={saving}
+            className="flex-1 bg-green-500 hover:bg-green-600 text-white rounded-lg py-2 text-xs font-semibold disabled:opacity-50">
+            {saving ? "..." : "Save & Approve"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function EditClassesModal({
   item,
   onClose,
@@ -592,71 +736,6 @@ function EditClassesModal({
   );
 }
 
-// ── diff modal ─────────────────────────────────────────────────────────────
-
-function ClassDiffModal({
-  approval, current, loading, onClose,
-}: { approval: ClassApproval; current: AirlineClassMaster | null; loading: boolean; onClose: () => void }) {
-  const fields: { label: string; ak: keyof ClassApproval; ck: keyof AirlineClassMaster }[] = [
-    { label: "Airline Name", ak: "airline_name", ck: "airline_name" },
-    { label: "Class Type",   ak: "class_type",   ck: "class_type" },
-    { label: "Class Code",   ak: "class_code",   ck: "class_code" },
-    { label: "Airline Type", ak: "airline_type", ck: "airline_type" },
-    { label: "Class Note",   ak: "class_note",   ck: "class_note" },
-  ];
-  return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-xl">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <div>
-            <h2 className="text-sm font-bold text-gray-900">Change Diff — {approval.class_code}</h2>
-            <p className="text-[10px] text-gray-400 mt-0.5">Updating Class ID #{approval.target_id}</p>
-          </div>
-          <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-lg"><X className="w-4 h-4 text-gray-500" /></button>
-        </div>
-        <div className="px-6 py-4">
-          {loading ? (
-            <div className="py-8 text-center text-xs text-gray-400">
-              <RefreshCw className="w-4 h-4 animate-spin mx-auto mb-2 text-gray-300" /> Loading current record...
-            </div>
-          ) : !current ? (
-            <p className="text-xs text-red-500 py-4 text-center">Could not load the current class record.</p>
-          ) : (
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="border-b border-gray-100">
-                  <th className="text-left py-2 pr-3 text-[10px] font-semibold text-gray-400 uppercase tracking-wide w-32">Field</th>
-                  <th className="text-left py-2 pr-3 text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Current</th>
-                  <th className="text-left py-2 text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Proposed</th>
-                </tr>
-              </thead>
-              <tbody>
-                {fields.map(({ label, ak, ck }) => {
-                  const cur = String(current[ck] ?? "");
-                  const proposed = String(approval[ak] ?? "");
-                  const changed = cur !== proposed;
-                  return (
-                    <tr key={label} className={`border-b border-gray-50 ${changed ? "bg-amber-50/60" : ""}`}>
-                      <td className="py-2 pr-3 font-semibold text-gray-600 text-[11px]">{label}</td>
-                      <td className="py-2 pr-3 text-gray-500">{cur || "—"}</td>
-                      <td className={`py-2 font-medium ${changed ? "text-amber-700" : "text-gray-700"}`}>
-                        {proposed || "—"}
-                        {changed && <span className="ml-1.5 text-[9px] bg-amber-200 text-amber-800 px-1 py-0.5 rounded font-bold">CHANGED</span>}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          )}
-        </div>
-        <div className="px-6 pb-4">
-          <button onClick={onClose} className="w-full border border-gray-200 rounded-lg py-2 text-sm text-gray-600 hover:bg-gray-50">Close</button>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 export default function ClassesMasterPage() {
   const user = useAppSelector(s => s.auth.user);
@@ -683,6 +762,7 @@ export default function ClassesMasterPage() {
   const [diffTarget, setDiffTarget] = useState<ClassApproval | null>(null);
   const [diffRecord, setDiffRecord] = useState<AirlineClassMaster | null>(null);
   const [loadingDiff, setLoadingDiff] = useState(false);
+  const [editRequestTarget, setEditRequestTarget] = useState<ClassApproval | null>(null);
   const [page, setPage] = useState(1);
   const [totalCount, setTotalCount] = useState(0);
   const [debouncedSearch, setDebouncedSearch] = useState("");
@@ -740,10 +820,12 @@ export default function ClassesMasterPage() {
   }, [items, approvals, totalCount]);
 
   const handleViewDiff = async (approval: ClassApproval) => {
-    if (!approval.target_id) return;
     setDiffTarget(approval);
-    setLoadingDiff(true);
     setDiffRecord(null);
+    // A "new" request has no master record to compare against — the modal just
+    // drops that column and shows the admin's edit on its own.
+    if (!approval.target_id) return;
+    setLoadingDiff(true);
     try {
       const { data } = await api.get<AirlineClassMaster>(`/classes/${approval.target_id}`);
       setDiffRecord(data);
@@ -1014,7 +1096,17 @@ export default function ClassesMasterPage() {
                     <td className="px-3 py-2 text-[11px] font-mono font-bold text-teal-700 bg-teal-50 rounded">{a.class_code}</td>
                     <td className="px-3 py-2 text-[11px] text-gray-700">{a.airline_type ?? "—"}</td>
                     <td className="px-3 py-2 text-[11px] text-gray-600 max-w-xs truncate">{a.class_note ?? "—"}</td>
-                    <td className="px-3 py-2"><RequestTypeBadge type={a.request_type} /></td>
+                    <td className="px-3 py-2">
+                      <div className="flex items-center gap-1 flex-wrap">
+                        <RequestTypeBadge type={a.request_type} />
+                        {/* So a second admin can tell this row has been touched. */}
+                        {a.edited && (
+                          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100 text-amber-800 border border-amber-300">
+                            Edited
+                          </span>
+                        )}
+                      </div>
+                    </td>
                     {isPlatformAdmin ? (
                       <>
                         <td className="px-3 py-2">
@@ -1024,12 +1116,18 @@ export default function ClassesMasterPage() {
                         <td className="px-3 py-2 text-[11px] text-gray-500">{new Date(a.submitted_at).toLocaleDateString()}</td>
                         <td className="px-3 py-2">
                           <div className="flex items-center gap-1.5 flex-wrap">
-                            {a.request_type === "update" && (
+                            {/* Also meaningful on a "new" request once edited —
+                                the modal then shows submitted vs. edited. */}
+                            {(a.request_type === "update" || a.edited) && (
                               <button onClick={() => handleViewDiff(a)}
                                 className="px-2.5 py-1 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-[10px] font-semibold">
                                 View Changes
                               </button>
                             )}
+                            <button onClick={() => setEditRequestTarget(a)}
+                              className="flex items-center gap-1 px-2.5 py-1 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-[10px] font-semibold">
+                              <Edit2 className="w-3 h-3" /> Edit
+                            </button>
                             <button onClick={() => handleApprove(a.id)} disabled={approvingId === a.id}
                               className="flex items-center gap-1 px-2.5 py-1 bg-green-500 hover:bg-green-600 text-white rounded-lg text-[10px] font-semibold disabled:opacity-50">
                               <Check className="w-3 h-3" />
@@ -1044,7 +1142,18 @@ export default function ClassesMasterPage() {
                       </>
                     ) : (
                       <>
-                        <td className="px-3 py-2"><StatusBadge status={a.status} /></td>
+                        <td className="px-3 py-2">
+                          <StatusBadge status={a.status} />
+                          {/* Lives inside the STATUS cell so no column is added.
+                              Shows for pending, approved and rejected alike. */}
+                          {a.edited && (
+                            <button onClick={() => handleViewDiff(a)}
+                              title="See what the platform admin changed"
+                              className="mt-1 flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100">
+                              <Edit2 className="w-2.5 h-2.5" /> Edited by admin
+                            </button>
+                          )}
+                        </td>
                         <td className="px-3 py-2 text-[11px] text-gray-500">{new Date(a.submitted_at).toLocaleDateString()}</td>
                         <td className="px-3 py-2 text-[11px] text-gray-500 max-w-xs truncate">{a.rejection_reason ?? "—"}</td>
                       </>
@@ -1057,10 +1166,29 @@ export default function ClassesMasterPage() {
         </div>
       )}
 
+      {editRequestTarget && (
+        <EditRequestModal
+          approval={editRequestTarget}
+          onClose={() => setEditRequestTarget(null)}
+          onSaved={() => { fetchApprovals(); fetchItems(); }}
+        />
+      )}
       {diffTarget && (
-        <ClassDiffModal
-          approval={diffTarget}
-          current={diffRecord}
+        <MasterDiffModal
+          title={`Change Diff — ${diffTarget.class_code}`}
+          subtitle={diffTarget.request_type === "update"
+            ? `Updating Class ID #${diffTarget.target_id}`
+            : "New class request"}
+          fields={CLASS_DIFF_FIELDS}
+          // "Current" only exists for an update request.
+          master={diffTarget.request_type === "update" ? diffRecord : null}
+          // Once edited, the middle column is what the submitter actually sent;
+          // otherwise the request row IS what they sent.
+          submitted={diffTarget.edited ? (diffTarget.original_payload ?? {}) : diffTarget}
+          edited={diffTarget.edited ? diffTarget : null}
+          submittedLabel={isPlatformAdmin ? "User proposed" : "You submitted"}
+          editedBy={diffTarget.edited_by}
+          editedAt={diffTarget.edited_at}
           loading={loadingDiff}
           onClose={() => { setDiffTarget(null); setDiffRecord(null); }}
         />

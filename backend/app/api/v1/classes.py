@@ -22,7 +22,9 @@ from app.schemas.airline_class_master import (
     BulkUploadResult,
     ClassApprovalRead,
     ClassApprovalAction,
+    ClassApprovalEdit,
 )
+from app.services.master_approval_edit import apply_admin_edit, CLASS_FIELDS
 
 router = APIRouter()
 
@@ -446,14 +448,24 @@ async def list_class_approvals(
     if _is_platform_admin(current_user):
         result = await db.execute(
             select(ClassApproval)
-            .options(selectinload(ClassApproval.submitted_by))
+            .options(
+                selectinload(ClassApproval.submitted_by),
+                # Without this, edited_by lazy-loads during serialisation and
+                # raises MissingGreenlet — but only once a row has been edited.
+                selectinload(ClassApproval.edited_by),
+            )
             .where(pending_filter)
             .order_by(ClassApproval.submitted_at.desc())
         )
     else:
         result = await db.execute(
             select(ClassApproval)
-            .options(selectinload(ClassApproval.submitted_by))
+            .options(
+                selectinload(ClassApproval.submitted_by),
+                # Without this, edited_by lazy-loads during serialisation and
+                # raises MissingGreenlet — but only once a row has been edited.
+                selectinload(ClassApproval.edited_by),
+            )
             .where(ClassApproval.submitted_by_id == current_user.id)
             .order_by(ClassApproval.submitted_at.desc())
         )
@@ -556,6 +568,87 @@ async def reject_class(
     approval.reviewed_at = datetime.utcnow()
     await db.commit()
     return {"status": "rejected"}
+
+
+# ── platform admin edits a pending request ─────────────────────────────────
+# Declared before "/{class_id}": FastAPI matches in declaration order, so below
+# it this path would bind there and 422 on the literal "approvals".
+
+@router.patch("/approvals/{approval_id}", response_model=ClassApprovalRead)
+async def edit_class_approval(
+    approval_id: int,
+    payload: ClassApprovalEdit,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role(PLATFORM)),
+):
+    """Correct a pending request before approving it.
+
+    Approve already copies this row onto the master, so editing the row in place
+    is all that is needed for the corrected values to land — this endpoint only
+    has to record what the submitter originally sent so they can see the change.
+    """
+    result = await db.execute(select(ClassApproval).where(ClassApproval.id == approval_id))
+    approval = result.scalar_one_or_none()
+    if not approval:
+        raise HTTPException(status_code=404, detail="Approval request not found.")
+    if (approval.status or "").lower() != "pending":
+        raise HTTPException(status_code=400, detail=f"Request is already '{approval.status}'.")
+
+    changes = payload.model_dump(exclude_unset=True)
+
+    if (approval.request_type or "new").lower() == "update":
+        # Editing a request whose target was deleted can only produce a row that
+        # approve will auto-reject, so refuse rather than waste the admin's work.
+        target = await db.execute(
+            select(AirlineClassMaster.id).where(AirlineClassMaster.id == approval.target_class_id)
+        )
+        if not target.scalar_one_or_none():
+            raise HTTPException(
+                status_code=409,
+                detail="The class this request targets no longer exists; it can only be rejected.",
+            )
+
+    # The master is unique on (airline_name, class_type, class_code). Approve
+    # auto-rejects a colliding "new" request, so check the merged triple here
+    # while the admin can still fix it.
+    merged = {k: changes.get(k, getattr(approval, k)) for k in ("airline_name", "class_type", "class_code")}
+    if any(changes.get(k) is not None and changes[k] != getattr(approval, k) for k in merged):
+        clash = await db.execute(
+            select(AirlineClassMaster.id).where(
+                AirlineClassMaster.airline_name == merged["airline_name"],
+                AirlineClassMaster.class_type == merged["class_type"],
+                AirlineClassMaster.class_code == merged["class_code"],
+                AirlineClassMaster.id != (approval.target_class_id or -1),
+            )
+        )
+        if clash.scalar_one_or_none():
+            raise HTTPException(
+                status_code=409,
+                detail=(f"Class '{merged['class_code']}' already exists for "
+                        f"{merged['airline_name']} / {merged['class_type']}."),
+            )
+
+    try:
+        apply_admin_edit(
+            approval,
+            fields=CLASS_FIELDS,
+            changes=changes,
+            editor_id=current_user.id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    await db.commit()
+
+    fresh = await db.execute(
+        select(ClassApproval)
+        .options(
+            selectinload(ClassApproval.submitted_by),
+            selectinload(ClassApproval.edited_by),
+        )
+        .where(ClassApproval.id == approval_id)
+    )
+    return fresh.scalar_one()
 
 
 @router.get("/{class_id}", response_model=AirlineClassMasterRead)

@@ -1,3 +1,7 @@
+import asyncio
+import time
+from datetime import datetime
+
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -8,11 +12,38 @@ from app.models.user import User, UserRole
 from app.models.tenant import Tenant, TenantType
 from app.schemas.user import UserCreate, SignupPayload, LoginPayload, TokenWithUser, SignupResult
 from app.core.email_domains import extract_domain, is_public_domain
-from app.services.email_service import send_verification_email
+from app.core.password_policy import password_problem
+from app.core import rate_limit
+from app.services.email_service import (
+    send_verification_email, send_password_reset_email, send_in_background,
+)
 from app.utils.security import (
     hash_password, verify_password, create_access_token,
     create_email_token, verify_email_token,
+    create_password_reset_token, read_password_reset_token, password_fingerprint_matches,
+    ACCESS_PURPOSE,
 )
+
+# One string for every way a reset link can be bad — expired, already used,
+# tampered with, or for an account that is gone or disabled. Telling them apart
+# helps an attacker and helps no legitimate user.
+_INVALID_RESET = "This reset link is invalid or has expired. Please request a new one."
+
+# Floor for the forgot-password response, so "account exists" and "account does
+# not exist" cannot be told apart by timing.
+_FORGOT_RESPONSE_FLOOR_S = 0.25
+
+
+def _now_floor() -> datetime:
+    """UTC now, truncated to whole seconds to match how jose encodes `iat`."""
+    return datetime.utcnow().replace(microsecond=0)
+
+
+def _check_policy(password: str, user: User) -> None:
+    """Raise 400 with the policy sentence, rather than Pydantic's 422 wording."""
+    problem = password_problem(password, email=user.email, full_name=user.full_name)
+    if problem:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=problem)
 
 
 async def _get_or_create_tenant(
@@ -111,7 +142,6 @@ class AuthService:
             is_verified=False,
             message="Account created. We've emailed you a verification link — "
                     "verify your email, then sign in.",
-            verification_url=link if settings.DEBUG else None,   # dev convenience only
         )
 
     # ── Email verification ─────────────────────────────────────────────────
@@ -140,7 +170,10 @@ class AuthService:
         user = result.scalar_one_or_none()
         if user and not user.is_verified:
             link = f"{settings.FRONTEND_URL}/verify-email?token={create_email_token(user.id)}"
-            await send_verification_email(user.email, link)
+            # Off the request path so the response time does not reveal whether
+            # the account exists — awaiting SMTP here was the same enumeration
+            # oracle that forgot-password is designed to avoid.
+            send_in_background(send_verification_email(user.email, link))
 
     # ── Corporate: discover/create a company tenant by work-email domain ───
     @staticmethod
@@ -196,6 +229,18 @@ class AuthService:
     # ── JSON login ─────────────────────────────────────────────────────────
     @staticmethod
     async def login_json(db: AsyncSession, payload: LoginPayload) -> TokenWithUser:
+        # Counted per email and cleared on success, so a user is never locked out
+        # by their own logins. See core/rate_limit.py for why this is the loose
+        # limit and the per-IP one does the real work.
+        email_bucket = rate_limit.email_key(payload.email)
+        allowed, retry_after = await rate_limit.hit("login:email", email_bucket, 10, 900)
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many sign-in attempts. Please try again shortly.",
+                headers={"Retry-After": str(retry_after)},
+            )
+
         result = await db.execute(
             select(User).options(selectinload(User.tenant)).where(User.email == payload.email)
         )
@@ -218,6 +263,9 @@ class AuthService:
                        "for the verification link.",
             )
 
+        # Successful sign-in clears the failure budget for this address.
+        await rate_limit.reset("login:email", email_bucket, 900)
+
         token = create_access_token({"sub": str(user.id), "role": user.role})
         return TokenWithUser(access_token=token, user=user)
 
@@ -235,9 +283,129 @@ class AuthService:
 
     @staticmethod
     async def refresh(db: AsyncSession, refresh_token: str) -> dict:
+        """Exchange a live access token for a fresh one.
+
+        Previously this laundered ANY token signed with SECRET_KEY into a full
+        access token — including an email-verification link — and read `role`
+        straight from the presented token. Now the token must be an access token
+        and every claim is re-read from the database.
+        """
         from app.utils.security import verify_token
         payload = verify_token(refresh_token)
-        if not payload:
+        if not payload or payload.get("purpose") not in (None, ACCESS_PURPOSE):
             raise HTTPException(status_code=401, detail="Invalid refresh token")
-        token = create_access_token({"sub": payload["sub"], "role": payload["role"]})
+        try:
+            user_id = int(payload["sub"])
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+        user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+        if not user or not user.is_active:
+            raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+        # A refresh must not outlive the password change that revoked it.
+        if user.password_changed_at is not None:
+            iat = payload.get("iat")
+            if iat is None or datetime.utcfromtimestamp(int(iat)) < user.password_changed_at:
+                raise HTTPException(status_code=401, detail="Session expired. Please sign in again.")
+
+        token = create_access_token({"sub": str(user.id), "role": user.role})
         return {"access_token": token, "token_type": "bearer"}
+
+    # ── Password management ────────────────────────────────────────────────
+
+    @staticmethod
+    async def change_password(
+        db: AsyncSession, user: User, current_password: str, new_password: str
+    ) -> TokenWithUser:
+        """Change the password of the signed-in user and re-issue their session."""
+        # Policy first, so an over-long password never reaches bcrypt.
+        _check_policy(new_password, user)
+
+        if not verify_password(current_password, user.hashed_password):
+            # 400, NOT 401 — deliberately. The frontend axios interceptor calls
+            # clearAuth() and hard-redirects on any 401, so returning 401 here
+            # would sign the user out for a typo instead of showing an inline
+            # error. It is also semantically right: the Bearer credential in the
+            # header is valid; the credential in the body is not.
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Current password is incorrect.",
+            )
+
+        if verify_password(new_password, user.hashed_password):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Your new password must be different from your current password.",
+            )
+
+        user.hashed_password = hash_password(new_password)
+        user.password_changed_at = _now_floor()
+        await db.commit()
+
+        # A fresh token so the acting tab keeps working. Every OTHER session is
+        # now dead: their tokens predate password_changed_at.
+        token = create_access_token({"sub": str(user.id), "role": user.role})
+        return TokenWithUser(access_token=token, user=user)
+
+    @staticmethod
+    async def forgot_password(db: AsyncSession, email: str) -> None:
+        """Mail a reset link if the address belongs to a usable account.
+
+        Returns None either way — the caller always responds with the same
+        message. Everything in here is shaped so that an observer cannot tell
+        which branch ran.
+        """
+        started = time.perf_counter()
+
+        result = await db.execute(select(User).where(User.email == email))
+        user = result.scalar_one_or_none()
+
+        # Unverified accounts get nothing: they have never proven they own the
+        # mailbox, and resend-verification is their route back in.
+        if user and user.is_active and user.is_verified:
+            link = (
+                f"{settings.FRONTEND_URL}/reset-password"
+                f"?token={create_password_reset_token(user.id, user.hashed_password)}"
+            )
+            # Off the request path: awaiting an SMTP round trip here would make
+            # "account exists" take seconds and "does not exist" milliseconds,
+            # which is the enumeration oracle this endpoint exists to avoid.
+            send_in_background(send_password_reset_email(user.email, link))
+
+        # Both branches now do one indexed lookup; pad anyway so the difference
+        # is not measurable.
+        elapsed = time.perf_counter() - started
+        await asyncio.sleep(max(0.0, _FORGOT_RESPONSE_FLOOR_S - elapsed))
+
+    @staticmethod
+    async def reset_password(db: AsyncSession, token: str, new_password: str) -> None:
+        parsed = read_password_reset_token(token)
+        if not parsed:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_INVALID_RESET)
+        user_id, fingerprint = parsed
+
+        result = await db.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+        if not user or not user.is_active:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_INVALID_RESET)
+
+        # The fingerprint is derived from the password hash the token was minted
+        # against. Any later password write rotates the hash, so a used link —
+        # or one superseded by a change-password — no longer matches.
+        if not password_fingerprint_matches(user.id, user.hashed_password, fingerprint):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_INVALID_RESET)
+
+        _check_policy(new_password, user)
+
+        if verify_password(new_password, user.hashed_password):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Your new password must be different from your current password.",
+            )
+
+        user.hashed_password = hash_password(new_password)
+        user.password_changed_at = _now_floor()
+        # A reset is the "I may have been compromised" path: every session dies,
+        # including this browser's. No token is issued — the user signs in again.
+        await db.commit()

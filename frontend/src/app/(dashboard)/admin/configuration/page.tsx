@@ -10,7 +10,7 @@ export default function ConfigurationPage() {
   const [tab, setTab] = useState<Tab>("General");
   const [saved, setSaved] = useState(false);
   const [config, setConfig] = useState({
-    orgName: "AirYield Operations Pvt. Ltd.",
+    orgName: "Fareqube Operations Pvt. Ltd.",
     baseCurrency: "USD",
     timezone: "Asia/Kolkata (IST)",
     fiscalYearStart: "April",
@@ -39,7 +39,7 @@ export default function ConfigurationPage() {
       <div className="flex items-start justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">System Configuration</h1>
-          <p className="text-sm text-gray-500 mt-0.5">Global settings for the AirYield platform</p>
+          <p className="text-sm text-gray-500 mt-0.5">Global settings for the Fareqube platform</p>
         </div>
         <button onClick={save} className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-700">
           {saved ? <><Check className="w-4 h-4" /> Saved!</> : "Save Changes"}

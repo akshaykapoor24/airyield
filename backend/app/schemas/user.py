@@ -1,9 +1,17 @@
 import re
-from pydantic import BaseModel, EmailStr, model_validator
-from typing import Optional, Literal
+from pydantic import BaseModel, EmailStr, Field, model_validator
+from pydantic.functional_validators import AfterValidator
+from typing import Annotated, Optional, Literal
 from datetime import datetime
 from app.models.user import UserRole
 from app.core.email_domains import is_public_domain
+from app.core.password_policy import validate_password
+
+# Enforces the shared policy at parse time (422). The two password-management
+# endpoints deliberately do NOT use this — they call validate_password inside
+# the service so the failure is a 400 with a clean sentence, rather than a 422
+# that Pydantic prefixes with "Value error, ".
+PasswordStr = Annotated[str, AfterValidator(validate_password)]
 
 # Indian tax identifiers
 PAN_RE   = re.compile(r"^[A-Z]{5}[0-9]{4}[A-Z]$")                            # 10 chars
@@ -13,7 +21,7 @@ GSTIN_RE = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$")  # 15
 class UserCreate(BaseModel):
     email: EmailStr
     full_name: str
-    password: str
+    password: PasswordStr
     role: UserRole = UserRole.VIEWER
     department: Optional[str] = None
     # Entities (from the admin's own My Profile → Entities list) this member works
@@ -23,8 +31,12 @@ class UserCreate(BaseModel):
 
 class UserUpdate(BaseModel):
     full_name: Optional[str] = None
-    password: Optional[str] = None
     department: Optional[str] = None
+    # `password` deliberately absent. It used to be here, but User has no
+    # `password` column, so crud.user.update just set a throwaway instance
+    # attribute and returned 200 — telling the caller their password had changed
+    # when nothing was written or hashed. Password changes go through
+    # POST /auth/change-password.
 
 
 class UserRoleUpdate(BaseModel):
@@ -61,7 +73,7 @@ class SignupPayload(BaseModel):
     account_type: Literal["corporate", "individual"] = "corporate"
     email: EmailStr
     full_name: str
-    password: str
+    password: PasswordStr
     company_name: Optional[str] = None       # corporate: optional company name
     pan_number: Optional[str] = None         # required for individual, optional for corporate
     gst_registered: bool = False
@@ -105,7 +117,11 @@ class SignupPayload(BaseModel):
 
 class LoginPayload(BaseModel):
     email: EmailStr
-    password: str
+    # The policy is deliberately NOT applied here. Applying it would lock out
+    # every user whose password predates the rule, and would turn login into an
+    # oracle telling an attacker which candidate passwords are worth trying. The
+    # cap only keeps a megabyte body away from bcrypt.
+    password: str = Field(max_length=1024)
 
 
 class TokenWithUser(BaseModel):
@@ -125,7 +141,6 @@ class SignupResult(BaseModel):
     email: str
     is_verified: bool = False
     message: str
-    verification_url: Optional[str] = None   # dev-only convenience (DEBUG)
 
 
 class VerifyEmailPayload(BaseModel):
@@ -138,6 +153,30 @@ class ResendVerificationPayload(BaseModel):
 
 class SimpleMessage(BaseModel):
     message: str
+
+
+# ── Password management ─────────────────────────────────────────────────────
+# `new_password` is a plain str on both payloads, not PasswordStr: the service
+# validates it so a policy failure is a 400 carrying the policy sentence, rather
+# than a 422 that Pydantic prefixes with "Value error, ".
+
+class ChangePasswordPayload(BaseModel):
+    current_password: str = Field(max_length=1024)
+    new_password: str = Field(max_length=1024)
+
+
+class ForgotPasswordPayload(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordPayload(BaseModel):
+    token: str
+    new_password: str = Field(max_length=1024)
+
+
+class RefreshPayload(BaseModel):
+    """Body, not a query param — a token in a URL lands in access logs and Referer."""
+    refresh_token: str
 
 
 # ── Profile (My Profile / onboarding step 1) ────────────────────────────────

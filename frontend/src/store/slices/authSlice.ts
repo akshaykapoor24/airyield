@@ -1,4 +1,4 @@
-import { createSlice, createAsyncThunk } from "@reduxjs/toolkit";
+import { createSlice, createAsyncThunk, type PayloadAction } from "@reduxjs/toolkit";
 import { setToken, setUser, getToken, getUser, clearAuth, type AuthUser } from "@/lib/auth";
 import api from "@/lib/api";
 
@@ -47,7 +47,15 @@ export const fetchMe = createAsyncThunk("auth/fetchMe", async () => {
 const authSlice = createSlice({
   name: "auth",
   initialState,
-  reducers: {},
+  reducers: {
+    /** Adopt a token re-issued mid-session (change-password hands back a fresh
+     *  one). Without this the store keeps the dead token even though
+     *  localStorage has the new one. */
+    sessionRefreshed(state, action: PayloadAction<{ token: string; user: AuthUser }>) {
+      state.token = action.payload.token;
+      state.user = action.payload.user;
+    },
+  },
   extraReducers: (builder) => {
     builder
       .addCase(login.pending,   (state) => { state.loading = true;  state.error = null; })
@@ -70,4 +78,5 @@ const authSlice = createSlice({
   },
 });
 
+export const { sessionRefreshed } = authSlice.actions;
 export default authSlice.reducer;
