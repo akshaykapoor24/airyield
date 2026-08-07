@@ -28,6 +28,14 @@ class User(Base):
                                        )
     department:      Mapped[str|None] = mapped_column(String(100), nullable=True)
     is_active:       Mapped[bool]     = mapped_column(Boolean, default=True)
+    # Instant this user's password last changed. get_current_user rejects any
+    # access token whose `iat` predates it, so a password change signs out every
+    # other session. NULL means "never observed" and the check is skipped — which
+    # is why deploying this signed nobody out.
+    # Always write it truncated to whole seconds (microsecond=0): jose floors the
+    # `iat` claim, so sub-second precision here would make a token minted just
+    # AFTER the change compare as older and log out the session that made it.
+    password_changed_at: Mapped[datetime|None] = mapped_column(DateTime, nullable=True)
     # email verification: signup creates an unverified account; login is blocked
     # until the emailed verification link flips this to True.
     is_verified:     Mapped[bool]     = mapped_column(Boolean, default=False, nullable=False)

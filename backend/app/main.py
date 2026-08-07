@@ -5,6 +5,15 @@ from fastapi.staticfiles import StaticFiles
 from app.config import settings
 from app.api.v1 import router as api_v1_router
 
+# Every session token, email-verification link and password-reset link is signed
+# with this key. Shipping the placeholder would let anyone mint a token for any
+# account, so refuse to start outside local development.
+if not settings.DEBUG and settings.SECRET_KEY == "change-me-in-production":
+    raise RuntimeError(
+        "SECRET_KEY is still the default. Set a real one in .env before running "
+        "outside DEBUG — it signs every auth token."
+    )
+
 app = FastAPI(
     title=settings.APP_NAME,
     description="B2B Airline Deal Management & Income Calculation Platform",

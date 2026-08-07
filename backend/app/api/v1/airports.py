@@ -13,12 +13,15 @@ from sqlalchemy.orm import selectinload
 from app.database import get_db
 from app.dependencies import get_current_user, require_role
 from app.models.user import User, UserRole
-from app.models.airport import Airport
+from app.models.airport import (
+    Airport, CATEGORIZATION_GROUPS, split_categorization, join_categorization,
+)
 from app.models.airport_approval import AirportApproval
 from app.schemas.airport import (
     AirportCreate, AirportUpdate, AirportRead,
-    AirportApprovalRead, ApprovalAction, BulkUploadResult,
+    AirportApprovalRead, AirportApprovalEdit, ApprovalAction, BulkUploadResult,
 )
+from app.services.master_approval_edit import apply_admin_edit, AIRPORT_FIELDS
 
 router = APIRouter()
 
@@ -41,6 +44,21 @@ def _is_platform_admin(user: User) -> bool:
         return role == PLATFORM
     role_str = str(role).lower()
     return role_str in {PLATFORM.value.lower(), PLATFORM.name.lower()}
+
+def _categorization_filter(value: str):
+    """Match one base group against the slash-joined stored value.
+
+    An airport in "MEAI/SAARC" must be found when filtering by either MEAI or
+    SAARC, so an equality test is not enough. Patterns anchor on "/" so that
+    filtering by "MEAI" cannot accidentally match an unrelated longer name.
+    """
+    return or_(
+        Airport.categorization == value,
+        Airport.categorization.ilike(f"{value}/%"),
+        Airport.categorization.ilike(f"%/{value}"),
+        Airport.categorization.ilike(f"%/{value}/%"),
+    )
+
 
 async def _next_apt_id(db: AsyncSession) -> str:
     result = await db.execute(
@@ -95,7 +113,7 @@ async def count_airports(
             Airport.city_airport_name.ilike(term),
         ))
     if categorization:
-        stmt = stmt.where(Airport.categorization == categorization)
+        stmt = stmt.where(_categorization_filter(categorization))
     if continent:
         stmt = stmt.where(Airport.continent == continent)
     result = await db.execute(stmt)
@@ -122,7 +140,7 @@ async def list_airports(
             Airport.city_airport_name.ilike(term),
         ))
     if categorization:
-        stmt = stmt.where(Airport.categorization == categorization)
+        stmt = stmt.where(_categorization_filter(categorization))
     if continent:
         stmt = stmt.where(Airport.continent == continent)
     stmt = stmt.order_by(Airport.apt_id).offset(skip).limit(limit)
@@ -300,7 +318,12 @@ async def bulk_upload_airports(
         iata = str(row.get("IATA_CODE", "") or "").strip().upper()
         country = str(row.get("COUNTRY", "") or "").strip()
         city_airport_name = str(row.get("CITY_AIRPORT_NAME", "") or "").strip()
-        categorization = str(row.get("CATEGORIZATION", "") or "").strip() or None
+        # A spreadsheet cell may already hold a combination ("MEAI/SAARC") or a
+        # comma-separated list — normalise both to the canonical joined form.
+        raw_cat = str(row.get("CATEGORIZATION", "") or "").strip()
+        categorization = join_categorization(
+            [g for part in raw_cat.split(",") for g in split_categorization(part)]
+        ) if raw_cat else None
         continent = str(row.get("CONTINENT", "") or "").strip() or None
 
         if not iata or not country or not city_airport_name:
@@ -395,7 +418,13 @@ async def list_approvals(
         # platform admin sees all pending
         result = await db.execute(
             select(AirportApproval)
-            .options(selectinload(AirportApproval.submitted_by))
+            .options(
+                selectinload(AirportApproval.submitted_by),
+                # edited_by is set by id, so without this it lazy-loads during
+                # serialisation and raises MissingGreenlet — but only once a row
+                # has actually been edited.
+                selectinload(AirportApproval.edited_by),
+            )
             .where(pending_filter)
             .order_by(AirportApproval.submitted_at.desc())
         )
@@ -403,7 +432,13 @@ async def list_approvals(
         # super_admin sees their own submissions (all statuses)
         result = await db.execute(
             select(AirportApproval)
-            .options(selectinload(AirportApproval.submitted_by))
+            .options(
+                selectinload(AirportApproval.submitted_by),
+                # edited_by is set by id, so without this it lazy-loads during
+                # serialisation and raises MissingGreenlet — but only once a row
+                # has actually been edited.
+                selectinload(AirportApproval.edited_by),
+            )
             .where(AirportApproval.submitted_by_id == current_user.id)
             .order_by(AirportApproval.submitted_at.desc())
         )
@@ -509,6 +544,89 @@ async def reject_airport(
     return {"status": "rejected"}
 
 
+# ── platform admin edits a pending request ─────────────────────────────────
+# Declared here, inside the approvals block: FastAPI matches in declaration
+# order, so below "/{airport_id}" this path would bind there and 422.
+
+@router.patch("/approvals/{approval_id}", response_model=AirportApprovalRead)
+async def edit_airport_approval(
+    approval_id: int,
+    payload: AirportApprovalEdit,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role(PLATFORM)),
+):
+    """Correct a pending request before approving it.
+
+    Approve already copies this row onto the master, so editing the row in place
+    is all that is needed for the corrected values to land — this endpoint only
+    has to record what the submitter originally sent so they can see the change.
+    """
+    result = await db.execute(
+        select(AirportApproval).where(AirportApproval.id == approval_id)
+    )
+    approval = result.scalar_one_or_none()
+    if not approval:
+        raise HTTPException(status_code=404, detail="Approval request not found.")
+    if (approval.status or "").lower() != "pending":
+        raise HTTPException(status_code=400, detail=f"Request is already '{approval.status}'.")
+
+    changes = payload.model_dump(exclude_unset=True)
+
+    if (approval.request_type or "new").lower() == "update":
+        # Editing a request whose target was deleted can only produce a row that
+        # approve will auto-reject, so refuse rather than waste the admin's work.
+        target = await db.execute(
+            select(Airport.id).where(Airport.id == approval.target_airport_id)
+        )
+        if not target.scalar_one_or_none():
+            raise HTTPException(
+                status_code=409,
+                detail="The airport this request targets no longer exists; it can only be rejected.",
+            )
+
+    # iata_code is unique on the master. Approve auto-rejects a "new" request
+    # that collides — destroying the submission — and for an "update" it does not
+    # check at all and would raise a raw IntegrityError. Catch it here, while the
+    # admin can still fix the value.
+    new_iata = changes.get("iata_code")
+    if new_iata and new_iata != approval.iata_code:
+        clash = await db.execute(
+            select(Airport.id).where(
+                Airport.iata_code == new_iata,
+                Airport.id != (approval.target_airport_id or -1),
+            )
+        )
+        if clash.scalar_one_or_none():
+            raise HTTPException(
+                status_code=409,
+                detail=f"Airport '{new_iata}' already exists in the master.",
+            )
+
+    try:
+        apply_admin_edit(
+            approval,
+            fields=AIRPORT_FIELDS,
+            changes=changes,
+            editor_id=current_user.id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    await db.commit()
+
+    # edited_by was set by id, so the relationship is not loaded; re-select with
+    # both eager loads rather than lazy-loading them during serialisation.
+    fresh = await db.execute(
+        select(AirportApproval)
+        .options(
+            selectinload(AirportApproval.submitted_by),
+            selectinload(AirportApproval.edited_by),
+        )
+        .where(AirportApproval.id == approval_id)
+    )
+    return fresh.scalar_one()
+
+
 # ── distinct option lists for deal form dropdowns ─────────────────────────
 
 @router.get("/options")
@@ -541,14 +659,6 @@ async def get_airport_options(
         )
         return {"airports": [r[0] for r in res.all()]}
 
-    # Canonical base country groups — each airport record may store a combination
-    # like "MEAI/SAARC" meaning it belongs to both MEAI and SAARC.
-    # We expand those and return only the base canonical values.
-    _CANONICAL_GROUPS = [
-        "APAC", "EUROPEAN NATIONS", "GCC/MIDDLE EAST", "LATIN AMERICA",
-        "MEAI", "NAM", "OTHER", "SAARC",
-    ]
-
     cont_q = await db.execute(
         select(sql_distinct(Airport.continent))
         .where(Airport.continent.isnot(None), Airport.is_active == True)
@@ -557,14 +667,13 @@ async def get_airport_options(
         select(sql_distinct(Airport.categorization))
         .where(Airport.categorization.isnot(None), Airport.is_active == True)
     )
-    raw_cats = {r[0] for r in cat_q.all()}
-    # Keep a canonical group if it appears as a standalone value or as part of a
-    # slash-separated combination (e.g. "MEAI" matches "MEAI/SAARC").
-    # "GCC/MIDDLE EAST" is a single canonical name and must be matched as a whole.
-    expanded = sorted(
-        c for c in _CANONICAL_GROUPS
-        if any(c == r or r.startswith(c + "/") or ("/" + c) in r for r in raw_cats)
-    ) or _CANONICAL_GROUPS  # fall back to full list when DB is empty
+    # Each record may store a combination like "MEAI/SAARC" meaning it belongs to
+    # both. Expand every stored value into its base groups and return only those
+    # canonical names. split_categorization keeps "GCC/MIDDLE EAST" whole.
+    present = {g.upper() for r in cat_q.all() for g in split_categorization(r[0])}
+    expanded = [
+        c for c in CATEGORIZATION_GROUPS if c.upper() in present
+    ] or list(CATEGORIZATION_GROUPS)  # fall back to full list when DB is empty
 
     return {
         "continents":    sorted(r[0] for r in cont_q.all()),

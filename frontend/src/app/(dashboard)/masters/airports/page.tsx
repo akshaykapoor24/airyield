@@ -9,17 +9,44 @@ import api from "@/lib/api";
 import { canManageGlobalMasters, canSubmitMasterRequest, canViewMasterRequests } from "@/lib/rbac";
 import { useAppSelector } from "@/store/hooks";
 import Pagination from "@/components/ui/Pagination";
+import MultiSelectDropdown from "@/components/ui/MultiSelectDropdown";
+import MasterDiffModal, { DiffFieldSpec } from "@/components/masters/MasterDiffModal";
 
 // ── constants ──────────────────────────────────────────────────────────────
 
-const CATEGORIZATIONS = [
-  "APAC", "MEAI", "MEAI/SAARC", "SAARC",
-  "EUROPEAN NATIONS", "LATIN AMERICA", "OTHER",
+// The base groups an airport can belong to. An airport frequently belongs to
+// several at once, so these are chosen through a multi-select and the backend
+// stores them slash-joined ("MEAI/SAARC"). Combinations are therefore no longer
+// listed as options — they are produced by selecting more than one.
+// Keep in sync with CATEGORIZATION_GROUPS in backend/app/models/airport.py.
+const CATEGORIZATION_GROUPS = [
+  "APAC", "EUROPEAN NATIONS", "GCC/MIDDLE EAST", "LATIN AMERICA",
+  "MEAI", "NAM", "OTHER", "SAARC",
 ];
+const CATEGORIZATION_OPTIONS = CATEGORIZATION_GROUPS.map(g => ({ value: g, label: g }));
 const CONTINENTS = [
   "Africa", "Asia", "Europe",
   "North America", "Oceania", "South America",
 ];
+
+/** Groups for display. The API supplies the parsed list; fall back to showing
+ *  the raw stored value so nothing disappears if that field is ever absent. */
+const groupsOf = (r: { categorization: string | null; categorization_groups?: string[] }) =>
+  r.categorization_groups ?? (r.categorization ? [r.categorization] : []);
+
+function CategorizationChips({ groups }: { groups: string[] }) {
+  if (groups.length === 0) return <span className="text-[10px] text-gray-300">—</span>;
+  return (
+    <div className="flex flex-wrap gap-1">
+      {groups.map(g => (
+        <span key={g}
+          className="text-[10px] px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 font-medium border border-blue-100 whitespace-nowrap">
+          {g}
+        </span>
+      ))}
+    </div>
+  );
+}
 
 // ── types ──────────────────────────────────────────────────────────────────
 
@@ -29,6 +56,8 @@ type Airport = {
   iata_code: string;
   country: string;
   categorization: string | null;
+  /** Parsed base groups of `categorization`, supplied by the API. */
+  categorization_groups?: string[];
   continent: string | null;
   city_airport_name: string;
   is_active: boolean;
@@ -40,6 +69,7 @@ type Approval = {
   iata_code: string;
   country: string;
   categorization: string | null;
+  categorization_groups?: string[];
   continent: string | null;
   city_airport_name: string;
   status: "pending" | "approved" | "rejected";
@@ -49,12 +79,54 @@ type Approval = {
   rejection_reason: string | null;
   request_type: "new" | "update";
   target_id: number | null;
+  // ── platform-admin edit state ────────────────────────────────────────────
+  /** True only when an admin changed something the submitter should see. */
+  edited?: boolean;
+  /** The business values as the submitter originally sent them. */
+  original_payload?: Record<string, unknown> | null;
+  /** Parsed groups of the original categorization — the stored form is
+   *  slash-joined and one group name contains a slash, so the server parses it. */
+  original_categorization_groups?: string[] | null;
+  edited_by?: { id: number; full_name: string; email: string } | null;
+  edited_at?: string | null;
 };
 
 type BulkResult = { total: number; success: number; failed: number; errors: string[] };
 
+// ── diff field map ─────────────────────────────────────────────────────────
+
+const AIRPORT_DIFF_FIELDS: DiffFieldSpec[] = [
+  { key: "iata_code",         label: "IATA Code" },
+  { key: "country",           label: "Country" },
+  { key: "city_airport_name", label: "City / Airport" },
+  {
+    // Both sides are pre-parsed into groups by the caller — never split the
+    // stored string here, "GCC/MIDDLE EAST" contains a slash of its own.
+    key: "categorization_groups",
+    label: "Categorization",
+    render: v => <CategorizationChips groups={(v as string[]) ?? []} />,
+    // Order is not meaningful: the same groups picked in a different order is
+    // not a change.
+    equals: (a, b) => {
+      const x = [...((a as string[]) ?? [])].sort();
+      const y = [...((b as string[]) ?? [])].sort();
+      return x.length === y.length && x.every((v, i) => v === y[i]);
+    },
+  },
+  { key: "continent",         label: "Continent" },
+];
+
+/** Shape an Airport or Approval into the record the diff modal reads. */
+const toDiffRecord = (r: { categorization: string | null; categorization_groups?: string[] } & Record<string, unknown>) =>
+  ({ ...r, categorization_groups: groupsOf(r) });
+
+/** The submitter's original values, shaped the same way. */
+const toOriginalDiffRecord = (a: Approval) =>
+  ({ ...(a.original_payload ?? {}), categorization_groups: a.original_categorization_groups ?? [] });
+
+// categorization is a list here — the backend joins it into its stored form.
 const emptyForm = {
-  iata_code: "", country: "", categorization: "", continent: "", city_airport_name: "",
+  iata_code: "", country: "", categorization: [] as string[], continent: "", city_airport_name: "",
 };
 
 // ── status badge ───────────────────────────────────────────────────────────
@@ -97,7 +169,8 @@ function AddAirportModal({
   const [bulkResult, setBulkResult] = useState<BulkResult | null>(null);
   const [uploading, setUploading] = useState(false);
 
-  const set = <K extends keyof typeof emptyForm>(k: K, v: string) => setForm(p => ({ ...p, [k]: v }));
+  const set = <K extends keyof typeof emptyForm>(k: K, v: (typeof emptyForm)[K]) =>
+    setForm(p => ({ ...p, [k]: v }));
 
   useEffect(() => {
     if (requestType === "update" && existingAirports.length === 0) {
@@ -112,7 +185,7 @@ function AddAirportModal({
       setForm({
         iata_code: apt.iata_code,
         country: apt.country,
-        categorization: apt.categorization ?? "",
+        categorization: groupsOf(apt),
         continent: apt.continent ?? "",
         city_airport_name: apt.city_airport_name,
       });
@@ -287,27 +360,31 @@ function AddAirportModal({
                   className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 bg-gray-50" />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">
-                    Categorization
-                  </label>
-                  <select value={form.categorization ?? ""} onChange={e => set("categorization", e.target.value)}
-                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 bg-gray-50">
-                    <option value="">Select...</option>
-                    {CATEGORIZATIONS.map(c => <option key={c}>{c}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">
-                    Continent
-                  </label>
-                  <select value={form.continent ?? ""} onChange={e => set("continent", e.target.value)}
-                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 bg-gray-50">
-                    <option value="">Select...</option>
-                    {CONTINENTS.map(c => <option key={c}>{c}</option>)}
-                  </select>
-                </div>
+              <div>
+                <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">
+                  Categorization
+                </label>
+                <MultiSelectDropdown
+                  options={CATEGORIZATION_OPTIONS}
+                  selected={form.categorization}
+                  onChange={v => set("categorization", v)}
+                  placeholder="Select one or more..."
+                  searchable={false}
+                />
+                <p className="text-[10px] text-gray-400 mt-1">
+                  Pick every group this airport&apos;s country belongs to.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">
+                  Continent
+                </label>
+                <select value={form.continent ?? ""} onChange={e => set("continent", e.target.value)}
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 bg-gray-50">
+                  <option value="">Select...</option>
+                  {CONTINENTS.map(c => <option key={c}>{c}</option>)}
+                </select>
               </div>
 
               {error && <p className="text-[11px] text-red-500">{error}</p>}
@@ -392,13 +469,13 @@ function EditAirportModal({
 }: { airport: Airport; onClose: () => void; onSaved: () => void }) {
   const [form, setForm] = useState({
     country: airport.country,
-    categorization: airport.categorization ?? "",
+    categorization: groupsOf(airport),
     continent: airport.continent ?? "",
     city_airport_name: airport.city_airport_name,
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const set = (k: string, v: string) => setForm(p => ({ ...p, [k]: v }));
+  const set = (k: string, v: string | string[]) => setForm(p => ({ ...p, [k]: v }));
 
   const handleSave = async () => {
     if (!form.country || !form.city_airport_name) { setError("Country and City/Airport Name are required."); return; }
@@ -432,23 +509,23 @@ function EditAirportModal({
             <input value={form.city_airport_name ?? ""} onChange={e => set("city_airport_name", e.target.value)}
               className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 bg-gray-50" />
           </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Categorization</label>
-              <select value={form.categorization ?? ""} onChange={e => set("categorization", e.target.value)}
-                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 bg-gray-50">
-                <option value="">Select...</option>
-                {CATEGORIZATIONS.map(c => <option key={c}>{c}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Continent</label>
-              <select value={form.continent ?? ""} onChange={e => set("continent", e.target.value)}
-                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 bg-gray-50">
-                <option value="">Select...</option>
-                {CONTINENTS.map(c => <option key={c}>{c}</option>)}
-              </select>
-            </div>
+          <div>
+            <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Categorization</label>
+            <MultiSelectDropdown
+              options={CATEGORIZATION_OPTIONS}
+              selected={form.categorization}
+              onChange={v => set("categorization", v)}
+              placeholder="Select one or more..."
+              searchable={false}
+            />
+          </div>
+          <div>
+            <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Continent</label>
+            <select value={form.continent ?? ""} onChange={e => set("continent", e.target.value)}
+              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 bg-gray-50">
+              <option value="">Select...</option>
+              {CONTINENTS.map(c => <option key={c}>{c}</option>)}
+            </select>
           </div>
           {error && <p className="text-[11px] text-red-500">{error}</p>}
         </div>
@@ -458,6 +535,132 @@ function EditAirportModal({
             className="flex-1 text-white rounded-lg py-2 text-sm font-semibold disabled:opacity-50"
             style={{ background: "linear-gradient(135deg,#0d9488,#0f766e)" }}>
             {saving ? "Saving..." : "Save Changes"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── platform admin edits a pending request ────────────────────────────────
+
+function EditRequestModal({
+  approval, onClose, onSaved,
+}: { approval: Approval; onClose: () => void; onSaved: () => void }) {
+  const [form, setForm] = useState({
+    iata_code: approval.iata_code,
+    country: approval.country,
+    categorization: groupsOf(approval),
+    continent: approval.continent ?? "",
+    city_airport_name: approval.city_airport_name,
+  });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const set = (k: string, v: string | string[]) => setForm(p => ({ ...p, [k]: v }));
+
+  /** Returns true when the edit was saved, so the caller can chain approve. */
+  const save = async (): Promise<boolean> => {
+    if (!form.iata_code || !form.country || !form.city_airport_name) {
+      setError("IATA Code, Country and City/Airport Name are required."); return false;
+    }
+    setError("");
+    try {
+      await api.patch(`/airports/approvals/${approval.id}`, form);
+      return true;
+    } catch (e: unknown) {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setError(msg ?? "Failed to save changes."); return false;
+    }
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    if (await save()) { onSaved(); onClose(); }
+    setSaving(false);
+  };
+
+  const handleSaveAndApprove = async () => {
+    setSaving(true);
+    if (await save()) {
+      try {
+        await api.patch(`/airports/approvals/${approval.id}/approve`);
+        onSaved(); onClose();
+      } catch (e: unknown) {
+        // The edit is already persisted and the request is still pending —
+        // say so rather than closing and losing the admin's work.
+        const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+        setError(`Changes saved, but approval failed: ${msg ?? "please try again."}`);
+        onSaved();
+      }
+    }
+    setSaving(false);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md">
+        <div className="flex items-start justify-between px-6 py-4 border-b border-gray-100">
+          <div>
+            <h2 className="text-sm font-bold text-gray-900">Edit Request — {approval.iata_code}</h2>
+            <p className="text-[10px] text-gray-400 mt-0.5">
+              Submitted by {approval.submitted_by.full_name} · they will see what you change
+            </p>
+          </div>
+          <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-lg">
+            <X className="w-4 h-4 text-gray-500" />
+          </button>
+        </div>
+        <div className="px-6 py-4 space-y-3">
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">IATA Code *</label>
+              <input value={form.iata_code} onChange={e => set("iata_code", e.target.value.toUpperCase())}
+                maxLength={3}
+                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm font-mono uppercase focus:outline-none focus:ring-2 focus:ring-teal-400 bg-gray-50" />
+            </div>
+            <div>
+              <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Country *</label>
+              <input value={form.country} onChange={e => set("country", e.target.value)}
+                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 bg-gray-50" />
+            </div>
+          </div>
+          <div>
+            <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">City / Airport Name *</label>
+            <input value={form.city_airport_name} onChange={e => set("city_airport_name", e.target.value)}
+              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 bg-gray-50" />
+          </div>
+          <div>
+            <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Categorization</label>
+            <MultiSelectDropdown
+              options={CATEGORIZATION_OPTIONS}
+              selected={form.categorization}
+              onChange={v => set("categorization", v)}
+              placeholder="Select one or more..."
+              searchable={false}
+            />
+          </div>
+          <div>
+            <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Continent</label>
+            <select value={form.continent} onChange={e => set("continent", e.target.value)}
+              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 bg-gray-50">
+              <option value="">Select...</option>
+              {CONTINENTS.map(c => <option key={c}>{c}</option>)}
+            </select>
+          </div>
+          {error && <p className="text-[11px] text-red-500">{error}</p>}
+        </div>
+        <div className="px-6 pb-5 flex gap-2">
+          <button onClick={onClose} disabled={saving}
+            className="flex-1 border border-gray-200 rounded-lg py-2 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50">
+            Cancel
+          </button>
+          <button onClick={handleSave} disabled={saving}
+            className="flex-1 border border-teal-500 text-teal-600 rounded-lg py-2 text-xs font-semibold hover:bg-teal-50 disabled:opacity-50">
+            {saving ? "..." : "Save Changes"}
+          </button>
+          <button onClick={handleSaveAndApprove} disabled={saving}
+            className="flex-1 bg-green-500 hover:bg-green-600 text-white rounded-lg py-2 text-xs font-semibold disabled:opacity-50">
+            {saving ? "..." : "Save & Approve"}
           </button>
         </div>
       </div>
@@ -505,71 +708,6 @@ function RejectModal({
   );
 }
 
-// ── diff modal ─────────────────────────────────────────────────────────────
-
-function AirportDiffModal({
-  approval, current, loading, onClose,
-}: { approval: Approval; current: Airport | null; loading: boolean; onClose: () => void }) {
-  const fields: { label: string; ak: keyof Approval; ck: keyof Airport }[] = [
-    { label: "IATA Code",      ak: "iata_code",         ck: "iata_code" },
-    { label: "Country",        ak: "country",           ck: "country" },
-    { label: "Categorization", ak: "categorization",    ck: "categorization" },
-    { label: "Continent",      ak: "continent",         ck: "continent" },
-    { label: "City / Airport", ak: "city_airport_name", ck: "city_airport_name" },
-  ];
-  return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-xl">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <div>
-            <h2 className="text-sm font-bold text-gray-900">Change Diff — {approval.iata_code}</h2>
-            <p className="text-[10px] text-gray-400 mt-0.5">Updating Airport ID #{approval.target_id}</p>
-          </div>
-          <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-lg"><X className="w-4 h-4 text-gray-500" /></button>
-        </div>
-        <div className="px-6 py-4">
-          {loading ? (
-            <div className="py-8 text-center text-xs text-gray-400">
-              <RefreshCw className="w-4 h-4 animate-spin mx-auto mb-2 text-gray-300" /> Loading current record...
-            </div>
-          ) : !current ? (
-            <p className="text-xs text-red-500 py-4 text-center">Could not load the current airport record.</p>
-          ) : (
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="border-b border-gray-100">
-                  <th className="text-left py-2 pr-3 text-[10px] font-semibold text-gray-400 uppercase tracking-wide w-36">Field</th>
-                  <th className="text-left py-2 pr-3 text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Current</th>
-                  <th className="text-left py-2 text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Proposed</th>
-                </tr>
-              </thead>
-              <tbody>
-                {fields.map(({ label, ak, ck }) => {
-                  const cur = String(current[ck] ?? "");
-                  const proposed = String(approval[ak] ?? "");
-                  const changed = cur !== proposed;
-                  return (
-                    <tr key={label} className={`border-b border-gray-50 ${changed ? "bg-amber-50/60" : ""}`}>
-                      <td className="py-2 pr-3 font-semibold text-gray-600 text-[11px]">{label}</td>
-                      <td className="py-2 pr-3 text-gray-500">{cur || "—"}</td>
-                      <td className={`py-2 font-medium ${changed ? "text-amber-700" : "text-gray-700"}`}>
-                        {proposed || "—"}
-                        {changed && <span className="ml-1.5 text-[9px] bg-amber-200 text-amber-800 px-1 py-0.5 rounded font-bold">CHANGED</span>}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          )}
-        </div>
-        <div className="px-6 pb-4">
-          <button onClick={onClose} className="w-full border border-gray-200 rounded-lg py-2 text-sm text-gray-600 hover:bg-gray-50">Close</button>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 // ── main page ──────────────────────────────────────────────────────────────
 
@@ -597,6 +735,7 @@ export default function AirportsPage() {
   const [diffTarget, setDiffTarget] = useState<Approval | null>(null);
   const [diffRecord, setDiffRecord] = useState<Airport | null>(null);
   const [loadingDiff, setLoadingDiff] = useState(false);
+  const [editRequestTarget, setEditRequestTarget] = useState<Approval | null>(null);
   const [page, setPage] = useState(1);
   const [totalCount, setTotalCount] = useState(0);
   const [debouncedSearch, setDebouncedSearch] = useState("");
@@ -647,10 +786,12 @@ export default function AirportsPage() {
   };
 
   const handleViewDiff = async (approval: Approval) => {
-    if (!approval.target_id) return;
     setDiffTarget(approval);
-    setLoadingDiff(true);
     setDiffRecord(null);
+    // A "new" request has no master record to compare against — the modal just
+    // drops that column and shows the admin's edit on its own.
+    if (!approval.target_id) return;
+    setLoadingDiff(true);
     try {
       const { data } = await api.get<Airport>(`/airports/${approval.target_id}`);
       setDiffRecord(data);
@@ -753,8 +894,10 @@ export default function AirportsPage() {
             </div>
             <select value={catFilter} onChange={e => setCatFilter(e.target.value)}
               className="border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs text-gray-700 bg-white focus:outline-none focus:ring-1 focus:ring-teal-400">
+              {/* Filtering by one group also matches airports that sit in it
+                  alongside others — the backend anchors the match on "/". */}
               <option value="">All Categories</option>
-              {CATEGORIZATIONS.map(c => <option key={c}>{c}</option>)}
+              {CATEGORIZATION_GROUPS.map(c => <option key={c}>{c}</option>)}
             </select>
             <select value={contFilter} onChange={e => setContFilter(e.target.value)}
               className="border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs text-gray-700 bg-white focus:outline-none focus:ring-1 focus:ring-teal-400">
@@ -790,9 +933,7 @@ export default function AirportsPage() {
                     </td>
                     <td className="px-3 py-2 text-[11px] text-gray-700">{a.country}</td>
                     <td className="px-3 py-2">
-                      {a.categorization
-                        ? <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 font-medium border border-blue-100">{a.categorization}</span>
-                        : <span className="text-[10px] text-gray-300">—</span>}
+                      <CategorizationChips groups={groupsOf(a)} />
                     </td>
                     <td className="px-3 py-2 text-[11px] text-gray-600">{a.continent ?? "—"}</td>
                     <td className="px-3 py-2 text-[11px] text-gray-800 max-w-xs truncate">{a.city_airport_name}</td>
@@ -865,10 +1006,20 @@ export default function AirportsPage() {
                       <span className="font-mono text-[11px] font-bold text-teal-600 bg-teal-50 px-2 py-0.5 rounded">{a.iata_code}</span>
                     </td>
                     <td className="px-3 py-2 text-[11px] text-gray-700">{a.country}</td>
-                    <td className="px-3 py-2 text-[11px] text-gray-600">{a.categorization ?? "—"}</td>
+                    <td className="px-3 py-2"><CategorizationChips groups={groupsOf(a)} /></td>
                     <td className="px-3 py-2 text-[11px] text-gray-600">{a.continent ?? "—"}</td>
                     <td className="px-3 py-2 text-[11px] text-gray-800 max-w-xs truncate">{a.city_airport_name}</td>
-                    <td className="px-3 py-2"><RequestTypeBadge type={a.request_type} /></td>
+                    <td className="px-3 py-2">
+                      <div className="flex items-center gap-1 flex-wrap">
+                        <RequestTypeBadge type={a.request_type} />
+                        {/* So a second admin can tell this row has been touched. */}
+                        {a.edited && (
+                          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100 text-amber-800 border border-amber-300">
+                            Edited
+                          </span>
+                        )}
+                      </div>
+                    </td>
 
                     {isPlatformAdmin ? (
                       <>
@@ -881,12 +1032,18 @@ export default function AirportsPage() {
                         </td>
                         <td className="px-3 py-2">
                           <div className="flex items-center gap-1.5 flex-wrap">
-                            {a.request_type === "update" && (
+                            {/* Also meaningful on a "new" request once edited —
+                                the modal then shows submitted vs. edited. */}
+                            {(a.request_type === "update" || a.edited) && (
                               <button onClick={() => handleViewDiff(a)}
                                 className="px-2.5 py-1 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-[10px] font-semibold">
                                 View Changes
                               </button>
                             )}
+                            <button onClick={() => setEditRequestTarget(a)}
+                              className="flex items-center gap-1 px-2.5 py-1 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-[10px] font-semibold">
+                              <Edit2 className="w-3 h-3" /> Edit
+                            </button>
                             <button onClick={() => handleApprove(a.id)} disabled={approvingId === a.id}
                               className="flex items-center gap-1 px-2.5 py-1 bg-green-500 hover:bg-green-600 text-white rounded-lg text-[10px] font-semibold disabled:opacity-50">
                               <Check className="w-3 h-3" />
@@ -901,7 +1058,18 @@ export default function AirportsPage() {
                       </>
                     ) : (
                       <>
-                        <td className="px-3 py-2"><StatusBadge status={a.status} /></td>
+                        <td className="px-3 py-2">
+                          <StatusBadge status={a.status} />
+                          {/* Lives inside the STATUS cell so no column is added.
+                              Shows for pending, approved and rejected alike. */}
+                          {a.edited && (
+                            <button onClick={() => handleViewDiff(a)}
+                              title="See what the platform admin changed"
+                              className="mt-1 flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100">
+                              <Edit2 className="w-2.5 h-2.5" /> Edited by admin
+                            </button>
+                          )}
+                        </td>
                         <td className="px-3 py-2 text-[11px] text-gray-500">
                           {new Date(a.submitted_at).toLocaleDateString()}
                         </td>
@@ -940,10 +1108,29 @@ export default function AirportsPage() {
           onDone={() => { fetchApprovals(); }}
         />
       )}
+      {editRequestTarget && (
+        <EditRequestModal
+          approval={editRequestTarget}
+          onClose={() => setEditRequestTarget(null)}
+          onSaved={() => { fetchApprovals(); fetchAirports(); }}
+        />
+      )}
       {diffTarget && (
-        <AirportDiffModal
-          approval={diffTarget}
-          current={diffRecord}
+        <MasterDiffModal
+          title={`Change Diff — ${diffTarget.iata_code}`}
+          subtitle={diffTarget.request_type === "update"
+            ? `Updating Airport ID #${diffTarget.target_id}`
+            : "New airport request"}
+          fields={AIRPORT_DIFF_FIELDS}
+          // "Current" only exists for an update request.
+          master={diffTarget.request_type === "update" ? (diffRecord ? toDiffRecord(diffRecord) : null) : null}
+          // Once edited, the middle column is what the submitter actually sent;
+          // otherwise the request row IS what they sent.
+          submitted={diffTarget.edited ? toOriginalDiffRecord(diffTarget) : toDiffRecord(diffTarget)}
+          edited={diffTarget.edited ? toDiffRecord(diffTarget) : null}
+          submittedLabel={isPlatformAdmin ? "User proposed" : "You submitted"}
+          editedBy={diffTarget.edited_by}
+          editedAt={diffTarget.edited_at}
           loading={loadingDiff}
           onClose={() => { setDiffTarget(null); setDiffRecord(null); }}
         />

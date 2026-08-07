@@ -3,9 +3,11 @@
 import { useState } from "react";
 import Link from "next/link";
 import {
-  AlertTriangle, ArrowRight, Building2, CheckCircle2, CreditCard, Eye, EyeOff,
-  Loader2, Lock, Mail, MailCheck, ReceiptText, TriangleAlert, User,
+  AlertTriangle, ArrowRight, Building2, CheckCircle2, CreditCard,
+  Loader2, Mail, MailCheck, ReceiptText, TriangleAlert, User,
 } from "lucide-react";
+import PasswordField from "@/components/ui/PasswordField";
+import { passwordProblem } from "@/lib/password";
 
 type AccountType = "corporate" | "individual";
 
@@ -21,24 +23,6 @@ const PUBLIC_DOMAINS = new Set([
   "gmx.com", "mail.com", "yandex.com",
 ]);
 
-/** Purely visual strength hint — the server enforces the real rule (min 8). */
-function strengthOf(pw: string) {
-  if (!pw) return { score: 0, label: "", tone: "" };
-  let score = 0;
-  if (pw.length >= 8) score++;
-  if (pw.length >= 12) score++;
-  if (/[A-Z]/.test(pw) && /[a-z]/.test(pw)) score++;
-  if (/\d/.test(pw) && /[^A-Za-z0-9]/.test(pw)) score++;
-  const meta = [
-    { label: "Too short", tone: "bg-red-500 text-red-600" },
-    { label: "Weak",      tone: "bg-orange-500 text-orange-600" },
-    { label: "Fair",      tone: "bg-amber-500 text-amber-600" },
-    { label: "Strong",    tone: "bg-emerald-500 text-emerald-600" },
-    { label: "Excellent", tone: "bg-emerald-600 text-emerald-700" },
-  ][score];
-  return { score, ...meta };
-}
-
 export default function SignupPage() {
   const [accountType,  setAccountType]  = useState<AccountType>("corporate");
   const [fullName,     setFullName]     = useState("");
@@ -49,7 +33,6 @@ export default function SignupPage() {
   const [gst,          setGst]          = useState("");
   const [password,     setPassword]     = useState("");
   const [confirm,      setConfirm]      = useState("");
-  const [showPw,       setShowPw]       = useState(false);
   const [loading,      setLoading]      = useState(false);
   const [error,        setError]        = useState("");
   const [domainNote,   setDomainNote]   = useState("");  // corporate: "you'll be admin"
@@ -58,12 +41,10 @@ export default function SignupPage() {
   const [gstError,     setGstError]     = useState("");
   // post-signup confirmation ("check your email")
   const [sent,         setSent]         = useState(false);
-  const [devVerifyUrl, setDevVerifyUrl] = useState<string | null>(null);
   const [resendMsg,    setResendMsg]    = useState("");
   const [resending,    setResending]    = useState(false);
 
   const isIndividual = accountType === "individual";
-  const pwStrength = strengthOf(password);
 
   const switchType = (t: AccountType) => {
     setAccountType(t);
@@ -126,8 +107,9 @@ export default function SignupPage() {
     if (gstRegistered && (!gst || !GSTIN_RE.test(gst))) {
       setError("Please enter a valid 15-character GSTIN, or turn off GST registered."); return;
     }
-    if (password.length < 8) {
-      setError("Password must be at least 8 characters."); return;
+    const pwProblem = passwordProblem(password);
+    if (pwProblem) {
+      setError(pwProblem); return;
     }
     if (password !== confirm) {
       setError("Passwords do not match."); return;
@@ -161,9 +143,8 @@ export default function SignupPage() {
         setError(msg);
         return;
       }
-      // Account created but unverified — no session issued. Show a "check your
-      // email" confirmation; in dev the backend returns the link directly.
-      setDevVerifyUrl(data?.verification_url ?? null);
+      // Account created but unverified — no session issued. The verification
+      // link is emailed; show a "check your email" confirmation.
       setSent(true);
     } catch {
       setError("Cannot reach server. Make sure the backend is running.");
@@ -212,20 +193,6 @@ export default function SignupPage() {
           <span className="font-semibold text-slate-700">{email}</span>. Click it to
           activate your account, then sign in.
         </p>
-
-        {devVerifyUrl && (
-          <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-left">
-            <p className="mb-1.5 text-[11px] font-semibold text-amber-700">
-              Developer mode — verify directly:
-            </p>
-            <a
-              href={devVerifyUrl}
-              className="break-all text-[11px] font-semibold text-blue-600 underline underline-offset-2"
-            >
-              Open verification link
-            </a>
-          </div>
-        )}
 
         <div className="mt-7 space-y-3">
           <Link
@@ -461,77 +428,18 @@ export default function SignupPage() {
         </div>
 
         {/* password */}
-        <div>
-          <label htmlFor="password" className="mb-1.5 block text-xs font-semibold text-slate-700">
-            Password <span className="text-red-500">*</span>
-          </label>
-          <div className="relative">
-            <input
-              id="password"
-              type={showPw ? "text" : "password"}
-              autoComplete="new-password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="Min 8 characters"
-              className={`${field} pr-11`}
-            />
-            <Lock className={icon} />
-            <button
-              type="button"
-              onClick={() => setShowPw((s) => !s)}
-              aria-label={showPw ? "Hide password" : "Show password"}
-              className="absolute right-3 top-1/2 -translate-y-1/2 rounded-md p-1 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
-            >
-              {showPw ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-            </button>
-          </div>
-
-          {/* strength meter */}
-          {password && (
-            <div className="animate-fade-in mt-2 flex items-center gap-2">
-              <div className="flex flex-1 gap-1">
-                {[0, 1, 2, 3].map((i) => (
-                  <span
-                    key={i}
-                    className={`h-1 flex-1 rounded-full transition-all duration-300 ${
-                      i < pwStrength.score ? pwStrength.tone.split(" ")[0] : "bg-slate-200"
-                    }`}
-                  />
-                ))}
-              </div>
-              <span className={`text-[10px] font-semibold ${pwStrength.tone.split(" ")[1]}`}>
-                {pwStrength.label}
-              </span>
-            </div>
-          )}
-        </div>
+        <PasswordField
+          id="password" label="Password" required showStrength
+          autoComplete="new-password" placeholder="Min 8 characters"
+          value={password} onChange={setPassword}
+        />
 
         {/* confirm */}
-        <div>
-          <label htmlFor="confirm" className="mb-1.5 block text-xs font-semibold text-slate-700">
-            Confirm password <span className="text-red-500">*</span>
-          </label>
-          <div className="relative">
-            <input
-              id="confirm"
-              type="password"
-              autoComplete="new-password"
-              value={confirm}
-              onChange={(e) => setConfirm(e.target.value)}
-              placeholder="Re-enter your password"
-              className={`${field} ${confirm && confirm !== password ? bad : ""} ${
-                confirm && confirm === password ? "border-emerald-300 focus:border-emerald-400 focus:ring-emerald-500/12" : ""
-              }`}
-            />
-            <Lock className={icon} />
-            {confirm && confirm === password && (
-              <CheckCircle2 className="animate-scale-in absolute right-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-emerald-500" />
-            )}
-          </div>
-          {confirm && confirm !== password && (
-            <p className="mt-1 text-[11px] text-red-500">Passwords do not match</p>
-          )}
-        </div>
+        <PasswordField
+          id="confirm" label="Confirm password" required
+          autoComplete="new-password" placeholder="Re-enter your password"
+          matchValue={password} value={confirm} onChange={setConfirm}
+        />
 
         {/* error */}
         {error && (

@@ -18,6 +18,7 @@ import { toggleSidebar } from "@/store/slices/uiSlice";
 import { logout as logoutThunk } from "@/store/slices/authSlice";
 import { getUser } from "@/lib/auth";
 import { canManageTenantUsers, canSubmitMasterRequest, isPlatformAdmin } from "@/lib/rbac";
+import ChangePasswordModal from "@/components/layout/ChangePasswordModal";
 
 type NavChild = { label: string; href: string; icon: any; badge?: number };
 type NavItem = {
@@ -183,6 +184,7 @@ export default function Sidebar() {
     displayName.split(" ").filter(Boolean).map((n) => n[0]).join("").toUpperCase().slice(0, 2) || "U";
   const router = useRouter();
   const [showProfileMenu, setShowProfileMenu] = useState(false);
+  const [showChangePw, setShowChangePw] = useState(false);
   const handleLogout = async () => {
     setShowProfileMenu(false);
     await dispatch(logoutThunk());
@@ -245,6 +247,7 @@ export default function Sidebar() {
     );
 
   return (
+    <>
     <aside
       className={cn(
         "flex flex-col shrink-0 h-screen sticky top-0 overflow-y-auto transition-all duration-300 bg-white border-r border-[#e6ebf2] text-slate-700",
@@ -455,10 +458,9 @@ export default function Sidebar() {
                   <UserCircle className="w-4 h-4 text-slate-400 shrink-0" />
                   Ind / Corp profile
                 </Link>
-                {/* TODO: hook up the change-password flow */}
                 <button
                   type="button"
-                  onClick={() => setShowProfileMenu(false)}
+                  onClick={() => { setShowProfileMenu(false); setShowChangePw(true); }}
                   className="flex items-center gap-2.5 w-full px-4 py-2 text-sm text-slate-600 hover:bg-slate-50 transition-colors"
                 >
                   <KeyRound className="w-4 h-4 text-slate-400 shrink-0" />
@@ -511,5 +513,11 @@ export default function Sidebar() {
         </button>
       </div>
     </aside>
+
+    {/* Sibling of the <aside>, not a child: the aside is overflow-y-auto, and a
+        sibling is immune if it ever grows a transform (which would re-parent a
+        fixed-position child). */}
+    {showChangePw && <ChangePasswordModal onClose={() => setShowChangePw(false)} />}
+    </>
   );
 }
