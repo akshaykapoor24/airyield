@@ -8,6 +8,10 @@
 # ─── Claude Code local settings (machine-specific, not for version control) ───
 .claude/settings.local.json
 
+# ─── Internal docs (user guides, .docx drafts, screenshots) ───────────────────
+# Kept out of the repo deliberately: only frontend/ and backend/ ship to GitHub.
+docs/
+
 # ─── OS artifacts ─────────────────────────────────────────────────────────────
 .DS_Store
 .DS_Store?

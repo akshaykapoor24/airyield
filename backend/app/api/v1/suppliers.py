@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.database import get_db
-from app.dependencies import get_current_user, require_role
+from app.dependencies import get_current_user, is_platform_admin, require_role
 from app.models.supplier import Supplier
 from app.models.supplier_approval import SupplierApproval
 from app.models.user import User, UserRole
@@ -55,12 +55,6 @@ def _directory_kwargs(obj) -> dict:
 SUPPLIER_FIELDS = (*SUPPLIER_CORE_FIELDS, *DIRECTORY_FIELDS)
 
 
-def _is_platform_admin(user: User) -> bool:
-    role = user.role
-    if isinstance(role, UserRole):
-        return role == PLATFORM
-    role_str = str(role).lower()
-    return role_str in {PLATFORM.value.lower(), PLATFORM.name.lower()}
 
 
 async def _generate_code(db: AsyncSession) -> str:
@@ -126,7 +120,7 @@ async def create_supplier(
         if not target_check.scalar_one_or_none():
             raise HTTPException(status_code=404, detail=f"Supplier with id {payload.target_id} not found.")
 
-        if _is_platform_admin(current_user):
+        if is_platform_admin(current_user):
             target = (await db.execute(select(Supplier).where(Supplier.id == payload.target_id))).scalar_one()
             target.name = payload.name.strip()
             target.vendor_type = payload.vendor_type
@@ -172,7 +166,7 @@ async def create_supplier(
         return {"status": "pending_approval", "approval_id": approval.id}
 
     # request_type == "new"
-    if _is_platform_admin(current_user):
+    if is_platform_admin(current_user):
         code = payload.code.strip() if payload.code else await _generate_code(db)
         existing = await db.execute(select(Supplier).where(Supplier.code == code))
         if existing.scalar_one_or_none():
@@ -339,7 +333,7 @@ async def bulk_upload_suppliers(
         }
 
         try:
-            if _is_platform_admin(current_user):
+            if is_platform_admin(current_user):
                 code = await _generate_code(db)
                 supplier = Supplier(
                     name=name, code=code,
@@ -421,7 +415,7 @@ async def list_approvals(
     current_user: User = Depends(require_role(*SUBMITTERS)),
 ):
     pending_filter = func.lower(SupplierApproval.status) == "pending"
-    if _is_platform_admin(current_user):
+    if is_platform_admin(current_user):
         result = await db.execute(
             select(SupplierApproval)
             .options(

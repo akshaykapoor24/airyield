@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.database import get_db
-from app.dependencies import get_current_user, require_role
+from app.dependencies import get_current_user, is_platform_admin, require_role
 from app.models.airline import Airline
 from app.models.airline_approval import AirlineApproval
 from app.models.user import User, UserRole
@@ -33,12 +33,6 @@ SUBMITTERS = (
 )
 
 
-def _is_platform_admin(user: User) -> bool:
-    role = user.role
-    if isinstance(role, UserRole):
-        return role == PLATFORM
-    role_str = str(role).lower()
-    return role_str in {PLATFORM.value.lower(), PLATFORM.name.lower()}
 
 
 @router.get("/count")
@@ -93,7 +87,7 @@ async def create_airline(payload: AirlineCreate, db: AsyncSession = Depends(get_
         if not target_check.scalar_one_or_none():
             raise HTTPException(status_code=404, detail=f"Airline with id {payload.target_id} not found.")
 
-        if _is_platform_admin(current_user):
+        if is_platform_admin(current_user):
             target_airline = (await db.execute(select(Airline).where(Airline.id == payload.target_id))).scalar_one()
             target_airline.name = payload.name.strip()
             target_airline.iata_code = iata
@@ -124,7 +118,7 @@ async def create_airline(payload: AirlineCreate, db: AsyncSession = Depends(get_
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=400, detail=f"Airline with code '{payload.iata_code}' already exists.")
 
-    if _is_platform_admin(current_user):
+    if is_platform_admin(current_user):
         cleaned_payload = AirlineCreate(
             name=payload.name.strip(),
             iata_code=iata,
@@ -250,7 +244,7 @@ async def bulk_upload_airlines(
             continue
 
         try:
-            if _is_platform_admin(current_user):
+            if is_platform_admin(current_user):
                 await crud.airline.create(
                     db,
                     obj_in={"name": airline_name, "iata_code": code, "icao_code": iata_numeric_value,
@@ -314,7 +308,7 @@ async def list_approvals(
     current_user: User = Depends(require_role(*SUBMITTERS)),
 ):
     pending_filter = func.lower(AirlineApproval.status) == "pending"
-    if _is_platform_admin(current_user):
+    if is_platform_admin(current_user):
         result = await db.execute(
             select(AirlineApproval)
             .options(

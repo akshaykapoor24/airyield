@@ -983,7 +983,8 @@ export default function AirlinesPage() {
                             <button onClick={() => handleViewDiff(a)}
                               title="See what the platform admin changed"
                               className="mt-1 flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100">
-                              <Edit2 className="w-2.5 h-2.5" /> Edited by admin
+                              {/* <Edit2 className="w-2.5 h-2.5" /> */}
+                              View Admin Edits
                             </button>
                           )}
                         </td>

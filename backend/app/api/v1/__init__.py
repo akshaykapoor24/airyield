@@ -1,11 +1,12 @@
 from fastapi import APIRouter
 
-from app.api.v1 import auth, users, airlines, suppliers, airports, routes, deals, tickets, income, documents, reports, classes, approval_workflows, dashboard, customers, corporates, entities, login_ids, iata_commissions, user_entities, user_login_ids, agencies, agency_entities, agency_login_ids, agency_billing, adjustments, airline_adjustments, statements, bsp, bsp_summary, bsp_reconciliation, bsp_commission, customer_statements, lcc_detailed, ticket_details, series_contracts
+from app.api.v1 import auth, users, subscriptions, airlines, suppliers, airports, routes, deals, tickets, income, documents, reports, classes, approval_workflows, dashboard, customers, corporates, entities, login_ids, iata_commissions, user_entities, user_login_ids, agencies, agency_entities, agency_login_ids, agency_billing, adjustments, airline_adjustments, statements, bsp, bsp_summary, bsp_reconciliation, bsp_commission, customer_statements, lcc_detailed, ticket_details, series_contracts
 
 router = APIRouter()
 
 router.include_router(auth.router, prefix="/auth", tags=["Auth"])
 router.include_router(users.router, prefix="/users", tags=["Users"])
+router.include_router(subscriptions.router, prefix="/subscriptions", tags=["Platform - Subscriptions"])
 router.include_router(airlines.router, prefix="/airlines", tags=["Airlines"])
 router.include_router(suppliers.router, prefix="/suppliers", tags=["Suppliers"])
 router.include_router(airports.router, prefix="/airports", tags=["Airports"])

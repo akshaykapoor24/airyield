@@ -1,10 +1,22 @@
 """Ticket Details — look up a ticket across all vendor-statement stores.
 
-Enter a document/ticket number (or several, `|`-separated) and an airline type
-(BSP / LCC / Third Party / All); we exact-match it against every store that could
+Enter a document/ticket number or PNR (or several, `|`-separated) and an airline
+type (BSP / LCC / Third Party / All); we match it against every store that could
 hold it and return the full stored row(s), grouped by source. BSP + LCC-Detailed
 match on typed indexed columns; the spec-repo LCC and Third-Party tables match on
 their JSONB `data` keys. Read-only; scoped by tenant_id + created_by_id.
+
+Matching is not a bare equality test. A ticket is printed with punctuation and its
+airline stock prefix (098-4846834428) but stored bare (4846834428), so each token
+is also compared through the same two normalisations BSP Reconciliation joins on
+(`norm_tn` and `_alt_key` in services/bsp_reconciliation.py). Without that the two
+screens disagree about whether a ticket exists.
+
+Note what each source can be found BY, which is not the same everywhere:
+  * BSP           — document/ticket number, SPDR, RTDN, and conjunction documents
+  * LCC Detailed  — PNR only. The 27-column standard spec has no ticket-number
+                    column, so a ticket number can never match it.
+  * everything else — ticket number and/or PNR, per its `match` list below.
 """
 from __future__ import annotations
 
@@ -17,7 +29,9 @@ from typing import Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import select, or_, func
+from sqlalchemy import select, or_, func, cast
+from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.types import TEXT
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -30,6 +44,7 @@ from app.models.statement_row import (
 )
 from app.services import statement_spec
 from app.services import lcc_detailed_spec
+from app.services.bsp_reconciliation import norm_tn, _alt_key
 from app.services.bsp_export import _tax_buckets, _join, _f, _s
 
 router = APIRouter()
@@ -75,7 +90,11 @@ LCC_DETAILED_COLUMNS: list[dict] = [
 # kind: "bsp" (typed cols + tax breakup) | "lcc-detailed" (typed cols) | "jsonb" (data JSONB)
 SOURCES: list[dict] = [
     {"key": "bsp", "label": "BSP", "group": "bsp", "kind": "bsp", "model": BspStatementRow,
-     "match": ["document_number", "ticket_number", "spdr_no", "rtdn"], "columns": BSP_COLUMNS},
+     "match": ["document_number", "ticket_number", "spdr_no", "rtdn"],
+     # JSONB string arrays searched by element. `alt_document_numbers` holds the
+     # +TKTT conjunction documents and is already displayed as "Alt Docs".
+     "match_json_array": ["alt_document_numbers"],
+     "columns": BSP_COLUMNS},
     {"key": "lcc-detailed", "label": "LCC · Detailed Statement", "group": "lcc", "kind": "lcc-detailed",
      "model": LccDetailed, "match": ["record_locator", "gds_record_locator"], "columns": LCC_DETAILED_COLUMNS},
     {"key": "lcc-flown-report", "label": "LCC · Flown Report", "group": "lcc", "kind": "jsonb",
@@ -137,12 +156,73 @@ def _val(v) -> Any:
     return v
 
 
-def _predicate(src: dict, tokens_lower: list[str]):
+def _norm_sql(col):
+    """SQL mirror of services.bsp_reconciliation.norm_tn.
+
+    Strip non-alphanumerics, drop leading zeros, uppercase — so a document typed
+    as printed ("098-4846834428", "0984846834428") lands on the same key as the
+    bare "4846834428" the statement stores.
+    """
+    return func.upper(func.ltrim(func.regexp_replace(col, r"[^0-9A-Za-z]", "", "g"), "0"))
+
+
+def _alt_sql(col):
+    """SQL mirror of services.bsp_reconciliation._alt_key — last 10 alphanumerics.
+
+    A ticket is printed with its 3-digit airline stock prefix (098-4846834428)
+    but stored without it, so normalising alone still misses. Reconciliation
+    already joins on the trailing 10; searching has to agree with it or the two
+    screens disagree about whether the same ticket exists.
+    """
+    return func.right(func.regexp_replace(col, r"[^0-9A-Za-z]", "", "g"), 10)
+
+
+def _predicate(
+    src: dict,
+    tokens: list[str],
+    tokens_lower: list[str],
+    tokens_norm: list[str],
+    tokens_alt: list[str],
+):
+    """Match a token against every identifier this source can be found by.
+
+    Three passes, OR'd: the exact (indexed) one first, then the two normalised
+    forms. Previously only the exact one existed, which meant Ticket Search
+    answered "not found" for a ticket that BSP Reconciliation had already
+    matched — the same number, written the way the agent reads it off the coupon.
+    """
     m = src["model"]
-    if src["kind"] == "jsonb":
-        conds = [func.lower(m.data[key].astext).in_(tokens_lower) for key in src["match"]]
+    cols = (
+        [m.data[key].astext for key in src["match"]]
+        if src["kind"] == "jsonb"
+        else [getattr(m, col) for col in src["match"]]
+    )
+
+    conds = [func.lower(c).in_(tokens_lower) for c in cols]
+    if tokens_norm:
+        conds += [_norm_sql(c).in_(tokens_norm) for c in cols]
+    if tokens_alt:
+        conds += [_alt_sql(c).in_(tokens_alt) for c in cols]
+
+    # Conjunction tickets: a long itinerary is issued across several documents,
+    # and the extra ones live in this JSONB array. The list is already shown in
+    # the results as "Alt Docs" but was never searchable, so looking up a
+    # conjunction number found nothing while the ticket sat right there.
+    # Conjunction tickets: a long itinerary is issued across several documents,
+    # and the extra ones live in this JSONB array. The list is already shown in
+    # the results as "Alt Docs" but was never searchable, so looking up a
+    # conjunction number found nothing while the ticket sat right there.
+    #
+    # `?|` tests array membership and can use a GIN index, so rather than
+    # normalising every element we hand it every form the token could have been
+    # stored as. Conjunction documents are bare digits, so case never matters.
+    if tokens_norm or tokens_alt:
+        json_tokens = sorted({*tokens, *tokens_norm, *tokens_alt})
     else:
-        conds = [func.lower(getattr(m, col)).in_(tokens_lower) for col in src["match"]]
+        json_tokens = sorted(set(tokens))
+    for key in src.get("match_json_array", []):
+        conds.append(getattr(m, key).op("?|")(cast(json_tokens, ARRAY(TEXT))))
+
     return or_(*conds)
 
 
@@ -213,6 +293,12 @@ async def _run_lookup(document: Optional[str], airline_type: str, db: AsyncSessi
         raise HTTPException(status_code=400, detail="airline_type must be one of: all, bsp, lcc, third-party.")
 
     tokens_lower = [t.lower() for t in tokens]
+    # Same two keys BSP Reconciliation joins on, so both screens agree about what
+    # counts as the same ticket. _alt_key returns None below 10 characters, which
+    # keeps a 6-character PNR off the trailing-10 path entirely.
+    tokens_norm = sorted({n for n in (norm_tn(t) for t in tokens) if n})
+    tokens_alt = sorted({a for a in (_alt_key(t) for t in tokens) if a})
+
     groups: list[dict] = []
     for src in SOURCES:
         if at != "all" and src["group"] != at:
@@ -221,7 +307,7 @@ async def _run_lookup(document: Optional[str], airline_type: str, db: AsyncSessi
             select(src["model"]).where(
                 src["model"].tenant_id == user.tenant_id,
                 src["model"].created_by_id == user.id,
-                _predicate(src, tokens_lower),
+                _predicate(src, tokens, tokens_lower, tokens_norm, tokens_alt),
             ).limit(_PER_SOURCE_LIMIT)
         )).scalars().all()
         if not rows:

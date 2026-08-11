@@ -15,6 +15,39 @@ class UserRole(str, enum.Enum):
     VIEWER          = "viewer"
 
 
+def role_matches(role, *targets: UserRole) -> bool:
+    """Compare a user's role against one or more UserRole members, tolerantly.
+
+    The users.role column is SAEnum(native_enum=False) with no values_callable,
+    so it persists the enum NAME ("PLATFORM_ADMIN") rather than its value. Most
+    reads come back as a UserRole member, but raw-SQL paths (create_platform_admin.py)
+    and a few call sites hand back a bare string in either casing. This collapses
+    all of that, and is the same reasoning behind require_role's token sets.
+    """
+    if role is None:
+        return False
+    tokens = {role}
+    if isinstance(role, UserRole):
+        tokens |= {role.name, role.value, role.name.lower(), role.value.lower(),
+                   role.name.upper(), role.value.upper()}
+    else:
+        s = str(role)
+        tokens |= {s, s.lower(), s.upper()}
+
+    for target in targets:
+        if not tokens.isdisjoint({
+            target, target.name, target.value,
+            target.name.lower(), target.value.lower(),
+            target.name.upper(), target.value.upper(),
+        }):
+            return True
+    return False
+
+
+def _is_platform_admin_role(role) -> bool:
+    return role_matches(role, UserRole.PLATFORM_ADMIN)
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -63,3 +96,39 @@ class User(Base):
         if "tenant" in sa_inspect(self).unloaded:
             return None
         return self.tenant.tenant_type.value if self.tenant else None
+
+    # ── Subscription, derived from the tenant ────────────────────────────────
+    # The plan is bought per workspace, so these three just read through to the
+    # tenant. They exist so UserRead can carry the state to the browser in the
+    # login response and on /users/me.
+    @property
+    def plan_active(self) -> bool:
+        """Whether this user's workspace may use the product.
+
+        A platform admin has no tenant by design and is never subject to the
+        paywall — it owns global master data, not a customer workspace.
+
+        Returns True when `tenant` is unloaded. This property is a *display*
+        value; the enforcing check lives in get_current_user, which always
+        eager-loads the tenant. Failing open here only affects endpoints that
+        serialize other people's users (the admin list), where the field is
+        cosmetic — it never widens access.
+        """
+        if _is_platform_admin_role(self.role):
+            return True
+        if "tenant" in sa_inspect(self).unloaded:
+            return True
+        return bool(self.tenant and self.tenant.has_active_plan)
+
+    @property
+    def plan_status(self) -> str | None:
+        if "tenant" in sa_inspect(self).unloaded or not self.tenant:
+            return None
+        status = self.tenant.plan_status
+        return getattr(status, "value", status)
+
+    @property
+    def plan_expires_at(self) -> datetime | None:
+        if "tenant" in sa_inspect(self).unloaded:
+            return None
+        return self.tenant.plan_expires_at if self.tenant else None

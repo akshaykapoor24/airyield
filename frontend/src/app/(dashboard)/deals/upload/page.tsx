@@ -16,6 +16,7 @@ import {
   INCENTIVE_FIELDS, FIELD_OPTIONS, ANCILLARY_ITEMS,
   TabBar, IncentiveTabContent, InclExclTabContent,
 } from "@/components/deals/IncentiveInclExclShared";
+import { missingFields, missingMessage, notifyRequired } from "@/lib/requiredFields";
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CONSTANTS
@@ -319,6 +320,19 @@ function convertAIDealsToRows(deals: AIDeal[]): ReviewRow[] {
     };
   });
 }
+
+// Contract columns every review row must carry before it can be saved. These
+// are the four the manual deal API declares required (airline_type,
+// airline_name, valid_from, valid_to) — the upload confirm payload leaves them
+// all Optional, so without this check a blank one saved silently as NULL.
+// Contract Year / Trigger / Payout are NOT here: the mapping step fills them
+// with GDS / Sales / Sales fallbacks, so they are never blank by this point.
+const REQUIRED_ROW_COLUMNS:{key:string;label:string;dealTypes:string[]}[] = [
+  {key:"c__airline_name",label:"Airline Name",         dealTypes:["airline","b2b"]},
+  {key:"c__airline_type",label:"Airline Type",         dealTypes:["airline","b2b"]},
+  {key:"c__valid_from",  label:"Contract Valid From",  dealTypes:["airline","b2b"]},
+  {key:"c__valid_to",    label:"Contract Valid To",    dealTypes:["airline","b2b"]},
+];
 
 const EMPTY_ROW = ():ReviewRow => ({
   row_order:0,airline_name:"",iata_code:"",eco_commission:"",
@@ -1451,6 +1465,9 @@ export default function UploadDealPage(){
   const [bulkColKey,    setBulkColKey]    = useState("");
   const [bulkColValue,  setBulkColValue]  = useState("");
   const [savedBatchId,  setSavedBatchId]  = useState<string|null>(null);
+  // Set when the deals saved but storing the source contract failed. Reported on
+  // the success screen so "Saved Successfully" never overstates what happened.
+  const [fileStoreError,setFileStoreError]= useState("");
   const [isMultiTab,    setIsMultiTab]    = useState(false);   // multi-tab workbook upload
   // parsed multi-tab rows held aside while the user reviews/adjusts column mapping
   const [mtParsed,      setMtParsed]      = useState<{rows:ReviewRow[];rowInclExcl:Record<number,RowInclExcl>}|null>(null);
@@ -1620,9 +1637,19 @@ export default function UploadDealPage(){
 
   // ── Step 1 → 2/3: Extract ───────────────────────────────────────────────────
   const handleExtract=async()=>{
-    if(!file){setUploadError("Please select a file.");return;}
-    if(!dealType){setUploadError("Please select a deal type.");return;}
-    if(dealType==="b2b"&&!supplierName){setUploadError("Please select a supplier name for B2B deal.");return;}
+    // Inline message AND a side notification: the inline one persists while the
+    // user fixes it, the toast is what they actually notice on a long form.
+    const missing=missingFields([
+      {label:"Contract File",value:file},
+      {label:"Deal Type",value:dealType},
+      {label:"Supplier Name",value:supplierName,when:dealType==="b2b"},
+    ]);
+    if(missing.length||!file){
+      const msg=missingMessage(missing.length?missing:["Contract File"]);
+      setUploadError(msg);
+      notifyRequired(msg);
+      return;
+    }
     setUploading(true);setUploadError("");setIsMultiTab(false);
     try{
       const form=new FormData();form.append("file",file);
@@ -1766,7 +1793,47 @@ export default function UploadDealPage(){
 
   // ── Step 3 → 4: Save ────────────────────────────────────────────────────────
   const handleConfirm=async()=>{
-    if(rows.length===0){setSaveError("Add at least one commission row before saving.");return;}
+    if(rows.length===0){
+      const msg="Add at least one commission row before saving.";
+      setSaveError(msg);notifyRequired(msg);return;
+    }
+
+    // Every review row becomes its own deal, so the header fields the deal API
+    // needs have to be present on each one. Nothing checked this before: the
+    // confirm payload declares all of them Optional, so a row with no airline or
+    // no contract dates saved as NULL and still reported "Deal Saved
+    // Successfully". Validate here, name the row, and refuse.
+    const rowValue=(r:ReviewRow,key:string)=>
+      key==="c__airline_name" ? (r.extra[key]||r.airline_name||"") : (r.extra[key]||"");
+    const badRows:{row:number;missing:string[]}[]=[];
+    rows.forEach((r,i)=>{
+      const missing=missingFields(
+        REQUIRED_ROW_COLUMNS
+          .filter(c=>c.dealTypes.includes(dealType||"airline"))
+          .map(c=>({label:c.label,value:rowValue(r,c.key)}))
+      );
+      if(missing.length) badRows.push({row:i+1,missing});
+    });
+    if(badRows.length){
+      const cols=[...new Set(badRows.flatMap(b=>b.missing))];
+      const msg=badRows.length===1
+        ? `Row ${badRows[0].row}: ${missingMessage(badRows[0].missing)}`
+        : `${badRows.length} rows are missing required fields (${cols.join(", ")}). First problem is row ${badRows[0].row}.`;
+      setSaveError(msg);notifyRequired(msg);
+      setFilterText("");                      // clear any filter hiding the bad row
+      return;
+    }
+
+    // An inverted contract range produces incentives that can never trigger.
+    const badRange=rows.findIndex(r=>{
+      const f=rowValue(r,"c__valid_from"),t=rowValue(r,"c__valid_to");
+      return f&&t&&t<f;
+    });
+    if(badRange>=0){
+      const msg=`Row ${badRange+1}: Contract Valid To must be on or after Contract Valid From.`;
+      setSaveError(msg);notifyRequired(msg);return;
+    }
+
     setSaving(true);setSaveError("");
     const ext=file?.name.split(".").pop()?.toLowerCase()??"unknown";
     const fileType=ext==="pdf"?"pdf":["xls","xlsx"].includes(ext)?"excel":["doc","docx"].includes(ext)?"word":["png","jpg","jpeg"].includes(ext)?"image":"unknown";
@@ -1847,6 +1914,7 @@ export default function UploadDealPage(){
         }
       );
       setSavedBatchId(confirmData.batch_id ?? null);
+      setFileStoreError("");
       if (file && confirmData.batch_id) {
         console.log("[GCS] Uploading deal file to bucket | batch_id=", confirmData.batch_id, "| file=", file.name, "| size=", file.size);
         try {
@@ -1857,7 +1925,14 @@ export default function UploadDealPage(){
           });
           console.log("[GCS] Deal file upload SUCCESS | response=", res.data);
         } catch (uploadErr) {
+          // The deals themselves are saved — only the source contract failed to
+          // store. Previously this went to the console alone, so the user got an
+          // unqualified "Deal Saved Successfully" for a batch with no attachment
+          // and no way to know it had to be re-attached.
           console.error("[GCS] Deal file upload FAILED:", uploadErr);
+          const detail = (uploadErr as {response?:{data?:{detail?:string}}})?.response?.data?.detail;
+          setFileStoreError(detail ?? "The contract file could not be stored.");
+          notifyRequired(`Deals saved, but the contract file "${file.name}" was not attached. Re-upload it from the batch page.`);
         }
       } else {
         console.warn("[GCS] Skipping file upload | file=", file, "| batch_id=", confirmData.batch_id);
@@ -1880,12 +1955,21 @@ export default function UploadDealPage(){
         <span className="font-medium">{rows.length} row{rows.length!==1?"s":""}</span> saved and submitted for approval.
         {selectedIncentives.length>0&&<> Incentives: <span className="font-medium">{selectedIncentives.join(", ")}</span>.</>}
       </p>
+      {fileStoreError&&(
+        <div className="flex items-start gap-2 text-left bg-amber-50 border border-amber-200 rounded-lg px-3 py-2.5">
+          <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5"/>
+          <p className="text-xs text-amber-700">
+            <span className="font-semibold">The contract file was not attached.</span>{" "}
+            {fileStoreError} The deals above are saved — re-upload the file from the batch page.
+          </p>
+        </div>
+      )}
       <div className="flex gap-3 justify-center pt-2 flex-wrap">
         {savedBatchId&&(
           <button onClick={()=>router.push(`/deals/${savedBatchId}`)} className="bg-[#1e3a5f] text-white px-5 py-2 rounded-lg text-sm font-medium hover:bg-[#16304f]">View Batch</button>
         )}
         <button onClick={()=>router.push("/deals")} className="border border-[#1e3a5f] text-[#1e3a5f] px-5 py-2 rounded-lg text-sm font-medium hover:bg-blue-50">View All Deals</button>
-        <button onClick={()=>{setStep(1);setFile(null);setPreview(null);setRows([]);setDealType("");setSupplierName("");setValidFromDate("");setColumnMap({});setSelectedIncentives([]);setSelectedInclExcl([]);setRowInclExcl({});setAiMode(false);setAiFileName("");setAiConfidence(0);setSavedBatchId(null);setCopyPrevInclExcl(true);setIsMultiTab(false);}}
+        <button onClick={()=>{setStep(1);setFile(null);setPreview(null);setRows([]);setDealType("");setSupplierName("");setValidFromDate("");setColumnMap({});setSelectedIncentives([]);setSelectedInclExcl([]);setRowInclExcl({});setAiMode(false);setAiFileName("");setAiConfidence(0);setSavedBatchId(null);setFileStoreError("");setCopyPrevInclExcl(true);setIsMultiTab(false);}}
           className="border border-gray-200 text-gray-700 px-5 py-2 rounded-lg text-sm font-medium hover:bg-gray-50">Upload Another</button>
       </div>
     </div>

@@ -5,6 +5,7 @@ import toast from "react-hot-toast";
 import { Layers, RefreshCw, Save, X } from "lucide-react";
 import api from "@/lib/api";
 import { apiError } from "@/components/userMaster/shared";
+import { missingFields, missingMessage, notifyRequired } from "@/lib/requiredFields";
 import AirlinePicker from "@/components/tickets/AirlinePicker";
 import SearchSelect from "@/components/ui/SearchSelect";
 import PaymentTermsEditor, { type PaymentTerm } from "@/components/vendors/PaymentTermsEditor";
@@ -141,12 +142,45 @@ export default function ContractModal({
     totalTouched && computedTotal != null && totalFare != null &&
     Math.abs(computedTotal - totalFare) > 0.01;
 
+  const paxNum = num(draft.pax_count);
+  // The editor keeps a line the moment either cell is filled, so a row with a due
+  // date and no percentage (or the reverse) would save as a half-instalment.
+  const incompleteTerm = (terms ?? []).some((t) => !t.due_date || t.percent == null);
+
   const save = async () => {
     setTouched(true);
-    if (!draft.pnr_no.trim()) {
-      setError("PNR No is required — it is how tickets are matched to this contract.");
+
+    const missing = missingFields([
+      // The match key. Already enforced server-side on create.
+      { label: "PNR No", value: draft.pnr_no },
+      // Not previously required, and its absence is invisible: the matching
+      // service's _status() returns PARTIAL for an unknown pax count no matter
+      // how many tickets are issued, so a contract saved without it can never
+      // reach "complete" — it just sits at partial forever.
+      { label: "Pax Count", value: draft.pax_count },
+      // On an AIRLINE contract the server mirrors the airline into agent_name;
+      // on a B2B one it does not, so leaving this blank saves a contract with no
+      // counterparty at all.
+      { label: "Supplier", value: draft.agent_name, when: isB2B },
+      // Each instalment's rupee amount is derived from the total, so a schedule
+      // without one stores every amount as null.
+      { label: "Total Fare", value: draft.total_fare, when: (terms?.length ?? 0) > 0 },
+    ]);
+    if (missing.length) {
+      const msg = missingMessage(missing);
+      setError(msg);
+      notifyRequired(msg);
       return;
     }
+    if (paxNum == null || paxNum <= 0) {
+      const msg = "Pax Count must be greater than zero — a contract for zero passengers can never complete.";
+      setError(msg); notifyRequired(msg); return;
+    }
+    if (incompleteTerm) {
+      const msg = "Every payment term needs both a due date and a percentage. Complete or remove the blank one.";
+      setError(msg); notifyRequired(msg); return;
+    }
+
     setSaving(true); setError("");
     try {
       const payload = {
@@ -227,7 +261,9 @@ export default function ContractModal({
                 airline below already names the party. */}
             {isB2B && (
               <div>
-                <label className={LABEL}>Supplier</label>
+                <label className={LABEL}>
+                  Supplier<span className="text-red-500 ml-0.5">*</span>
+                </label>
                 <SearchSelect
                   value={draft.agent_name}
                   options={suppliers}
@@ -235,6 +271,9 @@ export default function ContractModal({
                   placeholder="Select supplier…"
                   allowCustom
                 />
+                <p className="text-[10px] text-gray-400 mt-1 leading-snug">
+                  The counterparty on a B2B contract — nothing else names it.
+                </p>
               </div>
             )}
 
@@ -264,14 +303,22 @@ export default function ContractModal({
             />
 
             <div>
-              <label className={LABEL}>Pax Count</label>
+              <label className={LABEL}>
+                Pax Count<span className="text-red-500 ml-0.5">*</span>
+              </label>
               <input
-                type="number" min="0" step="1"
+                type="number" min="1" step="1"
                 value={draft.pax_count}
                 onChange={(e) => set("pax_count", e.target.value)}
                 placeholder="40"
-                className={INPUT}
+                className={`${INPUT} ${
+                  touched && (paxNum == null || paxNum <= 0) ? "border-red-300 bg-red-50" : ""
+                }`}
               />
+              <p className="text-[10px] text-gray-400 mt-1 leading-snug">
+                The seat block being sold. Without it the contract stays &ldquo;partial&rdquo; forever —
+                there is nothing to count the issued tickets against.
+              </p>
             </div>
 
             <div>
@@ -304,7 +351,10 @@ export default function ContractModal({
             </div>
 
             <div>
-              <label className={LABEL}>Total Fare</label>
+              <label className={LABEL}>
+                Total Fare
+                {(terms?.length ?? 0) > 0 && <span className="text-red-500 ml-0.5">*</span>}
+              </label>
               <input
                 type="number" step="0.01"
                 value={draft.total_fare}

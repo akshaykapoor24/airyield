@@ -10,6 +10,7 @@ import {
   Calculator, Upload, ClipboardCheck, CheckSquare,
   Edit3, Users, Shield, GitMerge, Search,
   BookOpen, History, LayoutGrid, Plus, Contact, Percent, FilePlus, Layers,
+  CreditCard,
 } from "lucide-react";
 import { loadDashboards, type CustomDashboard } from "@/lib/customDashboards";
 import { cn } from "@/lib/utils";
@@ -94,17 +95,17 @@ const TENANT_NAV: NavItem[] = [
     ],
   },
 
-  {
-    id: "reports", label: "Reports", icon: BarChart2,
-    children: [
-      { label: "Airline-wise", href: "/reports", icon: Plane },
-      { label: "Supplier-wise", href: "/reports/supplier", icon: Building2 },
-      { label: "Route / Class", href: "/reports/route-class", icon: Route },
-      { label: "Period-wise", href: "/reports/period", icon: History },
-      { label: "Adjustment", href: "/reports/adjustment", icon: Edit3 },
-      { label: "Audit Trail", href: "/reports/audit-trail", icon: BookOpen },
-    ],
-  },
+  // {
+  //   id: "reports", label: "Reports", icon: BarChart2,
+  //   children: [
+  //     { label: "Airline-wise", href: "/reports", icon: Plane },
+  //     { label: "Supplier-wise", href: "/reports/supplier", icon: Building2 },
+  //     { label: "Route / Class", href: "/reports/route-class", icon: Route },
+  //     { label: "Period-wise", href: "/reports/period", icon: History },
+  //     { label: "Adjustment", href: "/reports/adjustment", icon: Edit3 },
+  //     { label: "Audit Trail", href: "/reports/audit-trail", icon: BookOpen },
+  //   ],
+  // },
 
   {
     // "update", not "master": a tenant user submits changes here and sees their
@@ -149,13 +150,14 @@ const PLATFORM_NAV: NavItem[] = [
       { label: "Airlines", href: "/masters/airlines", icon: Plane },
       { label: "Airports", href: "/masters/airports", icon: MapPin },
       { label: "Classes / RBD", href: "/masters/classes", icon: Tag },
-      { label: "Income Heads", href: "/masters/income-heads", icon: DollarSign },
-      { label: "Calculation Rules", href: "/masters/calculation-rules", icon: Calculator },
+      // { label: "Income Heads", href: "/masters/income-heads", icon: DollarSign },
+      // { label: "Calculation Rules", href: "/masters/calculation-rules", icon: Calculator },
     ],
   },
   {
     id: "administration", label: "Administration", icon: Shield,
     children: [
+      { label: "Subscriptions", href: "/admin/subscriptions", icon: CreditCard },
       { label: "Configuration", href: "/admin/configuration", icon: Settings },
       { label: "Approval Inbox", href: "/admin/approval-matrix", icon: GitMerge },
     ],

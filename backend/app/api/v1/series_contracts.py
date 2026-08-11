@@ -192,6 +192,16 @@ async def update_contract(
 ):
     obj = await _get_owned_contract(contract_id, db, current_user)
     data = _payload_fields(payload)
+    # Create refuses a blank PNR; update did not, so a PATCH carrying "" cleared
+    # the match key and quietly detached the contract from its tickets — the next
+    # matching run would find nothing and reset the rollup to zero.
+    # `exclude_unset` means an absent key is "leave it alone"; only an explicit
+    # blank is rejected.
+    if "pnr_no" in data and not data.get("pnr_no"):
+        raise HTTPException(
+            status_code=400,
+            detail="PNR No is required — it is how tickets are matched to this contract.",
+        )
     for field, value in data.items():
         setattr(obj, field, value)
     _sync_agent_name(obj)

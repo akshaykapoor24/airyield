@@ -7,8 +7,13 @@ import {
 } from "lucide-react";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
+import { notifyRequired } from "@/lib/requiredFields";
 
 const PAGE = 50;
+// The API rejects anything below 3 recognised columns (_MIN_MATCHED_COLUMNS in
+// api/v1/statements.py). Between that floor and this number the import succeeds
+// but most fields land empty, which is worth saying out loud.
+const LOW_MATCH_WARNING = 6;
 const SELECT_CLS =
   "border border-slate-200 rounded-lg px-2 py-1.5 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-400";
 
@@ -67,7 +72,7 @@ function UploadModal({ apiBase, title, onClose, onDone }: { apiBase: string; tit
     setFile(f);
   };
   const submit = async () => {
-    if (!file) return;
+    if (!file) { notifyRequired("Choose an .xlsx, .xls or .csv file to import."); return; }
     setUploading(true);
     try {
       const fd = new FormData(); fd.append("file", file);
@@ -78,6 +83,15 @@ function UploadModal({ apiBase, title, onClose, onDone }: { apiBase: string; tit
       toast.success(split
         ? `Imported ${data.source_rows} ${title} ticket line${data.source_rows === 1 ? "" : "s"} as ${data.leg_rows} sector rows.`
         : `Imported ${data.inserted} ${title} row${data.inserted === 1 ? "" : "s"}.`);
+      // The API refuses a file below its minimum recognised-column threshold, but
+      // it will happily accept one just above it — and then most columns land
+      // empty. The count was already in the response and simply never shown.
+      if (data.matched_columns != null && data.matched_columns < LOW_MATCH_WARNING) {
+        toast(
+          `Only ${data.matched_columns} column${data.matched_columns === 1 ? "" : "s"} were recognised — most fields will be blank. Check the file against the Template.`,
+          { icon: "⚠️", duration: 7000 }
+        );
+      }
       onDone();
     } catch (e) { toast.error(errMsg(e, "Failed to import the file.")); }
     finally { setUploading(false); }

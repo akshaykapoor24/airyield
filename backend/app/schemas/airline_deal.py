@@ -3,17 +3,23 @@ from datetime import datetime, date
 from typing import Optional
 from pydantic import BaseModel
 
+from app.schemas.required import RequiredStr, ISODate
+
 
 class AirlineDealCreate(BaseModel):
     source_agent: Optional[str] = None
     deal_maker_name: Optional[str] = None
     deal_tag: Optional[str] = "standard"
     remark: Optional[str] = None
-    airline_type: str
-    airline_name: str
+    # These four were already declared required, but as bare `str` — which accepts
+    # "" and was then written to the column as NULL by `payload.airline_type or
+    # None`. The form sent "" for any field it did not validate, so the deal
+    # saved half-empty and reported success. RequiredStr rejects blank.
+    airline_type: RequiredStr
+    airline_name: RequiredStr
     contract_year: Optional[str] = None
-    valid_from: str
-    valid_to: str
+    valid_from: ISODate
+    valid_to: ISODate
     trigger_type: Optional[str] = None
     payout_type: Optional[str] = None
     entity: Optional[str] = None

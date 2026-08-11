@@ -60,6 +60,14 @@ class UserRead(BaseModel):
     created_at: datetime
     tenant_id: Optional[int] = None
     tenant_type: Optional[str] = None   # "corporate" | "individual" (derived from tenant)
+    # Subscription state of this user's workspace, derived from the tenant. The
+    # browser gates the whole dashboard on plan_active; the real enforcement is
+    # the 402 in get_current_user. Defaults to True so an endpoint that
+    # serializes users without eager-loading the tenant can't render a false
+    # "frozen" — see User.plan_active.
+    plan_active: bool = True
+    plan_status: Optional[str] = None   # "free" | "trial" | "active" | "expired" | "suspended"
+    plan_expires_at: Optional[datetime] = None
     # Entities this member is assigned to. Populated by the admin user endpoints;
     # empty elsewhere (e.g. /users/me) since it needs a separate lookup.
     entity_ids: list[int] = []

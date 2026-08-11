@@ -3,6 +3,8 @@ from datetime import datetime, date
 from typing import Optional
 from pydantic import BaseModel
 
+from app.schemas.required import RequiredStr, ISODate
+
 
 class B2BDealCreate(BaseModel):
     source_agent: Optional[str] = None
@@ -10,12 +12,17 @@ class B2BDealCreate(BaseModel):
     deal_tag: Optional[str] = "standard"
     # inbound = deal received from this supplier; outbound = deal floated to it (supplier_name = whom)
     direction: str = "inbound"
+    # The counterparty. Required in practice — it is the deal's source_agent, and
+    # for a B2B Standard deal it is what resolves the agency whose entities and
+    # login IDs the form offers — but left Optional here so existing rows and any
+    # caller mid-migration are not broken. The form enforces it.
     supplier_name: Optional[str] = None
     remark: Optional[str] = None
-    airline_type: str
-    airline_name: str
-    valid_from: str
-    valid_to: str
+    # See AirlineDealCreate — bare `str` accepted "" and stored NULL.
+    airline_type: RequiredStr
+    airline_name: RequiredStr
+    valid_from: ISODate
+    valid_to: ISODate
     contract_year: Optional[str] = None
     # No trigger_type, payout_type for B2B
     entity: Optional[str] = None

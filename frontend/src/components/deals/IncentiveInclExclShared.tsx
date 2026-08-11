@@ -119,9 +119,16 @@ export const INCL_EXCL_SEARCH_OPTIONS: Record<string, string[]> = {
 };
 
 // ── compact select ─────────────────────────────────────────────────────────
-export function SelectField({ label, placeholder="Select...", options, value, onChange }: {
+/** Red asterisk after a label. Kept in one place so every mandatory field on
+ *  every deal form is marked identically. */
+export function RequiredMark({ required }: { required?: boolean }) {
+  if (!required) return null;
+  return <span className="text-red-500 ml-0.5" title="Required">*</span>;
+}
+
+export function SelectField({ label, placeholder="Select...", options, value, onChange, required }: {
   label?: string; placeholder?: string; options: string[];
-  value: string; onChange: (v: string) => void;
+  value: string; onChange: (v: string) => void; required?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -135,7 +142,7 @@ export function SelectField({ label, placeholder="Select...", options, value, on
   const unique = useMemo(() => [...new Set(options)], [options]);
   return (
     <div className="relative" ref={ref}>
-      {label && <label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">{label}</label>}
+      {label && <label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">{label}<RequiredMark required={required} /></label>}
       <button type="button" onClick={() => setOpen(o => !o)}
         className="w-full flex items-center justify-between border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-white text-left focus:outline-none focus:ring-1 focus:ring-blue-400">
         <span className={value ? "text-gray-800" : "text-gray-400"}>{value || placeholder}</span>
@@ -157,9 +164,9 @@ export function SelectField({ label, placeholder="Select...", options, value, on
 }
 
 // ── compact search select ──────────────────────────────────────────────────
-export function SearchSelectField({ label, placeholder="Search and select", options, value, onChange }: {
+export function SearchSelectField({ label, placeholder="Search and select", options, value, onChange, required }: {
   label?: string; placeholder?: string; options: string[];
-  value: string; onChange: (v: string) => void;
+  value: string; onChange: (v: string) => void; required?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -179,7 +186,7 @@ export function SearchSelectField({ label, placeholder="Search and select", opti
   const filtered = unique.filter(o => o.toLowerCase().includes(search.toLowerCase()));
   return (
     <div className="relative" ref={ref}>
-      {label && <label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">{label}</label>}
+      {label && <label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">{label}<RequiredMark required={required} /></label>}
       <button type="button" onClick={() => { setOpen(o => !o); setSearch(""); }}
         className="w-full flex items-center justify-between border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-white text-left focus:outline-none focus:ring-1 focus:ring-blue-400">
         <span className={value ? "text-gray-800" : "text-gray-400"}>{value || placeholder}</span>
@@ -207,9 +214,9 @@ export function SearchSelectField({ label, placeholder="Search and select", opti
 }
 
 // ── multi-checkbox dropdown ────────────────────────────────────────────────
-export function MultiCheckboxDropdown({ label, placeholder="Select...", options, values, onChange }: {
+export function MultiCheckboxDropdown({ label, placeholder="Select...", options, values, onChange, required }: {
   label?: string; placeholder?: string; options: string[];
-  values: string[]; onChange: (v: string[]) => void;
+  values: string[]; onChange: (v: string[]) => void; required?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -227,7 +234,7 @@ export function MultiCheckboxDropdown({ label, placeholder="Select...", options,
   const display = values.length ? values.join(", ") : null;
   return (
     <div className="relative" ref={ref}>
-      {label && <label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">{label}</label>}
+      {label && <label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">{label}<RequiredMark required={required} /></label>}
       <button type="button" onClick={() => setOpen(o => !o)}
         className="w-full flex items-center justify-between border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-white text-left focus:outline-none focus:ring-1 focus:ring-blue-400">
         <span className={display ? "text-gray-800" : "text-gray-400"}>{display || placeholder}</span>
@@ -252,9 +259,9 @@ export function MultiCheckboxDropdown({ label, placeholder="Select...", options,
 }
 
 // ── multi-value search select ───────────────────────────────────────────────
-export function MultiSearchSelectField({ label, placeholder="Search and select", options, values, onChange }: {
+export function MultiSearchSelectField({ label, placeholder="Search and select", options, values, onChange, required }: {
   label?: string; placeholder?: string; options: string[];
-  values: string[]; onChange: (v: string[]) => void;
+  values: string[]; onChange: (v: string[]) => void; required?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -272,7 +279,7 @@ export function MultiSearchSelectField({ label, placeholder="Search and select",
   const display = values.length ? values.join(", ") : null;
   return (
     <div className="relative" ref={ref}>
-      {label && <label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">{label}</label>}
+      {label && <label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">{label}<RequiredMark required={required} /></label>}
       <button type="button" onClick={() => { setOpen(o => !o); setSearch(""); }}
         className="w-full flex items-start justify-between border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-white text-left focus:outline-none focus:ring-1 focus:ring-blue-400 min-h-[28px]">
         <span className={display ? "text-gray-800 whitespace-normal break-words leading-relaxed" : "text-gray-400"}>{display || placeholder}</span>
@@ -303,8 +310,8 @@ export function MultiSearchSelectField({ label, placeholder="Search and select",
 }
 
 // ── free-text tag input (e.g. tour codes) ───────────────────────────────────
-export function TagInput({ label, placeholder="Type and press Enter", values, onChange }: {
-  label?: string; placeholder?: string; values: string[]; onChange: (v: string[]) => void;
+export function TagInput({ label, placeholder="Type and press Enter", values, onChange, required }: {
+  label?: string; placeholder?: string; values: string[]; onChange: (v: string[]) => void; required?: boolean;
 }) {
   const [text, setText] = useState("");
   const commit = () => { const v = text.trim(); if (v && !values.includes(v)) { onChange([...values, v]); } setText(""); };
@@ -314,7 +321,7 @@ export function TagInput({ label, placeholder="Type and press Enter", values, on
   };
   return (
     <div>
-      {label && <label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">{label}</label>}
+      {label && <label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">{label}<RequiredMark required={required} /></label>}
       <div className="min-h-[28px] border border-gray-200 rounded-md px-2 py-1 flex flex-wrap gap-1 bg-white focus-within:ring-1 focus-within:ring-blue-400">
         {values.map(v => (
           <span key={v} className="flex items-center gap-1 px-1.5 py-0.5 bg-blue-50 text-blue-700 border border-blue-200 rounded text-[10px] font-medium">
@@ -331,13 +338,13 @@ export function TagInput({ label, placeholder="Type and press Enter", values, on
 }
 
 // ── date input ─────────────────────────────────────────────────────────────
-export function DateField({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
+export function DateField({ label, value, onChange, required }: { label: string; value: string; onChange: (v: string) => void; required?: boolean }) {
   // Always a real date input so the FIRST click opens the native calendar (no
   // text→date swap that used to cost a click). Stays empty until a date is picked —
   // no current date is pre-filled.
   return (
     <div>
-      <label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">{label}</label>
+      <label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">{label}<RequiredMark required={required} /></label>
       <input type="date" value={value}
         onClick={e => { try { e.currentTarget.showPicker?.(); } catch { /* unsupported — ignore */ } }}
         onChange={e => onChange(e.currentTarget.value)}
