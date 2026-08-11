@@ -68,6 +68,9 @@ export default function PaymentTermsEditor({
     return Number.isFinite(n) ? sum + n : sum;
   }, 0);
   const offBy100 = lines.length > 0 && Math.abs(totalPct - 100) > 0.01;
+  const halfFilledCount = lines.filter(
+    (l) => (!!l.due_date) !== Number.isFinite(parseFloat(l.percent)),
+  ).length;
 
   return (
     <div className="space-y-2">
@@ -84,6 +87,11 @@ export default function PaymentTermsEditor({
         const pct = parseFloat(l.percent);
         const amount =
           Number.isFinite(pct) && totalFare != null ? (totalFare * pct) / 100 : null;
+        // A line survives serialisation the moment either cell is filled, so mark
+        // the missing half rather than letting it save as a null instalment.
+        const halfFilled = (!!l.due_date) !== Number.isFinite(pct);
+        const needDate = halfFilled && !l.due_date;
+        const needPct = halfFilled && !Number.isFinite(pct);
         return (
           <div key={i} className="flex items-center gap-2">
             <input
@@ -91,7 +99,9 @@ export default function PaymentTermsEditor({
               value={l.due_date}
               onChange={(e) => set(i, { due_date: e.target.value })}
               onClick={(e) => { try { (e.target as HTMLInputElement).showPicker(); } catch {} }}
-              className="w-40 border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400"
+              className={`w-40 border rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400 ${
+                needDate ? "border-red-300 bg-red-50" : "border-gray-200"
+              }`}
             />
             <input
               type="number"
@@ -99,7 +109,9 @@ export default function PaymentTermsEditor({
               value={l.percent}
               placeholder="25"
               onChange={(e) => set(i, { percent: e.target.value })}
-              className="w-24 border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400"
+              className={`w-24 border rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400 ${
+                needPct ? "border-red-300 bg-red-50" : "border-gray-200"
+              }`}
             />
             <span className="flex-1 text-right text-[11px] tabular-nums text-gray-600">
               {amount != null ? inr(amount) : <span className="text-gray-300">—</span>}
@@ -137,6 +149,17 @@ export default function PaymentTermsEditor({
           </span>
         )}
       </div>
+
+      {halfFilledCount > 0 && (
+        <div className="flex items-start gap-1.5 text-[10px] text-red-600 bg-red-50 border border-red-200 rounded-lg px-2.5 py-1.5">
+          <AlertCircle className="w-3 h-3 shrink-0 mt-px" />
+          <span>
+            {halfFilledCount === 1 ? "One instalment is" : `${halfFilledCount} instalments are`} missing a due
+            date or a percentage. Complete {halfFilledCount === 1 ? "it" : "them"} or remove the row — a
+            half-filled instalment saves with a blank amount.
+          </span>
+        </div>
+      )}
 
       {offBy100 && (
         <div className="flex items-start gap-1.5 text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">

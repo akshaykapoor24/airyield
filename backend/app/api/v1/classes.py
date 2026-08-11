@@ -10,7 +10,7 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import get_current_user, require_role
+from app.dependencies import get_current_user, is_platform_admin, require_role
 from app.models.airline_class_master import AirlineClassMaster
 from app.models.airline import Airline
 from app.models.class_approval import ClassApproval
@@ -72,12 +72,6 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _is_platform_admin(user: User) -> bool:
-    role = user.role
-    if isinstance(role, UserRole):
-        return role == PLATFORM
-    role_str = str(role).lower()
-    return role_str in {PLATFORM.value.lower(), PLATFORM.name.lower()}
 
 
 @router.get("/template")
@@ -203,7 +197,7 @@ async def bulk_upload_airline_classes(
             "is_active": True,
         }
         try:
-            if _is_platform_admin(current_user):
+            if is_platform_admin(current_user):
                 obj = AirlineClassMaster(**payload)
                 db.add(obj)
                 await db.commit()
@@ -362,7 +356,7 @@ async def create_airline_class(
         if not target_check.scalar_one_or_none():
             raise HTTPException(status_code=404, detail=f"Class with id {payload.target_id} not found.")
 
-        if _is_platform_admin(current_user):
+        if is_platform_admin(current_user):
             target_class = (
                 await db.execute(select(AirlineClassMaster).where(AirlineClassMaster.id == payload.target_id))
             ).scalar_one()
@@ -403,7 +397,7 @@ async def create_airline_class(
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Class already exists for this airline.")
 
-    if _is_platform_admin(current_user):
+    if is_platform_admin(current_user):
         obj = AirlineClassMaster(**{k: v for k, v in normalized.items() if k != "is_active"}, is_active=True)
         db.add(obj)
         await db.commit()
@@ -445,7 +439,7 @@ async def list_class_approvals(
     current_user: User = Depends(require_role(*SUBMITTERS)),
 ):
     pending_filter = func.lower(ClassApproval.status) == "pending"
-    if _is_platform_admin(current_user):
+    if is_platform_admin(current_user):
         result = await db.execute(
             select(ClassApproval)
             .options(

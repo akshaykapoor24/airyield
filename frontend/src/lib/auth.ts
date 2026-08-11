@@ -1,7 +1,10 @@
 import type { AppRole } from "@/lib/rbac";
+import { clearPlanBlocked } from "@/lib/planGate";
 
 const TOKEN_KEY = "ay_token";
 const USER_KEY  = "ay_user";
+
+export type PlanStatus = "free" | "trial" | "active" | "expired" | "suspended";
 
 export type AuthUser = {
   id: number;
@@ -14,6 +17,13 @@ export type AuthUser = {
   onboarding_complete?: boolean;
   tenant_id?: number | null;
   tenant_type?: "corporate" | "individual" | null;
+  // Subscription state of the user's workspace. Optional because a session that
+  // signed in before this shipped has an ay_user without them — the dashboard
+  // layout refetches /users/me on mount to heal that, and the 402 interceptor
+  // catches whatever slips through.
+  plan_active?: boolean;
+  plan_status?: PlanStatus | string | null;
+  plan_expires_at?: string | null;
 };
 
 export const ROLE_LABELS: Record<string, string> = {
@@ -52,6 +62,9 @@ export function setUser(user: AuthUser) {
 export function clearAuth() {
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(USER_KEY);
+  // Otherwise the next person to sign in on this tab inherits the previous
+  // account's frozen state until their first request.
+  clearPlanBlocked();
 }
 
 export function isAuthenticated(): boolean {

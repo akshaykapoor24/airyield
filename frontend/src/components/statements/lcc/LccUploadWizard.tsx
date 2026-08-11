@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
+import { notifyRequired } from "@/lib/requiredFields";
 
 type Step = "upload" | "mapping" | "preview" | "progress" | "done";
 
@@ -34,6 +35,30 @@ type StatusResp = {
 };
 
 const SKIP = "";   // "— not in file —"
+
+/**
+ * Mapping rules.
+ *
+ * Only ONE of each group has to be mapped — airlines label these differently and
+ * not every export carries all of them.
+ *
+ * IDENTIFIER is hard-required. Ticket Search finds an LCC Detailed row by
+ * `record_locator` or `gds_record_locator` and nothing else
+ * (api/v1/ticket_details.py, the lcc-detailed `match` list). Ingest a batch with
+ * neither mapped and every row is permanently unreachable from the product —
+ * the import reports "50,000 rows saved" and the rows may as well not exist.
+ *
+ * AMOUNT is hard-required too: a settlement statement row with no money on it
+ * cannot be reconciled against anything, so it is a mis-mapping, not a choice.
+ *
+ * DATE is a warning only — some exports genuinely carry the period in the file
+ * name rather than per row.
+ */
+const REQUIRED_MAPPING_GROUPS: { label: string; fields: string[]; headers: string }[] = [
+  { label: "a booking identifier", fields: ["record_locator", "gds_record_locator"], headers: "RecordLocator or GDS_recordlocator" },
+  { label: "an amount",            fields: ["total", "base_fare"],                   headers: "Total or BaseFare" },
+];
+const DATE_FIELDS = ["transaction_date", "booking_date", "payment_datetime"];
 
 function errMsg(e: unknown, fallback: string): string {
   const m = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
@@ -112,6 +137,29 @@ export default function LccUploadWizard({
   const allCols: StdCol[] = useMemo(() => groups.flatMap((g) => g.columns), [groups]);
   const totalStd = allCols.length || extracted?.standard_total || 0;
   const mappedCount = Object.values(columnMap).filter(Boolean).length;
+  // 87 of the 129 standard columns are tax codes, so "something is mapped" was
+  // satisfied by a single tax column. Count the ones that carry the row's identity.
+  const coreMappedCount = allCols.filter((c) => c.role === "core" && columnMap[c.field]).length;
+
+  const missingRequiredGroups = REQUIRED_MAPPING_GROUPS
+    .filter((g) => !g.fields.some((f) => columnMap[f]))
+    .map((g) => `${g.label} (${g.headers})`);
+  const dateMissing = !DATE_FIELDS.some((f) => columnMap[f]);
+
+  /** Guard for both Preview and Confirm — the mapping is what makes the rows usable. */
+  const checkMapping = (): boolean => {
+    if (coreMappedCount === 0) {
+      return notifyRequired("Map at least one Core column — mapping only taxes or legs would import rows with no ticket data on them.");
+    }
+    if (missingRequiredGroups.length) {
+      return notifyRequired(
+        missingRequiredGroups.length === 1
+          ? `Map ${missingRequiredGroups[0]} before continuing.`
+          : `Map ${missingRequiredGroups.join(" and ")} before continuing.`
+      );
+    }
+    return true;
+  };
 
   // ── Upload ─────────────────────────────────────────────────────────────────
   const pickFile = (f: File | null) => {
@@ -120,7 +168,7 @@ export default function LccUploadWizard({
   };
 
   const doExtract = async () => {
-    if (!file) return;
+    if (!file) { notifyRequired("Choose a statement file (.xlsx, .xls or .csv) to continue."); return; }
     setUploading(true);
     try {
       const fd = new FormData(); fd.append("file", file);
@@ -186,7 +234,10 @@ export default function LccUploadWizard({
 
   // ── Confirm + progress polling ───────────────────────────────────────────
   const doConfirm = async () => {
-    if (!extracted) return;
+    if (!extracted) { notifyRequired("Nothing to import — upload a file first."); return; }
+    // Re-checked here, not just on the Preview button: this is the call that
+    // actually writes rows, and the user can reach it after editing the mapping.
+    if (!checkMapping()) { setStep("mapping"); return; }
     try {
       await api.post(`${apiBase}/confirm`, { batch_id: extracted.batch_id, column_map: columnMap, expected_rows: expectedNum });
       setStatusData({ batch_id: extracted.batch_id, status: "pending", total_rows: extracted.total_rows, processed_rows: 0, expected_rows: expectedNum, progress_pct: 0, error: null });
@@ -279,6 +330,17 @@ export default function LccUploadWizard({
                   : <><AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" /><span>{mappedCount} of {totalStd} columns auto-matched. Map the remaining columns below (or leave them unmapped).</span></>}
               </div>
 
+              {/* What must be mapped, stated up front rather than only on rejection. */}
+              {missingRequiredGroups.length > 0 && (
+                <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 mb-3 text-xs text-red-700">
+                  <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+                  <span>
+                    <b>Still required:</b> {missingRequiredGroups.join(", ")}.{" "}
+                    Rows without a booking identifier can never be found in Ticket Search.
+                  </span>
+                </div>
+              )}
+
               <div className="flex items-center gap-2 mb-3">
                 <div className="relative flex-1 max-w-xs">
                   <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
@@ -346,6 +408,14 @@ export default function LccUploadWizard({
                 Preview of the first {previewRows.length} of {extracted.total_rows.toLocaleString()} rows, mapped as configured.
                 Confirm to ingest all {extracted.total_rows.toLocaleString()} rows in the background.
               </p>
+              {/* Not blocking — some exports carry the period in the file name — but
+                  worth saying before ingesting tens of thousands of undated rows. */}
+              {dateMissing && (
+                <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 mb-3 text-xs text-amber-700">
+                  <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+                  <span>No date column is mapped (Transaction Date, BookingDate or PaymentDtm). These rows will import without a date, so they won&apos;t appear in any period filter.</span>
+                </div>
+              )}
               <div className="border border-slate-200 rounded-xl overflow-hidden">
                 <div className="overflow-x-auto max-h-[52vh]">
                   <table className="text-left border-collapse text-sm">
@@ -449,7 +519,9 @@ export default function LccUploadWizard({
               </>
             )}
             {step === "mapping" && (
-              <button onClick={() => setStep("preview")} disabled={mappedCount === 0} className="inline-flex items-center gap-1.5 px-4 py-1.5 text-xs font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-40">
+              // Deliberately NOT disabled when the mapping is incomplete — a dead
+              // button explains nothing. Clicking it names what is missing.
+              <button onClick={() => { if (checkMapping()) setStep("preview"); }} className="inline-flex items-center gap-1.5 px-4 py-1.5 text-xs font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700">
                 Preview <ArrowRight className="w-3.5 h-3.5" />
               </button>
             )}

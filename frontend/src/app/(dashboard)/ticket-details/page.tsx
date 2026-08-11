@@ -109,7 +109,7 @@ export default function TicketDetailsPage() {
           <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-0.5">Vendors data</p>
           <h1 className="text-xl font-bold text-gray-900">Ticket Details</h1>
           <p className="text-xs text-gray-500 mt-0.5">
-            Look up a ticket across BSP, LCC and Third Party statements by document / ticket number.
+            Look up a ticket across BSP, LCC and Third Party statements by ticket / document number or PNR.
           </p>
         </div>
       </div>
@@ -118,18 +118,29 @@ export default function TicketDetailsPage() {
       <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-4 space-y-3">
         <div>
           <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">
-            Document / Ticket Number <span className="text-red-400">*</span>
+            Ticket / Document Number or PNR <span className="text-red-400">*</span>
           </label>
           <textarea
             value={document}
             onChange={(e) => setDocument(e.target.value)}
             onKeyDown={onKeyDown}
             rows={3}
-            placeholder="e.g. 4846715082"
+            placeholder="e.g. 4846715082 or 098-4846715082 or a PNR like ZE1JWQ"
             className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#1e3a5f]/30 bg-gray-50 resize-y"
           />
           <p className="text-[11px] text-gray-400 mt-1 italic">
-            Use | (pipe) or a new line to look up more than one document.
+            Use | (pipe) or a new line to look up more than one. The airline prefix, spaces and
+            hyphens are ignored, so 098-4846715082 and 4846715082 find the same ticket.
+          </p>
+          {/* What each store can be found BY differs, and the difference is not
+              guessable: the LCC Detailed standard template has no ticket-number
+              column at all, so a ticket number can never match those rows. */}
+          <p className="text-[11px] text-gray-400 mt-1">
+            <span className="font-semibold text-gray-500">BSP</span> — ticket / document number,
+            including conjunction documents, SPDR and RTDN.{" "}
+            <span className="font-semibold text-gray-500">LCC Detailed</span> — PNR only.{" "}
+            <span className="font-semibold text-gray-500">Flown / CTA-BTA / Third Party</span> —
+            ticket number or PNR.
           </p>
         </div>
 

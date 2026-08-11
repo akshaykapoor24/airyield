@@ -1,20 +1,27 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import Sidebar from "@/components/layout/Sidebar";
 import Header from "@/components/layout/Header";
 import { getUser, isAuthenticated } from "@/lib/auth";
 import { isPlatformAdmin } from "@/lib/rbac";
-import { useAppSelector } from "@/store/hooks";
+import { getPlanBlocked, getPlanBlockedServer, subscribePlanGate } from "@/lib/planGate";
+import { useAppDispatch, useAppSelector } from "@/store/hooks";
+import { fetchMe } from "@/store/slices/authSlice";
 import OnboardingWizard from "@/components/onboarding/OnboardingWizard";
+import NoActivePlanGate from "@/components/plan/NoActivePlanGate";
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
+  const dispatch = useAppDispatch();
   const [ready, setReady] = useState(false);
   const [onboardingDone, setOnboardingDone] = useState(false);
   const reduxUser = useAppSelector((s) => s.auth.user);
+  // Raised by the axios interceptor on a 402 — covers the window between a
+  // workspace being suspended and this tab noticing.
+  const planBlocked = useSyncExternalStore(subscribePlanGate, getPlanBlocked, getPlanBlockedServer);
 
   useEffect(() => {
     if (!isAuthenticated()) {
@@ -30,7 +37,27 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     }
   }, [router, pathname]);
 
+  // Refresh the cached user once per mount. `ay_user` in localStorage is written
+  // at login and never expires, so a session that signed in before subscriptions
+  // shipped carries no plan_active at all — and a workspace suspended since
+  // login would still look active. /users/me is exempt from the paywall for
+  // exactly this reason.
+  useEffect(() => {
+    if (isAuthenticated()) dispatch(fetchMe());
+  }, [dispatch]);
+
   if (!ready) return null;
+
+  const user = reduxUser ?? getUser();
+
+  // No active plan → the whole dashboard is replaced, not overlaid: nothing
+  // behind this mounts, so no page fires a request that would only 402. Returns
+  // before the onboarding wizard too — a frozen workspace has nothing to set up.
+  // Platform admins own global master data and belong to no customer workspace,
+  // so the paywall never applies to them (the backend agrees).
+  const frozen =
+    !!user && !isPlatformAdmin(user.role) && (user.plan_active === false || planBlocked);
+  if (frozen) return <NoActivePlanGate user={user} />;
 
   // First-login onboarding: block the dashboard with the wizard until finished.
   // CORPORATE workspaces only — entities and airline login IDs are company setup.
@@ -38,7 +65,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   // configure up front, so it goes straight to the dashboard and can still add
   // entities and login IDs later from My Profile.
   // Platform admins and already-onboarded users skip it either way.
-  const user = reduxUser ?? getUser();
   const showOnboarding =
     !onboardingDone &&
     !!user &&

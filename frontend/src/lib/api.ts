@@ -1,5 +1,6 @@
 import axios from "axios";
 import { getToken, clearAuth } from "@/lib/auth";
+import { markPlanBlocked } from "@/lib/planGate";
 
 const api = axios.create({
   baseURL: process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1",
@@ -33,6 +34,11 @@ api.interceptors.response.use(
       // Guard against a redirect loop when the 401 happened on /login itself.
       if (window.location.pathname !== "/login") window.location.href = "/login";
     }
+    // 402 = the workspace has no active plan (get_current_user on the backend).
+    // Deliberately NOT treated like 401: the session is perfectly valid, so
+    // signing the user out would replace "here is who to email" with a login
+    // form. Just raise the gate; the dashboard layout is subscribed to it.
+    if (err.response?.status === 402) markPlanBlocked();
     return Promise.reject(err);
   }
 );

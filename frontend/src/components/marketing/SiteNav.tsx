@@ -75,7 +75,7 @@ export default function SiteNav() {
                 className={`group hidden items-center gap-1.5 rounded-xl px-4 py-2 text-[15px] font-semibold transition-all sm:inline-flex ${cta}`}
                 style={{ background: "var(--brand-grad)" }}
               >
-                Start free
+                Sign up
                 <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
               </Link>
             </>
@@ -123,7 +123,7 @@ export default function SiteNav() {
                     className="rounded-xl px-4 py-3 text-center text-sm font-semibold text-white"
                     style={{ background: "var(--brand-grad)" }}
                   >
-                    Start free
+                    Sign up
                   </Link>
                 </>
               )}

@@ -155,7 +155,7 @@ export default function HomePage() {
                 className="group inline-flex w-full items-center justify-center gap-2 rounded-xl px-7 py-3.5 text-base font-semibold text-white shadow-lg shadow-blue-500/30 transition-all hover:-translate-y-0.5 hover:shadow-xl hover:shadow-blue-500/40 sm:w-auto"
                 style={{ background: "var(--brand-grad)" }}
               >
-                Start free
+                Sign up
                 <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
               </Link>
               <Link

@@ -11,7 +11,7 @@ from sqlalchemy import select, func, or_
 from sqlalchemy.orm import selectinload
 
 from app.database import get_db
-from app.dependencies import get_current_user, require_role
+from app.dependencies import get_current_user, is_platform_admin, require_role
 from app.models.user import User, UserRole
 from app.models.airport import (
     Airport, CATEGORIZATION_GROUPS, split_categorization, join_categorization,
@@ -38,12 +38,6 @@ SUBMITTERS = (
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
-def _is_platform_admin(user: User) -> bool:
-    role = user.role
-    if isinstance(role, UserRole):
-        return role == PLATFORM
-    role_str = str(role).lower()
-    return role_str in {PLATFORM.value.lower(), PLATFORM.name.lower()}
 
 def _categorization_filter(value: str):
     """Match one base group against the slash-joined stored value.
@@ -165,7 +159,7 @@ async def create_airport(
         if not target_check.scalar_one_or_none():
             raise HTTPException(status_code=404, detail=f"Airport with id {payload.target_id} not found.")
 
-        if _is_platform_admin(current_user):
+        if is_platform_admin(current_user):
             target_airport = (await db.execute(select(Airport).where(Airport.id == payload.target_id))).scalar_one()
             target_airport.iata_code = payload.iata_code.strip().upper()
             target_airport.country = payload.country
@@ -198,7 +192,7 @@ async def create_airport(
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=400, detail=f"Airport with IATA '{payload.iata_code}' already exists.")
 
-    if _is_platform_admin(current_user):
+    if is_platform_admin(current_user):
         airport = await _direct_insert(db, payload.model_dump(), current_user)
         return {"status": "added", "airport": AirportRead.model_validate(airport)}
 
@@ -343,7 +337,7 @@ async def bulk_upload_airports(
                 "categorization": categorization, "continent": continent}
 
         try:
-            if _is_platform_admin(current_user):
+            if is_platform_admin(current_user):
                 await _direct_insert(db, data, current_user)
             else:
                 pending = await db.execute(
@@ -414,7 +408,7 @@ async def list_approvals(
     current_user: User = Depends(require_role(*SUBMITTERS)),
 ):
     pending_filter = func.lower(AirportApproval.status) == "pending"
-    if _is_platform_admin(current_user):
+    if is_platform_admin(current_user):
         # platform admin sees all pending
         result = await db.execute(
             select(AirportApproval)

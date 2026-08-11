@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
+import { notifyRequired, requireFields } from "@/lib/requiredFields";
 import {
   IEFieldValue,
   INCENTIVE_TYPES, INCLUSIONS_EXCLUSIONS,
@@ -485,12 +486,33 @@ export default function NewDealPage() {
     }
   };
 
-  const validateCore = (): boolean => {
-    // Airline Type is optional for B2B — it may be blank when the airline has no
-    // entry in the class/RBD master, and the user can fill it in by hand.
-    if (dealType === "airline" && !airlineType) { toast.error("Please select Airline Type."); return false; }
-    if (!airlineName) { toast.error("Please select Airline Name."); return false; }
-    if (!validFrom)   { toast.error("Please enter Valid From date."); return false; }
+  /** The deal header fields the API declares required (AirlineDealCreate /
+   *  B2BDealCreate: airline_type, airline_name, valid_from, valid_to), plus
+   *  Supplier Name, which a B2B deal is meaningless without — it is the
+   *  counterparty, and for a B2B Standard deal it is also what resolves the
+   *  agency whose entities and login IDs populate the two fields below it.
+   *
+   *  All four API-required fields were previously reachable while blank: the
+   *  form checked only three of them, and the API's `str` type accepts "" and
+   *  stores it as NULL, so nothing complained either side. */
+  const requiredHeaderFields = () => [
+    { label: "Supplier Name",       value: supplierName, when: dealType === "b2b" },
+    { label: "Airline Name",        value: airlineName },
+    // Auto-filled from the class/RBD master when an airline is picked, but that
+    // master does not cover every airline, so it still has to be checked.
+    { label: "Airline Type",        value: airlineType },
+    { label: "Contract Valid From", value: validFrom },
+    { label: "Contract Valid To",   value: validTo },
+  ];
+
+  const validateCore = (): boolean => requireFields(requiredHeaderFields());
+
+  /** Contract dates must also make sense against each other — an inverted range
+   *  silently produces incentives that can never trigger. */
+  const validateDateOrder = (): boolean => {
+    if (validFrom && validTo && validTo < validFrom) {
+      return notifyRequired("Contract Valid To must be on or after Contract Valid From.");
+    }
     return true;
   };
 
@@ -538,7 +560,11 @@ export default function NewDealPage() {
   };
 
   const handleSaveDraft = async () => {
-    if (!validateCore()) return;
+    // Same checks as Submit, deliberately. "Save Draft" does not currently
+    // produce a draft — the API has no draft status and both buttons create the
+    // deal as pending_approval — so relaxing validation here would push
+    // half-filled deals straight into the approval queue.
+    if (!validateCore() || !validateDateOrder()) return;
     setIsDraftSaving(true);
     setSubmitError("");
     try {
@@ -560,7 +586,15 @@ export default function NewDealPage() {
   };
 
   const handleSubmitForApproval = async () => {
-    if (!validateCore()) return;
+    if (!validateCore() || !validateDateOrder()) return;
+    // The Deal Details tab's Next button is disabled until an incentive is
+    // ticked, but edit mode and the tab bar can both land here without one, and
+    // a deal with no incentive has nothing to approve or calculate.
+    if (selectedIncentives.length === 0) {
+      notifyRequired("Select at least one Incentive Type before submitting for approval.");
+      setActiveTopTab("deal");
+      return;
+    }
     setIsSubmitting(true);
     setSubmitError("");
     try {
@@ -652,6 +686,7 @@ export default function NewDealPage() {
               {dealType === "b2b" && (
                 <SearchSelectField
                   label="Supplier Name"
+                  required
                   options={supplierOptions}
                   value={supplierName}
                   onChange={v => { suppressAgencyResetRef.current = false; setSupplierName(v); }}
@@ -662,6 +697,7 @@ export default function NewDealPage() {
               {/* [2] Airline Name — full master list; picking one auto-fills the type */}
               <SearchSelectField
                 label="Airline Name"
+                required
                 options={airlineNameOptions}
                 value={airlineName}
                 onChange={name => {
@@ -678,6 +714,7 @@ export default function NewDealPage() {
                    class/RBD master), but stays editable and may be left blank. */}
               <SelectField
                 label="Airline Type"
+                required
                 options={["GDS", "LCC"]}
                 value={airlineType}
                 onChange={setAirlineType}
@@ -692,10 +729,10 @@ export default function NewDealPage() {
               <SearchSelectField label="Business Type" options={BUSINESS_TYPES} value={businessType} onChange={setBusinessType} />
 
               {/* [6] Valid From — flows into every selected incentive's "from" date */}
-              <DateField label="Contract Valid From" value={validFrom} onChange={v => setContractDates(v, validTo)} />
+              <DateField label="Contract Valid From" required value={validFrom} onChange={v => setContractDates(v, validTo)} />
 
               {/* [7] Valid To — flows into every selected incentive's "to" date */}
-              <DateField label="Contract Valid To" value={validTo} onChange={v => setContractDates(validFrom, v)} />
+              <DateField label="Contract Valid To" required value={validTo} onChange={v => setContractDates(validFrom, v)} />
 
               {/* [8a+8b] Trigger Type + Payout Type — Airline only */}
               {dealType === "airline" && (

@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
+import { notifyRequired } from "@/lib/requiredFields";
 import BspComparisonPanel from "./BspComparisonPanel";
 
 function inr(v: number | string | null | undefined): string {
@@ -94,7 +95,7 @@ export default function BspUploadWizard({ onClose, onDone }: { onClose: () => vo
 
   // ── Step 1: upload summary, then poll it ──────────────────────────────────
   const uploadSummary = async () => {
-    if (!summaryFile) return;
+    if (!summaryFile) { notifyRequired("Choose the BSP Summary PDF (FCAGBILLSUMNG) to continue."); return; }
     setBusy(true);
     try {
       const fd = new FormData(); fd.append("file", summaryFile);
@@ -127,7 +128,15 @@ export default function BspUploadWizard({ onClose, onDone }: { onClose: () => vo
 
   // ── Step 2: upload detailed against the group, then poll it ───────────────
   const uploadDetail = async () => {
-    if (!detailFile || !groupId) return;
+    if (!detailFile) { notifyRequired("Choose the BSP Detailed PDF (FCAGBILLDETALT) to continue."); return; }
+    // The button only ever checked the file, so a missing group id — the summary
+    // upload having returned without one — made "Upload & compare" a dead click
+    // with no message at all.
+    if (!groupId) {
+      notifyRequired("The summary upload didn't return a billing group. Go back and re-upload the Summary PDF.");
+      setStep(1);
+      return;
+    }
     setBusy(true);
     try {
       const fd = new FormData(); fd.append("file", detailFile); fd.append("group_id", groupId);
