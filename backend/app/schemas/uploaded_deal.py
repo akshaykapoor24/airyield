@@ -123,11 +123,25 @@ class DealUpdatePayload(BaseModel):
 class AIDeal(BaseModel):
     airline_type: str = "GDS"
     airline_name: str = ""
+    # The extraction prompt has always asked for this and the review table has
+    # always had a column for it, but the field was missing here — so Pydantic
+    # dropped it on every AI upload and the column arrived blank.
+    iata_commission: Optional[float] = None
     contract_valid_from: Optional[str] = None
     contract_valid_to: Optional[str] = None
     incentive_types: list[str] = ["PLB"]
     incentive_data: dict = {}
     remark: Optional[str] = None
+    # Provenance — which physical table row this deal came from. Feeds the
+    # read-only Source column, the only practical way to spot-check a 350-row
+    # extraction against the printed PDF.
+    src_n: Optional[int] = None
+    src_page: Optional[int] = None
+    src_text: Optional[str] = None
+    # Set when a row survived every retry without yielding usable cells. It
+    # still occupies a review row so the user can fill it in by hand: a source
+    # row must never vanish silently.
+    needs_manual: bool = False
 
 
 class AIExtractResponse(BaseModel):

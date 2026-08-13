@@ -150,6 +150,10 @@ async def ai_extract_deals(
     """
     AI-powered extraction — upload a PDF and get back fully structured deal objects
     split by class (Economy / Premium / Business). Skips column-mapping step.
+
+    The whole document is read. Rows are enumerated deterministically from the
+    PDF's table structure and sent to the model in chunks, so sheet size is not
+    a limit — there is deliberately no max-deals cap.
     """
     max_mb = 50
     chunk = await file.read(max_mb * 1024 * 1024 + 1)
@@ -159,7 +163,15 @@ async def ai_extract_deals(
     file.file = _io.BytesIO(chunk)  # type: ignore[assignment]
     await file.seek(0)
 
-    result = await AIDealExtractionService.extract(file, max_deals=15)
+    result = await AIDealExtractionService.extract(file)
+    if result.get("unreadable"):
+        # Better an honest refusal than a wrong-but-plausible layout — the
+        # column-mapping path handles anything this parser can't.
+        raise HTTPException(
+            status_code=422,
+            detail="This PDF's table structure could not be read. "
+                   "Turn off AI Extraction and use column mapping instead.",
+        )
     deals = [AIDeal(**d) for d in result.get("deals", [])]
 
     # Apply Contract Valid To fallback when AI didn't extract the date
@@ -868,6 +880,14 @@ async def _close_matching_unified_deals(
             UnifiedDeal.airline_name == new_deal.airline_name,
             UnifiedDeal.airline_type == new_deal.airline_type,
             UnifiedDeal.id != new_deal.id,
+            # Never close a deal that came from the SAME upload. A contract
+            # legitimately lists one airline several times — Lords carries two
+            # Korean Air rows and two Japan Airlines rows at different rates —
+            # and without this a proprietary-category workflow has each row
+            # close the previous one as it is created, quietly discarding most
+            # of the sheet. Harmless for step-based workflows, which never
+            # reach this function at all.
+            UnifiedDeal.statement_id != new_deal.statement_id,
         )
     )
     for d in result.scalars().all():
