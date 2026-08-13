@@ -275,6 +275,11 @@ type AIDeal = {
   incentive_types: string[];
   incentive_data: Record<string, Record<string, string | number | null> | undefined>;
   remark: string;
+  // Where this deal came from in the source PDF, and whether it needs manual entry.
+  src_n?: number | null;
+  src_page?: number | null;
+  src_text?: string | null;
+  needs_manual?: boolean;
 };
 
 type AIExtractResponse = {
@@ -293,6 +298,12 @@ function convertAIDealsToRows(deals: AIDeal[]): ReviewRow[] {
                                   extra["c__iata_commission"] = String(deal.iata_commission);
     if (deal.contract_valid_from) extra["c__valid_from"]    = deal.contract_valid_from;
     if (deal.contract_valid_to)   extra["c__valid_to"]      = deal.contract_valid_to;
+    // Provenance for the read-only Source column. Deliberately NOT a "c__" key:
+    // those are contract fields, and this must never reach the save payload.
+    if (deal.src_page != null || deal.src_n != null) {
+      extra["__src"] = `p.${deal.src_page ?? "?"} r${deal.src_n ?? "?"} · ${deal.src_text ?? ""}`.trim();
+    }
+    if (deal.needs_manual) extra["__needs_manual"] = "1";
     for (const [incType, incFields] of Object.entries(deal.incentive_data ?? {})) {
       if (!incFields) continue;
       for (const [field, value] of Object.entries(incFields)) {
@@ -992,11 +1003,14 @@ function getColMeta(key:string):{type:"date"|"select"|"number"|"text";options?:s
 // flat table columns — they're configured per row via the Incentive Data modal
 // (IncentiveDataRowModal), which reuses the same IncentiveTabContent the manual
 // create-deal form uses, so they get full slab/matrix/dependency support.
-function buildColGroups(dealType:string):ColGroup[]{
+function buildColGroups(dealType:string,aiMode=false):ColGroup[]{
   const contractCols = getContractCols(dealType);
   const groups:ColGroup[]=[
     {label:"Airline Contract Details",color:"#1e3a5f",cols:[{key:"c__deal_tag",label:"Deal Tag"},...contractCols]},
   ];
+  // Where each AI-extracted row came from in the PDF. With 300+ rows, spot-checking
+  // against the printed contract is impractical without the page/row it came from.
+  if(aiMode) groups.push({label:"Source",color:"#7c3aed",cols:[{key:"__src__",label:"Source (PDF)"}]});
   groups.push({label:"Remarks",color:"#64748b",cols:[{key:"remarks",label:"Remarks"}]});
   // Single column for both the incentive payout fields AND their inclusion/exclusion
   // rules — configured together per incentive type in one popup.
@@ -1038,6 +1052,24 @@ function ReviewTable({
   };
 
   const renderCell=(row:ReviewRow,idx:number,colKey:string)=>{
+    // Special: read-only provenance. Never edited, never saved — it exists so the
+    // reviewer can find this row on the printed page.
+    if(colKey==="__src__"){
+      const src=row.extra["__src"]??"";
+      const manual=row.extra["__needs_manual"]==="1";
+      return(
+        <td key={colKey} className="px-2 py-1 border-l border-gray-100">
+          {manual&&(
+            <span className="mr-1.5 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-semibold bg-amber-100 text-amber-700 border border-amber-300">
+              <AlertTriangle className="w-2.5 h-2.5"/>fill in
+            </span>
+          )}
+          <span className="text-[10px] text-gray-400 whitespace-nowrap" title={src}>
+            {src.length>60?src.slice(0,60)+"…":src}
+          </span>
+        </td>
+      );
+    }
     // Special: Incl/Excl column
     if(colKey==="__incl_excl__"){
       const state=rowInclExcl[idx];
@@ -1451,6 +1483,14 @@ export default function UploadDealPage(){
   const [aiMode,       setAiMode]       = useState(false);
   const [aiFileName,   setAiFileName]   = useState("");
   const [aiConfidence, setAiConfidence] = useState(0);
+  // The extractor reports partial failures (skipped rows, failed sections, the
+  // per-upload row cap) through `warning`. It used to be dropped on the floor
+  // here while confidence WAS rendered — so a truncated extraction showed as
+  // "312 rows · 78% confidence" with nothing saying why.
+  const [aiWarning,    setAiWarning]    = useState("");
+  // Reading a whole contract takes 30-60s. Without a ticker the button looks
+  // hung, and people re-click or navigate away mid-extraction.
+  const [uploadSecs,   setUploadSecs]   = useState(0);
 
   // ── Step 3 state ────────────────────────────────────────────────────────────
   const [rows,          setRows]          = useState<ReviewRow[]>([]);
@@ -1473,6 +1513,13 @@ export default function UploadDealPage(){
   const [mtParsed,      setMtParsed]      = useState<{rows:ReviewRow[];rowInclExcl:Record<number,RowInclExcl>}|null>(null);
 
   useEffect(()=>{
+    if(!uploading){setUploadSecs(0);return;}
+    const started=Date.now();
+    const id=setInterval(()=>setUploadSecs(Math.round((Date.now()-started)/1000)),1000);
+    return ()=>clearInterval(id);
+  },[uploading]);
+
+  useEffect(()=>{
     api.get<{id:number;name:string}[]>("/suppliers/?limit=5000")
       .then(r=>setSupplierOptions(r.data.map(s=>s.name)))
       .catch(()=>{});
@@ -1483,7 +1530,7 @@ export default function UploadDealPage(){
       .catch(()=>{});
   },[]);
 
-  const colGroups = buildColGroups(dealType);
+  const colGroups = buildColGroups(dealType,aiMode);
 
   // ── Row incl/excl helpers ──────────────────────────────────────────────────
   const getOrInitRowInclExcl=(idx:number):RowInclExcl=>(
@@ -1650,12 +1697,15 @@ export default function UploadDealPage(){
       notifyRequired(msg);
       return;
     }
-    setUploading(true);setUploadError("");setIsMultiTab(false);
+    setUploading(true);setUploadError("");setIsMultiTab(false);setAiWarning("");
     try{
       const form=new FormData();form.append("file",file);
       if(aiMode){
         if(validFromDate) form.append("valid_from",validFromDate);
-        const {data}=await api.post<AIExtractResponse>("/deals/upload/ai-extract",form,{headers:{"Content-Type":"multipart/form-data"}});
+        // Per-call only — a global axios timeout would also apply to
+        // /upload/confirm, which is slower still on a large sheet.
+        const {data}=await api.post<AIExtractResponse>("/deals/upload/ai-extract",form,
+          {headers:{"Content-Type":"multipart/form-data"},timeout:300_000});
         const converted=convertAIDealsToRows(data.deals);
         converted.forEach(r=>{
           // AI returns data for one incentive (PLB) — replicate it across every
@@ -1690,6 +1740,7 @@ export default function UploadDealPage(){
         }
         setAiFileName(data.file_name);
         setAiConfidence(data.confidence);
+        setAiWarning(data.warning??"");
         setFilterText("");setSelectedRows(new Set());setBulkColKey("");setBulkColValue("");
         setStep(3);
       }else{
@@ -2147,19 +2198,20 @@ export default function UploadDealPage(){
                 </div>
               )}
 
-              {/* AI Mode toggle */}
-              {(()=>{const isExcel=!!file?.name.match(/\.xlsx?$/i);return(
-              <label className={`flex items-center gap-2.5 select-none py-1 ${isExcel?"opacity-40 cursor-not-allowed":"cursor-pointer"}`}>
+              {/* AI Mode toggle — PDF only. The extractor reads the PDF's table
+                  structure, so it has nothing to work with for any other format. */}
+              {(()=>{const aiBlocked=!/\.pdf$/i.test(file?.name??"");return(
+              <label className={`flex items-center gap-2.5 select-none py-1 ${aiBlocked?"opacity-40 cursor-not-allowed":"cursor-pointer"}`}>
                 <div
-                  onClick={()=>{if(!isExcel)setAiMode(m=>!m);}}
-                  className={`relative w-10 h-5 rounded-full transition-colors duration-200 flex-shrink-0 ${aiMode&&!isExcel?"bg-[#1e3a5f]":"bg-gray-200"}`}
+                  onClick={()=>{if(!aiBlocked)setAiMode(m=>!m);}}
+                  className={`relative w-10 h-5 rounded-full transition-colors duration-200 flex-shrink-0 ${aiMode&&!aiBlocked?"bg-[#1e3a5f]":"bg-gray-200"}`}
                 >
-                  <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform duration-200 ${aiMode&&!isExcel?"translate-x-5":"translate-x-0"}`}/>
+                  <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform duration-200 ${aiMode&&!aiBlocked?"translate-x-5":"translate-x-0"}`}/>
                 </div>
                 <span className="text-xs font-medium text-gray-700">
                   Use AI Extraction
                   <span className="ml-1.5 text-[11px] text-gray-400 font-normal">
-                    {isExcel?"Not available for Excel — use column mapping":"Standard extraction with column mapping"}
+                    {aiBlocked?"Available for PDFs only — use column mapping":"Standard extraction with column mapping"}
                   </span>
                 </span>
               </label>
@@ -2184,7 +2236,9 @@ export default function UploadDealPage(){
               <button onClick={handleExtract} disabled={!file||!dealType||(dealType==="b2b"&&!supplierName)||uploading}
                 className="w-full bg-[#1e3a5f] text-white rounded-xl py-3 text-sm font-semibold hover:bg-[#16304f] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2">
                 {uploading
-                  ?<><RefreshCw className="w-4 h-4 animate-spin"/>{aiMode?"Analyzing with AI…":"Extracting columns…"}</>
+                  ?<><RefreshCw className="w-4 h-4 animate-spin"/>{aiMode
+                      ?`Reading every row… ${uploadSecs}s`
+                      :"Extracting columns…"}</>
                   :aiMode
                     ?<><Settings2 className="w-4 h-4"/>Extract &amp; Structure with AI</>
                     :<><Upload className="w-4 h-4"/>Extract &amp; Map Columns</>
@@ -2193,7 +2247,9 @@ export default function UploadDealPage(){
 
               <div className={`rounded-lg px-3 py-2.5 text-[11px] ${aiMode?"bg-purple-50 border border-purple-200 text-purple-700":"bg-blue-50 border border-blue-200 text-blue-700"}`}>
                 {aiMode
-                  ?"AI will read the PDF, split each airline's deal into Economy / Premium / Business rows, and skip column mapping."
+                  ?(uploading&&uploadSecs>=20
+                    ?"Reading the whole sheet — a 4-page contract takes about a minute and produces 300+ rows. Please keep this tab open."
+                    :"AI will read every row of the PDF, split each airline's deal into Economy / Premium / Business rows, and skip column mapping.")
                   :"After upload you'll map document columns to our fields, then review & edit all data before saving."
                 }
               </div>
@@ -2245,7 +2301,7 @@ export default function UploadDealPage(){
               {dealTag==="adhoc"?"Adhoc":"Standard"}
             </span>
             {selectedIncentives.map(t=><span key={t} className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-purple-50 text-purple-700 border border-purple-200">{t}</span>)}
-            {!aiMode&&preview?.warning&&<span className="flex items-center gap-1 text-[11px] text-amber-600"><AlertTriangle className="w-3.5 h-3.5"/>{preview.warning}</span>}
+            {(aiMode?aiWarning:preview?.warning)&&<span className="flex items-center gap-1 text-[11px] text-amber-600"><AlertTriangle className="w-3.5 h-3.5"/>{aiMode?aiWarning:preview?.warning}</span>}
           </div>
 
           {/* Filter + Bulk Edit Toolbar */}
@@ -2285,9 +2341,9 @@ export default function UploadDealPage(){
                   className="border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400 text-gray-700"
                 >
                   <option value="">Column to edit…</option>
-                  {colGroups.filter(g=>g.label!=="Incl / Excl"&&g.label!=="Incentive Data").map(g=>(
+                  {colGroups.filter(g=>g.label!=="Incl / Excl"&&g.label!=="Incentive Data"&&g.label!=="Source").map(g=>(
                     <optgroup key={g.label} label={g.label}>
-                      {g.cols.filter(c=>c.key!=="__incl_excl__"&&c.key!=="__incentive_data__").map(c=>(
+                      {g.cols.filter(c=>c.key!=="__incl_excl__"&&c.key!=="__incentive_data__"&&c.key!=="__src__").map(c=>(
                         <option key={c.key} value={c.key}>{c.label}</option>
                       ))}
                     </optgroup>
