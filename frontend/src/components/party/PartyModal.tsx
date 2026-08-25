@@ -4,7 +4,10 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { X } from "lucide-react";
 import api from "@/lib/api";
-import { CORPORATE_TYPES, GSTIN_RE, PAN_RE, PARTY, corporateLabel, type Party, type PartyKind } from "@/lib/party";
+import {
+  CORPORATE_TYPES, GSTIN_RE, INHERITED_FIELDS, PAN_RE, PARTY,
+  corporateLabel, seedFromCorporate, type InheritedField, type Party, type PartyKind,
+} from "@/lib/party";
 import { PARTY_ICON } from "@/components/party/icons";
 
 const LABEL = "block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1";
@@ -24,6 +27,27 @@ const SECTION = "text-[10px] font-bold text-gray-400 uppercase tracking-widest p
  */
 const INDIVIDUAL = "";
 const LEGACY = "legacy";
+
+/**
+ * A field label, marked when the value below it was copied from a corporate
+ * rather than typed. The mark is generic and the employer's name lives in the
+ * tooltip — a long company name in eight labels wraps the whole form.
+ */
+function FieldLabel({ text, from }: { text: string; from?: string }) {
+  return (
+    <label className={LABEL}>
+      {text}
+      {from && (
+        <span
+          className="ml-1.5 font-medium normal-case tracking-normal text-[10px] text-blue-500"
+          title={`Filled in from ${from}`}
+        >
+          · inherited
+        </span>
+      )}
+    </label>
+  );
+}
 
 /**
  * Add / edit form for a customer or a corporate.
@@ -101,7 +125,36 @@ export default function PartyModal({
     return () => { cancelled = true; };
   }, [isCorporate]);
 
-  const set = (k: keyof typeof form, v: string) => setForm((p) => ({ ...p, [k]: v }));
+  // Fields currently holding a value copied from the selected corporate. A field
+  // leaves this set the moment the user types in it, which is what stops a later
+  // change of employer from overwriting something they entered by hand.
+  const [inherited, setInherited] = useState<Set<string>>(new Set());
+  const selectedCorporate = corporates.find((c) => `corp:${c.id}` === employer) ?? null;
+  /** The corporate a field's current value came from, or undefined if it is the user's own. */
+  const inheritedFrom = (key: InheritedField) =>
+    inherited.has(key) && selectedCorporate ? corporateLabel(selectedCorporate) : undefined;
+
+  const set = (k: keyof typeof form, v: string) => {
+    setForm((p) => ({ ...p, [k]: v }));
+    setInherited((prev) => {
+      if (!prev.has(k)) return prev;
+      const next = new Set(prev);
+      next.delete(k);
+      return next;
+    });
+  };
+
+  /** Switching employer re-seeds the inherited fields — see seedFromCorporate. */
+  const selectEmployer = (next: string) => {
+    setEmployer(next);
+    const corporate = corporates.find((c) => `corp:${c.id}` === next) ?? null;
+    const current = Object.fromEntries(
+      INHERITED_FIELDS.map((k) => [k, form[k]])
+    ) as Record<InheritedField, string>;
+    const seeded = seedFromCorporate(current, inherited, corporate);
+    setForm((prev) => ({ ...prev, ...seeded.values }));
+    setInherited(seeded.held as Set<string>);
+  };
 
   // A corporate is identified by its name; a customer by the person's first name.
   const requiredValue = isCorporate ? form.company : form.first_name;
@@ -242,7 +295,7 @@ export default function PartyModal({
                   <label className={LABEL}>Company</label>
                   <select
                     value={employer}
-                    onChange={(e) => setEmployer(e.target.value)}
+                    onChange={(e) => selectEmployer(e.target.value)}
                     className={INPUT}
                     disabled={!corporatesLoaded}
                   >
@@ -270,16 +323,24 @@ export default function PartyModal({
                   .
                 </p>
               )}
+
+              {inherited.size > 0 && selectedCorporate && (
+                <p className="text-[11px] text-blue-700 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2 -mt-1">
+                  Filled in from{" "}
+                  <span className="font-semibold">{corporateLabel(selectedCorporate)}</span> — change any of
+                  it below and this employee keeps your version.
+                </p>
+              )}
             </>
           )}
 
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className={LABEL}>Phone / Contact</label>
+              <FieldLabel text="Phone / Contact" from={inheritedFrom("phone")} />
               <input value={form.phone} onChange={(e) => set("phone", e.target.value)} placeholder="+91-XXXXXXXXXX" className={INPUT} />
             </div>
             <div>
-              <label className={LABEL}>Email</label>
+              <FieldLabel text="Email" from={inheritedFrom("email")} />
               <input type="email" value={form.email} onChange={(e) => set("email", e.target.value)} placeholder={cfg.emailPlaceholder} className={INPUT} />
             </div>
           </div>
@@ -333,7 +394,7 @@ export default function PartyModal({
 
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className={LABEL}>Markup Type</label>
+              <FieldLabel text="Markup Type" from={inheritedFrom("markup_type")} />
               <select value={form.markup_type} onChange={(e) => set("markup_type", e.target.value)} className={INPUT}>
                 <option value="">— Select —</option>
                 <option value="percentage">Percentage (%)</option>
@@ -341,9 +402,10 @@ export default function PartyModal({
               </select>
             </div>
             <div>
-              <label className={LABEL}>
-                Markup Value {form.markup_type === "percentage" ? "(%)" : form.markup_type === "fixed" ? "(₹)" : ""}
-              </label>
+              <FieldLabel
+                text={`Markup Value ${form.markup_type === "percentage" ? "(%)" : form.markup_type === "fixed" ? "(₹)" : ""}`.trim()}
+                from={inheritedFrom("markup_value")}
+              />
               <input
                 type="number"
                 value={form.markup_value}
@@ -355,7 +417,7 @@ export default function PartyModal({
           </div>
 
           <div>
-            <label className={LABEL}>Billing Type</label>
+            <FieldLabel text="Billing Type" from={inheritedFrom("billing_type")} />
             <select value={form.billing_type} onChange={(e) => set("billing_type", e.target.value)} className={INPUT}>
               <option value="">— Select —</option>
               <option value="reseller">Reseller</option>
@@ -365,7 +427,7 @@ export default function PartyModal({
 
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className={LABEL}>GST Registration</label>
+              <FieldLabel text="GST Registration" from={inheritedFrom("gst_registered")} />
               <select
                 value={form.gst_registered}
                 onChange={(e) => {
@@ -380,7 +442,7 @@ export default function PartyModal({
             </div>
             {form.gst_registered === "true" && (
               <div>
-                <label className={LABEL}>GST No *</label>
+                <FieldLabel text="GST No *" from={inheritedFrom("gst_no")} />
                 <input
                   value={form.gst_no}
                   onChange={(e) => set("gst_no", e.target.value.toUpperCase())}
@@ -393,7 +455,7 @@ export default function PartyModal({
           </div>
 
           <div>
-            <label className={LABEL}>PAN No</label>
+            <FieldLabel text="PAN No" from={inheritedFrom("pan_no")} />
             <input
               value={form.pan_no}
               onChange={(e) => set("pan_no", e.target.value.toUpperCase())}
