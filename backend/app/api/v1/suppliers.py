@@ -21,6 +21,7 @@ from app.schemas.supplier import (
     SupplierApprovalRead, SupplierApprovalAction, SupplierApprovalEdit,
 )
 from app.services.master_approval_edit import apply_admin_edit, SUPPLIER_CORE_FIELDS
+from app.services.master_export import master_export_response
 
 router = APIRouter()
 PLATFORM = UserRole.PLATFORM_ADMIN
@@ -406,6 +407,73 @@ async def download_supplier_template():
         bio,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": 'attachment; filename="supplier_template.xlsx"'},
+    )
+
+
+def _branches_cell(branches) -> str:
+    """Serialise the branches JSON back into the "Name|IATA;Name|IATA" the
+    bulk-upload parser reads, so an export round-trips as an import."""
+    if not branches:
+        return ""
+    parts = []
+    for b in branches:
+        if not isinstance(b, dict):
+            continue
+        name = (b.get("name") or "").strip()
+        if not name:
+            continue
+        code = (b.get("iata_code") or "").strip()
+        parts.append(f"{name}|{code}" if code else name)
+    return ";".join(parts)
+
+
+@router.get("/export")
+async def export_suppliers(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_role(PLATFORM)),
+):
+    """The whole supplier master as .xlsx, for review in Excel.
+
+    Column headers match download_supplier_template so a reviewed sheet can go
+    straight back through /bulk-upload; ID is for the admin's reference only.
+    """
+    result = await db.execute(select(Supplier).order_by(Supplier.name))
+    suppliers = result.scalars().all()
+
+    headers = [
+        "ID", "SUPPLIER CODE",
+        "COMPANY NAME", "REGION / CHAPTER", "MEMBERSHIP CATEGORY",
+        "ADD1", "ADD2", "ADD3", "CITY", "PINCODE",
+        "TELEPHONE NOS. & MOBILE NOS.", "WEBSITE",
+        "E.MAIL ADDRESS", "ALTERNATE E-MAIL ID-1", "ACCOUNTS", "FAX NO",
+        "REPRESENTATIVE I", "REPRESENTATIVE II",
+        # --- Legacy vendor fields, same names bulk-upload reads ---
+        "TYPE", "VENDOR_DISPLAY_NAME", "BRANCH", "BRANCHES",
+        "CONTACT_NUMBER", "ALTERNATE_CONTACT_NO",
+        "CONTACT_EMAIL", "ALTERNATE_EMAIL",
+        "GST_NUMBER", "PAN_NUMBER", "REMARKS", "ACTIVE",
+    ]
+    rows = [
+        [
+            s.id, s.code,
+            s.name, s.region_chapter, s.membership_category,
+            s.address_1, s.address_2, s.address_3, s.city, s.pincode,
+            s.telephone_mobile, s.website,
+            s.email_address, s.alternate_email_id, s.accounts_email, s.fax_no,
+            s.representative_1, s.representative_2,
+            s.vendor_type, s.vendor_name, s.branch, _branches_cell(s.branches),
+            s.contact_phone, s.alternate_phone,
+            s.contact_email, s.alternate_email,
+            s.gst_number, s.pan_number, s.notes, s.is_active,
+        ]
+        for s in suppliers
+    ]
+
+    return master_export_response(
+        sheet_title="Supplier Master",
+        filename="supplier_master.xlsx",
+        headers=headers,
+        rows=rows,
     )
 
 

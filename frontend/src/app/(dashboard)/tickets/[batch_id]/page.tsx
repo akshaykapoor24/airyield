@@ -10,6 +10,7 @@ import {
   AlertCircle, TrendingUp, SquarePen, FilePlus,
 } from "lucide-react";
 import api from "@/lib/api";
+import { useStatementSectionBase } from "@/lib/statementSection";
 import Pagination from "@/components/ui/Pagination";
 import { INCENTIVE_TYPE_COLS } from "@/lib/incentives";
 import {
@@ -326,6 +327,9 @@ function formatDate(d: string) {
 // ── Component ──────────────────────────────────────────────────────────────
 
 export default function StatementDetailPage() {
+  // Back and "add a ticket" must return to the section the user came from —
+  // this screen is reachable from Customer data and from /tickets alike.
+  const sectionBase = useStatementSectionBase();
   const params  = useParams();
   const router  = useRouter();
   const batchId = params.batch_id as string;
@@ -652,7 +656,7 @@ export default function StatementDetailPage() {
 
   if (error || !statement) return (
     <div className="space-y-4">
-      <Link href="/tickets" className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-800">
+      <Link href={sectionBase} className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-800">
         <ChevronLeft className="w-4 h-4" /> Back to Repository
       </Link>
       <div className="flex items-center gap-2 px-4 py-3 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700">
@@ -665,7 +669,7 @@ export default function StatementDetailPage() {
     <div className="space-y-5">
       {/* breadcrumb + back */}
       <div className="flex items-center gap-2 text-sm text-gray-500">
-        <Link href="/tickets" className="flex items-center gap-1.5 hover:text-gray-800 transition-colors">
+        <Link href={sectionBase} className="flex items-center gap-1.5 hover:text-gray-800 transition-colors">
           <ChevronLeft className="w-4 h-4" /> Ticket Repository
         </Link>
         <ChevronRight className="w-3.5 h-3.5 text-gray-300" />
@@ -805,7 +809,7 @@ export default function StatementDetailPage() {
             <span className="text-xs text-gray-500">{selected.size} selected</span>
           )}
           <Link
-            href={`/tickets/create?statement=${batchId}`}
+            href={`${sectionBase}/create?statement=${batchId}`}
             title="Punch a ticket into this statement"
             className="flex items-center gap-1.5 px-3.5 py-2 border border-gray-200 rounded-lg text-xs font-medium text-gray-600 hover:bg-gray-50"
           >

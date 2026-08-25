@@ -25,6 +25,7 @@ from app.schemas.airline_class_master import (
     ClassApprovalEdit,
 )
 from app.services.master_approval_edit import apply_admin_edit, CLASS_FIELDS
+from app.services.master_export import master_export_response
 
 router = APIRouter()
 
@@ -95,6 +96,39 @@ async def download_airline_class_template():
         bio,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": 'attachment; filename="airline_class_template.xlsx"'},
+    )
+
+
+@router.get("/export")
+async def export_airline_classes(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_role(PLATFORM)),
+):
+    """The whole class / RBD master as .xlsx, for review in Excel.
+
+    Column headers match download_airline_class_template so a reviewed sheet can
+    go straight back through /bulk-upload; ROW_ID is ignored on the way back in.
+    """
+    result = await db.execute(
+        select(AirlineClassMaster).order_by(
+            AirlineClassMaster.airline_name,
+            AirlineClassMaster.class_type,
+            AirlineClassMaster.class_code,
+        )
+    )
+    classes = result.scalars().all()
+
+    headers = ["ROW_ID", "AIRLINE_NAME", "CLASS_TYPE", "CLASS_CODE", "AIRLINE_TYPE", "CLASS_NOTE", "ACTIVE"]
+    rows = [
+        [c.id, c.airline_name, c.class_type, c.class_code, c.airline_type, c.class_note, c.is_active]
+        for c in classes
+    ]
+
+    return master_export_response(
+        sheet_title="Airline Class Master",
+        filename="airline_class_master.xlsx",
+        headers=headers,
+        rows=rows,
     )
 
 

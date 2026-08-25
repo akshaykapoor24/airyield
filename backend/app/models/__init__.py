@@ -44,11 +44,21 @@ from app.models.deal_batch import DealBatch
 from app.models.agency import Agency
 from app.models.agency_entity import AgencyEntity
 from app.models.agency_login_id import AgencyLoginId
+from app.models.agency_terms import AgencyTerms
+from app.models.agency_ledger import AgencyLedger
 # Per-user profile data (My Profile → Entities / Login IDs) and the grants that
 # share an admin's entities with the team members they add.
 from app.models.user_entity import UserEntity
 from app.models.user_login_id import UserLoginId
 from app.models.user_entity_access import UserEntityAccess
+# Tenant-level masters. These were missing here, which mattered more than it
+# looks: alembic/env.py builds `target_metadata` from `from app.models import *`,
+# so with these three absent an `alembic revision --autogenerate` saw live tables
+# with no model behind them and proposed DROP TABLE for all three.
+from app.models.entity import Entity
+from app.models.login_id import LoginId
+from app.models.iata_commission import IataCommission
+from app.models.iata_commission_approval import IataCommissionApproval
 from app.models.deal import (
     DealStatement,
     Deal,
@@ -101,7 +111,8 @@ __all__ = [
     "BspSummaryStatement", "BspSummaryRow",
     "TicketReconciliation",
     "DealBatch",
-    "Agency", "AgencyEntity", "AgencyLoginId",
+    "Agency", "AgencyEntity", "AgencyLoginId", "AgencyTerms", "AgencyLedger",
+    "Entity", "LoginId", "IataCommission", "IataCommissionApproval",
     # New unified deal schema
     "DealStatement", "Deal",
     "DealIncentiveConfig", "DealIncentiveSlab", "DealIncentiveSlabValue",

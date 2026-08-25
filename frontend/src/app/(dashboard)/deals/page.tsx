@@ -68,6 +68,11 @@ type DealRepositoryItem = {
   file_type:             string | null;
   batch_id:              string | null;
   supplier_name:         string | null;
+  // Outgoing-deal scope: who the deal is floated to. `scope_party_name` is the
+  // snapshot taken at save time, so a renamed agency does not rewrite history.
+  direction:             string | null;
+  scope_type:            string | null;
+  scope_party_name:      string | null;
 };
 
 type DealHistoryStep = {
@@ -138,7 +143,22 @@ const DEAL_TYPE_STYLE: Record<string, { label: string; cls: string }> = {
   unified: { label: "Airline/B2B", cls: "bg-indigo-50 text-indigo-700 border-indigo-200" },
 };
 
+/** Outgoing scope chips. Deliberately not reusing DEAL_TYPE_STYLE: on an outgoing
+ *  deal the interesting fact is WHO it reaches, not airline-vs-b2b, and every one
+ *  of them is stored as deal_type='b2b'. */
+const SCOPE_STYLE: Record<string, { label: string; cls: string }> = {
+  agency:    { label: "B2B",       cls: "bg-sky-50 text-sky-700 border-sky-200" },
+  corporate: { label: "Corporate", cls: "bg-violet-50 text-violet-700 border-violet-200" },
+  all:       { label: "Common",    cls: "bg-emerald-50 text-emerald-700 border-emerald-200" },
+};
+
 function getDealTypeBadge(d: DealRepositoryItem) {
+  // Outgoing: show the scope. A Corporate deal is stored as deal_type='b2b'
+  // (that column is the vendor-side airline-vs-b2b discriminator), so the old
+  // badge called every outgoing deal "B2B" regardless of who it was for.
+  if (d.direction === "outbound" && d.scope_type) {
+    return SCOPE_STYLE[d.scope_type] ?? DEAL_TYPE_STYLE.b2b;
+  }
   if (d.deal_type === "unified") {
     // The deal KIND (B2B vs Airline) is encoded in the deal_no prefix the backend
     // builds from Deal.deal_type — the same signal the statement view shows. Don't
@@ -756,8 +776,15 @@ function DealFlatTable({ deals, showAirlineCol = true, onOpenHistory, onEdit, on
                   </span>
                 </td>
                 {showAirlineCol && (
-                  <td className="px-3 py-2.5 text-xs text-gray-700 max-w-[160px] truncate" title={d.airline_name ?? d.deal_maker_name ?? undefined}>
-                    {d.airline_name || d.deal_maker_name || d.supplier_name || "—"}
+                  <td className="px-3 py-2.5 text-xs text-gray-700 max-w-[160px]" title={d.airline_name ?? d.deal_maker_name ?? undefined}>
+                    <span className="block truncate">{d.airline_name || d.deal_maker_name || d.supplier_name || "—"}</span>
+                    {/* Who it is floated to. The chip says which KIND of scope; this
+                        says which party, which is the part you actually search for. */}
+                    {d.direction === "outbound" && d.scope_party_name && (
+                      <span className="block truncate text-[10px] text-gray-400" title={d.scope_party_name}>
+                        → {d.scope_party_name}
+                      </span>
+                    )}
                   </td>
                 )}
                 <td className="px-3 py-2.5 whitespace-nowrap">
@@ -846,7 +873,11 @@ export default function DealsPage() {
   const [loading,    setLoading]    = useState(true);
   const [apiError,   setApiError]   = useState("");
   const [search,     setSearch]     = useState("");
-  const [dealTypeFilter, setDealTypeFilter] = useState<"all" | DealType>("all");
+  // One control, two vocabularies: incoming filters by DealType (airline/b2b),
+  // outgoing by scope (agency/corporate/common). "common" stands in for the stored
+  // scope "all", which is already taken here by the no-filter option.
+  type DealFilter = "all" | DealType | "agency" | "corporate" | "common";
+  const [dealTypeFilter, setDealTypeFilter] = useState<DealFilter>("all");
   const [page,       setPage]       = useState(1);
   const [repoView,   setRepoView]   = useState<"statement" | "airline" | "all">("statement"); // default to first tab
 
@@ -960,18 +991,56 @@ export default function DealsPage() {
     setIncentiveRulesPopup({ deal: d, initialIncType: name });
   }, []);
 
+  const outbound = direction === "outbound";
+
+  // A batch's scope, read off its deals. DealBatch has no scope column of its own
+  // — the scope lives on the deal — and every deal in one batch shares it, because
+  // it is picked once per upload or per Create Deal. Both lists are already loaded,
+  // so this needs no extra request.
+  const batchScope = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const d of deals) {
+      if (d.batch_id && d.scope_type && !m.has(d.batch_id)) m.set(d.batch_id, d.scope_type);
+    }
+    return m;
+  }, [deals]);
+
+  /** The party name shown for a batch, preferring the deal's snapshot. */
+  const batchParty = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const d of deals) {
+      if (d.batch_id && d.scope_party_name && !m.has(d.batch_id)) m.set(d.batch_id, d.scope_party_name);
+    }
+    return m;
+  }, [deals]);
+
   // ── stat counts ───────────────────────────────────────────────────────
+  // Outgoing counts by SCOPE (who the deal reaches); incoming keeps airline-vs-b2b,
+  // which is the only distinction that means anything on the buying side.
   const totalDeals     = batches.reduce((s, b) => s + b.deal_count, 0);
   const countAirline   = batches.filter(b => b.deal_type === "airline").reduce((s, b) => s + b.deal_count, 0);
   const countB2B       = batches.filter(b => b.deal_type === "b2b").reduce((s, b) => s + b.deal_count, 0);
+  const countScope     = (scope: string) => deals.filter(d => (d.scope_type ?? "all") === scope).length;
   const countPending   = deals.filter(d => d.status === "pending_approval" || d.status === "confirmed").length;
   const countActive    = deals.filter(d => d.deal_lifecycle_status === "active").length;
+
+  /** On outgoing the type filter selects a scope, not airline-vs-b2b. */
+  const scopeOf = (d: DealRepositoryItem) => d.scope_type ?? "all";
+  /** Dropdown value → stored scope. The Common option cannot use the stored "all",
+   *  because that string already means "no filter" in this same select. */
+  const scopeFilterValue = dealTypeFilter === "common" ? "all" : dealTypeFilter;
+
   // ── filtered batches ──────────────────────────────────────────────────
   const filteredBatches = batches.filter(b => {
-    if (dealTypeFilter !== "all" && b.deal_type !== dealTypeFilter) return false;
+    if (dealTypeFilter !== "all") {
+      if (outbound) {
+        if ((batchScope.get(b.batch_id) ?? "all") !== scopeFilterValue) return false;
+      } else if (b.deal_type !== dealTypeFilter) return false;
+    }
     const q = search.toLowerCase();
     return !q ||
       (b.supplier_name ?? "").toLowerCase().includes(q) ||
+      (batchParty.get(b.batch_id) ?? "").toLowerCase().includes(q) ||
       (b.file_name     ?? "").toLowerCase().includes(q) ||
       (b.created_by_name ?? "").toLowerCase().includes(q);
   });
@@ -979,16 +1048,21 @@ export default function DealsPage() {
   // ── filtered deals (All Deal + Airline Wise views) ─────────────────────
   const filteredDeals = useMemo(() => deals.filter(d => {
     if (dealTypeFilter !== "all") {
-      const dType = d.deal_type === "unified" ? (d.business_type ? "b2b" : "airline") : d.deal_type;
-      if (dType !== dealTypeFilter) return false;
+      if (outbound) {
+        if (scopeOf(d) !== scopeFilterValue) return false;
+      } else {
+        const dType = d.deal_type === "unified" ? (d.business_type ? "b2b" : "airline") : d.deal_type;
+        if (dType !== dealTypeFilter) return false;
+      }
     }
     const q = search.toLowerCase();
     return !q ||
       (d.airline_name     ?? "").toLowerCase().includes(q) ||
       (d.deal_maker_name   ?? "").toLowerCase().includes(q) ||
       (d.supplier_name     ?? "").toLowerCase().includes(q) ||
+      (d.scope_party_name  ?? "").toLowerCase().includes(q) ||
       d.deal_no.toLowerCase().includes(q);
-  }), [deals, dealTypeFilter, search]);
+  }), [deals, dealTypeFilter, search, outbound]);
 
   const dealsByAirline = useMemo(() => {
     const map = new Map<string, DealRepositoryItem[]>();
@@ -1034,7 +1108,11 @@ export default function DealsPage() {
           <div className="flex items-start justify-between">
             <div>
               <h1 className="text-xl font-bold text-gray-900 uppercase tracking-wide">{direction === "outbound" ? "Outgoing Deal Repository" : "Incoming Deal Repository"}</h1>
-              <p className="text-xs text-gray-500 mt-0.5">All deals — uploads, airline contracts and B2B agreements</p>
+              <p className="text-xs text-gray-500 mt-0.5">
+                {outbound
+                  ? "Deals you float to customers — per agency, per corporate, or common to all"
+                  : "All deals — uploads, airline contracts and B2B agreements"}
+              </p>
             </div>
             <div className="flex gap-2">
               <button onClick={fetchDeals} disabled={loading}
@@ -1069,12 +1147,24 @@ export default function DealsPage() {
           </div>
 
           {/* ── Stats bar ───────────────────────────────────────────────── */}
-          <div className="grid grid-cols-6 gap-2">
+          <div className={`grid gap-2 ${outbound ? "grid-cols-7" : "grid-cols-6"}`}>
             {[
               { label: "Total Batches",    value: batches.length,                         color: "bg-blue-50 text-blue-700 border-blue-200"       },
               { label: "Total Deals",      value: totalDeals,                             color: "bg-indigo-50 text-indigo-700 border-indigo-200"  },
-              { label: "Airline Deals",    value: countAirline,                           color: "bg-sky-50 text-sky-700 border-sky-200"           },
-              { label: "B2B Deals",        value: countB2B,                               color: "bg-violet-50 text-violet-700 border-violet-200"  },
+              // "Airline Deals" is meaningless on the selling side — every outgoing
+              // deal is stored as b2b — so these two tiles count who the deals reach.
+              ...(outbound
+                ? [
+                    { label: "B2B (Agency)", value: countScope("agency"),    color: "bg-sky-50 text-sky-700 border-sky-200"          },
+                    { label: "Corporate",    value: countScope("corporate"), color: "bg-violet-50 text-violet-700 border-violet-200" },
+                  ]
+                : [
+                    { label: "Airline Deals", value: countAirline,           color: "bg-sky-50 text-sky-700 border-sky-200"          },
+                    { label: "B2B Deals",     value: countB2B,               color: "bg-violet-50 text-violet-700 border-violet-200" },
+                  ]),
+              ...(outbound
+                ? [{ label: "Common", value: countScope("all"), color: "bg-teal-50 text-teal-700 border-teal-200" }]
+                : []),
               { label: "Active",           value: countActive,                            color: "bg-emerald-50 text-emerald-700 border-emerald-200" },
               { label: "Pending Approval", value: countPending,                           color: "bg-amber-50 text-amber-700 border-amber-200"     },
             ].map(s => (
@@ -1090,14 +1180,31 @@ export default function DealsPage() {
             <div className="relative flex-1">
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
               <input value={search} onChange={e => { setSearch(e.target.value); setPage(1); }}
-                placeholder={repoView === "statement" ? "Search by supplier, file name, uploaded by..." : "Search by deal no, airline, deal maker..."}
+                placeholder={
+                  repoView === "statement"
+                    ? (outbound ? "Search by customer, file name, uploaded by..." : "Search by supplier, file name, uploaded by...")
+                    : (outbound ? "Search by deal no, airline, customer..." : "Search by deal no, airline, deal maker...")
+                }
                 className="w-full pl-8 pr-3 py-1.5 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-1 focus:ring-blue-400" />
             </div>
-            <select value={dealTypeFilter} onChange={e => { setDealTypeFilter(e.target.value as "all" | DealType); setPage(1); }}
+            <select value={dealTypeFilter} onChange={e => { setDealTypeFilter(e.target.value as DealFilter); setPage(1); }}
               className="border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs text-gray-700 bg-white focus:outline-none focus:ring-1 focus:ring-blue-400">
               <option value="all">All Deal Types</option>
-              <option value="airline">Airline</option>
-              <option value="b2b">B2B</option>
+              {outbound ? (
+                <>
+                  {/* The scope values, not airline-vs-b2b — every outgoing deal is b2b.
+                      "common" rather than the stored "all", which is already taken by
+                      the no-filter option above. scopeFilterValue maps it back. */}
+                  <option value="agency">B2B</option>
+                  <option value="corporate">Corporate</option>
+                  <option value="common">Common</option>
+                </>
+              ) : (
+                <>
+                  <option value="airline">Airline</option>
+                  <option value="b2b">B2B</option>
+                </>
+              )}
             </select>
             <span className="text-[11px] text-gray-400 ml-auto whitespace-nowrap">
               {repoView === "statement"
@@ -1122,7 +1229,9 @@ export default function DealsPage() {
             <table className="w-full">
               <thead>
                 <tr style={{ background: "#1e3a5f" }}>
-                  <th className="px-4 py-3 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Supplier / Source</th>
+                  <th className="px-4 py-3 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">
+                    {outbound ? "Customer / Scope" : "Supplier / Source"}
+                  </th>
                   <th className="px-3 py-3 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Deal Type</th>
                   <th className="px-3 py-3 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Deal Tag</th>
                   <th className="px-3 py-3 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">
@@ -1173,7 +1282,14 @@ export default function DealsPage() {
                     </td>
                   </tr>
                 ) : filteredBatches.map(b => {
-                  const dtStyle = DEAL_TYPE_STYLE[b.deal_type] ?? DEAL_TYPE_STYLE.airline;
+                  // Outgoing: the batch's Deal Type chip is its SCOPE. Every outgoing
+                  // batch is deal_type='b2b', so the old chip labelled a Corporate
+                  // batch "B2B" and a Common one "B2B" too.
+                  const bScope  = batchScope.get(b.batch_id);
+                  const dtStyle = outbound && bScope
+                    ? (SCOPE_STYLE[bScope] ?? DEAL_TYPE_STYLE.b2b)
+                    : (DEAL_TYPE_STYLE[b.deal_type] ?? DEAL_TYPE_STYLE.airline);
+                  const bParty  = batchParty.get(b.batch_id) ?? b.supplier_name;
                   const FileIcon = b.file_type === "pdf" ? FileText : FileSpreadsheet;
                   return (
                     <tr
@@ -1187,9 +1303,18 @@ export default function DealsPage() {
                           <div className="w-7 h-7 rounded-lg bg-blue-50 flex items-center justify-center shrink-0">
                             <Building2 className="w-3.5 h-3.5 text-blue-500" />
                           </div>
-                          <p className="text-xs font-semibold text-gray-800 group-hover:text-[#1e3a5f] leading-tight truncate" title={b.supplier_name ?? undefined}>
-                            {b.supplier_name || "—"}
-                          </p>
+                          <div className="min-w-0">
+                            <p className="text-xs font-semibold text-gray-800 group-hover:text-[#1e3a5f] leading-tight truncate" title={bParty ?? undefined}>
+                              {bParty || "—"}
+                            </p>
+                            {/* Names the kind of counterparty, so "exl" reads as a
+                                corporate and "All Customers" as a common deal. */}
+                            {outbound && bScope && (
+                              <p className="text-[10px] text-gray-400 leading-tight truncate">
+                                {bScope === "agency" ? "Agency" : bScope === "corporate" ? "Corporate" : "All customers"}
+                              </p>
+                            )}
+                          </div>
                         </div>
                       </td>
 
@@ -1300,7 +1425,7 @@ export default function DealsPage() {
                 <DealFlatTable
                   deals={filteredDeals}
                   onOpenHistory={openHistory}
-                  onEdit={(d) => router.push(`/deals/new?editId=${d.id}`)}
+                  onEdit={(d) => router.push(`/deals/new?editId=${d.id}&direction=${direction}`)}
                   onDelete={setDeleteTarget}
                   onOpenIncentiveRules={openIncentiveRules}
                 />
@@ -1333,7 +1458,7 @@ export default function DealsPage() {
                       deals={airlineDeals}
                       showAirlineCol={false}
                       onOpenHistory={openHistory}
-                      onEdit={(d) => router.push(`/deals/new?editId=${d.id}`)}
+                      onEdit={(d) => router.push(`/deals/new?editId=${d.id}&direction=${direction}`)}
                       onDelete={setDeleteTarget}
                       onOpenIncentiveRules={openIncentiveRules}
                     />

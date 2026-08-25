@@ -4,15 +4,16 @@ import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
-  BarChart2, FileText, Ticket, FolderOpen, FolderOutput, Settings,
+  BarChart2, FileText, FolderOpen, FolderOutput, Settings,
   ChevronLeft, ChevronDown, Send, UserCircle, KeyRound, LogOut,
-  Plane, Building, Building2, MapPin, Route, Tag, DollarSign,
-  Calculator, Upload, ClipboardCheck, CheckSquare,
+  Plane, Building, Building2, MapPin, Route, Tag, DollarSign, Percent,
+  Calculator, ClipboardCheck, CheckSquare,
   Edit3, Users, Shield, GitMerge, Search,
-  BookOpen, History, LayoutGrid, Plus, Contact, Percent, FilePlus, Layers,
+  History, LayoutGrid, Plus, Contact, Layers,
   CreditCard,
 } from "lucide-react";
 import { loadDashboards, type CustomDashboard } from "@/lib/customDashboards";
+import { USER_MASTER_NAV, userMasterHref } from "@/lib/userMasterNav";
 import { cn } from "@/lib/utils";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { toggleSidebar } from "@/store/slices/uiSlice";
@@ -61,20 +62,16 @@ const TENANT_NAV: NavItem[] = [
       // Customer directory = the sub-agencies we onboard and float deals to (NOT our own
       // customer list). One page with in-page Onboarding / Overview tabs.
       { label: "Customer directory", href: "/customers/directory", icon: Contact },
-      { label: "Floated deals", href: "/deals?direction=outbound", icon: FolderOutput },
-      { label: "Statements", href: "/customers/statements", icon: FileText },
+      { label: "Outgoing deals", href: "/deals?direction=outbound", icon: FolderOutput },
+      // Statement is the ticket book on the selling side: the statement list and
+      // every ticket, with Upload Statement and Create Ticket on the page itself.
+      // It absorbed the old top-level "Internal Statement" group — the /tickets/*
+      // URLs still work and still read the same rows, they are just no longer a
+      // separate destination.
+      { label: "Statement", href: "/customers/statements", icon: FileText },
       { label: "Reconciliation", href: "/customers/reconciliation", icon: GitMerge },
+      { label: "Income Statement", href: "/customers/income-statement", icon: DollarSign },
       // { label: "Billing and invoices", href: "/billing/agency", icon: DollarSign },
-    ],
-  },
-
-  {
-    id: "tickets", label: "Internal Statement", icon: Ticket,
-    children: [
-      { label: "Internal Statement", href: "/tickets", icon: BookOpen },
-      { label: "Upload Statement", href: "/tickets/upload", icon: Upload },
-      { label: "Create Tickets", href: "/tickets/create", icon: FilePlus },
-      { label: "Income Statement", href: "/tickets/income-summary", icon: DollarSign },
     ],
   },
 
@@ -88,11 +85,13 @@ const TENANT_NAV: NavItem[] = [
   },
 
   {
-    id: "agency-profile", label: "User master", icon: Users,
-    children: [
-      // Agency Onboarding + Overview moved into "Customer data" (they ARE the customer directory).
-      { label: "IATA Commission", href: "/user-master/iata-commission", icon: Percent },
-    ],
+    // "User master" = the parties you maintain (who you work with). Billing them
+    // lives under "Billing". Children come from lib/userMasterNav so this and the
+    // user-master layout's tab strip cannot drift apart.
+    id: "user-master", label: "User master", icon: Users,
+    children: USER_MASTER_NAV.map((t) => ({
+      label: t.label, href: userMasterHref(t.slug), icon: t.icon,
+    })),
   },
 
   // {
@@ -118,6 +117,7 @@ const TENANT_NAV: NavItem[] = [
       { label: "Airlines", href: "/masters/airlines", icon: Plane },
       { label: "Airports", href: "/masters/airports", icon: MapPin },
       { label: "Classes / RBD", href: "/masters/classes", icon: Tag },
+      { label: "IATA Commission", href: "/masters/iata-commission", icon: Percent },
     ],
   },
 
@@ -150,6 +150,9 @@ const PLATFORM_NAV: NavItem[] = [
       { label: "Airlines", href: "/masters/airlines", icon: Plane },
       { label: "Airports", href: "/masters/airports", icon: MapPin },
       { label: "Classes / RBD", href: "/masters/classes", icon: Tag },
+      // Moved out of the tenant's "User master" — per-airline IATA commission
+      // is one global master, so the platform admin owns it.
+      { label: "IATA Commission", href: "/masters/iata-commission", icon: Percent },
       // { label: "Income Heads", href: "/masters/income-heads", icon: DollarSign },
       // { label: "Calculation Rules", href: "/masters/calculation-rules", icon: Calculator },
     ],
@@ -220,6 +223,11 @@ export default function Sidebar() {
           !pathname.startsWith("/tickets/create") &&
           !pathname.startsWith("/tickets/bsp") &&
           !pathname.startsWith("/tickets/adjustments"))
+    // "/customers" is Customer Billing: the picker plus the /customers/{id}
+    // billing workspace. Its siblings (directory / statements / reconciliation)
+    // are separate entries under "Customer data" and must not light this up.
+    : href === "/customers"
+      ? pathname === "/customers" || /^\/customers\/\d+$/.test(pathname)
     : pathname === href || pathname.startsWith(href + "/");
 
   const isOnCustomDashboard = pathname.startsWith("/dashboard/");

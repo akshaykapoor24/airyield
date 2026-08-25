@@ -360,7 +360,7 @@ export default function SignupPage() {
                 autoComplete="organization"
                 value={companyName}
                 onChange={(e) => setCompanyName(e.target.value)}
-                placeholder="e.g. Yatra Online Pvt Ltd"
+                placeholder="e.g. ABC Pvt Ltd"
                 className={field}
               />
               <Building2 className={icon} />

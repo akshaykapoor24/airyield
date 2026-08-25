@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { Building2, RefreshCw, Ticket, FileText, Download, Trash2, Save, X, Eye, Edit2 } from "lucide-react";
 import api from "@/lib/api";
 import { INCENTIVE_TYPE_COLS } from "@/lib/incentives";
@@ -8,7 +9,11 @@ import { INCENTIVE_TYPE_COLS } from "@/lib/incentives";
 type AgencyOpt = {
   id: number;
   name: string;
-  vendor_type: string | null;
+  branch_name: string | null;
+  city: string | null;
+  // What the agency trades on. Cash or credit is per CHANNEL now and lives in
+  // agency_terms, so there is no single "type" to show here.
+  channels: string;             // GDS | LCC | BOTH
   gst_number: string | null;
   pan_number: string | null;
   contact_email: string | null;
@@ -148,6 +153,10 @@ export default function AgencyBillingPage() {
   // Save Billing
   const [showSaveBilling, setShowSaveBilling] = useState(false);
   const [billingName, setBillingName] = useState("");
+  // Which channel's account this invoice draws down. Only asked for when the
+  // agency trades on both — posting to the wrong one spends a deposit that was
+  // never meant for these tickets.
+  const [billingChannel, setBillingChannel] = useState("GDS");
   const [savingBilling, setSavingBilling] = useState(false);
 
   // Billings
@@ -287,6 +296,9 @@ export default function AgencyBillingPage() {
     try {
       await api.post(`/agency-billings/${agencyId}/billings`, {
         billing_name: billingName.trim(),
+        // Which account this invoice draws down. Omitted for a single-channel
+        // agency (the API resolves it); required when it trades on both.
+        channel: selectedAgency?.channels === "BOTH" ? billingChannel : null,
         period_from: dateFrom,
         period_to: dateTo,
         items: rows.map((t) => ({
@@ -396,7 +408,7 @@ export default function AgencyBillingPage() {
           <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-0.5">Billing</p>
           <h1 className="text-xl font-bold text-gray-900">Agency Billing</h1>
           <p className="text-xs text-gray-500 mt-0.5">
-            Select an agency from your Customer Directory, review its tickets, and bill them.
+            Pick an agency, review its tickets, and bill them. Agencies are onboarded in Agency Master.
           </p>
         </div>
       </div>
@@ -410,16 +422,37 @@ export default function AgencyBillingPage() {
             className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#1e3a5f]/30 bg-gray-50"
           >
             <option value="">— Select agency —</option>
+            {/* Branch AND channel, because a vendor is onboarded once per branch
+                and once per channel, and each is a separate account with its own
+                unbilled tickets. On the name alone the list shows duplicates. */}
             {agencies.map((a) => (
               <option key={a.id} value={a.id}>
                 {a.name}
+                {a.branch_name || a.city ? ` — ${a.branch_name || a.city}` : ""}
+                {` · ${a.channels}`}
               </option>
             ))}
           </select>
+          {agencies.length === 0 && (
+            <p className="text-[11px] text-gray-400 mt-1">
+              No agencies yet.{" "}
+              <Link href="/user-master/agency-master" className="text-[#1e3a5f] font-semibold hover:underline">
+                Add them in Agency Master →
+              </Link>
+            </p>
+          )}
         </div>
         {selectedAgency && (
           <div className="text-[11px] text-gray-500 pb-2">
-            {selectedAgency.vendor_type && <span className="mr-3">Type: {selectedAgency.vendor_type}</span>}
+            {selectedAgency.branch_name && <span className="mr-3 font-semibold text-gray-600">{selectedAgency.branch_name}</span>}
+            {selectedAgency.city && <span className="mr-3">{selectedAgency.city}</span>}
+            <span className="mr-3 inline-flex gap-1 align-middle">
+              {(selectedAgency.channels === "BOTH" ? ["GDS", "LCC"] : [selectedAgency.channels]).map(c => (
+                <span key={c} className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold border ${
+                  c === "GDS" ? "bg-sky-50 text-sky-700 border-sky-200" : "bg-violet-50 text-violet-700 border-violet-200"
+                }`}>{c}</span>
+              ))}
+            </span>
             {selectedAgency.gst_number && <span className="mr-3">GST: {selectedAgency.gst_number}</span>}
             {selectedAgency.contact_email && <span>{selectedAgency.contact_email}</span>}
           </div>
@@ -797,8 +830,32 @@ export default function AgencyBillingPage() {
                   className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#1e3a5f]/30 bg-gray-50"
                 />
               </div>
+              {selectedAgency?.channels === "BOTH" && (
+                <div>
+                  <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Channel *</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {["GDS", "LCC"].map((c) => (
+                      <button
+                        key={c}
+                        type="button"
+                        onClick={() => setBillingChannel(c)}
+                        className={`rounded-lg border py-2 text-xs font-bold transition ${
+                          billingChannel === c
+                            ? "border-emerald-500 bg-emerald-50 text-emerald-700"
+                            : "border-gray-200 text-gray-500 hover:bg-gray-50"
+                        }`}
+                      >
+                        {c}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-gray-400 mt-1">
+                    This agency has a separate account per channel — the invoice draws down the one you pick.
+                  </p>
+                </div>
+              )}
               <div className="bg-gray-50 border border-gray-100 rounded-lg px-3 py-2.5 text-[11px] text-gray-600 space-y-1">
-                <div className="flex justify-between"><span>Agency</span><span className="font-semibold">{selectedAgency?.name}</span></div>
+                <div className="flex justify-between"><span>Agency</span><span className="font-semibold">{selectedAgency?.name}{selectedAgency?.branch_name ? ` · ${selectedAgency.branch_name}` : ""}</span></div>
                 <div className="flex justify-between"><span>Period</span><span className="font-semibold">{dateFrom || "—"} → {dateTo || "—"}</span></div>
                 <div className="flex justify-between"><span>Selected Tickets</span><span className="font-semibold">{selectedSummary.count}</span></div>
                 <div className="flex justify-between"><span>Grand Total</span><span className="font-semibold">{money(selectedSummary.total)}</span></div>

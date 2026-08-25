@@ -11,7 +11,27 @@ Match criteria (in order):
   5. Trigger type (airline deals): Sales/Flown vs ticket invoice_type
   6. Per-incentive sub-validity: contract_valid_from / contract_valid_to
 
-statement_type restricts which deal_type is searched:
+`direction` picks which side of the book is searched, and it changes rules 7-8:
+
+  INBOUND  (default) — deals you RECEIVE, the income side. BSP settlement runs
+                       and anything else asking "what did we earn". `deal_type`
+                       is restricted by statement_type and a B2B deal must name
+                       the statement's own supplier.
+
+  OUTBOUND           — deals you FLOAT to a customer, the commission you PAY.
+                       What the customer-side ticket run uses. Every outgoing
+                       deal is b2b by construction, so statement_type does NOT
+                       restrict deal_type here — an AIRLINE-format statement
+                       sold to a sub-agency would otherwise match nothing. The
+                       supplier-name guard is replaced by `customer_scope`:
+
+                         7. Scope guard — a deal naming a DIFFERENT party is not
+                            a candidate at all. Common ('all') deals always are.
+                         8. Scope ladder — a deal naming this exact customer
+                            beats the common one outright. The common deal is
+                            reached only when no customer-specific deal matched.
+
+statement_type restricts which deal_type is searched (INBOUND only):
   "B2B"     → only deals with deal_type="b2b"; supplier enforced
   "AIRLINE" → only deals with deal_type="airline"
   None      → both
@@ -44,6 +64,7 @@ from app.models.deal import (
     DealStatusType,
     DealLifecycleType,
     DealDirection,
+    DealScopeType,
     build_rule_dict,
 )
 
@@ -655,6 +676,79 @@ async def _compute_slab_cumulative(
     return inc
 
 
+# ── Outgoing-deal customer scope ───────────────────────────────────────────
+# The mirror image of Deal.scope_type, read off the TICKET. An outgoing deal is
+# floated either to one named party or to everybody; this says which party the
+# ticket in hand was sold to, so the two can be compared.
+
+@dataclass(frozen=True)
+class CustomerScope:
+    """WHO a ticket was sold to, as the outgoing matcher needs it.
+
+    `kind` is 'agency' | 'corporate' | 'direct' | None. None is NOT the same as
+    'direct': direct means the sale is known to be to a walk-in, None means the
+    ticket carries no customer tag at all. Both reach common deals only, but the
+    second is a data gap worth reporting rather than a business fact.
+    """
+    kind:         str | None = None
+    agency_id:    int | None = None
+    corporate_id: int | None = None
+    name:         str | None = None      # display only, for diagnosis text
+
+
+# Ladder rungs. Higher wins outright — a deal naming this exact customer is used
+# even when a common deal would have paid more, because the specific arrangement
+# IS the agreement with that customer.
+SCOPE_SPECIFIC = 2
+SCOPE_COMMON   = 1
+
+_SCOPE_LABEL = {SCOPE_SPECIFIC: "customer-specific", SCOPE_COMMON: "common"}
+
+
+def _deal_scope_type(deal: UnifiedDeal) -> str:
+    st = deal.scope_type
+    return st.value if hasattr(st, "value") else str(st or DealScopeType.ALL.value)
+
+
+def _scope_tier(deal: UnifiedDeal, party: CustomerScope | None) -> int | None:
+    """Which rung of the ladder this outgoing deal sits on for this ticket.
+
+    None means the deal is not a candidate at all — it names a different party.
+    A party-less ticket (direct, or untagged) can only ever reach common deals;
+    it must never fall through to some other agency's rate.
+    """
+    st = _deal_scope_type(deal)
+    if st == DealScopeType.ALL.value:
+        return SCOPE_COMMON
+    if party is None:
+        return None
+    if st == DealScopeType.AGENCY.value:
+        if party.kind == "agency" and party.agency_id is not None and deal.agency_id == party.agency_id:
+            return SCOPE_SPECIFIC
+        return None
+    if st == DealScopeType.CORPORATE.value:
+        if party.kind == "corporate" and party.corporate_id is not None and deal.corporate_id == party.corporate_id:
+            return SCOPE_SPECIFIC
+        return None
+    return None
+
+
+def _party_label(party: CustomerScope | None) -> str:
+    if party is None or party.kind is None:
+        return "untagged"
+    if party.name:
+        return f"{party.kind}: {party.name}"
+    ident = party.agency_id if party.kind == "agency" else party.corporate_id
+    return f"{party.kind} #{ident}" if ident else party.kind
+
+
+def _deal_scope_label(deal: UnifiedDeal) -> str:
+    st = _deal_scope_type(deal)
+    if st == DealScopeType.ALL.value:
+        return "All Customers"
+    return f"{st}: {deal.scope_party_name or deal.supplier_name or '—'}"
+
+
 # ── Result type ────────────────────────────────────────────────────────────
 
 @dataclass
@@ -670,6 +764,10 @@ class DealMatchResult:
     valid_to:             date | None = None
     deal_maker_name:      str | None  = None
     iata_commission:      str | None  = None  # deal's IATA commission %, applied to ticket sell fare
+    # Outgoing runs only: which rung of the scope ladder this deal was reached on.
+    # None on inbound matches, which have no scope.
+    scope_tier:           int | None  = None
+    scope_label:          str | None  = None
 
 
 # ── Main service ───────────────────────────────────────────────────────────
@@ -697,15 +795,24 @@ class DealMatchingService:
         statement_type:  str | None = None,
         skip_criteria:   set[str] | None = None,
         cumulative_provider: CumulativeProvider | None = None,
+        direction:       DealDirection = DealDirection.INBOUND,
+        customer_scope:  CustomerScope | None = None,
     ) -> list[DealMatchResult]:
         """
         Search the unified deals table, return ALL matching deals sorted by
         calculated_incentive descending (highest first).
 
-        statement_type restricts which deal_type is searched:
+        statement_type restricts which deal_type is searched (INBOUND only):
           "B2B"     → only deals with deal_type="b2b"; supplier match enforced.
           "AIRLINE" → only deals with deal_type="airline".
           None/other → both deal types.
+
+        direction picks the side of the book. OUTBOUND searches the deals you
+        floated to your customers instead of the ones you receive, drops the
+        statement_type→deal_type restriction (every outgoing deal is b2b), and
+        swaps the supplier-name guard for customer_scope: deals naming another
+        party are dropped, and a deal naming THIS customer beats the common one
+        outright — the common deal is returned only when no specific one matched.
 
         skip_criteria names the filters the caller's source cannot evaluate
         (SKIP_CLASS / SKIP_TRAVEL_DATE) — used by BSP settlement rows, which
@@ -713,8 +820,12 @@ class DealMatchingService:
         where slab achievement is summed from.
         """
         airline_lower = airline_name.lower()
-        is_b2b     = (statement_type or "").upper() == "B2B"
-        is_airline = (statement_type or "").upper() == "AIRLINE"
+        is_outbound = direction == DealDirection.OUTBOUND
+        # Outgoing deals are always b2b, so an AIRLINE-format statement sold to a
+        # sub-agency must NOT be narrowed to deal_type='airline' — that pool is
+        # empty by construction and every such ticket would come back unmatched.
+        is_b2b     = not is_outbound and (statement_type or "").upper() == "B2B"
+        is_airline = not is_outbound and (statement_type or "").upper() == "AIRLINE"
         skips = skip_criteria or set()
         # None = "unknown", which the slab cell picker reads differently from an
         # empty set; never fabricate {"Economy"} for a source without a class.
@@ -732,9 +843,10 @@ class DealMatchingService:
         where_clauses = [
             UnifiedDeal.tenant_id             == tenant_id,
             UnifiedDeal.created_by_id         == created_by_id,
-            # Only INBOUND deals count as your income. Floated (outbound) deals are
-            # commission you pay a sub-agency — they must never match your own tickets.
-            UnifiedDeal.direction             == DealDirection.INBOUND,
+            # One side of the book only, and never a mix. INBOUND deals are the
+            # income you earn; OUTBOUND deals are the commission you pay a customer.
+            # A run asking for one must never be handed the other.
+            UnifiedDeal.direction             == direction,
             UnifiedDeal.status                == DealStatusType.APPROVED,
             UnifiedDeal.deal_lifecycle_status == DealLifecycleType.ACTIVE,
             func.lower(UnifiedDeal.airline_name) == airline_lower,
@@ -762,10 +874,20 @@ class DealMatchingService:
         for deal in u_result.scalars().all():
             deal_type_str = deal.deal_type.value  # "airline" | "b2b"
 
-            # Supplier guard (B2B)
-            if deal_type_str == "b2b" and supplier_agency:
-                if deal.supplier_name and deal.supplier_name.lower() != supplier_agency.lower():
+            if is_outbound:
+                # Scope guard. Replaces the supplier-name guard entirely: an
+                # outgoing deal's supplier_name is a snapshot of the scope label
+                # ("All Customers" on a common deal), so comparing it to the
+                # statement's agency name would reject every common deal.
+                scope_tier = _scope_tier(deal, customer_scope)
+                if scope_tier is None:
                     continue
+            else:
+                scope_tier = None
+                # Supplier guard (B2B)
+                if deal_type_str == "b2b" and supplier_agency:
+                    if deal.supplier_name and deal.supplier_name.lower() != supplier_agency.lower():
+                        continue
 
             # Trigger guard (airline deals only)
             if deal_type_str == "airline" and not _trigger_matches(invoice_type, deal.trigger_type):
@@ -814,7 +936,10 @@ class DealMatchingService:
                     deal_id=deal.id,
                     deal_type=deal_type_str,
                     deal_name=deal.airline_name or airline_name,
-                    deal_no=f"{'B2B' if deal_type_str == 'b2b' else 'AIR'}-{deal.id:04d}",
+                    # 6 digits, matching deals.py:_unified_deal_to_repo_item — the two
+                    # used to disagree, so one deal showed a different number in the
+                    # repository than in a commission row.
+                    deal_no=f"{'B2B' if deal_type_str == 'b2b' else 'AIR'}-{deal.id:06d}",
                     calculated_incentive=total_inc,
                     incentive_breakdown=breakdown,
                     is_unified=True,
@@ -822,7 +947,19 @@ class DealMatchingService:
                     valid_to=deal.valid_to,
                     deal_maker_name=deal.deal_maker_name,
                     iata_commission=deal.iata_commission,
+                    scope_tier=scope_tier,
+                    scope_label=_deal_scope_label(deal) if is_outbound else None,
                 ))
+
+        # ── Scope ladder (outgoing only) ───────────────────────────────────
+        # A deal written for THIS customer wins outright, even when a common deal
+        # would have paid more — the specific arrangement is the agreement with
+        # that customer, not the best of several offers. A specific deal that
+        # matched but computed ₹0 (slab target not met) still wins its tier: it
+        # applied and paid nothing, which is not the same as not applying.
+        if is_outbound and matches:
+            best_tier = max(m.scope_tier or SCOPE_COMMON for m in matches)
+            matches = [m for m in matches if (m.scope_tier or SCOPE_COMMON) == best_tier]
 
         matches.sort(key=lambda m: m.calculated_incentive or 0, reverse=True)
         return matches
@@ -851,14 +988,22 @@ class DealMatchingService:
         skip_criteria:       set[str] | None = None,
         rule_skip_fields:    set[str] | None = None,
         cumulative_provider: CumulativeProvider | None = None,
+        direction:           DealDirection = DealDirection.INBOUND,
+        customer_scope:      CustomerScope | None = None,
     ) -> list:
         """
         Return a full step-by-step diagnostic for every approved deal belonging to this
         airline+tenant.
-        statement_type restricts which unified deals are shown in diagnosis:
+        statement_type restricts which unified deals are shown in diagnosis (INBOUND only):
           "B2B"     → only deal_type="b2b"; supplier match enforced.
           "AIRLINE" → only deal_type="airline".
         Never short-circuits — every PLB step is evaluated.
+
+        direction/customer_scope mirror find_all_deals, and MUST mirror what the
+        runner passed: a diagnosis of the income side cannot explain a result the
+        customer side produced. On OUTBOUND the supplier step is replaced by a
+        Customer Scope step, and a common deal beaten by a customer-specific one
+        is shown failing a Scope Priority step rather than quietly disappearing.
 
         skip_criteria mirrors find_all_deals: named criteria the source cannot
         supply are reported as skipped rather than failed.
@@ -872,6 +1017,10 @@ class DealMatchingService:
         )
 
         airline_lower = airline_name.lower()
+        is_outbound = direction == DealDirection.OUTBOUND
+        party_label = _party_label(customer_scope)
+        # deal_id → rung, so the ladder can be explained after every deal is scored.
+        scope_tier_by_deal: dict[int, int] = {}
         skips = skip_criteria or set()
         if SKIP_CLASS in skips:
             cabin_groups = None
@@ -891,7 +1040,7 @@ class DealMatchingService:
 
             deal_type_str = deal.deal_type.value  # "airline" | "b2b"
             prefix = {"airline": "AIR", "b2b": "B2B"}.get(deal_type_str, "DEAL")
-            deal_no = f"{prefix}-{deal.id:04d}"
+            deal_no = f"{prefix}-{deal.id:06d}"
             deal_name = deal.airline_name or airline_name
 
             # ── A: Deal-level validity (matched against the ticket ISSUE date) ─
@@ -992,8 +1141,24 @@ class DealMatchingService:
                         ),
                     ))
 
-                # Supplier (B2B only)
-                if deal_type_str == "b2b" and supplier_agency and deal.supplier_name:
+                # Customer scope (outgoing) — who this floated deal is aimed at.
+                # Deals naming a different party never reach here; this step is
+                # what tells the reader WHICH rung the surviving deal sits on.
+                if is_outbound:
+                    tier = scope_tier_by_deal.get(deal.id, SCOPE_COMMON)
+                    steps.append(MatchStepResult(
+                        step="Customer Scope",
+                        passed=True,
+                        ticket_value=party_label,
+                        deal_value=_deal_scope_label(deal),
+                        detail=(
+                            f"ticket sold to {party_label}; deal floated to "
+                            f"{_deal_scope_label(deal)} — reachable as the "
+                            f"{_SCOPE_LABEL[tier]} deal"
+                        ),
+                    ))
+                # Supplier (B2B only, income side)
+                elif deal_type_str == "b2b" and supplier_agency and deal.supplier_name:
                     sup_pass = deal.supplier_name.lower() == supplier_agency.lower()
                     steps.append(MatchStepResult(
                         step="Supplier Match",
@@ -1188,14 +1353,17 @@ class DealMatchingService:
             )
 
         # ── Unified deals table (single source of truth) ───────────────────
-        _is_b2b     = (statement_type or "").upper() == "B2B"
-        _is_airline = (statement_type or "").upper() == "AIRLINE"
+        # deal_type is narrowed by statement_type on the income side only; every
+        # outgoing deal is b2b, so narrowing an AIRLINE statement here would show
+        # an empty diagnosis for a ticket the runner matched fine.
+        _is_b2b     = not is_outbound and (statement_type or "").upper() == "B2B"
+        _is_airline = not is_outbound and (statement_type or "").upper() == "AIRLINE"
 
         diag_where = [
             UnifiedDeal.tenant_id == tenant_id,
             UnifiedDeal.created_by_id == created_by_id,
-            # Diagnosis is income-side too — exclude floated (outbound) deals.
-            UnifiedDeal.direction == DealDirection.INBOUND,
+            # Same side of the book the runner searched — see the docstring.
+            UnifiedDeal.direction == direction,
             UnifiedDeal.status    == DealStatusType.APPROVED,
             func.lower(UnifiedDeal.airline_name) == airline_lower,
         ]
@@ -1219,11 +1387,44 @@ class DealMatchingService:
         )
         for deal in d_result.scalars().all():
             deal_type_str = deal.deal_type.value
-            # Skip wrong supplier for B2B
-            if deal_type_str == "b2b" and supplier_agency and deal.supplier_name:
+            if is_outbound:
+                # Skip deals floated to somebody else — they explain nothing here.
+                tier = _scope_tier(deal, customer_scope)
+                if tier is None:
+                    continue
+                scope_tier_by_deal[deal.id] = tier
+            # Skip wrong supplier for B2B (income side)
+            elif deal_type_str == "b2b" and supplier_agency and deal.supplier_name:
                 if deal.supplier_name.lower() != supplier_agency.lower():
                     continue
             results.append(await _diagnose_unified_deal(deal))
+
+        # ── Explain the scope ladder ───────────────────────────────────────
+        # The runner drops every common deal once a customer-specific one matches.
+        # Say so on the dropped deals instead of leaving them looking like winners
+        # the run inexplicably ignored.
+        if is_outbound and any(
+            d.overall_match and scope_tier_by_deal.get(d.deal_id) == SCOPE_SPECIFIC
+            for d in results
+        ):
+            for d in results:
+                if scope_tier_by_deal.get(d.deal_id) != SCOPE_COMMON or not d.overall_match:
+                    continue
+                note = MatchStepResult(
+                    step="Scope Priority",
+                    passed=False,
+                    ticket_value=party_label,
+                    deal_value="All Customers",
+                    detail=(
+                        f"a deal floated specifically to {party_label} also matched — "
+                        "a common deal applies only when no customer-specific deal does"
+                    ),
+                )
+                for p in d.plbs:
+                    p.steps.append(note)
+                    p.plb_overall_match = False
+                d.overall_match  = False
+                d.best_incentive = None
 
         return results
 
@@ -1248,8 +1449,15 @@ class DealMatchingService:
         statement_type:  str | None = None,
         skip_criteria:   set[str] | None = None,
         cumulative_provider: CumulativeProvider | None = None,
+        direction:       DealDirection = DealDirection.INBOUND,
+        customer_scope:  CustomerScope | None = None,
     ) -> DealMatchResult | None:
-        """Return the single best (highest incentive) matching deal."""
+        """Return the single best (highest incentive) matching deal.
+
+        On an OUTBOUND run "best" is read within the winning scope tier only —
+        find_all_deals has already dropped the common deals when a deal naming
+        this customer matched.
+        """
         matches = await DealMatchingService.find_all_deals(
             db=db, airline_name=airline_name, travel_date=travel_date,
             tenant_id=tenant_id, created_by_id=created_by_id, issue_date=issue_date,
@@ -1261,6 +1469,8 @@ class DealMatchingService:
             statement_type=statement_type,
             skip_criteria=skip_criteria,
             cumulative_provider=cumulative_provider,
+            direction=direction,
+            customer_scope=customer_scope,
         )
         return matches[0] if matches else None
 

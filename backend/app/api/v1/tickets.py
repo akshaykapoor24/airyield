@@ -12,6 +12,8 @@ from dateutil import parser as dateutil_parser
 from fastapi import APIRouter, Depends, Form, UploadFile, File, HTTPException, status, Query
 from fastapi.responses import StreamingResponse
 import pandas as pd
+from dataclasses import dataclass
+
 from sqlalchemy import select, or_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -24,6 +26,9 @@ from app.models.ticket_statement import TicketStatement
 from app.models.income_summary import IncomeSummary
 from app.models.ticket_calculation import TicketCalculation
 from app.models.user import User
+from app.models.agency import Agency
+from app.models.corporate import Corporate
+from app.models.customer import Customer
 from app.schemas.uploaded_ticket import (
     TicketExtractionPreview,
     TicketRow,
@@ -44,7 +49,8 @@ from app.schemas.uploaded_ticket import (
     IncomeSummaryRead,
 )
 from pydantic import BaseModel
-from app.services.deal_matching import DealMatchingService
+from app.models.deal import DealDirection
+from app.services.deal_matching import CustomerScope, DealMatchingService, SCOPE_SPECIFIC
 from app.services.exclusion_evaluator import evaluate_exclusion_for_payout, evaluate_inclusion_for_payout
 from app.services.ticket_extraction import (
     TicketExtractionService, TEMPLATE_HEADERS, AIRLINE_TEMPLATE_HEADERS,
@@ -235,6 +241,86 @@ async def _resolve_airlines(
     return code_to_airline, name_to_airline
 
 
+@dataclass
+class CustomerParty:
+    """A resolved, authorised counterparty for a statement or ticket."""
+    customer_type: str | None = None          # agency | corporate | direct
+    agency_id:     int | None = None
+    corporate_id:  int | None = None
+    customer_id:   int | None = None
+    name:          str | None = None          # display name, written to `agency`
+    label:         str | None = None          # "B2B" | "Corporate" | "Direct"
+
+
+_PARTY_LABEL = {"agency": "B2B", "corporate": "Corporate", "direct": "Direct"}
+
+
+async def _resolve_customer_party(
+    db: AsyncSession,
+    current_user: User,
+    customer_type: str | None,
+    agency_id: int | None,
+    corporate_id: int | None,
+    customer_id: int | None,
+) -> CustomerParty:
+    """Authorise the named party and return it.
+
+    Ownership is checked here rather than left to the foreign keys, because an FK
+    only proves the row exists — not that it is the caller's. The three masters
+    are scoped differently: agencies by `user_id` alone, customers and corporates
+    by tenant + creator.
+
+    An untyped payload (an older client, or the legacy Internal Statement form)
+    returns an empty party and the caller keeps its previous behaviour.
+    """
+    ct = (customer_type or "").strip().lower() or None
+    if ct is None:
+        return CustomerParty()
+    if ct not in _PARTY_LABEL:
+        raise HTTPException(status_code=422, detail="customer_type must be agency, corporate or direct.")
+
+    if ct == "agency":
+        if agency_id is None:
+            raise HTTPException(status_code=422, detail="An agency statement needs an agency.")
+        row = (await db.execute(
+            select(Agency).where(Agency.id == agency_id, Agency.user_id == current_user.id)
+        )).scalar_one_or_none()
+        if not row:
+            raise HTTPException(status_code=400, detail=f"Agency id {agency_id} not found in your agencies.")
+        return CustomerParty("agency", agency_id=row.id, name=row.name, label="B2B")
+
+    if ct == "corporate":
+        if corporate_id is None:
+            raise HTTPException(status_code=422, detail="A corporate statement needs a corporate.")
+        row = (await db.execute(
+            select(Corporate).where(
+                Corporate.id == corporate_id,
+                Corporate.tenant_id == current_user.tenant_id,
+                Corporate.created_by_id == current_user.id,
+            )
+        )).scalar_one_or_none()
+        if not row:
+            raise HTTPException(status_code=400, detail=f"Corporate id {corporate_id} not found in your corporates.")
+        name = (row.company or "").strip() or f"{row.first_name} {row.last_name or ''}".strip()
+        return CustomerParty("corporate", corporate_id=row.id, name=name, label="Corporate")
+
+    # Direct. A walk-in need not exist in Customer Master, so the id is optional —
+    # the type alone is enough to say "this is not an agency and not a corporate".
+    if customer_id is None:
+        return CustomerParty("direct", label="Direct")
+    row = (await db.execute(
+        select(Customer).where(
+            Customer.id == customer_id,
+            Customer.tenant_id == current_user.tenant_id,
+            Customer.created_by_id == current_user.id,
+        )
+    )).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=400, detail=f"Customer id {customer_id} not found in your customers.")
+    name = f"{row.first_name} {row.last_name or ''}".strip() or (row.company or "")
+    return CustomerParty("direct", customer_id=row.id, name=name, label="Direct")
+
+
 async def _build_uploaded_tickets(
     rows:           list[TicketRow],
     db:             AsyncSession,
@@ -245,6 +331,7 @@ async def _build_uploaded_tickets(
     tenant_id:      int,
     created_by_id:  int,
     now:            datetime,
+    party:          "CustomerParty | None" = None,
 ) -> list[UploadedTicket]:
     """Build UploadedTicket rows from preview rows. Not added to the session.
 
@@ -322,6 +409,13 @@ async def _build_uploaded_tickets(
             sold_to=row.sold_to,
             customer_name=row.customer_name,
             tour_code=row.tour_code,
+            # The statement's tag copied onto every ticket. The commission run
+            # reads the TICKET, never the statement — one file can hold rows sold
+            # to different customers, and Create Tickets files them one at a time.
+            customer_type=(party.customer_type if party else None),
+            customer_agency_id=(party.agency_id if party else None),
+            corporate_id=(party.corporate_id if party else None),
+            customer_id=(party.customer_id if party else None),
             airline_name=resolved_airline_name,
             split_type=row.split_type,
             adm_acm_ra=adm_acm_ra,
@@ -394,13 +488,31 @@ async def confirm_ticket_upload(
     now = datetime.utcnow()
     batch_id = str(uuid.uuid4())
 
+    # WHO it was sold to. Authorised here, not trusted from the payload: an FK
+    # alone would let one user tag a statement to another user's agency.
+    party = await _resolve_customer_party(
+        db, current_user,
+        payload.customer_type, payload.customer_agency_id,
+        payload.corporate_id, payload.customer_id,
+    )
+
     db.add(TicketStatement(
         batch_id=batch_id,
         tenant_id=current_user.tenant_id,
         statement_type=payload.statement_type,
+        # The derived name leads with the CUSTOMER TYPE when there is one, so a
+        # corporate statement reads "Corporate - Infosys Ltd - …" rather than
+        # "B2B - Infosys Ltd - …", which named the wrong thing entirely.
         statement_name=(payload.statement_name or "").strip()
-                       or f"{payload.statement_type} - {payload.agency} - {payload.valid_from}",
-        agency=payload.agency,
+                       or f"{party.label or payload.statement_type} - {party.name or payload.agency} - {payload.valid_from}",
+        agency=party.name or payload.agency,
+        # Only an agency-typed statement sets agency_id, so Agency Billing keeps
+        # claiming exactly the statements it did before and no others.
+        agency_id=party.agency_id if party.customer_type == "agency" else payload.agency_id,
+        customer_type=party.customer_type,
+        customer_agency_id=party.agency_id,
+        corporate_id=party.corporate_id,
+        customer_id=party.customer_id,
         valid_from=payload.valid_from,
         valid_to=payload.valid_to,
         file_name=payload.file_name,
@@ -416,6 +528,7 @@ async def confirm_ticket_upload(
         tenant_id=current_user.tenant_id,
         created_by_id=current_user.id,
         now=now,
+        party=party,
     ):
         db.add(ticket)
 
@@ -490,6 +603,14 @@ async def append_tickets_to_statement(
         tenant_id=current_user.tenant_id,
         created_by_id=current_user.id,
         now=datetime.utcnow(),
+        # Inherit the statement's customer tag, exactly as the rows inherit its
+        # type — a ticket appended to a corporate statement is a corporate sale.
+        party=CustomerParty(
+            customer_type=statement.customer_type,
+            agency_id=statement.customer_agency_id,
+            corporate_id=statement.corporate_id,
+            customer_id=statement.customer_id,
+        ),
     ):
         db.add(ticket)
 
@@ -668,6 +789,10 @@ async def list_ticket_statements(
         TicketStatementRead(
             batch_id=stmt.batch_id,
             statement_type=getattr(stmt, "statement_type", "B2B"),
+            customer_type=stmt.customer_type,
+            customer_agency_id=stmt.customer_agency_id,
+            corporate_id=stmt.corporate_id,
+            customer_id=stmt.customer_id,
             statement_name=stmt.statement_name,
             agency=stmt.agency,
             valid_from=stmt.valid_from,
@@ -712,6 +837,10 @@ async def get_ticket_statement(
     return TicketStatementRead(
         batch_id=stmt.batch_id,
         statement_type=getattr(stmt, "statement_type", "B2B"),
+        customer_type=stmt.customer_type,
+        customer_agency_id=stmt.customer_agency_id,
+        corporate_id=stmt.corporate_id,
+        customer_id=stmt.customer_id,
         statement_name=stmt.statement_name,
         agency=stmt.agency,
         valid_from=stmt.valid_from,
@@ -1100,6 +1229,69 @@ def _parse_issue_date(ticket_date: str | None, departure_datetime: str | None) -
     return _parse_travel_date(ticket_date, departure_datetime)
 
 
+# ── Which deals this statement book runs against ───────────────────────────
+# The /tickets statement book is the SELLING side: these rows are tickets sold to
+# a sub-agency, a corporate or a walk-in, so the commission on them is what we PAY
+# out under a floated deal — never the income we receive from an airline. The
+# income side has its own runner in services/bsp_commission.py and keeps INBOUND.
+_TICKET_RUN_DIRECTION = DealDirection.OUTBOUND
+
+
+async def _resolve_ticket_scope(
+    db: AsyncSession,
+    ticket: UploadedTicket,
+    statement: TicketStatement | None,
+) -> CustomerScope:
+    """WHO this ticket was sold to, for outgoing-deal matching.
+
+    The TICKET's own tag wins: one statement can hold rows sold to different
+    customers, and Create Tickets files them one at a time. Rows written before
+    that tag existed carry none, so the statement's copy is the first fallback and
+    its `agency_id` the second.
+
+    The bare `agency` NAME is the last resort, and only when it resolves to
+    exactly ONE agency. A vendor onboarded once per branch matches two rows, and
+    guessing between them would pay one branch's rate on the other's tickets —
+    the same reason Agency Billing refuses an ambiguous name. An unresolved name
+    is not an error: the ticket simply reaches common deals only.
+    """
+    ct = (ticket.customer_type or "").strip().lower() or None
+    if ct == "agency" and ticket.customer_agency_id:
+        return CustomerScope("agency", agency_id=ticket.customer_agency_id,
+                             name=(statement.agency if statement else None) or ticket.customer_name)
+    if ct == "corporate" and ticket.corporate_id:
+        return CustomerScope("corporate", corporate_id=ticket.corporate_id,
+                             name=(statement.agency if statement else None) or ticket.customer_name)
+    if ct == "direct":
+        return CustomerScope("direct", name=ticket.customer_name)
+
+    if statement is None:
+        return CustomerScope()
+
+    st = (statement.customer_type or "").strip().lower() or None
+    if st == "agency" and statement.customer_agency_id:
+        return CustomerScope("agency", agency_id=statement.customer_agency_id, name=statement.agency)
+    if st == "corporate" and statement.corporate_id:
+        return CustomerScope("corporate", corporate_id=statement.corporate_id, name=statement.agency)
+    if st == "direct":
+        return CustomerScope("direct", name=statement.agency)
+
+    if statement.agency_id:
+        return CustomerScope("agency", agency_id=statement.agency_id, name=statement.agency)
+
+    if statement.agency:
+        rows = (await db.execute(
+            select(Agency.id).where(
+                func.lower(Agency.name) == statement.agency.strip().lower(),
+                Agency.user_id == ticket.created_by_id,
+            )
+        )).scalars().all()
+        if len(rows) == 1:
+            return CustomerScope("agency", agency_id=rows[0], name=statement.agency)
+
+    return CustomerScope(name=statement.agency)
+
+
 _CANCELLED_INVOICE_TYPES = {"credit note", "refund"}
 
 
@@ -1248,6 +1440,7 @@ async def _run_single(
     )
     statement = stmt_res.scalar_one_or_none()
     supplier_agency = (statement.agency or None) if statement else None
+    customer_scope = await _resolve_ticket_scope(db, ticket, statement)
 
     issue_date = _parse_issue_date(ticket.ticket_date, ticket.departure_datetime)
 
@@ -1269,6 +1462,8 @@ async def _run_single(
         meals=float(ticket.meals) if ticket.meals is not None else None,
         supplier_agency=supplier_agency,
         statement_type=ticket.statement_type,
+        direction=_TICKET_RUN_DIRECTION,
+        customer_scope=customer_scope,
     )
 
     if match:
@@ -1367,7 +1562,13 @@ async def _run_single(
             calculated_incentive=ticket.calculated_incentive,
             iata_commission=float(ticket.iata_commission or 0),
             incentive_breakdown=ticket.incentive_breakdown or {},
-            message=f"Matched {match.deal_type} deal ID {match.deal_id}.",
+            # Name the rung, so a user seeing an unexpected rate knows immediately
+            # whether it came from this customer's own deal or the common one.
+            message=(
+                f"Matched outgoing deal ID {match.deal_id} "
+                f"({'customer-specific' if match.scope_tier == SCOPE_SPECIFIC else 'common'}"
+                f"{f' — {match.scope_label}' if match.scope_label else ''})."
+            ),
         )
     else:
         ticket.matched_deal_id      = None
@@ -1380,7 +1581,10 @@ async def _run_single(
             ticket_id=ticket.id, matched=False,
             matched_deal_id=None, matched_deal_type=None,
             matched_deal_name=None, calculated_incentive=None,
-            message="No matching approved deal found.",
+            message=(
+                "No matching approved outgoing deal found for "
+                f"{customer_scope.name or customer_scope.kind or 'this customer'}."
+            ),
         )
 
 
@@ -1578,6 +1782,14 @@ async def get_all_matched_deals(
         return []
     issue_date = _parse_issue_date(ticket.ticket_date, ticket.departure_datetime)
 
+    # Same pool and same scope ladder the runner walks — a popup listing deals the
+    # run would never reach is worse than no popup at all.
+    stmt_res = await db.execute(
+        select(TicketStatement).where(TicketStatement.batch_id == ticket.batch_id)
+    )
+    statement = stmt_res.scalar_one_or_none()
+    customer_scope = await _resolve_ticket_scope(db, ticket, statement)
+
     all_matches = await DealMatchingService.find_all_deals(
         db=db,
         airline_name=airline.name,
@@ -1594,6 +1806,9 @@ async def get_all_matched_deals(
         seat_selection=float(ticket.seat_selection) if ticket.seat_selection is not None else None,
         excess_baggage=float(ticket.excess_baggage) if ticket.excess_baggage is not None else None,
         meals=float(ticket.meals) if ticket.meals is not None else None,
+        statement_type=ticket.statement_type,
+        direction=_TICKET_RUN_DIRECTION,
+        customer_scope=customer_scope,
     )
 
     best_id = all_matches[0].deal_id if all_matches else None
@@ -1739,6 +1954,7 @@ async def match_diagnosis(
     )
     stmt_row = stmt_res.scalar_one_or_none()
     supplier_agency = (stmt_row.agency or None) if stmt_row else None
+    customer_scope = await _resolve_ticket_scope(db, ticket, stmt_row)
 
     # ── Run diagnosis ─────────────────────────────────────────────────────
     issue_date = _parse_issue_date(ticket.ticket_date, ticket.departure_datetime)
@@ -1762,6 +1978,8 @@ async def match_diagnosis(
         supplier_agency=supplier_agency,
         tour_code=ticket.tour_code,
         statement_type=ticket.statement_type,
+        direction=_TICKET_RUN_DIRECTION,
+        customer_scope=customer_scope,
     )
 
     return MatchDiagnosisResponse(

@@ -12,7 +12,8 @@ there is nothing extra to show, and it needs no backfill for rows already queued
 A later edit never overwrites the snapshot, so the submitter always diffs against
 their own values rather than against an intermediate admin draft.
 """
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Any, Mapping, Sequence
 
 
@@ -26,6 +27,11 @@ AIRPORT_FIELDS = ("iata_code", "country", "categorization", "continent", "city_a
 AIRLINE_FIELDS = ("name", "iata_code", "icao_code", "contract_year")
 
 CLASS_FIELDS = ("airline_name", "class_type", "class_code", "airline_type", "class_note")
+
+IATA_COMMISSION_FIELDS = (
+    "airline_name", "airline_code", "iata_numeric_code",
+    "iata_commission_pct", "valid_from", "valid_to",
+)
 
 SUPPLIER_CORE_FIELDS = (
     "name", "vendor_type", "vendor_name", "branch", "branches",
@@ -48,9 +54,14 @@ def _is_blank(value: Any) -> bool:
 
 
 def _jsonable(value: Any) -> Any:
-    # Business columns are str / None / list-of-dict today; the datetime arm is
-    # cheap insurance if one of the masters ever grows a date column.
-    return value.isoformat() if isinstance(value, datetime) else value
+    # Business columns are mostly str / None / list-of-dict; IATA Commission
+    # adds Date and Numeric columns, and psycopg's JSONB adapter is plain
+    # json.dumps, which handles neither date nor Decimal.
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    return value
 
 
 def snapshot(approval: Any, fields: Sequence[str]) -> dict[str, Any]:

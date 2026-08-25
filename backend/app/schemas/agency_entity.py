@@ -6,6 +6,9 @@ class AgencyEntityCreate(BaseModel):
     agency_id: int
     name: str
     code: str
+    # GDS | LCC | BOTH. Defaults to the agency's own scope when omitted, and
+    # must sit inside it — see _validate_scope.
+    channels: Optional[str] = None
     address: Optional[str] = None
     state: Optional[str] = None
     city: Optional[str] = None
@@ -16,6 +19,7 @@ class AgencyEntityUpdate(BaseModel):
     agency_id: Optional[int] = None
     name: Optional[str] = None
     code: Optional[str] = None
+    channels: Optional[str] = None
     address: Optional[str] = None
     state: Optional[str] = None
     city: Optional[str] = None
@@ -28,6 +32,7 @@ class AgencyEntityRead(BaseModel):
     agency_name: Optional[str] = None       # resolved from the user's agencies
     name: str
     code: str
+    channels: str
     address: Optional[str] = None
     state: Optional[str] = None
     city: Optional[str] = None

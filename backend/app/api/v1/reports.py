@@ -1,6 +1,6 @@
 from datetime import date
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 
@@ -98,6 +98,13 @@ async def report_supplier_wise(
         TicketStatement.agency == supplier,
         TicketStatement.tenant_id == current_user.tenant_id,
         TicketStatement.created_by_id == current_user.id,
+        # `agency` is the counterparty's display name whatever the customer type,
+        # so an exact name match alone would pull a same-named corporate's
+        # statements into a supplier's report.
+        or_(
+            TicketStatement.customer_type.is_(None),
+            TicketStatement.customer_type == "agency",
+        ),
     )
     if date_from:                                  # overlap: drop statements ending before range start
         stmt_q = stmt_q.where(TicketStatement.valid_to >= date_from)

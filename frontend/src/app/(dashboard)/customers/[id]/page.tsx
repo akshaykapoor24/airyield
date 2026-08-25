@@ -1,10 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { ArrowLeft, Edit2, RefreshCw, Contact, Ticket, FileText, Download, Trash2, Save, X, Eye } from "lucide-react";
 import api from "@/lib/api";
-import CustomerModal, { type Customer } from "@/components/customers/CustomerModal";
+// Editing a customer lives in Customer Master (/user-master/customer-master);
+// this page is the billing workspace and reads the record.
+import { type Party as Customer } from "@/lib/party";
 import { INCENTIVE_TYPE_COLS } from "@/lib/incentives";
 
 type SoldTicket = {
@@ -147,7 +150,6 @@ export default function CustomerDetailPage() {
   const [loadingCustomer, setLoadingCustomer] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("Customer Details");
-  const [showEdit, setShowEdit] = useState(false);
 
   // Sold Tickets
   const [dateField, setDateField] = useState<"ticket" | "travel">("ticket");
@@ -232,11 +234,6 @@ export default function CustomerDetailPage() {
       setLoadingTickets(false);
     }
   }, [customerId, dateFrom, dateTo, dateField]);
-
-  const onCustomerSaved = () => {
-    fetchCustomer();
-    if (soldTickets !== null && dateFrom && dateTo) applyRange();
-  };
 
   // Live summary over the loaded tickets + entered additional markups.
   const summary = useMemo(() => {
@@ -412,21 +409,21 @@ export default function CustomerDetailPage() {
             <ArrowLeft className="w-4 h-4 text-gray-600" />
           </button>
           <div>
-            <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-0.5">My Customers</p>
+            <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-0.5">Customer Billing</p>
             <h1 className="text-xl font-bold text-gray-900">
               {customer ? `${customer.first_name} ${customer.last_name ?? ""}`.trim() : "Customer"}
             </h1>
             {customer?.company && <p className="text-xs text-gray-500 mt-0.5">{customer.company}</p>}
           </div>
         </div>
-        {/* {customer && (
-          <button
-            onClick={() => setShowEdit(true)}
+        {customer && (
+          <Link
+            href="/user-master/customer-master"
             className="flex items-center gap-1.5 bg-white border border-gray-200 text-gray-700 px-3.5 py-2 rounded-lg text-xs font-semibold hover:bg-gray-50"
           >
-            <Edit2 className="w-3.5 h-3.5" /> Edit
-          </button>
-        )} */}
+            <Edit2 className="w-3.5 h-3.5" /> Edit in Customer Master
+          </Link>
+        )}
       </div>
 
       {/* Tab bar */}
@@ -792,7 +789,6 @@ export default function CustomerDetailPage() {
         </div>
       )}
 
-      {showEdit && customer && <CustomerModal customer={customer} onClose={() => setShowEdit(false)} onSaved={onCustomerSaved} />}
 
       {/* Save Billing modal */}
       {showSaveBilling && (

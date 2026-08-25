@@ -3,12 +3,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
-  Building2, CheckCircle2, Clock3, CreditCard, Filter, Lock, RefreshCw, Search, User2,
+  Building2, CheckCircle2, Clock3, CreditCard, Filter, Lock, RefreshCw, Search, Trash2, User2,
 } from "lucide-react";
 import api from "@/lib/api";
 import { useAppSelector } from "@/store/hooks";
 import { canManageGlobalMasters } from "@/lib/rbac";
 import { INPUT, LABEL, ModalShell, apiError } from "@/components/userMaster/shared";
+import DeleteWorkspaceModal from "@/components/admin/DeleteWorkspaceModal";
 
 type PlanStatus = "free" | "trial" | "active" | "expired" | "suspended";
 
@@ -24,6 +25,12 @@ type TenantPlan = {
   created_at: string;
   has_active_plan: boolean;
   user_count: number;
+  // Every table this workspace fills, totalled. Deals and tickets alone said too
+  // little — a workspace living in BSP and vendor statements read as 0.
+  record_count: number;
+  // {label: rows}, non-zero entries only, in the order the backend registry
+  // declares them. Feeds the hover panel.
+  record_breakdown: Record<string, number>;
   owner_email: string | null;
   owner_name: string | null;
 };
@@ -74,6 +81,64 @@ function StatTile({ icon: Icon, label, value, tone }: {
   );
 }
 
+/**
+ * The Records total, with the per-table breakdown behind a hover.
+ *
+ * The panel is `position: fixed` rather than `absolute` on purpose: the table
+ * sits inside `overflow-x-auto`, and a non-visible overflow on one axis makes the
+ * browser clip the other too — an absolutely positioned panel would be cut off at
+ * the first and last rows. Fixed escapes that, and no ancestor of this table sets
+ * transform/filter/will-change, so it resolves against the viewport.
+ */
+function RecordsCell({ total, breakdown }: {
+  total: number; breakdown: Record<string, number>;
+}) {
+  const [at, setAt] = useState<{ x: number; y: number } | null>(null);
+  const entries = Object.entries(breakdown ?? {});
+
+  // A fixed panel does not travel with the scroll container, so drop it rather
+  // than let it hang over unrelated rows.
+  useEffect(() => {
+    if (!at) return;
+    const close = () => setAt(null);
+    window.addEventListener("scroll", close, true);
+    return () => window.removeEventListener("scroll", close, true);
+  }, [at]);
+
+  if (!total) {
+    return <td className="px-4 py-3 text-xs tabular-nums"><span className="text-gray-300">0</span></td>;
+  }
+
+  return (
+    <td
+      className="px-4 py-3 text-xs tabular-nums"
+      onMouseEnter={(e) => {
+        const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+        setAt({ x: r.left, y: r.bottom + 6 });
+      }}
+      onMouseLeave={() => setAt(null)}
+    >
+      <span className="text-gray-700 font-medium cursor-default border-b border-dotted border-gray-300">
+        {total.toLocaleString()}
+      </span>
+      {at && entries.length > 0 && (
+        <div
+          className="fixed z-50 bg-white border border-gray-200 rounded-lg shadow-lg py-1.5 px-2 min-w-44 pointer-events-none"
+          style={{ left: at.x, top: at.y }}
+        >
+          <p className="text-[9px] uppercase tracking-wide text-gray-400 px-1 pb-1">Records by source</p>
+          {entries.map(([label, n]) => (
+            <div key={label} className="flex items-center justify-between gap-6 px-1 py-0.5">
+              <span className="text-[10px] text-gray-600 whitespace-nowrap">{label}</span>
+              <span className="text-[10px] text-gray-900 font-medium tabular-nums">{n.toLocaleString()}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </td>
+  );
+}
+
 export default function SubscriptionsPage() {
   const router = useRouter();
   const user = useAppSelector((s) => s.auth.user);
@@ -92,6 +157,10 @@ export default function SubscriptionsPage() {
   });
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState("");
+
+  const [deleting, setDeleting] = useState<TenantPlan | null>(null);
+  // Survives the modal closing, so the operator sees what actually went.
+  const [deleteNotice, setDeleteNotice] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -209,6 +278,15 @@ export default function SubscriptionsPage() {
         <div className="bg-red-50 border border-red-200 text-red-600 text-xs rounded-lg px-3 py-2">{error}</div>
       )}
 
+      {deleteNotice && (
+        <div className="flex items-start justify-between gap-3 bg-amber-50 border border-amber-200 text-amber-800 text-xs rounded-lg px-3 py-2">
+          <span>{deleteNotice}</span>
+          <button onClick={() => setDeleteNotice("")} className="text-amber-500 hover:text-amber-700 shrink-0">
+            Dismiss
+          </button>
+        </div>
+      )}
+
       <div className="bg-white border border-gray-100 rounded-xl overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-left">
@@ -217,6 +295,7 @@ export default function SubscriptionsPage() {
                 <th className="px-4 py-2.5 font-semibold">Workspace</th>
                 <th className="px-4 py-2.5 font-semibold">Owner</th>
                 <th className="px-4 py-2.5 font-semibold">Users</th>
+                <th className="px-4 py-2.5 font-semibold">Records</th>
                 <th className="px-4 py-2.5 font-semibold">Plan</th>
                 <th className="px-4 py-2.5 font-semibold">Expires</th>
                 <th className="px-4 py-2.5 font-semibold">Joined</th>
@@ -225,10 +304,10 @@ export default function SubscriptionsPage() {
             </thead>
             <tbody className="divide-y divide-gray-50">
               {loading && (
-                <tr><td colSpan={7} className="px-4 py-8 text-center text-xs text-gray-400">Loading…</td></tr>
+                <tr><td colSpan={8} className="px-4 py-8 text-center text-xs text-gray-400">Loading…</td></tr>
               )}
               {!loading && rows.length === 0 && (
-                <tr><td colSpan={7} className="px-4 py-8 text-center text-xs text-gray-400">No workspaces match.</td></tr>
+                <tr><td colSpan={8} className="px-4 py-8 text-center text-xs text-gray-400">No workspaces match.</td></tr>
               )}
               {!loading && rows.map((t) => (
                 <tr key={t.id} className="hover:bg-gray-50/60">
@@ -248,6 +327,9 @@ export default function SubscriptionsPage() {
                     <p className="text-[10px] text-gray-400 truncate">{t.owner_email || "—"}</p>
                   </td>
                   <td className="px-4 py-3 text-xs text-gray-600">{t.user_count}</td>
+                  {/* Usage at a glance — a zero reads as "signed up but never used".
+                      Hover the number for which tables it came from. */}
+                  <RecordsCell total={t.record_count} breakdown={t.record_breakdown} />
                   <td className="px-4 py-3">
                     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border ${CHIP[t.plan_status]}`}>
                       <span className={`w-1.5 h-1.5 rounded-full ${t.has_active_plan ? "bg-green-500" : "bg-gray-400"}`} />
@@ -261,14 +343,23 @@ export default function SubscriptionsPage() {
                   </td>
                   <td className="px-4 py-3 text-xs text-gray-600">{fmtDate(t.plan_expires_at)}</td>
                   <td className="px-4 py-3 text-xs text-gray-500">{fmtDate(t.created_at)}</td>
-                  <td className="px-4 py-3 text-right">
-                    <button
-                      onClick={() => openEditor(t)}
-                      className="inline-flex items-center gap-1.5 text-white px-3 py-1.5 rounded-lg text-[11px] font-medium"
-                      style={{ background: "#7c3aed" }}
-                    >
-                      <CreditCard className="w-3 h-3" /> Manage plan
-                    </button>
+                  <td className="px-4 py-3">
+                    <div className="flex items-center justify-end gap-1.5">
+                      <button
+                        onClick={() => openEditor(t)}
+                        className="inline-flex items-center gap-1.5 text-white px-3 py-1.5 rounded-lg text-[11px] font-medium"
+                        style={{ background: "#7c3aed" }}
+                      >
+                        <CreditCard className="w-3 h-3" /> Manage plan
+                      </button>
+                      <button
+                        onClick={() => setDeleting(t)}
+                        title="Delete this workspace's records, or the whole workspace"
+                        className="inline-flex items-center justify-center h-[26px] w-[26px] rounded-lg border border-gray-200 text-gray-400 hover:border-red-200 hover:bg-red-50 hover:text-red-600 transition-colors"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -350,6 +441,29 @@ export default function SubscriptionsPage() {
             </p>
           </div>
         </ModalShell>
+      )}
+
+      {deleting && (
+        <DeleteWorkspaceModal
+          tenantId={deleting.id}
+          fallbackName={deleting.name || deleting.domain || `Workspace #${deleting.id}`}
+          onClose={() => setDeleting(null)}
+          onDeleted={(result) => {
+            const who = result.tenant_name || `Workspace #${result.tenant_id}`;
+            const n = result.total.toLocaleString();
+            const rows = `${n} record${result.total !== 1 ? "s" : ""}`;
+            const what = result.deleted.length
+              ? ` (${result.deleted.map((d) => `${d.label} ${d.rows.toLocaleString()}`).join(", ")})`
+              : "";
+            setDeleteNotice(
+              result.workspace_removed
+                ? `Deleted ${who} and its ${rows}${what}.`
+                : `Deleted ${rows} from ${who}${what}. The workspace itself is still there.`,
+            );
+            setDeleting(null);
+            load();
+          }}
+        />
       )}
     </div>
   );

@@ -8,6 +8,7 @@ import {
   Building2, Calendar, Hash, AlertCircle, Search, X, FilePlus, SquarePen,
 } from "lucide-react";
 import api from "@/lib/api";
+import { CUSTOMER_TYPE_BADGE, CUSTOMER_TYPE_LABEL } from "@/lib/customerType";
 import { MANUAL_ENTRY_FILE_NAME, type StatementType } from "@/lib/ticketFields";
 
 export type TicketStatement = {
@@ -21,6 +22,10 @@ export type TicketStatement = {
   ticket_count:    number;
   created_by_name: string | null;
   created_at:      string;
+  // Who the tickets were sold to. Null on statements filed before customer
+  // tagging existed, and on any filed through Internal Statement, which asks
+  // for a vendor rather than a customer.
+  customer_type:   "agency" | "corporate" | "direct" | null;
 };
 
 function formatDate(d: string) {
@@ -36,15 +41,39 @@ function TypeBadge({ type }: { type: StatementType }) {
     : <span className="inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold bg-purple-100 text-purple-700 uppercase tracking-wide">B2B</span>;
 }
 
-/** Statement-wise view — one row per upload/creation batch. */
-export default function StatementsView({ onLoaded }: { onLoaded?: (n: number) => void }) {
+/** The CUSTOMER type. "Untagged" is not a failure state to hide: those rows
+ *  cannot be priced by the customer commission run until someone says who they
+ *  were sold to, so saying so is the useful thing. */
+function CustomerBadge({ type }: { type: TicketStatement["customer_type"] }) {
+  if (!type) {
+    return <span className="inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold bg-gray-100 text-gray-500 uppercase tracking-wide">Untagged</span>;
+  }
+  return (
+    <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border ${CUSTOMER_TYPE_BADGE[type]}`}>
+      {CUSTOMER_TYPE_LABEL[type]}
+    </span>
+  );
+}
+
+/** Statement-wise view — one row per upload/creation batch.
+ *  `showCustomer` swaps the vendor Type badge for the CUSTOMER type, which is
+ *  what the Customer-data view of the same rows is actually about. */
+export default function StatementsView({ onLoaded, showCustomer }: {
+  onLoaded?: (n: number) => void;
+  showCustomer?: boolean;
+}) {
+  // Keep the drill-in inside whichever section the list is rendered in — both
+  // routes render the same detail screen over the same rows.
+  const detailBase = showCustomer ? "/customers/statements" : "/tickets";
   const router = useRouter();
   const [statements, setStatements] = useState<TicketStatement[]>([]);
   const [loading,    setLoading]    = useState(true);
   const [error,      setError]      = useState<string | null>(null);
   const [filterName,   setFilterName]   = useState("");
   const [filterAgency, setFilterAgency] = useState("");
-  const [filterType,   setFilterType]   = useState<"" | StatementType>("");
+  // "" = no filter. Holds a StatementType in vendor mode, a CustomerType or
+  // "untagged" in customer mode.
+  const [filterType,   setFilterType]   = useState<string>("");
   const [filterFrom,   setFilterFrom]   = useState("");
   const [filterTo,     setFilterTo]     = useState("");
 
@@ -69,7 +98,13 @@ export default function StatementsView({ onLoaded }: { onLoaded?: (n: number) =>
   const filtered = statements.filter(s => {
     if (filterName && !(s.statement_name ?? "").toLowerCase().includes(filterName.toLowerCase())) return false;
     if (filterAgency && s.agency !== filterAgency) return false;
-    if (filterType && s.statement_type !== filterType) return false;
+    // In customer mode this select filters the CUSTOMER type; "untagged" is a
+    // real, selectable state, since those rows are the ones needing attention.
+    if (filterType) {
+      if (showCustomer) {
+        if (filterType === "untagged" ? s.customer_type != null : s.customer_type !== filterType) return false;
+      } else if (s.statement_type !== filterType) return false;
+    }
     if (filterFrom && s.valid_to < filterFrom) return false;
     if (filterTo   && s.valid_from > filterTo)   return false;
     return true;
@@ -94,12 +129,24 @@ export default function StatementsView({ onLoaded }: { onLoaded?: (n: number) =>
 
         {/* Type filter */}
         <select
-          value={filterType} onChange={e => setFilterType(e.target.value as "" | StatementType)}
+          value={filterType} onChange={e => setFilterType(e.target.value)}
           className="py-2 px-2.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400 text-gray-600 bg-white"
         >
-          <option value="">All Types</option>
-          <option value="B2B">B2B</option>
-          <option value="AIRLINE">Airline</option>
+          {showCustomer ? (
+            <>
+              <option value="">All Customer Types</option>
+              <option value="agency">B2B (Agency)</option>
+              <option value="corporate">B2E (Corporate)</option>
+              <option value="direct">Direct Customer</option>
+              <option value="untagged">Untagged</option>
+            </>
+          ) : (
+            <>
+              <option value="">All Types</option>
+              <option value="B2B">B2B</option>
+              <option value="AIRLINE">Airline</option>
+            </>
+          )}
         </select>
 
         {/* Agency filter — derived from loaded data */}
@@ -107,7 +154,7 @@ export default function StatementsView({ onLoaded }: { onLoaded?: (n: number) =>
           value={filterAgency} onChange={e => setFilterAgency(e.target.value)}
           className="py-2 px-2.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400 text-gray-600 bg-white"
         >
-          <option value="">All Agencies</option>
+          <option value="">{showCustomer ? "All Customers" : "All Agencies"}</option>
           {allAgencies.map(a => <option key={a} value={a}>{a}</option>)}
         </select>
 
@@ -164,13 +211,13 @@ export default function StatementsView({ onLoaded }: { onLoaded?: (n: number) =>
           <p className="text-xs text-gray-400 mt-1 mb-5">Upload a supplier statement, or punch tickets in by hand</p>
           <div className="flex items-center gap-3">
             <Link
-              href="/tickets/upload"
+              href={`${detailBase}/upload`}
               className="flex items-center gap-2 px-4 py-2 bg-[#1e3a5f] text-white rounded-lg text-sm font-medium hover:bg-[#16304f]"
             >
               <Upload className="w-4 h-4" /> Upload Statement
             </Link>
             <Link
-              href="/tickets/create"
+              href={`${detailBase}/create`}
               className="flex items-center gap-2 px-4 py-2 border border-gray-200 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-50"
             >
               <FilePlus className="w-4 h-4" /> Create Ticket
@@ -195,10 +242,10 @@ export default function StatementsView({ onLoaded }: { onLoaded?: (n: number) =>
           <table className="w-full">
             <thead>
               <tr style={{background:"#1e3a5f"}}>
-                <th className="px-4 py-2 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide">Type</th>
+                <th className="px-4 py-2 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide">{showCustomer ? "Customer Type" : "Type"}</th>
                 <th className="px-4 py-2 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide">Statement Name</th>
                 <th className="px-4 py-2 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide">
-                  <span className="flex items-center gap-1"><Building2 className="w-3.5 h-3.5" /> Agency</span>
+                  <span className="flex items-center gap-1"><Building2 className="w-3.5 h-3.5" /> {showCustomer ? "Customer" : "Agency"}</span>
                 </th>
                 <th className="px-4 py-2 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide">
                   <span className="flex items-center gap-1"><Calendar className="w-3.5 h-3.5" /> Valid Period</span>
@@ -222,12 +269,14 @@ export default function StatementsView({ onLoaded }: { onLoaded?: (n: number) =>
               ) : filtered.map(stmt => (
                 <tr
                   key={stmt.batch_id}
-                  onClick={() => router.push(`/tickets/${stmt.batch_id}`)}
+                  onClick={() => router.push(`${detailBase}/${stmt.batch_id}`)}
                   className="hover:bg-blue-50/40 cursor-pointer transition-colors group"
                 >
                   {/* Type badge */}
                   <td className="px-4 py-2">
-                    <TypeBadge type={stmt.statement_type ?? "B2B"} />
+                    {showCustomer
+                      ? <CustomerBadge type={stmt.customer_type} />
+                      : <TypeBadge type={stmt.statement_type ?? "B2B"} />}
                   </td>
 
                   {/* Statement Name */}

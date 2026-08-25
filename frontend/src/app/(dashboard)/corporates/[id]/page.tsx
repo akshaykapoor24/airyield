@@ -1,10 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { ArrowLeft, RefreshCw, Building, Ticket, FileText, Download, Trash2, Save, X, Eye, Edit2 } from "lucide-react";
 import api from "@/lib/api";
-import CorporateModal, { type Corporate } from "@/components/corporates/CorporateModal";
+// Editing a corporate lives in Corporate Master (/user-master/corporate-master);
+// this page is the billing workspace and reads the record.
+import { type Party as Corporate } from "@/lib/party";
 import { INCENTIVE_TYPE_COLS } from "@/lib/incentives";
 
 type SoldTicket = {
@@ -146,7 +149,6 @@ export default function CorporateDetailPage() {
   const [loadingCorporate, setLoadingCorporate] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("Corporate Details");
-  const [showEdit, setShowEdit] = useState(false);
 
   // Sold Tickets
   const [dateField, setDateField] = useState<"ticket" | "travel">("ticket");
@@ -231,11 +233,6 @@ export default function CorporateDetailPage() {
       setLoadingTickets(false);
     }
   }, [corporateId, dateFrom, dateTo, dateField]);
-
-  const onCorporateSaved = () => {
-    fetchCorporate();
-    if (soldTickets !== null && dateFrom && dateTo) applyRange();
-  };
 
   const summary = useMemo(() => {
     const rows = soldTickets ?? [];
@@ -413,6 +410,14 @@ export default function CorporateDetailPage() {
             {corporate?.company && <p className="text-xs text-gray-500 mt-0.5">{corporate.company}</p>}
           </div>
         </div>
+        {corporate && (
+          <Link
+            href="/user-master/corporate-master"
+            className="flex items-center gap-1.5 bg-white border border-gray-200 text-gray-700 px-3.5 py-2 rounded-lg text-xs font-semibold hover:bg-gray-50"
+          >
+            <Edit2 className="w-3.5 h-3.5" /> Edit in Corporate Master
+          </Link>
+        )}
       </div>
 
       {/* Tab bar */}
@@ -778,7 +783,6 @@ export default function CorporateDetailPage() {
         </div>
       )}
 
-      {showEdit && corporate && <CorporateModal corporate={corporate} onClose={() => setShowEdit(false)} onSaved={onCorporateSaved} />}
 
       {/* Save Billing modal */}
       {showSaveBilling && (

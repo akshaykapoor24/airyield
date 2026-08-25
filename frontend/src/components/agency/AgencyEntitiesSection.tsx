@@ -1,11 +1,16 @@
 "use client";
 
 // Agency Entities manager (table + add/edit modal + xlsx upload) for Agency
-// Profile → Agency Onboarding. One agency -> many entities (e.g. Lords agency
-// has entities in Delhi and Mumbai). In add-mode you pick the agency once, then
-// add many entities under it at the same time. Entity code is unique per agency.
+// Profile → Agency Onboarding. One agency (= one vendor branch) -> many entities.
+// In add-mode you pick the agency once, then add many entities under it at the
+// same time. Entity code is unique per agency.
+//
+// `channels` is a SCOPE, not a duplicate row: a legal entity does not acquire a
+// second GSTIN because a booking went through a GDS, so one entity says which
+// channels it trades on. It must sit inside its agency's own scope, which is why
+// the options here are restricted to that agency's channels.
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Edit2, Trash2, RefreshCw, Plus } from "lucide-react";
 import api from "@/lib/api";
 import {
@@ -19,6 +24,7 @@ export type AgencyEntityRow = {
   agency_name: string | null;
   name: string;
   code: string;
+  channels: string;                 // GDS | LCC | BOTH
   address: string | null;
   state: string | null;
   city: string | null;
@@ -26,9 +32,31 @@ export type AgencyEntityRow = {
   login_id_count?: number | null;
 };
 
-type AgencyOpt = { id: number; name: string };
+type AgencyOpt = {
+  id: number; name: string; branch_name: string | null; branch_code: string; channels: string;
+  // The branch's own address. An entity is an office of its branch and in the
+  // ordinary case sits at the same place, so these seed every new entity row
+  // rather than being retyped once per entity.
+  address: string | null; state: string | null; city: string | null;
+};
 
-export default function AgencyEntitiesSection({ onChange }: { onChange?: (count: number) => void }) {
+/** Label an agency by branch AND channel — a vendor is onboarded once per branch
+ *  and once per channel, and an entity belongs to exactly one of those rows. */
+const agencyLabel = (a: AgencyOpt) =>
+  `${a.name} — ${a.branch_name || a.branch_code} · ${a.channels}`;
+
+/** Which scopes an entity of this agency may have. */
+const scopeOptions = (channels: string | undefined): string[] =>
+  channels === "BOTH" ? ["BOTH", "GDS", "LCC"] : channels ? [channels] : [];
+
+export default function AgencyEntitiesSection({
+  onChange, initialAgencyId, onConsumeInitial,
+}: {
+  onChange?: (count: number) => void;
+  /** Open the Add modal straight away with this agency preselected. */
+  initialAgencyId?: number | null;
+  onConsumeInitial?: () => void;
+}) {
   const [rows, setRows] = useState<AgencyEntityRow[]>([]);
   const [agencies, setAgencies] = useState<AgencyOpt[]>([]);
   const [loading, setLoading] = useState(true);
@@ -55,6 +83,12 @@ export default function AgencyEntitiesSection({ onChange }: { onChange?: (count:
 
   useEffect(() => { const t = setTimeout(fetchRows, 250); return () => clearTimeout(t); }, [fetchRows]);
   useEffect(() => { fetchAgencies(); }, [fetchAgencies]);
+
+  // Arriving from "Agency added → Add Entities": open the modal with that agency
+  // already chosen, so the user does not re-pick what they just created.
+  useEffect(() => {
+    if (initialAgencyId != null) { setModal(null); onConsumeInitial?.(); }
+  }, [initialAgencyId, onConsumeInitial]);
 
   const toggle = async (row: AgencyEntityRow) => {
     try {
@@ -87,23 +121,32 @@ export default function AgencyEntitiesSection({ onChange }: { onChange?: (count:
           <table className="w-full">
             <thead>
               <tr style={{ background: "#1e4d8c" }}>
-                {["AGENCY", "NAME", "CODE", "ADDRESS", "STATE", "CITY", "STATUS", "ACTIONS"].map(h => (
+                {["AGENCY", "NAME", "CODE", "CHANNELS", "ADDRESS", "STATE", "CITY", "STATUS", "ACTIONS"].map(h => (
                   <th key={h} className="px-3 py-2.5 text-left text-[10px] font-semibold text-white uppercase tracking-wider whitespace-nowrap">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={8} className="px-4 py-12 text-center text-xs text-gray-400"><RefreshCw className="w-4 h-4 animate-spin mx-auto mb-2 text-gray-300" />Loading…</td></tr>
+                <tr><td colSpan={9} className="px-4 py-12 text-center text-xs text-gray-400"><RefreshCw className="w-4 h-4 animate-spin mx-auto mb-2 text-gray-300" />Loading…</td></tr>
               ) : apiErr ? (
-                <tr><td colSpan={8} className="px-4 py-12 text-center text-xs text-red-400">{apiErr}</td></tr>
+                <tr><td colSpan={9} className="px-4 py-12 text-center text-xs text-red-400">{apiErr}</td></tr>
               ) : rows.length === 0 ? (
-                <tr><td colSpan={8} className="px-4 py-12 text-center text-xs text-gray-400">No entities yet. Add one or upload an XLS.</td></tr>
+                <tr><td colSpan={9} className="px-4 py-12 text-center text-xs text-gray-400">No entities yet. Add one or upload an XLS.</td></tr>
               ) : rows.map((r, idx) => (
                 <tr key={r.id} className={`border-b border-gray-50 hover:bg-sky-50/30 ${idx % 2 ? "bg-gray-50/30" : "bg-white"}`}>
                   <td className="px-3 py-2 text-[11px] font-semibold text-gray-700">{r.agency_name || "—"}</td>
                   <td className="px-3 py-2 text-[11px] font-semibold text-gray-800">{r.name}</td>
                   <td className="px-3 py-2 text-[11px] text-gray-600">{r.code}</td>
+                  <td className="px-3 py-2">
+                    <div className="flex gap-1">
+                      {(r.channels === "BOTH" ? ["GDS", "LCC"] : [r.channels]).map(c => (
+                        <span key={c} className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold border ${
+                          c === "GDS" ? "bg-sky-50 text-sky-700 border-sky-200" : "bg-violet-50 text-violet-700 border-violet-200"
+                        }`}>{c}</span>
+                      ))}
+                    </div>
+                  </td>
                   <td className="px-3 py-2 text-[11px] text-gray-600">{r.address || "—"}</td>
                   <td className="px-3 py-2 text-[11px] text-gray-600">{r.state || "—"}</td>
                   <td className="px-3 py-2 text-[11px] text-gray-600">{r.city || "—"}</td>
@@ -122,20 +165,32 @@ export default function AgencyEntitiesSection({ onChange }: { onChange?: (count:
       </div>
 
       {modal !== false && (
-        <EntityModal entity={modal} agencies={agencies} onClose={() => setModal(false)} onSaved={() => { setModal(false); fetchRows(); }} onRefresh={fetchRows} />
+        <EntityModal entity={modal} agencies={agencies} presetAgencyId={initialAgencyId ?? null} onClose={() => setModal(false)} onSaved={() => { setModal(false); fetchRows(); }} onRefresh={fetchRows} />
       )}
     </div>
   );
 }
 
 type EntityDraft = { name: string; code: string; address: string; state: string; city: string; err?: string };
-const emptyEntity = (): EntityDraft => ({ name: "", code: "", address: "", state: "", city: "" });
+
+/** A blank entity, pre-addressed to its branch. Every field stays editable —
+ *  an office that really is somewhere else just gets typed over. */
+const emptyEntity = (a?: AgencyOpt | null): EntityDraft => ({
+  name: "", code: "",
+  address: a?.address ?? "", state: a?.state ?? "", city: a?.city ?? "",
+});
+
+/** Has this row's address been left exactly as the branch's? Only such rows are
+ *  re-seeded when the agency changes — anything typed over is the user's. */
+const addressUntouched = (r: EntityDraft, a: AgencyOpt | null | undefined) =>
+  r.address === (a?.address ?? "") && r.state === (a?.state ?? "") && r.city === (a?.city ?? "");
 
 function EntityModal({
-  entity, agencies, onClose, onSaved, onRefresh,
+  entity, agencies, presetAgencyId, onClose, onSaved, onRefresh,
 }: {
   entity: AgencyEntityRow | null;
   agencies: AgencyOpt[];
+  presetAgencyId: number | null;
   onClose: () => void;
   onSaved: () => void;
   onRefresh: () => void;
@@ -145,12 +200,35 @@ function EntityModal({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
-  // add-mode: pick the agency ONCE, then add many entity rows under it
-  const [agencyId, setAgencyId] = useState<number | null>(null);
+  // add-mode: pick the agency and channel ONCE, then add many entity rows under them
+  const [agencyId, setAgencyId] = useState<number | null>(presetAgencyId);
+  const [channels, setChannels] = useState<string>("");
   const [rows, setRows] = useState<EntityDraft[]>([emptyEntity()]);
+  const pickedAgency = agencies.find(a => a.id === agencyId);
+  const addScopes = scopeOptions(pickedAgency?.channels);
+  // Default to the agency's own scope — a GDS-only agency's entities are GDS
+  // entities, and a Both agency's entity usually works both unless told otherwise.
+  useEffect(() => {
+    setChannels(pickedAgency ? pickedAgency.channels : "");
+  }, [pickedAgency]);
+
+  // Carry the branch's address onto the rows when the agency is picked or
+  // changed. Rows the user has already edited are left alone — re-seeding those
+  // would silently throw away what they typed.
+  const prevAgencyRef = useRef<AgencyOpt | null | undefined>(undefined);
+  useEffect(() => {
+    const prev = prevAgencyRef.current;
+    prevAgencyRef.current = pickedAgency;
+    if (prev === undefined && !pickedAgency) return;   // nothing picked yet
+    setRows(rs => rs.map(r =>
+      addressUntouched(r, prev)
+        ? { ...r, address: pickedAgency?.address ?? "", state: pickedAgency?.state ?? "", city: pickedAgency?.city ?? "" }
+        : r));
+  }, [pickedAgency]);
+
   const setRow = (i: number, patch: Partial<EntityDraft>) =>
     setRows(p => p.map((r, idx) => (idx === i ? { ...r, ...patch, err: undefined } : r)));
-  const addRow = () => setRows(p => [...p, emptyEntity()]);
+  const addRow = () => setRows(p => [...p, emptyEntity(pickedAgency)]);
   const removeRow = (i: number) => setRows(p => (p.length > 1 ? p.filter((_, idx) => idx !== i) : p));
   const validCount = rows.filter(r => r.name.trim() && r.code.trim()).length;
 
@@ -159,6 +237,7 @@ function EntityModal({
     agency_id: entity?.agency_id ?? null as number | null,
     name: entity?.name ?? "",
     code: entity?.code ?? "",
+    channels: entity?.channels ?? "",
     address: entity?.address ?? "",
     state: entity?.state ?? "",
     city: entity?.city ?? "",
@@ -188,6 +267,7 @@ function EntityModal({
       try {
         await api.post("/agency-entities/", {
           agency_id: agencyId,
+          channels,
           name: r.name.trim(),
           code: r.code.trim(),
           address: r.address || null,
@@ -228,12 +308,20 @@ function EntityModal({
           <div><label className={LABEL}>Agency *</label>
             <select value={form.agency_id ?? ""} onChange={e => set("agency_id", e.target.value ? Number(e.target.value) : null)} className={INPUT}>
               <option value="">— Select agency —</option>
-              {agencies.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+              {agencies.map(a => <option key={a.id} value={a.id}>{agencyLabel(a)}</option>)}
             </select></div>
           <div><label className={LABEL}>Entity Name *</label>
             <input value={form.name} onChange={e => set("name", e.target.value)} placeholder="e.g. Lords Delhi" className={INPUT} /></div>
           <div><label className={LABEL}>Code *</label>
             <input value={form.code} onChange={e => set("code", e.target.value)} placeholder="e.g. DEL-001" className={INPUT} /></div>
+          <div><label className={LABEL}>Channels *</label>
+            <select value={form.channels} onChange={e => set("channels", e.target.value)} className={INPUT}>
+              {scopeOptions(agencies.find(a => a.id === form.agency_id)?.channels).map(c => (
+                <option key={c} value={c}>{c === "BOTH" ? "Both" : c}</option>
+              ))}
+            </select>
+            <p className="text-[10px] text-gray-400 mt-1">Narrowing this can orphan a login ID already attached on the other channel.</p>
+          </div>
           <div><label className={LABEL}>Address</label>
             <input value={form.address} onChange={e => set("address", e.target.value)} placeholder="Street address" className={INPUT} /></div>
           <div className="grid grid-cols-2 gap-3">
@@ -263,9 +351,26 @@ function EntityModal({
             <label className={LABEL}>Agency *</label>
             <select value={agencyId ?? ""} onChange={e => setAgencyId(e.target.value ? Number(e.target.value) : null)} className={INPUT}>
               <option value="">— Select agency —</option>
-              {agencies.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+              {agencies.map(a => <option key={a.id} value={a.id}>{agencyLabel(a)}</option>)}
             </select>
             <p className="text-[10px] text-gray-400 mt-1">All entities below are added under this one agency.</p>
+          </div>
+
+          <div>
+            <label className={LABEL}>Channels *</label>
+            <select value={channels} onChange={e => setChannels(e.target.value)}
+              disabled={!agencyId || addScopes.length <= 1}
+              className={!agencyId || addScopes.length <= 1 ? `${INPUT} bg-gray-100 text-gray-500` : INPUT}>
+              {!agencyId && <option value="">Select an agency first</option>}
+              {addScopes.map(c => <option key={c} value={c}>{c === "BOTH" ? "Both" : c}</option>)}
+            </select>
+            <p className="text-[10px] text-gray-400 mt-1">
+              {!agencyId
+                ? "Which channels these entities trade on — limited to what the agency itself trades on."
+                : addScopes.length <= 1
+                  ? `This agency trades on ${pickedAgency?.channels} only.`
+                  : "Which channels these entities trade on. Both is usual unless an office handles one only."}
+            </p>
           </div>
 
           <div className="space-y-2.5">
@@ -286,6 +391,11 @@ function EntityModal({
                   <input value={r.state} onChange={e => setRow(i, { state: e.target.value })} placeholder="State" className={INPUT} />
                   <input value={r.city} onChange={e => setRow(i, { city: e.target.value })} placeholder="City" className={INPUT} />
                 </div>
+                {pickedAgency && addressUntouched(r, pickedAgency) && (r.address || r.state || r.city) && (
+                  <p className="text-[10px] text-gray-400">
+                    Address, state and city taken from {pickedAgency.branch_name || pickedAgency.branch_code} — edit if this office is elsewhere.
+                  </p>
+                )}
                 {r.err && <p className="text-[10px] text-red-500">{r.err}</p>}
               </div>
             ))}
@@ -305,7 +415,7 @@ function EntityModal({
           </div>
         </div>
       ) : (
-        <UploadBox resource="agency-entities" templateName="agency_entity_template.xlsx" columns="AGENCY, NAME, CODE, ADDRESS, STATE, CITY, ACTIVE" onDone={onSaved} />
+        <UploadBox resource="agency-entities" templateName="agency_entity_template.xlsx" columns="AGENCY, AGENCY_BRANCH, NAME, CODE, CHANNELS, ADDRESS, STATE, CITY, ACTIVE" onDone={onSaved} />
       )}
     </ModalShell>
   );

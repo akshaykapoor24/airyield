@@ -8,6 +8,7 @@ formula (18% on markup − discount). Billings are stored in the shared `billing
 table with `agency_id` set (and `customer_id` NULL).
 """
 from datetime import date
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import Optional
 
@@ -19,7 +20,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import get_current_user
-from app.models.agency import Agency
+from app.models.agency import CHANNELS, Agency, norm_channel
+from app.models.agency_ledger import AgencyLedger
 from app.models.billing import Billing
 from app.models.ticket_statement import TicketStatement
 from app.models.uploaded_ticket import UploadedTicket
@@ -37,6 +39,7 @@ from app.services.billing_calc import (
     passenger_name as _passenger_name,
 )
 from app.services.billing_pdf import build_billing_pdf
+from app.services.agency_account import agency_statement_scope, current_terms
 
 router = APIRouter()
 
@@ -44,6 +47,31 @@ router = APIRouter()
 # agency bill comes solely from the per-ticket additional markup entered by the
 # user; GST is computed with the "agency" rule (tax on markup only).
 _AGENCY_BILLING_TYPE = "agency"
+
+
+def _resolve_channel(agency: Agency, channel: Optional[str]) -> str:
+    """Which channel an agency invoice belongs to.
+
+    Mirrors agency_account._resolve_channel: omitting it is fine for an agency
+    that trades on one channel and refused for one that trades on both, because
+    guessing picks whose money gets spent.
+    """
+    ch = norm_channel(channel)
+    if ch is None:
+        if agency.channels in CHANNELS:
+            return agency.channels
+        raise HTTPException(
+            status_code=400,
+            detail="This agency trades on GDS and LCC — say which channel this billing is for.",
+        )
+    if ch not in CHANNELS:
+        raise HTTPException(status_code=400, detail=f"channel must be one of {sorted(CHANNELS)}.")
+    if agency.channels != "BOTH" and agency.channels != ch:
+        raise HTTPException(
+            status_code=400,
+            detail=f"This agency trades on {agency.channels} only — it has no {ch} account.",
+        )
+    return ch
 
 
 async def _get_owned_agency(agency_id: int, db: AsyncSession, current_user: User) -> Agency:
@@ -72,17 +100,22 @@ async def _get_owned_agency_billing(billing_id: int, agency_id: int, db: AsyncSe
 
 
 async def _load_agency_tickets(agency: Agency, db: AsyncSession, current_user: User) -> list[UploadedTicket]:
-    """All uploaded tickets tagged to this agency (statement.agency == agency.name)."""
-    agency_name = (agency.name or "").strip().lower()
-    if not agency_name:
-        return []
+    """All uploaded tickets tagged to this agency BRANCH.
+
+    Resolution lives in agency_statement_scope: an explicit `agency_id` on the
+    statement always wins, and the bare-name fallback applies only when that
+    vendor name resolves to one agency. Two branches of one vendor would
+    otherwise both match, and the first to bill would take the other's tickets
+    for good — uploaded_tickets.billing_id is a single FK.
+    """
+    clause, _ambiguous = await agency_statement_scope(db, agency, current_user)
     q = (
         select(UploadedTicket)
         .join(TicketStatement, UploadedTicket.batch_id == TicketStatement.batch_id)
         .where(
             UploadedTicket.tenant_id == current_user.tenant_id,
             UploadedTicket.created_by_id == current_user.id,
-            func.lower(func.trim(TicketStatement.agency)) == agency_name,
+            clause,
         )
         .order_by(UploadedTicket.created_at.desc())
     )
@@ -179,6 +212,10 @@ async def create_agency_billing(
     current_user: User = Depends(get_current_user),
 ):
     agency = await _get_owned_agency(agency_id, db, current_user)
+    # Which account this invoice draws down. An agency that is cash on GDS and
+    # credit on LCC settles them separately, so posting to the wrong one would
+    # spend a deposit that was never meant for these tickets.
+    channel = _resolve_channel(agency, payload.channel)
     if not payload.billing_name.strip():
         raise HTTPException(status_code=400, detail="billing_name is required.")
     if not payload.items:
@@ -258,6 +295,24 @@ async def create_agency_billing(
     for t in tickets:
         t.is_billed = True
         t.billing_id = billing.id
+
+    # Raising a billing is what draws down the agency's account, so it posts an
+    # invoice entry. Doing it here (rather than a separate call the UI must
+    # remember) is what keeps the ledger and `billings` from drifting apart.
+    terms = await current_terms(db, agency.id, channel)
+    db.add(AgencyLedger(
+        agency_id=agency.id,
+        user_id=current_user.id,
+        tenant_id=current_user.tenant_id,
+        terms_id=terms.id if terms else None,
+        channel=channel,
+        entry_date=payload.period_to or date.today(),
+        entry_type="invoice",
+        amount=-Decimal(str(round(grand, 2))),
+        billing_id=billing.id,
+        note=billing.billing_name,
+        created_by_id=current_user.id,
+    ))
     await db.commit()
     await db.refresh(billing)
     return billing
@@ -370,6 +425,30 @@ async def delete_agency_billing(
         .where(UploadedTicket.billing_id == billing.id)
         .values(is_billed=False, billing_id=None)
     )
+
+    # Back the invoice out of the ledger by posting its opposite. The entry rows
+    # stay — a deleted billing is still something that happened to the account.
+    posted = (await db.execute(
+        select(AgencyLedger).where(
+            AgencyLedger.billing_id == billing.id,
+            AgencyLedger.entry_type == "invoice",
+            AgencyLedger.agency_id == agency_id,
+        )
+    )).scalars().all()
+    for src in posted:
+        already = (await db.execute(
+            select(func.count()).select_from(AgencyLedger).where(AgencyLedger.reversal_of_id == src.id)
+        )).scalar() or 0
+        if already:
+            continue
+        db.add(AgencyLedger(
+            agency_id=agency_id, user_id=current_user.id, tenant_id=current_user.tenant_id,
+            terms_id=src.terms_id, channel=src.channel, entry_date=date.today(), entry_type="reversal",
+            amount=-Decimal(str(src.amount)), note=f"Billing #{billing.id} deleted",
+            reversal_of_id=src.id, created_by_id=current_user.id,
+        ))
+
+    # billing_id is ON DELETE SET NULL, so the entries survive the row going away.
     await db.delete(billing)
     await db.commit()
 
@@ -398,7 +477,7 @@ async def download_agency_billing_pdf(
         company=agency.name,
         first_name=None,
         last_name=None,
-        title=agency.vendor_type,
+        title=agency.city,
         email=agency.contact_email,
         phone=agency.contact_phone,
         gst_no=agency.gst_number,

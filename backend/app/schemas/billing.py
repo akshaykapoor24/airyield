@@ -15,6 +15,8 @@ class BillingCreate(BaseModel):
     billing_name: str
     period_from: date
     period_to: date
+    # Agency billings only: GDS | LCC, required when the agency trades on both.
+    channel: Optional[str] = None
     items: list[BillingItemInput]
 
 
@@ -52,6 +54,7 @@ class BillingRead(BaseModel):
     period_from: date
     period_to: date
     billing_type: Optional[str] = None
+    channel: Optional[str] = None
     total_base: float
     total_markup: float
     total_additional_markup: float
@@ -68,6 +71,7 @@ class BillingListItem(BaseModel):
     billing_name: str
     period_from: date
     period_to: date
+    channel: Optional[str] = None
     total_base: float
     total_markup: float
     total_additional_markup: float
@@ -83,7 +87,11 @@ class AgencyLite(BaseModel):
     """Minimal agency info returned alongside its billable tickets."""
     id: int
     name: str
-    vendor_type: Optional[str] = None
+    branch_name: Optional[str] = None
+    city: Optional[str] = None
+    # What the agency trades on. `agency_type` is gone from this row — cash or
+    # credit is now per channel and lives in agency_terms.
+    channels: str
     gst_number: Optional[str] = None
     pan_number: Optional[str] = None
     contact_email: Optional[str] = None

@@ -20,6 +20,7 @@ from app.database import get_db
 from app.dependencies import get_current_user
 from app.models.corporate import Corporate
 from app.models.billing import Billing
+from app.models.deal import Deal
 from app.models.uploaded_ticket import UploadedTicket
 from app.models.user import User
 from app.models.tenant import Tenant
@@ -319,6 +320,20 @@ async def delete_corporate(
     current_user: User = Depends(get_current_user),
 ):
     obj = await _get_owned_corporate(corporate_id, db, current_user)
+
+    # deals.corporate_id is ON DELETE RESTRICT (nulling it would break the deal's
+    # own scope CHECK), so refuse here with something readable rather than letting
+    # the driver raise an FK error.
+    deals_named = (await db.execute(
+        select(func.count()).select_from(Deal).where(Deal.corporate_id == corporate_id)
+    )).scalar() or 0
+    if deals_named:
+        raise HTTPException(
+            status_code=409,
+            detail=f"This corporate is named on {deals_named} outgoing deal(s) and cannot be deleted. "
+                   "Close or re-scope those deals first, or mark the corporate inactive.",
+        )
+
     await db.delete(obj)
     await db.commit()
 

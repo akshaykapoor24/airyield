@@ -1,15 +1,9 @@
-import re
 from pydantic import BaseModel, model_validator
 from typing import Optional
 
-# Same formats the signup flow enforces (app/schemas/user.py) — an entity's tax
-# ids are validated identically so the two paths can never disagree.
-PAN_RE   = re.compile(r"^[A-Z]{5}[0-9]{4}[A-Z]$")                            # 10 chars
-GSTIN_RE = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$")   # 15 chars
-
-
-def _norm(v: Optional[str]) -> Optional[str]:
-    return (v or "").strip().upper() or None
+# Same formats the signup flow enforces — both now read them from app.core.india_tax
+# rather than each declaring its own copy, so the two paths cannot disagree.
+from app.core.india_tax import PAN_RE, GSTIN_RE, normalise as _norm
 
 
 def tax_id_error(gst: Optional[str], pan: Optional[str]) -> Optional[str]:
@@ -19,11 +13,17 @@ def tax_id_error(gst: Optional[str], pan: Optional[str]) -> Optional[str]:
     value to one row and still save the others, which a schema-level raise makes
     impossible (pydantic rejects the whole list before the handler runs).
     Both fields are optional.
+
+    FORMAT ONLY, unlike app.core.india_tax.tax_id_error, which additionally checks
+    the GSTIN's check digit, its state code and the PAN embedded in it. An entity
+    here may carry a GSTIN entered long before those checks existed, and tightening
+    this would refuse edits to rows that are already stored. Agency Master calls the
+    full version because everything it validates is being typed in fresh.
     """
     if gst and not GSTIN_RE.match(gst):
-        return f"Invalid GSTIN '{gst}' — expected 15 characters, e.g. 22ABCDE1234F1Z5."
+        return f"Invalid GSTIN '{gst}' — expected 15 characters, e.g. 27AAPFU0939F1ZV."
     if pan and not PAN_RE.match(pan):
-        return f"Invalid PAN '{pan}' — expected 10 characters, e.g. ABCDE1234F."
+        return f"Invalid PAN '{pan}' — expected 10 characters, e.g. AAPFU0939F."
     return None
 
 
