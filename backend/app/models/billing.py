@@ -28,6 +28,10 @@ class Billing(Base):
     period_from:   Mapped[date]       = mapped_column(Date, nullable=False)
     period_to:     Mapped[date]       = mapped_column(Date, nullable=False)
     billing_type:  Mapped[str | None] = mapped_column(String(20), nullable=True)   # snapshot: 'reseller' | 'agency'
+    # GDS | LCC on an agency billing — an agency that is cash on one channel and
+    # credit on the other settles them separately, so a bill belongs to one of
+    # them. NULL on customer and corporate billings, which have no channel.
+    channel:       Mapped[str | None] = mapped_column(String(10), nullable=True)
 
     total_base:              Mapped[float] = mapped_column(Numeric(14, 2), nullable=False, default=0)
     total_markup:            Mapped[float] = mapped_column(Numeric(14, 2), nullable=False, default=0)

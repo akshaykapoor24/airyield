@@ -1,7 +1,46 @@
 from __future__ import annotations
-from pydantic import BaseModel
-from typing import Optional
+from pydantic import BaseModel, model_validator
+from typing import Literal, Optional
 from datetime import date, datetime
+
+
+# ── Outgoing-deal scope ────────────────────────────────────────────────────
+
+DealScopeLiteral = Literal["agency", "corporate", "all"]
+
+
+class DealScopeFields(BaseModel):
+    """WHO an outgoing deal is for. Mixed into every payload that writes a deal.
+
+    Inbound deals never send these — the endpoint forces `all`, because income
+    received from an airline has no customer.
+
+    The Literal is load-bearing: an unrecognised scope becomes a field-level 422
+    here rather than reaching the database and surfacing as a 500 from
+    ck_deals_scope_type.
+    """
+    scope_type:       Optional[DealScopeLiteral] = None
+    agency_id:        Optional[int] = None
+    corporate_id:     Optional[int] = None
+    agency_entity_id: Optional[int] = None
+
+    @model_validator(mode="after")
+    def _check_scope(self):
+        # None = "not sent" (a PATCH that leaves the scope alone). Only validate
+        # the pairing when the caller actually named a scope.
+        if self.scope_type is None:
+            return self
+        if self.scope_type == "agency" and self.agency_id is None:
+            raise ValueError("scope_type 'agency' requires agency_id")
+        if self.scope_type != "agency" and self.agency_id is not None:
+            raise ValueError("agency_id is only allowed when scope_type is 'agency'")
+        if self.scope_type == "corporate" and self.corporate_id is None:
+            raise ValueError("scope_type 'corporate' requires corporate_id")
+        if self.scope_type != "corporate" and self.corporate_id is not None:
+            raise ValueError("corporate_id is only allowed when scope_type is 'corporate'")
+        if self.agency_entity_id is not None and self.scope_type != "agency":
+            raise ValueError("agency_entity_id is only allowed when scope_type is 'agency'")
+        return self
 
 
 # ── Extraction preview (returned before DB save) ───────────────────────────
@@ -11,6 +50,11 @@ class ExtractedRow(BaseModel):
     row_order:        int        = 0
     airline_name:     str        = ""
     iata_code:        str        = ""
+    # The CARRIER designator (AI, VS, 6E) used to resolve — and if absent, to
+    # create — the airline master row. Transport only: it is never written to the
+    # deal. `iata_code` above is a different thing entirely; confirm_upload maps
+    # that one onto Deal.iata_number, the agency's IATA number.
+    airline_code:     Optional[str] = None
     variant:          str        = ""
     eco_commission:   str        = ""
     peco_commission:  str        = ""
@@ -82,6 +126,13 @@ class DealRepositoryItem(BaseModel):
     incl_excl_data:   Optional[dict] = None
     deal_tag:             Optional[str]  = "standard"
     direction:            Optional[str]  = "inbound"   # 'inbound' (received) | 'outbound' (floated)
+    # Outgoing-deal scope. `scope_party_name` is the snapshot taken at save time,
+    # so the row still reads correctly after the agency or corporate is renamed.
+    scope_type:           Optional[str]  = "all"
+    agency_id:            Optional[int]  = None
+    corporate_id:         Optional[int]  = None
+    agency_entity_id:     Optional[int]  = None
+    scope_party_name:     Optional[str]  = None
     status:               str
     deal_lifecycle_status: Optional[str] = None
     created_at:           datetime
@@ -94,7 +145,13 @@ class DealRepositoryItem(BaseModel):
 
 # ── AI Extraction schemas ──────────────────────────────────────────────────────
 
-class DealUpdatePayload(BaseModel):
+class DealUpdatePayload(DealScopeFields):
+    # NOTE: `direction` and `deal_tag` are deliberately NOT accepted here. Both are
+    # fixed at creation by the repository the deal was made in, and a PATCH that
+    # could flip `direction` would move a deal between the Incoming and Outgoing
+    # repositories — and, worse, make a floated deal start matching your own
+    # tickets as income. The Create Deal form sends both on edit; Pydantic drops
+    # them, which is the intended behaviour.
     airline_type:    Optional[str] = None
     airline_name:    Optional[str] = None
     contract_year:   Optional[str] = None
@@ -123,6 +180,16 @@ class DealUpdatePayload(BaseModel):
 class AIDeal(BaseModel):
     airline_type: str = "GDS"
     airline_name: str = ""
+    # ── Airline-master resolution ────────────────────────────────────────────
+    # All four are TRANSPORT ONLY — none is persisted on the deal. The code
+    # travels extract -> review -> confirm because `airlines.iata_code` is NOT
+    # NULL UNIQUE, so it is the only way confirm can create a missing master row.
+    # It must never be confused with `Deal.iata_number`, the AGENCY IATA number.
+    airline_code: Optional[str] = None
+    # resolved | new | conflict | multi_carrier | ambiguous | unresolved
+    airline_status: Optional[str] = None
+    airline_master_name: Optional[str] = None
+    airline_note: Optional[str] = None
     # The extraction prompt has always asked for this and the review table has
     # always had a column for it, but the field was missing here — so Pydantic
     # dropped it on every AI upload and the column arrived blank.
@@ -149,6 +216,10 @@ class AIExtractResponse(BaseModel):
     file_name: str
     confidence: float
     warning: Optional[str] = None
+    # {resolved: 177, conflict: 12, new: 12, ...} — counted over DISTINCT
+    # (name, code) pairs, not deal rows, so it reads as "12 airlines" and not
+    # "36 rows". Drives the review-table banner.
+    airline_summary: dict[str, int] = {}
 
 
 class DealBatchRead(BaseModel):
@@ -179,7 +250,7 @@ class AIConfirmPayload(BaseModel):
     file_type: Optional[str] = "pdf"
 
 
-class ConfirmUploadPayload(BaseModel):
+class ConfirmUploadPayload(DealScopeFields):
     """Sent by frontend after user edits/approves the extracted rows.
     Mirrors the manual New Deal form — same fields, different entry path.
     Used for both file-upload flow (source_type=upload) and manual entry (source_type=manual).
@@ -207,6 +278,11 @@ class ConfirmUploadPayload(BaseModel):
     business_type:   Optional[str]  = None
     entity_lcc:      Optional[str]  = None
     login_id:        Optional[str]  = None
+    # The structured form of `login_id` (which is only a ", "-joined display copy).
+    # The upload path never sent this, so the repository's Login IDs column was
+    # permanently blank for uploaded deals; the outgoing form now selects real
+    # credentials, so it has something true to carry.
+    login_ids:       Optional[list] = None
     # deal maker
     deal_maker_name: Optional[str]  = None
     # incentives (same as new deal form)

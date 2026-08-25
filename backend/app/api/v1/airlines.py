@@ -20,6 +20,7 @@ from app.schemas.airline import (
     AirlineApprovalRead, AirlineApprovalAction, AirlineApprovalEdit,
 )
 from app.services.master_approval_edit import apply_admin_edit, AIRLINE_FIELDS
+from app.services.master_export import master_export_response
 
 router = APIRouter()
 PLATFORM = UserRole.PLATFORM_ADMIN
@@ -299,6 +300,40 @@ async def download_airline_template():
         bio,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": 'attachment; filename="airline_template.xlsx"'},
+    )
+
+
+@router.get("/export")
+async def export_airlines(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_role(PLATFORM)),
+):
+    """The whole airline master as .xlsx, for review in Excel.
+
+    Column headers match download_airline_template so a reviewed sheet can go
+    straight back through /bulk-upload; AIRLINE_ID is the row's real id here
+    (bulk-upload only echoes it in error messages).
+    """
+    result = await db.execute(select(Airline).order_by(Airline.name))
+    airlines = result.scalars().all()
+
+    headers = ["AIRLINE_ID", "Code", "IATA_NUMERIC_CODE", "Airline", "CONTRACT_YEAR", "ACTIVE"]
+    rows = [
+        [
+            a.id, a.iata_code,
+            # The importer writes the numeric code to both columns; older rows
+            # only ever got icao_code, so fall back to it.
+            a.iata_numeric_code or a.icao_code,
+            a.name, a.contract_year, a.is_active,
+        ]
+        for a in airlines
+    ]
+
+    return master_export_response(
+        sheet_title="Airline Master",
+        filename="airline_master.xlsx",
+        headers=headers,
+        rows=rows,
     )
 
 

@@ -16,6 +16,11 @@ import {
   INCENTIVE_FIELDS, FIELD_OPTIONS, ANCILLARY_ITEMS,
   TabBar, IncentiveTabContent, InclExclTabContent,
 } from "@/components/deals/IncentiveInclExclShared";
+import OutgoingScopeFields, { type ScopeSelection } from "@/components/deals/OutgoingScopeFields";
+import {
+  OUTGOING_DEAL_KINDS, KIND_BUSINESS_TYPE, buildScopePayload, dealsHref, scopeLabel, toScopeType,
+  type DealScopeType, type OutgoingDealKind,
+} from "@/lib/dealScope";
 import { missingFields, missingMessage, notifyRequired } from "@/lib/requiredFields";
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -269,6 +274,14 @@ type ExtractionPreview = {
 type AIDeal = {
   airline_type: string;
   airline_name: string;
+  // Airline-master resolution. airline_name above is ALREADY the master's
+  // canonical name when airline_status is "resolved"; for every other status it
+  // is the sheet's own wording with the channel qualifier removed — the master's
+  // name is deliberately NOT applied when the match is not trustworthy.
+  airline_code?: string | null;
+  airline_status?: string | null;   // resolved|new|conflict|multi_carrier|ambiguous|unresolved
+  airline_master_name?: string | null;
+  airline_note?: string | null;
   iata_commission: string | number | null;
   contract_valid_from: string | null;
   contract_valid_to: string | null;
@@ -287,6 +300,8 @@ type AIExtractResponse = {
   file_name: string;
   confidence: number;
   warning?: string;
+  // Counted over DISTINCT airlines, not rows — "12 will be added", not "36 rows".
+  airline_summary?: Record<string,number>;
 };
 
 function convertAIDealsToRows(deals: AIDeal[]): ReviewRow[] {
@@ -294,6 +309,17 @@ function convertAIDealsToRows(deals: AIDeal[]): ReviewRow[] {
     const extra: Record<string, string> = {};
     if (deal.airline_type)        extra["c__airline_type"] = deal.airline_type;
     if (deal.airline_name)        extra["c__airline_name"]  = deal.airline_name;
+    // The carrier code reaches the save payload (handleConfirm sends it explicitly)
+    // so the backend can create a missing master row — airlines.iata_code is NOT
+    // NULL. It is NOT the agency IATA number, which travels as `iata_code`.
+    if (deal.airline_code)        extra["c__airline_code"] = deal.airline_code;
+    // Resolution status is advisory display only. "__"-prefixed keys are
+    // structurally incapable of reaching the payload — same guarantee __src relies
+    // on — and the server re-resolves from scratch anyway, so a tampered status
+    // cannot influence what gets written.
+    if (deal.airline_status)      extra["__air_status"] = deal.airline_status;
+    if (deal.airline_master_name) extra["__air_master"] = deal.airline_master_name;
+    if (deal.airline_note)        extra["__air_note"]   = deal.airline_note;
     if (deal.iata_commission != null && deal.iata_commission !== "")
                                   extra["c__iata_commission"] = String(deal.iata_commission);
     if (deal.contract_valid_from) extra["c__valid_from"]    = deal.contract_valid_from;
@@ -969,7 +995,8 @@ const CONTRACT_COL_OPTIONS: Record<string, string[]> = {
 
 const CELL_PLACEHOLDER: Record<string, string> = {
   "c__airline_type":  "GDS / LCC",
-  "c__airline_name":  "e.g. Emirates (EK)",
+  "c__airline_name":  "e.g. Emirates",
+  "c__airline_code":  "AI",
   "c__contract_year": "Calendar / Financial year",
   "c__valid_from":    "",
   "c__valid_to":      "",
@@ -1008,6 +1035,13 @@ function buildColGroups(dealType:string,aiMode=false):ColGroup[]{
   const groups:ColGroup[]=[
     {label:"Airline Contract Details",color:"#1e3a5f",cols:[{key:"c__deal_tag",label:"Deal Tag"},...contractCols]},
   ];
+  // How each row resolved against the airline master. The code is editable
+  // because it is the only way a reviewer can rescue a row the sheet left without
+  // one — without a code the airline cannot be added to the master at all.
+  if(aiMode) groups.push({label:"Airline Master",color:"#0f766e",cols:[
+    {key:"c__airline_code",label:"Code"},
+    {key:"__airline_master__",label:"Master"},
+  ]});
   // Where each AI-extracted row came from in the PDF. With 300+ rows, spot-checking
   // against the printed contract is impractical without the page/row it came from.
   if(aiMode) groups.push({label:"Source",color:"#7c3aed",cols:[{key:"__src__",label:"Source (PDF)"}]});
@@ -1046,6 +1080,20 @@ function ReviewTable({
   const allCols=colGroups.flatMap(g=>g.cols);
   const inp="w-full bg-transparent text-[11px] text-gray-800 focus:outline-none focus:bg-blue-50 rounded px-1 py-0.5 min-w-[80px]";
 
+  // Master airline names, for the Airline Name type-ahead. Fetched once when the
+  // review table mounts — one shared <datalist> rather than a picker component
+  // per cell, which on a 345-row sheet would be 345 identical requests. It stays
+  // a free-text field on purpose: an airline missing from the master is exactly
+  // the case this flow exists to add, so a hard picker would block it.
+  const [masterNames,setMasterNames]=useState<string[]>([]);
+  useEffect(()=>{
+    let alive=true;
+    api.get<{name:string}[]>("/airlines/",{params:{limit:5000}})
+      .then(({data})=>{if(alive)setMasterNames(data.map(a=>a.name).filter(Boolean));})
+      .catch(()=>{/* type-ahead is a convenience; the field works without it */});
+    return()=>{alive=false;};
+  },[]);
+
   const getCellValue=(row:ReviewRow,key:string):string=>{
     if(key.startsWith("inc::")||key.startsWith("ie::")||key.startsWith("c__"))return row.extra[key]??"";
     return (row as unknown as Record<string,string>)[key]??"";
@@ -1067,6 +1115,37 @@ function ReviewTable({
           <span className="text-[10px] text-gray-400 whitespace-nowrap" title={src}>
             {src.length>60?src.slice(0,60)+"…":src}
           </span>
+        </td>
+      );
+    }
+    // Special: read-only airline-master resolution. Advisory — the server
+    // re-resolves on save, so what shows here is what WOULD happen if the row is
+    // saved as it currently stands.
+    if(colKey==="__airline_master__"){
+      const status=row.extra["__air_status"]??"";
+      const master=row.extra["__air_master"]??"";
+      const note=row.extra["__air_note"]??"";
+      const code=row.extra["c__airline_code"]??"";
+      const badge=(cls:string,text:string,icon?:React.ReactNode)=>(
+        <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-semibold border ${cls}`}>
+          {icon}{text}
+        </span>
+      );
+      let content:React.ReactNode=null;
+      if(status==="resolved"){
+        content=badge("bg-emerald-50 text-emerald-700 border-emerald-200","✓ "+(master||"matched"));
+      }else if(status==="new"){
+        content=badge("bg-sky-50 text-sky-700 border-sky-200",`+ will be added${code?` (${code})`:""}`);
+      }else if(status==="conflict"||status==="ambiguous"){
+        content=badge("bg-red-50 text-red-700 border-red-300","needs a look",<AlertTriangle className="w-2.5 h-2.5"/>);
+      }else if(status==="multi_carrier"){
+        content=badge("bg-amber-50 text-amber-700 border-amber-300","multi-carrier",<AlertTriangle className="w-2.5 h-2.5"/>);
+      }else if(status){
+        content=badge("bg-gray-50 text-gray-500 border-gray-200","not in master");
+      }
+      return(
+        <td key={colKey} className="px-2 py-1 border-l border-gray-100 whitespace-nowrap" title={note||undefined}>
+          {content}
         </td>
       );
     }
@@ -1157,6 +1236,7 @@ function ReviewTable({
       <td key={colKey} className="px-1 py-1 border-l border-gray-100">
         <input
           className={inp}
+          list={colKey==="c__airline_name"?"airline-master-names":undefined}
           value={val}
           onChange={e=>change(e.target.value)}
           placeholder={CELL_PLACEHOLDER[colKey]??"—"}
@@ -1177,6 +1257,10 @@ function ReviewTable({
 
   return(
     <div className="overflow-x-auto border border-gray-200 rounded-lg">
+      {/* One shared options list for every Airline Name cell. */}
+      <datalist id="airline-master-names">
+        {masterNames.map(n=><option key={n} value={n}/>)}
+      </datalist>
       <table className="w-full min-w-max border-collapse">
         <thead>
           <tr>
@@ -1428,8 +1512,24 @@ export default function UploadDealPage(){
   const [selectedInclExcl,   setSelectedInclExcl]   = useState<string[]>([]);
   const [copyPrevInclExcl,   setCopyPrevInclExcl]   = useState(true);
 
-  // Direction is fixed by the entry point (Incoming vs Floated repo) — read it from the
-  // ?direction query param instead of asking. Floated deals are B2B only.
+  // ── Outgoing-deal scope: WHO the deal is floated to ────────────────────────
+  // Orthogonal to `dealType`, which stays "b2b" for every outgoing deal.
+  const [scopeKind, setScopeKind] = useState<OutgoingDealKind>("b2b");
+  const [scopeSel,  setScopeSel]  = useState<ScopeSelection>({
+    agencyId:null, corporateId:null, agencyEntityId:null, entity:"", loginIds:[],
+  });
+  const [scopeTouched, setScopeTouched] = useState(false);
+  const outbound  = direction==="outbound";
+  const scopeType: DealScopeType = outbound ? toScopeType(scopeKind) : "all";
+  /** Is the counterparty answered? A Common deal needs no party. */
+  const scopeComplete = !outbound
+    || scopeType==="all"
+    || (scopeType==="agency"    && scopeSel.agencyId    != null)
+    || (scopeType==="corporate" && scopeSel.corporateId != null);
+
+  // Direction is fixed by the entry point (Incoming vs Outgoing repo) — read it from
+  // the ?direction query param instead of asking. Outgoing deals are B2B only at the
+  // contract level; who they reach is the scope above.
   useEffect(()=>{
     if(new URLSearchParams(window.location.search).get("direction")==="outbound"){
       setDirection("outbound");
@@ -1488,6 +1588,7 @@ export default function UploadDealPage(){
   // here while confidence WAS rendered — so a truncated extraction showed as
   // "312 rows · 78% confidence" with nothing saying why.
   const [aiWarning,    setAiWarning]    = useState("");
+  const [airlineSummary, setAirlineSummary] = useState<Record<string,number>>({});
   // Reading a whole contract takes 30-60s. Without a ticker the button looks
   // hung, and people re-click or navigate away mid-extraction.
   const [uploadSecs,   setUploadSecs]   = useState(0);
@@ -1689,15 +1790,19 @@ export default function UploadDealPage(){
     const missing=missingFields([
       {label:"Contract File",value:file},
       {label:"Deal Type",value:dealType},
-      {label:"Supplier Name",value:supplierName,when:dealType==="b2b"},
+      {label:"Supplier Name",value:supplierName,when:!outbound&&dealType==="b2b"},
+      // Outgoing names its counterparty through the scope. A Common deal has none,
+      // which is why this checks scopeComplete rather than a party id.
+      {label:scopeType==="corporate"?"Corporate":"Agency",value:scopeComplete?"set":"",when:outbound},
     ]);
+    if(outbound) setScopeTouched(true);
     if(missing.length||!file){
       const msg=missingMessage(missing.length?missing:["Contract File"]);
       setUploadError(msg);
       notifyRequired(msg);
       return;
     }
-    setUploading(true);setUploadError("");setIsMultiTab(false);setAiWarning("");
+    setUploading(true);setUploadError("");setIsMultiTab(false);setAiWarning("");setAirlineSummary({});
     try{
       const form=new FormData();form.append("file",file);
       if(aiMode){
@@ -1741,6 +1846,7 @@ export default function UploadDealPage(){
         setAiFileName(data.file_name);
         setAiConfidence(data.confidence);
         setAiWarning(data.warning??"");
+        setAirlineSummary(data.airline_summary??{});
         setFilterText("");setSelectedRows(new Set());setBulkColKey("");setBulkColValue("");
         setStep(3);
       }else{
@@ -1888,7 +1994,13 @@ export default function UploadDealPage(){
     setSaving(true);setSaveError("");
     const ext=file?.name.split(".").pop()?.toLowerCase()??"unknown";
     const fileType=ext==="pdf"?"pdf":["xls","xlsx"].includes(ext)?"excel":["doc","docx"].includes(ext)?"word":["png","jpg","jpeg"].includes(ext)?"image":"unknown";
-    const sourceAgent=dealType==="b2b"?supplierName:(file?.name.replace(/\.[^/.]+$/,"")??"upload");
+    // An outgoing deal's counterparty comes from the scope, not from a typed
+    // supplier name. The server re-derives the authoritative label from the
+    // resolved party (the agency's own name, or "All Agencies" for a common
+    // deal); this is only the fallback it starts from.
+    const sourceAgent=outbound
+      ?scopeLabel(scopeType)
+      :dealType==="b2b"?supplierName:(file?.name.replace(/\.[^/.]+$/,"")??"upload");
 
     const getContractVal=(key:string)=>{for(const r of rows){if(r.extra[key])return r.extra[key];}return "";};
 
@@ -1907,11 +2019,17 @@ export default function UploadDealPage(){
           valid_to:        getContractVal("c__valid_to")||null,
           trigger_type:    dealType==="airline"?(getContractVal("c__trigger_type")||null):null,
           payout_type:     dealType==="airline"?(getContractVal("c__payout_type")||null):null,
-          entity:          entity||null,
+          // Outgoing takes the entity and credentials from the scoped AGENCY;
+          // incoming keeps `entity` meaning your own filing entity from My Profile.
+          entity:          (outbound?scopeSel.entity:entity)||null,
           entity_lcc:      getContractVal("c__entity_lcc")||null,
-          business_type:   getContractVal("c__business_type")||null,
-          login_id:        getContractVal("c__login_id")||null,
+          business_type:   (outbound?(getContractVal("c__business_type")||KIND_BUSINESS_TYPE[scopeKind]):getContractVal("c__business_type"))||null,
+          login_id:        (outbound?scopeSel.loginIds.join(", "):getContractVal("c__login_id"))||null,
+          login_ids:       outbound&&scopeSel.loginIds.length?scopeSel.loginIds:null,
           iata_commission: getContractVal("c__iata_commission")||null,
+          // Mirrors the server's own re-derivation, so a stale id left by a scope
+          // change can never travel attached to the wrong scope.
+          ...(outbound?buildScopePayload(scopeType,scopeSel.agencyId,scopeSel.corporateId,scopeSel.agencyEntityId):{}),
           incentive_types: selectedIncentives,
           incentive_data:  {},
           incl_excl_types: selectedInclExcl,
@@ -1933,6 +2051,10 @@ export default function UploadDealPage(){
             return{
               row_order:i,
               airline_name:r.extra["c__airline_name"]||r.airline_name||null,
+              // Carrier designator — resolves the airline master and, when the
+              // airline is missing, creates it. Distinct from `iata_code` below,
+              // which the backend maps onto the deal's AGENCY IATA number.
+              airline_code:r.extra["c__airline_code"]||null,
               // Per-deal header fields — used by multi-tab uploads; for the single-sheet
               // path these equal the deal-level values (the backend falls back on null).
               airline_type:   r.extra["c__airline_type"]||null,
@@ -2019,8 +2141,12 @@ export default function UploadDealPage(){
         {savedBatchId&&(
           <button onClick={()=>router.push(`/deals/${savedBatchId}`)} className="bg-[#1e3a5f] text-white px-5 py-2 rounded-lg text-sm font-medium hover:bg-[#16304f]">View Batch</button>
         )}
-        <button onClick={()=>router.push("/deals")} className="border border-[#1e3a5f] text-[#1e3a5f] px-5 py-2 rounded-lg text-sm font-medium hover:bg-blue-50">View All Deals</button>
-        <button onClick={()=>{setStep(1);setFile(null);setPreview(null);setRows([]);setDealType("");setSupplierName("");setValidFromDate("");setColumnMap({});setSelectedIncentives([]);setSelectedInclExcl([]);setRowInclExcl({});setAiMode(false);setAiFileName("");setAiConfidence(0);setSavedBatchId(null);setFileStoreError("");setCopyPrevInclExcl(true);setIsMultiTab(false);}}
+        <button onClick={()=>router.push(dealsHref(direction))} className="border border-[#1e3a5f] text-[#1e3a5f] px-5 py-2 rounded-lg text-sm font-medium hover:bg-blue-50">View All Deals</button>
+        <button onClick={()=>{setStep(1);setFile(null);setPreview(null);setRows([]);setDealType(outbound?"b2b":"");setSupplierName("");setValidFromDate("");setColumnMap({});setSelectedIncentives([]);setSelectedInclExcl([]);setRowInclExcl({});setAiMode(false);setAiFileName("");setAiConfidence(0);setSavedBatchId(null);setFileStoreError("");setCopyPrevInclExcl(true);setIsMultiTab(false);
+          // The scope is Step-1 state too — leaving it set would silently float the
+          // next upload to the previous upload's agency. dealType stays "b2b" on an
+          // outgoing upload, since the query param effect only runs on mount.
+          setScopeKind("b2b");setScopeTouched(false);setScopeSel({agencyId:null,corporateId:null,agencyEntityId:null,entity:"",loginIds:[]});}}
           className="border border-gray-200 text-gray-700 px-5 py-2 rounded-lg text-sm font-medium hover:bg-gray-50">Upload Another</button>
       </div>
     </div>
@@ -2062,7 +2188,7 @@ export default function UploadDealPage(){
           <div className="col-span-2 space-y-3">
             <SectionCard title="Deal Details">
               <div className="px-4 py-3 space-y-3">
-                {/* Direction is fixed by the entry point (Incoming vs Floated repo) — read-only */}
+                {/* Direction is fixed by the entry point (Incoming vs Outgoing repo) — read-only */}
                 <div>
                   <label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">Deal Direction</label>
                   <span className={`inline-flex items-center px-2.5 py-1 rounded-md text-xs font-medium border ${
@@ -2070,25 +2196,56 @@ export default function UploadDealPage(){
                       ? "border-amber-200 bg-amber-50 text-amber-700"
                       : "border-emerald-200 bg-emerald-50 text-emerald-700"
                   }`}>
-                    {direction==="outbound"?"Floated":"Incoming"}
+                    {direction==="outbound"?"Outgoing":"Incoming"}
                   </span>
                 </div>
-                <SelectField
-                  label="Deal Type"
-                  required
-                  placeholder="Select deal type…"
-                  options={direction==="outbound"?["B2B"]:["Airline","B2B"]}
-                  value={dealType==="airline"?"Airline":dealType==="b2b"?"B2B":""}
-                  onChange={v=>{ setDealType(v==="Airline"?"airline":v==="B2B"?"b2b":""); setSupplierName(""); }}
-                />
-                {dealType==="b2b"&&(
-                  <SearchSelectField
-                    label={direction==="outbound"?"Floated To (Agency) *":"Supplier Name *"}
-                    placeholder="Search supplier…"
-                    options={supplierOptions}
-                    value={supplierName}
-                    onChange={setSupplierName}
-                  />
+
+                {outbound ? (
+                  <>
+                    {/* Deal Type here is the SCOPE — who the deal is floated to.
+                        `dealType` stays pinned "b2b" behind it, because that value
+                        drives the required-row-column set, the contract columns and
+                        the XLS template; writing a scope into it would disable all
+                        three and let blank airline names save silently. */}
+                    <SelectField
+                      label="Deal Type"
+                      required
+                      placeholder="Select deal type…"
+                      options={OUTGOING_DEAL_KINDS.map(k=>k.label)}
+                      value={OUTGOING_DEAL_KINDS.find(k=>k.key===scopeKind)?.label ?? ""}
+                      onChange={v=>{
+                        const k=OUTGOING_DEAL_KINDS.find(x=>x.label===v)?.key ?? "b2b";
+                        setScopeKind(k);
+                        setScopeSel({agencyId:null,corporateId:null,agencyEntityId:null,entity:"",loginIds:[]});
+                      }}
+                    />
+                    <OutgoingScopeFields
+                      scope={scopeType}
+                      value={scopeSel}
+                      onChange={setScopeSel}
+                      touched={scopeTouched}
+                    />
+                  </>
+                ) : (
+                  <>
+                    <SelectField
+                      label="Deal Type"
+                      required
+                      placeholder="Select deal type…"
+                      options={["Airline","B2B"]}
+                      value={dealType==="airline"?"Airline":dealType==="b2b"?"B2B":""}
+                      onChange={v=>{ setDealType(v==="Airline"?"airline":v==="B2B"?"b2b":""); setSupplierName(""); }}
+                    />
+                    {dealType==="b2b"&&(
+                      <SearchSelectField
+                        label="Supplier Name *"
+                        placeholder="Search supplier…"
+                        options={supplierOptions}
+                        value={supplierName}
+                        onChange={setSupplierName}
+                      />
+                    )}
+                  </>
                 )}
                 <MultiSelectDropdown
                   label="Incentive Types"
@@ -2233,7 +2390,7 @@ export default function UploadDealPage(){
                 </span>
               </label>
 
-              <button onClick={handleExtract} disabled={!file||!dealType||(dealType==="b2b"&&!supplierName)||uploading}
+              <button onClick={handleExtract} disabled={!file||!dealType||(outbound?!scopeComplete:(dealType==="b2b"&&!supplierName))||uploading}
                 className="w-full bg-[#1e3a5f] text-white rounded-xl py-3 text-sm font-semibold hover:bg-[#16304f] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2">
                 {uploading
                   ?<><RefreshCw className="w-4 h-4 animate-spin"/>{aiMode
@@ -2304,6 +2461,21 @@ export default function UploadDealPage(){
             {(aiMode?aiWarning:preview?.warning)&&<span className="flex items-center gap-1 text-[11px] text-amber-600"><AlertTriangle className="w-3.5 h-3.5"/>{aiMode?aiWarning:preview?.warning}</span>}
           </div>
 
+          {/* Airline-master summary. Counts DISTINCT airlines, not rows, because
+              one airline routinely occupies 3 rows (Economy / Premium / Business). */}
+          {aiMode&&Object.keys(airlineSummary).length>0&&(()=>{
+            const n=(k:string)=>airlineSummary[k]??0;
+            const attention=n("conflict")+n("ambiguous")+n("multi_carrier");
+            return(
+              <div className="flex items-center gap-2 flex-wrap text-[11px]">
+                {n("resolved")>0&&<span className="px-2 py-0.5 rounded-full font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">{n("resolved")} matched to the airline master</span>}
+                {n("new")>0&&<span className="px-2 py-0.5 rounded-full font-semibold bg-sky-50 text-sky-700 border border-sky-200">{n("new")} will be added to the master when you save</span>}
+                {attention>0&&<span className="px-2 py-0.5 rounded-full font-semibold bg-red-50 text-red-700 border border-red-300">{attention} need a look — check the Master column</span>}
+                {n("unresolved")>0&&<span className="px-2 py-0.5 rounded-full font-semibold bg-gray-50 text-gray-500 border border-gray-200">{n("unresolved")} not in the master (no code)</span>}
+              </div>
+            );
+          })()}
+
           {/* Filter + Bulk Edit Toolbar */}
           <div className="bg-white rounded-xl border border-gray-200 px-4 py-2.5 space-y-2">
             {/* Row 1: Filter */}
@@ -2343,7 +2515,7 @@ export default function UploadDealPage(){
                   <option value="">Column to edit…</option>
                   {colGroups.filter(g=>g.label!=="Incl / Excl"&&g.label!=="Incentive Data"&&g.label!=="Source").map(g=>(
                     <optgroup key={g.label} label={g.label}>
-                      {g.cols.filter(c=>c.key!=="__incl_excl__"&&c.key!=="__incentive_data__"&&c.key!=="__src__").map(c=>(
+                      {g.cols.filter(c=>c.key!=="__incl_excl__"&&c.key!=="__incentive_data__"&&c.key!=="__src__"&&c.key!=="__airline_master__").map(c=>(
                         <option key={c.key} value={c.key}>{c.label}</option>
                       ))}
                     </optgroup>

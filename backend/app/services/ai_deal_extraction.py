@@ -371,6 +371,24 @@ def _canon_airline(name: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"\(.*?\)", "", name or "")).strip().upper()
 
 
+def _row_code(row: DocRow, cm) -> str | None:
+    """The airline code as printed in this row's code column.
+
+    Prefers the physical cell over the model's echo of it: Python already holds
+    the cell (post forward-fill — byte-for-byte what `render_row` sent), so
+    trusting a transcription round-trip buys nothing. Falls back to the model's
+    "cd" only when the document has no code column at all.
+
+    Transport only. The code is never written to `deals`; it exists so the master
+    can be resolved, and created, from the row.
+    """
+    from app.services.airline_resolver import clean_airline_code
+
+    if cm is None or cm.code is None or cm.code >= len(row.cells):
+        return None
+    return clean_airline_code(row.cells[cm.code])[0]
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # EXPANSION — one compact row becomes up to three deal objects
 # ══════════════════════════════════════════════════════════════════════════════
@@ -442,6 +460,14 @@ def expand_row(compact: dict, row: DocRow, stats: Stats, cm=None) -> list[dict]:
         valid_to = parse_validity_iso(remark_cell)
 
     airline_type = "LCC" if _canon_airline(name) in LCC_NAMES else "GDS"
+
+    # Deliberately AFTER every consumer of the raw name. `ft_from_airline_name`
+    # above needs to see "(INTL)" and `_canon_airline` needs the sheet's own
+    # spelling for LCC_NAMES — this module never renames anything, it only
+    # carries the code out so the API layer can resolve the master with it.
+    from app.services.airline_resolver import clean_airline_code
+    airline_code = _row_code(row, cm) or clean_airline_code(compact.get("cd"))[0]
+
     remark = (compact.get("rmk") or "").strip()[:150] or None
     iata = canon_pct(compact.get("iata"))
     if iata is not None and not 0 < iata <= 100:
@@ -464,7 +490,8 @@ def expand_row(compact: dict, row: DocRow, stats: Stats, cm=None) -> list[dict]:
         calc = norm_calc(cell.get("cc"))
         out.append({
             "airline_type": airline_type,
-            "airline_name": name,
+            "airline_name": name,          # still the RAW cell — the API layer renames
+            "airline_code": airline_code,  # transport only, never persisted on the deal
             "iata_commission": iata,
             "contract_valid_from": None,
             "contract_valid_to": valid_to,
@@ -495,11 +522,12 @@ def expand_row(compact: dict, row: DocRow, stats: Stats, cm=None) -> list[dict]:
     return out
 
 
-def _manual_placeholder(row: DocRow, cm_airline: int | None) -> dict:
+def _manual_placeholder(row: DocRow, cm) -> dict:
     """A row we could not read still occupies a review row, so the user can fill
     it in by hand. A source row must never vanish silently — that is the whole
     complaint this change exists to fix."""
     name = ""
+    cm_airline = cm.airline if cm is not None else None
     if cm_airline is not None and cm_airline < len(row.cells):
         # Cells keep their internal newlines; a name going straight to the UI
         # must not.
@@ -507,6 +535,7 @@ def _manual_placeholder(row: DocRow, cm_airline: int | None) -> dict:
     return {
         "airline_type": "GDS",
         "airline_name": name,
+        "airline_code": _row_code(row, cm),
         "iata_commission": None,
         "contract_valid_from": None,
         "contract_valid_to": None,
@@ -902,7 +931,7 @@ class AIDealExtractionService:
         for obj in compact_rows:
             unread: DocRow | None = obj.get("__row__") if isinstance(obj, dict) else None
             if unread is not None:
-                deals.append(_manual_placeholder(unread, layout.colmap.airline))
+                deals.append(_manual_placeholder(unread, layout.colmap))
                 continue
             row = by_n.get(obj.get("n"))
             if row is None:
@@ -917,7 +946,7 @@ class AIDealExtractionService:
         for row in layout.rows:
             if row.expects_deals and row.n not in covered:
                 stats.unresolved += 1
-                deals.append(_manual_placeholder(row, layout.colmap.airline))
+                deals.append(_manual_placeholder(row, layout.colmap))
 
         # Document reading order — the reviewer checks these against the printed
         # sheet, and any other order makes that impossible.

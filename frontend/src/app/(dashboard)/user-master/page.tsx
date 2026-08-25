@@ -1,7 +1,8 @@
 import { redirect } from "next/navigation";
 
-// "User Master" is a sidebar group with two sub-pages (Entity, Login IDs).
-// Visiting the group root lands on the first sub-tab.
+// "User Master" is a sidebar group with three sub-pages (Customer Master,
+// Agency Master, Corporate Master). Visiting the group root lands on the first
+// tab. IATA Commission moved to Master Governance — see lib/userMasterNav.ts.
 export default function UserMasterIndex() {
-  redirect("/user-master/entity");
+  redirect("/user-master/customer-master");
 }

@@ -8,7 +8,22 @@ import {
   FileText,
 } from "lucide-react";
 import api from "@/lib/api";
+import { useStatementSectionBase } from "@/lib/statementSection";
 import StatementFormPanel, { isStatementComplete as statementComplete, type StatementType } from "@/components/tickets/StatementFormPanel";
+import CustomerPartyPanel from "@/components/statements/CustomerPartyPanel";
+import { EMPTY_TAG, buildTagPayload, isTagComplete, type CustomerTag } from "@/lib/customerType";
+
+type AgencyOpt = { id: number; name: string; branch_name: string | null; branch_code: string; channels: string };
+
+/** "Lords Travels — Delhi · GDS".
+ *
+ *  BRANCH AND CHANNEL BOTH BELONG IN THE LABEL. A vendor is onboarded once per
+ *  branch and once per channel, and each is a separate account with its own
+ *  balance. `selectedAgency` below matches on this string, so a label that
+ *  stopped at the branch would render Lords Delhi GDS and Lords Delhi LCC
+ *  identically and file the statement under whichever came back first. */
+const agencyOptionLabel = (a: AgencyOpt) =>
+  `${a.name} — ${a.branch_name || a.branch_code} · ${a.channels}`;
 import {
   mappingFieldsFor, reviewColGroups,
   type ReviewColGroup as TColGroup,
@@ -140,7 +155,21 @@ function TicketReviewTable({
 }
 
 // ── component ──────────────────────────────────────────────────────────────
-export default function UploadTicketsPage() {
+/**
+ * Upload Statement, in two modes.
+ *
+ *   "internal" — Internal Statement. Asks for a statement TYPE (B2B/AIRLINE) and
+ *                the vendor agency the file came from. Unchanged.
+ *   "customer" — Customer data → Statement. Asks WHO the tickets were sold to,
+ *                and writes that tag to the DB for the commission run. There is
+ *                no airline option here: an airline is a vendor, not a customer.
+ *
+ * One flow rather than two copies, so the wizard, the column mapping and the
+ * review grid can never drift apart between the two entry points.
+ */
+export default function UploadTicketsPage({ mode = "internal" }: { mode?: "internal" | "customer" } = {}) {
+  const isCustomer = mode === "customer";
+  const sectionBase = useStatementSectionBase();
   const router = useRouter();
 
   type Step = "drop" | "mapping" | "preview" | "saving" | "done";
@@ -159,19 +188,35 @@ export default function UploadTicketsPage() {
   // ── Statement form state ───────────────────────────────────────────────────
   const [statementType, setStatementType] = useState<StatementType>("B2B");
   const [agency,        setAgency]        = useState("");
+  // Customer mode only: WHO the tickets were sold to.
+  const [tag,           setTag]           = useState<CustomerTag>(EMPTY_TAG);
   const [statementName, setStatementName] = useState("");
   const [agencyOptions, setAgencyOptions] = useState<string[]>([]);
+  // The statement must record WHICH onboarded agency it belongs to, not just a
+  // vendor name. A vendor is onboarded once per branch, so "Lords Travels" alone
+  // matches both Lords Delhi and Lords Mumbai — and Agency Billing then refuses
+  // to bill it rather than guess which branch's tickets these are.
+  const [agencyDirectory, setAgencyDirectory] = useState<AgencyOpt[]>([]);
 
   useEffect(() => {
-    api.get<{ id: number; name: string }[]>("/suppliers/?limit=5000")
-      .then(r => setAgencyOptions(r.data.map(s => s.name)))
+    api.get<AgencyOpt[]>("/agencies/", { params: { limit: 1000 } })
+      .then(r => {
+        setAgencyDirectory(r.data);
+        setAgencyOptions(r.data.map(agencyOptionLabel));
+      })
       .catch(() => {});
   }, []);
+
+  // The picker stores its label, so map back to the row it names.
+  const selectedAgency = agencyDirectory.find(a => agencyOptionLabel(a) === agency) ?? null;
   const [validFrom,   setValidFrom]   = useState("");
   const [validTo,     setValidTo]     = useState("");
   const [formTouched, setFormTouched] = useState(false);
 
-  const isStatementComplete = statementComplete(agency, validFrom, validTo);
+  // Customer mode is gated on the customer tag; internal mode on the vendor agency.
+  const isStatementComplete = isCustomer
+    ? (isTagComplete(tag) && validFrom !== "" && validTo !== "" && validTo >= validFrom)
+    : statementComplete(agency, validFrom, validTo);
 
   // ── Editable row handlers ─────────────────────────────────────────────────
   const handleTicketRowChange = useCallback((idx: number, key: string, val: string) => {
@@ -304,8 +349,15 @@ export default function UploadTicketsPage() {
         {
           file_name:      preview.file_name,
           rows,
-          statement_type: statementType,
-          agency,
+          // A customer statement is always B2B-shaped: the airline field set
+          // belongs to a vendor file, and those go through Vendors → Statements.
+          statement_type: isCustomer ? "B2B" : statementType,
+          // Name for display, id for billing. Without the id, two branches of one
+          // vendor both match this statement and neither can safely bill it.
+          // In customer mode the server re-derives both from the authorised party.
+          agency: isCustomer ? (tag.partyName || "—") : (selectedAgency?.name ?? agency),
+          agency_id: isCustomer ? null : (selectedAgency?.id ?? null),
+          ...(isCustomer ? buildTagPayload(tag) : {}),
           statement_name: statementName.trim() || null,
           valid_from:     validFrom,
           valid_to:       validTo,
@@ -352,7 +404,7 @@ export default function UploadTicketsPage() {
       {/* page header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <Link href="/tickets" className="p-1.5 rounded-lg border border-gray-200 hover:bg-gray-50 text-gray-500">
+          <Link href="/customers/statements" className="p-1.5 rounded-lg border border-gray-200 hover:bg-gray-50 text-gray-500">
             <ChevronLeft className="w-4 h-4" />
           </Link>
           <div>
@@ -421,7 +473,7 @@ export default function UploadTicketsPage() {
               Upload Another
             </button>
             <button
-              onClick={() => router.push("/tickets")}
+              onClick={() => router.push(sectionBase)}
               className="flex items-center gap-2 px-4 py-2 bg-[#1e3a5f] text-white rounded-lg text-sm font-medium hover:bg-[#16304f]"
             >
               <FileSpreadsheet className="w-4 h-4" /> View Ticket Repository
@@ -444,16 +496,26 @@ export default function UploadTicketsPage() {
       {step === "drop" && (
         <div className="grid grid-cols-1 lg:grid-cols-[380px_1fr] gap-6 items-start">
           {/* LEFT: Statement form */}
-          <StatementFormPanel
-            statementType={statementType} setStatementType={setStatementType}
-            agency={agency}               setAgency={setAgency}
-            statementName={statementName}   setStatementName={setStatementName}
-            agencyOptions={agencyOptions}
-            validFrom={validFrom}         setValidFrom={setValidFrom}
-            validTo={validTo}             setValidTo={setValidTo}
-            touched={formTouched}
-            isComplete={isStatementComplete}
-          />
+          {isCustomer ? (
+            <CustomerPartyPanel
+              tag={tag} setTag={setTag}
+              statementName={statementName} setStatementName={setStatementName}
+              validFrom={validFrom}         setValidFrom={setValidFrom}
+              validTo={validTo}             setValidTo={setValidTo}
+              touched={formTouched}
+            />
+          ) : (
+            <StatementFormPanel
+              statementType={statementType} setStatementType={setStatementType}
+              agency={agency}               setAgency={setAgency}
+              statementName={statementName}   setStatementName={setStatementName}
+              agencyOptions={agencyOptions}
+              validFrom={validFrom}         setValidFrom={setValidFrom}
+              validTo={validTo}             setValidTo={setValidTo}
+              touched={formTouched}
+              isComplete={isStatementComplete}
+            />
+          )}
           {/* RIGHT: dropzone */}
           <div className="space-y-4 min-w-0">
 

@@ -68,15 +68,32 @@ type SupplierApproval = {
   target_id: number | null;
 };
 
+type IataCommissionApproval = {
+  id: number;
+  airline_name: string;
+  airline_code: string | null;
+  iata_numeric_code: string | null;
+  iata_commission_pct: number | null;
+  valid_from: string | null;
+  valid_to: string | null;
+  status: "pending" | "approved" | "rejected";
+  submitted_by: { id: number; full_name: string; email: string };
+  submitted_at: string;
+  rejection_reason: string | null;
+  request_type: "new" | "update";
+  target_id: number | null;
+};
+
 type AirportRecord  = { id: number; iata_code: string; country: string; categorization: string | null; continent: string | null; city_airport_name: string };
 type AirlineRecord  = { id: number; name: string; iata_code: string; icao_code: string | null };
 type ClassRecord    = { id: number; airline_name: string; class_type: string; class_code: string; airline_type: string | null; class_note: string | null };
 type SupplierRecord = { id: number; name: string; vendor_name: string | null; vendor_type: string | null; branches: { name: string; iata_code: string }[] | null; contact_phone: string | null; gst_number: string | null; pan_number: string | null; notes: string | null };
-type CurrentRecord  = AirportRecord | AirlineRecord | ClassRecord | SupplierRecord;
+type IataCommissionRecord = { id: number; airline_name: string; airline_code: string | null; iata_numeric_code: string | null; iata_commission_pct: number | null; valid_from: string | null; valid_to: string | null };
+type CurrentRecord  = AirportRecord | AirlineRecord | ClassRecord | SupplierRecord | IataCommissionRecord;
 
 type ApprovalItem = {
   key: string;
-  type: "airport" | "airline" | "class" | "supplier";
+  type: "airport" | "airline" | "class" | "supplier" | "iata-commission";
   id: number;
   code: string;
   name: string;
@@ -100,6 +117,16 @@ function formatDiffVal(key: string, val: unknown): string {
   }
   return String(val ?? "");
 }
+
+/** Where each master's records and approval queue live. One map instead of the
+ *  same ternary chain repeated by the diff, approve and reject handlers. */
+const API_BASE: Record<ApprovalItem["type"], string> = {
+  airport: "/airports",
+  airline: "/airlines",
+  class: "/classes",
+  supplier: "/suppliers",
+  "iata-commission": "/iata-commissions",
+};
 
 const DIFF_FIELDS: Record<ApprovalItem["type"], { label: string; key: string }[]> = {
   airport: [
@@ -131,6 +158,14 @@ const DIFF_FIELDS: Record<ApprovalItem["type"], { label: string; key: string }[]
     { label: "PAN Number",   key: "pan_number" },
     { label: "Remarks",      key: "notes" },
   ],
+  "iata-commission": [
+    { label: "Airline",            key: "airline_name" },
+    { label: "Airline Code",       key: "airline_code" },
+    { label: "IATA Numeric Code",  key: "iata_numeric_code" },
+    { label: "IATA Commission %",  key: "iata_commission_pct" },
+    { label: "Valid From",         key: "valid_from" },
+    { label: "Valid To",           key: "valid_to" },
+  ],
 };
 
 function ApprovalDiffModal({
@@ -146,6 +181,9 @@ function ApprovalDiffModal({
 }) {
   const fields = DIFF_FIELDS[item.type];
   const cur = currentRecord as Record<string, unknown> | null;
+  const typeLabel = item.type === "iata-commission"
+    ? "IATA Commission"
+    : item.type.charAt(0).toUpperCase() + item.type.slice(1);
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
@@ -154,7 +192,7 @@ function ApprovalDiffModal({
           <div>
             <h2 className="text-sm font-bold text-gray-900">Change Diff — {item.code}</h2>
             <p className="text-[10px] text-gray-400 mt-0.5">
-              Updating {item.type.charAt(0).toUpperCase() + item.type.slice(1)} ID #{item.targetId}
+              Updating {typeLabel} ID #{item.targetId}
             </p>
           </div>
           <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-lg">
@@ -169,7 +207,7 @@ function ApprovalDiffModal({
             </div>
           ) : !cur ? (
             <p className="text-xs text-red-500 py-4 text-center">
-              Could not load the current {item.type} record.
+              Could not load the current {typeLabel} record.
             </p>
           ) : (
             <table className="w-full text-xs">
@@ -236,7 +274,7 @@ export default function ApprovalMatrixPage() {
   const [error, setError] = useState("");
   const [items, setItems] = useState<ApprovalItem[]>([]);
   const [query, setQuery] = useState("");
-  const [typeFilter, setTypeFilter] = useState<"all" | "airport" | "airline" | "class" | "supplier">("all");
+  const [typeFilter, setTypeFilter] = useState<"all" | ApprovalItem["type"]>("all");
   const [statusFilter, setStatusFilter] = useState<"all" | "pending" | "approved" | "rejected">("pending");
   const [actingKey, setActingKey] = useState<string | null>(null);
   const [rejectingKey, setRejectingKey] = useState<string | null>(null);
@@ -250,11 +288,12 @@ export default function ApprovalMatrixPage() {
     setLoading(true);
     setError("");
     try {
-      const [airportsRes, airlinesRes, classesRes, suppliersRes] = await Promise.all([
+      const [airportsRes, airlinesRes, classesRes, suppliersRes, commissionsRes] = await Promise.all([
         api.get<AirportApproval[]>("/airports/approvals"),
         api.get<AirlineApproval[]>("/airlines/approvals"),
         api.get<ClassApproval[]>("/classes/approvals"),
         api.get<SupplierApproval[]>("/suppliers/approvals"),
+        api.get<IataCommissionApproval[]>("/iata-commissions/approvals"),
       ]);
 
       const airportItems: ApprovalItem[] = airportsRes.data.map((a) => ({
@@ -317,7 +356,24 @@ export default function ApprovalMatrixPage() {
         rawData: a as unknown as Record<string, unknown>,
       }));
 
-      setItems([...airportItems, ...airlineItems, ...classItems, ...supplierItems].sort((x, y) =>
+      const commissionItems: ApprovalItem[] = commissionsRes.data.map((a) => ({
+        key: `iata-commission-${a.id}`,
+        type: "iata-commission" as const,
+        id: a.id,
+        // There is no short code on this master — the airline's IATA code is
+        // the closest thing, and the % is what the row is actually about.
+        code: a.airline_code ?? "—",
+        name: a.iata_commission_pct != null ? `${a.airline_name} — ${a.iata_commission_pct}%` : a.airline_name,
+        status: a.status,
+        submitted_by: a.submitted_by,
+        submitted_at: a.submitted_at,
+        rejection_reason: a.rejection_reason,
+        requestType: a.request_type ?? "new",
+        targetId: a.target_id ?? null,
+        rawData: a as unknown as Record<string, unknown>,
+      }));
+
+      setItems([...airportItems, ...airlineItems, ...classItems, ...supplierItems, ...commissionItems].sort((x, y) =>
         new Date(y.submitted_at).getTime() - new Date(x.submitted_at).getTime()
       ));
     } catch (e: unknown) {
@@ -339,11 +395,7 @@ export default function ApprovalMatrixPage() {
     setLoadingDiff(true);
     setDiffRecord(null);
     try {
-      const base = item.type === "airport" ? "/airports"
-                 : item.type === "airline" ? "/airlines"
-                 : item.type === "supplier" ? "/suppliers"
-                 : "/classes";
-      const { data } = await api.get<CurrentRecord>(`${base}/${item.targetId}`);
+      const { data } = await api.get<CurrentRecord>(`${API_BASE[item.type]}/${item.targetId}`);
       setDiffRecord(data);
     } catch { setDiffRecord(null); }
     finally { setLoadingDiff(false); }
@@ -385,14 +437,7 @@ export default function ApprovalMatrixPage() {
     if (item.status !== "pending") return;
     setActingKey(item.key);
     try {
-      const base = item.type === "airport"
-        ? "/airports/approvals"
-        : item.type === "airline"
-          ? "/airlines/approvals"
-          : item.type === "supplier"
-            ? "/suppliers/approvals"
-            : "/classes/approvals";
-      await api.patch(`${base}/${item.id}/approve`);
+      await api.patch(`${API_BASE[item.type]}/approvals/${item.id}/approve`);
       await fetchApprovals();
     } catch (e: unknown) {
       const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
@@ -411,14 +456,7 @@ export default function ApprovalMatrixPage() {
     if (!item || item.status !== "pending") return;
     setActingKey(item.key);
     try {
-      const base = item.type === "airport"
-        ? "/airports/approvals"
-        : item.type === "airline"
-          ? "/airlines/approvals"
-          : item.type === "supplier"
-            ? "/suppliers/approvals"
-            : "/classes/approvals";
-      await api.patch(`${base}/${item.id}/reject`, { rejection_reason: rejectReason || null });
+      await api.patch(`${API_BASE[item.type]}/approvals/${item.id}/reject`, { rejection_reason: rejectReason || null });
       setRejectingKey(null);
       setRejectReason("");
       await fetchApprovals();
@@ -487,6 +525,7 @@ export default function ApprovalMatrixPage() {
           <option value="airline">Airline</option>
           <option value="class">Class</option>
           <option value="supplier">Supplier</option>
+          <option value="iata-commission">IATA Commission</option>
         </select>
         <select
           value={statusFilter}
@@ -537,9 +576,11 @@ export default function ApprovalMatrixPage() {
                         ? "bg-sky-50 text-sky-700"
                         : item.type === "supplier"
                           ? "bg-purple-50 text-purple-700"
-                          : "bg-emerald-50 text-emerald-700"
+                          : item.type === "iata-commission"
+                            ? "bg-amber-50 text-amber-700"
+                            : "bg-emerald-50 text-emerald-700"
                   }`}>
-                    {item.type}
+                    {item.type === "iata-commission" ? "IATA comm." : item.type}
                   </span>
                 </td>
                 <td className="px-4 py-3">

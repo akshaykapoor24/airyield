@@ -4,9 +4,10 @@ from typing import Optional
 from pydantic import BaseModel
 
 from app.schemas.required import RequiredStr, ISODate
+from app.schemas.uploaded_deal import DealScopeFields
 
 
-class B2BDealCreate(BaseModel):
+class B2BDealCreate(DealScopeFields):
     source_agent: Optional[str] = None
     deal_maker_name: Optional[str] = None
     deal_tag: Optional[str] = "standard"

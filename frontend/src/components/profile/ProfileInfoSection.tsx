@@ -114,7 +114,7 @@ const ProfileInfoSection = forwardRef<ProfileInfoHandle, Props>(function Profile
 
       <div>
         <label className={LABEL}>Company Name</label>
-        <input value={form.company_name} onChange={e => set("company_name", e.target.value)} placeholder="e.g. Yatra Online Pvt Ltd" className={INPUT} />
+        <input value={form.company_name} onChange={e => set("company_name", e.target.value)} placeholder="e.g. ABC Pvt Ltd" className={INPUT} />
       </div>
 
       <div className="grid grid-cols-2 gap-3">

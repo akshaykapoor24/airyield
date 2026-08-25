@@ -8,10 +8,12 @@ import {
   AlertCircle, ChevronLeft, RefreshCw, RotateCcw, Save,
 } from "lucide-react";
 import api from "@/lib/api";
+import { useStatementSectionBase } from "@/lib/statementSection";
 import { apiError } from "@/components/userMaster/shared";
 import TicketFilingCard, {
   NEW_STATEMENT, type StatementOption,
 } from "@/components/tickets/TicketFilingCard";
+import { EMPTY_TAG, buildTagPayload, isTagComplete, type CustomerTag } from "@/lib/customerType";
 import TicketFieldGroupCard from "@/components/tickets/TicketFieldGroupCard";
 import TicketFieldInput from "@/components/tickets/TicketFieldInput";
 import TaxBreakupEditor from "@/components/tickets/TaxBreakupEditor";
@@ -35,7 +37,15 @@ const isBlank = (v: unknown) => v === null || v === undefined || v === "";
 
 // ── Page ─────────────────────────────────────────────────────────────────────
 
-export default function CreateTicketPage() {
+/**
+ * Create Ticket, in two modes — see the twin note on Upload Statement.
+ * "customer" asks who the ticket was sold to and tags the row for the commission
+ * run; "internal" keeps the vendor statement-type + agency filing card.
+ */
+export default function CreateTicketPage({ mode = "internal" }: { mode?: "internal" | "customer" } = {}) {
+  const isCustomer = mode === "customer";
+  // Saving must return to the section the user is actually in.
+  const sectionBase = useStatementSectionBase();
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -44,6 +54,8 @@ export default function CreateTicketPage() {
   const [statements, setStatements] = useState<StatementOption[]>([]);
   const [ticketType, setTicketType] = useState<StatementType>("B2B");
   const [agency, setAgency] = useState("");
+  // Customer mode only: WHO this ticket was sold to.
+  const [tag, setTag] = useState<CustomerTag>(EMPTY_TAG);
   const [statementName, setStatementName] = useState("");
   const [agencyOptions, setAgencyOptions] = useState<string[]>([]);
   const [validFrom, setValidFrom] = useState("");
@@ -165,7 +177,9 @@ export default function CreateTicketPage() {
   );
   const missingRequired = REQUIRED_KEYS.filter((k) => isBlank(composed[k]));
   const filingReady = isNew
-    ? agency !== "" && validFrom !== "" && validTo !== "" && validTo >= validFrom
+    ? (isCustomer
+        ? isTagComplete(tag) && validFrom !== "" && validTo !== "" && validTo >= validFrom
+        : agency !== "" && validFrom !== "" && validTo !== "" && validTo >= validFrom)
     : !!selectedStatement;
   const ticketReady = missingRequired.length === 0 && !legMalformed && rows.length > 0;
   const canSave = filingReady && ticketReady && !previewing && !saving;
@@ -201,8 +215,11 @@ export default function CreateTicketPage() {
             {
               file_name: MANUAL_ENTRY_FILE_NAME,
               rows: out,
-              statement_type: ticketType,
-              agency,
+              // A customer ticket is always B2B-shaped — the airline field set
+              // describes a vendor file, and those live under Vendors → Statements.
+              statement_type: isCustomer ? "B2B" : ticketType,
+              agency: isCustomer ? (tag.partyName || "—") : agency,
+              ...(isCustomer ? buildTagPayload(tag) : {}),
               statement_name: statementName.trim() || null,
               valid_from: validFrom,
               valid_to: validTo,
@@ -226,7 +243,7 @@ export default function CreateTicketPage() {
         toast.success(`Ticket saved — ${rowWord}`);
       }
 
-      router.push(`/tickets/${batchId}`);
+      router.push(`${sectionBase}/${batchId}`);
     } catch (e) {
       toast.error(apiError(e));
       setSaving(false);
@@ -239,7 +256,7 @@ export default function CreateTicketPage() {
       {/* header */}
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div className="flex items-center gap-3">
-          <Link href="/tickets" className="p-1.5 rounded-lg border border-gray-200 hover:bg-gray-50 text-gray-500">
+          <Link href="/customers/statements" className="p-1.5 rounded-lg border border-gray-200 hover:bg-gray-50 text-gray-500">
             <ChevronLeft className="w-4 h-4" />
           </Link>
           <div>
@@ -258,7 +275,7 @@ export default function CreateTicketPage() {
             <RotateCcw className="w-3.5 h-3.5" /> Clear form
           </button>
           <Link
-            href="/tickets/upload"
+            href="/customers/statements/upload"
             className="px-3 py-2 border border-gray-200 rounded-lg text-xs text-gray-600 hover:bg-gray-50"
           >
             Have a file? Upload instead
@@ -276,6 +293,7 @@ export default function CreateTicketPage() {
         validFrom={validFrom} setValidFrom={setValidFrom}
         validTo={validTo} setValidTo={setValidTo}
         touched={touched}
+        customerMode={isCustomer} tag={tag} setTag={setTag}
       />
 
       {/* derived strip */}

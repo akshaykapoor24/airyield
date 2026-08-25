@@ -1,62 +1,44 @@
 "use client";
 
 import { useState } from "react";
-import { Contact, X } from "lucide-react";
+import { X } from "lucide-react";
 import api from "@/lib/api";
-
-export type MarkupType = "percentage" | "fixed";
-export type BillingType = "reseller" | "agency";
-
-export type Customer = {
-  id: number;
-  first_name: string;
-  last_name: string | null;
-  company: string | null;
-  title: string | null;
-  phone: string | null;
-  email: string | null;
-  // Customer-local naming (gst_no / pan_no) — the profile/supplier modules use
-  // gst_number / pan_number; intentionally kept separate. Only the regexes are shared.
-  gst_registered: boolean;
-  gst_no: string | null;
-  pan_no: string | null;
-  markup_type: MarkupType | null;
-  markup_value: number | null;
-  billing_type: BillingType | null;
-  is_active: boolean;
-};
-
-// Shared with ProfileInfoSection / signup: GSTIN = 15 chars, PAN = 10 chars.
-const PAN_RE = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
-const GSTIN_RE = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
+import { GSTIN_RE, PAN_RE, PARTY, type Party, type PartyKind } from "@/lib/party";
+import { PARTY_ICON } from "@/components/party/icons";
 
 const LABEL = "block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1";
 const INPUT =
   "w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#1e3a5f]/30 bg-gray-50";
 
-export default function CustomerModal({
-  customer,
+// Add / edit form for a customer or corporate. Both tables have identical
+// columns, so `kind` only picks the API segment and the wording.
+export default function PartyModal({
+  kind,
+  party,
   onClose,
   onSaved,
 }: {
-  customer?: Customer | null;
+  kind: PartyKind;
+  party?: Party | null;
   onClose: () => void;
   onSaved: () => void;
 }) {
-  const isEdit = !!customer?.id;
+  const cfg = PARTY[kind];
+  const Icon = PARTY_ICON[kind];
+  const isEdit = !!party?.id;
   const [form, setForm] = useState({
-    first_name: customer?.first_name ?? "",
-    last_name: customer?.last_name ?? "",
-    company: customer?.company ?? "",
-    title: customer?.title ?? "",
-    phone: customer?.phone ?? "",
-    email: customer?.email ?? "",
-    gst_registered: customer?.gst_registered ? "true" : "false",
-    gst_no: customer?.gst_no ?? "",
-    pan_no: customer?.pan_no ?? "",
-    markup_type: customer?.markup_type ?? "",
-    markup_value: customer?.markup_value != null ? String(customer.markup_value) : "",
-    billing_type: customer?.billing_type ?? "",
+    first_name: party?.first_name ?? "",
+    last_name: party?.last_name ?? "",
+    company: party?.company ?? "",
+    title: party?.title ?? "",
+    phone: party?.phone ?? "",
+    email: party?.email ?? "",
+    gst_registered: party?.gst_registered ? "true" : "false",
+    gst_no: party?.gst_no ?? "",
+    pan_no: party?.pan_no ?? "",
+    markup_type: party?.markup_type ?? "",
+    markup_value: party?.markup_value != null ? String(party.markup_value) : "",
+    billing_type: party?.billing_type ?? "",
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -76,7 +58,9 @@ export default function CustomerModal({
     const gstNo = form.gst_no.trim().toUpperCase();
     const panNo = form.pan_no.trim().toUpperCase();
     if (registered && !GSTIN_RE.test(gstNo)) {
-      setError("A valid 15-character GST No is required for registered customers (e.g. 27ABCDE1234F1Z5).");
+      setError(
+        `A valid 15-character GST No is required for registered ${cfg.plural.toLowerCase()} (e.g. 27ABCDE1234F1Z5).`
+      );
       return;
     }
     if (panNo && !PAN_RE.test(panNo)) {
@@ -101,15 +85,15 @@ export default function CustomerModal({
     };
     try {
       if (isEdit) {
-        await api.patch(`/customers/${customer!.id}`, payload);
+        await api.patch(`/${cfg.resource}/${party!.id}`, payload);
       } else {
-        await api.post("/customers/", payload);
+        await api.post(`/${cfg.resource}/`, payload);
       }
       onSaved();
       onClose();
     } catch (e: unknown) {
       const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-      setError(msg ?? "Failed to save customer.");
+      setError(msg ?? `Failed to save ${cfg.singular.toLowerCase()}.`);
     } finally {
       setSaving(false);
     }
@@ -121,9 +105,11 @@ export default function CustomerModal({
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
           <div className="flex items-center gap-2">
             <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center">
-              <Contact className="w-4 h-4 text-[#1e3a5f]" />
+              <Icon className="w-4 h-4 text-[#1e3a5f]" />
             </div>
-            <h2 className="text-sm font-bold text-gray-900">{isEdit ? "Edit Customer" : "Add Customer"}</h2>
+            <h2 className="text-sm font-bold text-gray-900">
+              {isEdit ? `Edit ${cfg.singular}` : `Add ${cfg.singular}`}
+            </h2>
           </div>
           <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-lg">
             <X className="w-4 h-4 text-gray-500" />
@@ -160,7 +146,7 @@ export default function CustomerModal({
             </div>
             <div>
               <label className={LABEL}>Email</label>
-              <input type="email" value={form.email} onChange={(e) => set("email", e.target.value)} placeholder="customer@email.com" className={INPUT} />
+              <input type="email" value={form.email} onChange={(e) => set("email", e.target.value)} placeholder={cfg.emailPlaceholder} className={INPUT} />
             </div>
           </div>
 
@@ -248,7 +234,7 @@ export default function CustomerModal({
             disabled={saving || !form.first_name.trim()}
             className="flex-1 bg-[#1e3a5f] hover:bg-[#16304f] text-white rounded-lg py-2 text-sm font-semibold disabled:opacity-50"
           >
-            {saving ? "Saving…" : isEdit ? "Save Changes" : "Add Customer"}
+            {saving ? "Saving…" : isEdit ? "Save Changes" : `Add ${cfg.singular}`}
           </button>
         </div>
       </div>

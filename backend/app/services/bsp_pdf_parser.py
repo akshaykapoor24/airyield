@@ -576,7 +576,7 @@ def parse_statement_header(page1_text: str) -> dict:
     # Agent name: first ALL-CAPS company line after the agent-code title line.
     lines = [ln.strip() for ln in page1_text.splitlines() if ln.strip()]
     for i, ln in enumerate(lines):
-        if _AGENT_CODE_RE.search(ln) and " - " in ln:  # e.g. "14-3 0950 3 - YATRA.COM"
+        if _AGENT_CODE_RE.search(ln) and " - " in ln:  # e.g. "14-3 0950 3 - ABC.COM"
             for cand in lines[i + 1 : i + 6]:
                 up = cand.upper()
                 if cand == up and "IATA" not in up and "REFERENCE" not in up and len(cand) > 3:

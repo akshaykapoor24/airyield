@@ -3,16 +3,22 @@
 import { useState } from "react";
 import { Download, Upload, X } from "lucide-react";
 import api from "@/lib/api";
+import { PARTY, type PartyKind } from "@/lib/party";
 
 type BulkResult = { total: number; success: number; failed: number; errors: string[] };
 
-export default function UploadCustomersModal({
+// Bulk XLS import for customers or corporates — both hit the same
+// /{resource}/template and /{resource}/bulk-upload endpoint shape.
+export default function PartyUploadModal({
+  kind,
   onClose,
   onSaved,
 }: {
+  kind: PartyKind;
   onClose: () => void;
   onSaved: () => void;
 }) {
+  const cfg = PARTY[kind];
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
@@ -21,11 +27,11 @@ export default function UploadCustomersModal({
   const handleTemplateDownload = async () => {
     setError("");
     try {
-      const res = await api.get("/customers/template", { responseType: "blob" });
+      const res = await api.get(`/${cfg.resource}/template`, { responseType: "blob" });
       const url = window.URL.createObjectURL(res.data as Blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = "customer_template.xlsx";
+      link.download = cfg.templateFile;
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -46,7 +52,7 @@ export default function UploadCustomersModal({
     const fd = new FormData();
     fd.append("file", file);
     try {
-      const { data } = await api.post<BulkResult>("/customers/bulk-upload", fd, {
+      const { data } = await api.post<BulkResult>(`/${cfg.resource}/bulk-upload`, fd, {
         headers: { "Content-Type": "multipart/form-data" },
       });
       setResult(data);
@@ -67,7 +73,7 @@ export default function UploadCustomersModal({
             <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center">
               <Upload className="w-4 h-4 text-[#1e3a5f]" />
             </div>
-            <h2 className="text-sm font-bold text-gray-900">Import Customers</h2>
+            <h2 className="text-sm font-bold text-gray-900">Import {cfg.plural}</h2>
           </div>
           <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-lg">
             <X className="w-4 h-4 text-gray-500" />
@@ -78,9 +84,7 @@ export default function UploadCustomersModal({
           <div className="bg-blue-50 border border-blue-200 rounded-lg px-3 py-2.5 flex items-center justify-between">
             <div>
               <p className="text-xs font-semibold text-[#1e3a5f]">Download Excel Template</p>
-              <p className="text-[10px] text-blue-500 mt-0.5">
-                Columns: FIRST_NAME, LAST_NAME, COMPANY, TITLE, PHONE, EMAIL, GST_REGISTERED (Registered|Unregistered), GST_NO, PAN_NO, MARKUP_TYPE (percentage|fixed), MARKUP_VALUE, BILLING_TYPE (reseller|agency)
-              </p>
+              <p className="text-[10px] text-blue-500 mt-0.5">Columns: {cfg.templateColumns}</p>
             </div>
             <button
               type="button"

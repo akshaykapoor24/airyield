@@ -4,6 +4,9 @@ from typing import Optional
 
 class AgencyLoginIdCreate(BaseModel):
     agency_id: int
+    # GDS | LCC, never BOTH. `login_id` then holds the mirror ID (GDS) or the
+    # portal login / airline ID (LCC) — one column, relabelled per channel.
+    channel: str
     login_id: str
     airline_name: Optional[str] = None
     airline_code: Optional[str] = None
@@ -15,6 +18,7 @@ class AgencyLoginIdCreate(BaseModel):
 
 class AgencyLoginIdUpdate(BaseModel):
     agency_id: Optional[int] = None
+    channel: Optional[str] = None
     login_id: Optional[str] = None
     airline_name: Optional[str] = None
     airline_code: Optional[str] = None
@@ -26,6 +30,7 @@ class AgencyLoginIdUpdate(BaseModel):
 
 class AgencyLoginIdRead(BaseModel):
     id: int
+    channel: str
     login_id: str
     airline_name: Optional[str] = None
     airline_code: Optional[str] = None

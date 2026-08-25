@@ -1,10 +1,10 @@
-import re
 from pydantic import BaseModel, EmailStr, Field, model_validator
 from pydantic.functional_validators import AfterValidator
 from typing import Annotated, Optional, Literal
 from datetime import datetime
 from app.models.user import UserRole
 from app.core.email_domains import is_public_domain
+from app.core.india_tax import PAN_RE, GSTIN_RE
 from app.core.password_policy import validate_password
 
 # Enforces the shared policy at parse time (422). The two password-management
@@ -13,9 +13,9 @@ from app.core.password_policy import validate_password
 # that Pydantic prefixes with "Value error, ".
 PasswordStr = Annotated[str, AfterValidator(validate_password)]
 
-# Indian tax identifiers
-PAN_RE   = re.compile(r"^[A-Z]{5}[0-9]{4}[A-Z]$")                            # 10 chars
-GSTIN_RE = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$")  # 15 chars
+# PAN_RE / GSTIN_RE are imported above rather than declared here — app.core.india_tax
+# is the single definition, and it also holds the state codes and the check digit
+# that the Agency Master forms verify a GSTIN against.
 
 
 class UserCreate(BaseModel):

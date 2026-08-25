@@ -13,7 +13,7 @@ from app.database import get_db
 from app.dependencies import get_current_user
 from app.models.agency_login_id import AgencyLoginId
 from app.models.agency_entity import AgencyEntity
-from app.models.agency import Agency
+from app.models.agency import CHANNELS, Agency, norm_channel, scope_covers
 from app.models.supplier import Supplier
 from app.models.user import User
 from app.schemas.agency_login_id import (
@@ -65,31 +65,130 @@ async def _validate_vendor(db: AsyncSession, vendor_id: int | None) -> int | Non
     return vendor_id
 
 
-async def _validate_agency(db: AsyncSession, current_user: User, agency_id: int | None) -> int:
-    """Ensure agency_id is one of the caller's OWN agencies."""
+async def _validate_agency(db: AsyncSession, current_user: User, agency_id: int | None) -> Agency:
+    """Ensure agency_id is one of the caller's OWN agencies, and return it.
+
+    Returns the row rather than the id because the caller needs its `channels`
+    to check the credential's channel against.
+    """
     if agency_id is None:
         raise HTTPException(status_code=400, detail="agency_id is required.")
-    exists = (await db.execute(
-        select(Agency.id).where(Agency.id == agency_id, Agency.user_id == current_user.id)
+    agency = (await db.execute(
+        select(Agency).where(Agency.id == agency_id, Agency.user_id == current_user.id)
     )).scalar_one_or_none()
-    if not exists:
+    if not agency:
         raise HTTPException(status_code=400, detail=f"Agency id {agency_id} not found in your agencies.")
-    return agency_id
+    return agency
 
 
-async def _validate_entity(db: AsyncSession, current_user: User, agency_id: int, entity_id: int | None) -> int | None:
-    """Ensure entity_id (if given) belongs to the caller AND to the chosen agency."""
+def _agency_resolver(agencies: list[Agency]):
+    """Resolve an XLS AGENCY (+ optional AGENCY_BRANCH / CHANNEL) cell to one row.
+
+    Replaces the plain `{name.lower(): id}` dict this used to build. That dict was
+    a comprehension, so on duplicate names it was LAST-WRITE-WINS and silently
+    filed every row under whichever branch happened to be iterated last. A vendor
+    is deliberately onboarded once per branch AND once per channel, so a bare name
+    is ambiguous twice over: "Lords Travels" can mean Delhi or Mumbai, and Lords
+    Delhi can mean its GDS agency or its LCC one. Both narrow the candidates; an
+    ambiguity that survives both is an error naming what would settle it, never a
+    guess — the guess would file credentials under the wrong account.
+
+    The CHANNEL column is a natural tie-breaker here, since a credential is always
+    for exactly one channel: a mirror id is a GDS artifact and an airline portal
+    login is an LCC one.
+    """
+    by_name: dict[str, list[Agency]] = {}
+    for a in agencies:
+        if not a.name:
+            continue
+        by_name.setdefault(str(a.name).strip().lower(), []).append(a)
+
+    def resolve(name_raw: str, branch_raw: str = "", channel_raw: str = "") -> tuple[Agency | None, str]:
+        n = (name_raw or "").strip().lower()
+        branch = (branch_raw or "").strip().lower()
+        matches = by_name.get(n, [])
+        if not matches:
+            return None, f"agency '{name_raw}' not found in your agencies — skipped."
+
+        if branch:
+            matches = [m for m in matches if str(m.branch_code or "").strip().lower() == branch]
+            if not matches:
+                return None, f"agency '{name_raw}' branch '{branch_raw}' not found in your agencies — skipped."
+
+        # A legacy BOTH agency covers whichever channel is asked for, hence scope_covers.
+        channel = norm_channel(channel_raw)
+        if len(matches) > 1 and channel:
+            narrowed = [m for m in matches if scope_covers(m.channels, channel)]
+            if narrowed:
+                matches = narrowed
+
+        if len(matches) == 1:
+            return matches[0], ""
+
+        branches = {str(m.branch_code) for m in matches}
+        if len(branches) > 1:
+            return None, (
+                f"'{name_raw}' is onboarded on {len(branches)} branches ({', '.join(sorted(branches))}) — "
+                f"add an AGENCY_BRANCH column to say which."
+            )
+        channels = ", ".join(sorted(str(m.channels) for m in matches))
+        return None, (
+            f"'{name_raw}' branch '{sorted(branches)[0]}' is onboarded once per channel ({channels}) — "
+            f"set CHANNEL on this row to say which agency the credential belongs to."
+        )
+
+    return resolve
+
+
+def _validate_channel(agency: Agency, raw) -> str:
+    """A credential's channel — always exactly one, and inside the agency's scope.
+
+    Unlike an entity, this is never BOTH: a mirror id is a GDS artifact and an
+    airline portal login is an LCC artifact, and the two are not interchangeable.
+    """
+    ch = norm_channel(raw)
+    if ch not in CHANNELS:
+        raise HTTPException(
+            status_code=400,
+            detail="channel is required — GDS (mirror ID) or LCC (login ID / airline ID).",
+        )
+    if not scope_covers(agency.channels, ch):
+        raise HTTPException(
+            status_code=400,
+            detail=f"This agency trades on {agency.channels} only — it has no {ch} credentials.",
+        )
+    return ch
+
+
+async def _validate_entity(
+    db: AsyncSession, current_user: User, agency_id: int, entity_id: int | None, channel: str
+) -> int | None:
+    """Ensure entity_id (if given) belongs to the caller, to the chosen agency,
+    AND trades on the channel this credential is for.
+
+    The cross-channel check lives here because this is already the one place that
+    enforces "the entity belongs to this agency" — keeping both invariants
+    together means a caller cannot satisfy one and skip the other.
+    """
     if entity_id is None:
         return None
-    exists = (await db.execute(
-        select(AgencyEntity.id).where(
+    entity = (await db.execute(
+        select(AgencyEntity).where(
             AgencyEntity.id == entity_id,
             AgencyEntity.user_id == current_user.id,
             AgencyEntity.agency_id == agency_id,
         )
     )).scalar_one_or_none()
-    if not exists:
+    if not entity:
         raise HTTPException(status_code=400, detail=f"Entity id {entity_id} not found under the chosen agency.")
+    if not scope_covers(entity.channels, channel):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Entity '{entity.code}' is scoped to {entity.channels} only — "
+                f"it cannot hold a {channel} credential."
+            ),
+        )
     return entity_id
 
 
@@ -100,6 +199,7 @@ async def list_login_ids(
     search: Optional[str] = None,
     agency_id: Optional[int] = None,
     entity_id: Optional[int] = None,
+    channel: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -112,6 +212,11 @@ async def list_login_ids(
         q = q.where(AgencyLoginId.agency_id == agency_id)
     if entity_id is not None:
         q = q.where(AgencyLoginId.entity_id == entity_id)
+    ch = norm_channel(channel)
+    if ch is not None:
+        if ch not in CHANNELS:
+            raise HTTPException(status_code=400, detail=f"channel must be one of {sorted(CHANNELS)}.")
+        q = q.where(AgencyLoginId.channel == ch)
     if search and search.strip():
         term = f"%{search.strip()}%"
         q = q.where(or_(
@@ -131,17 +236,20 @@ async def create_login_id(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    agency = await _validate_agency(db, current_user, payload.agency_id)
+    channel = _validate_channel(agency, payload.channel)
     login_val = (payload.login_id or "").strip()
     if not login_val:
-        raise HTTPException(status_code=400, detail="login_id is required.")
-    agency_id = await _validate_agency(db, current_user, payload.agency_id)
+        label = "Mirror ID" if channel == "GDS" else "Login ID / Airline ID"
+        raise HTTPException(status_code=400, detail=f"{label} is required.")
     vendor_id = await _validate_vendor(db, payload.vendor_id)
-    entity_id = await _validate_entity(db, current_user, agency_id, payload.entity_id)
+    entity_id = await _validate_entity(db, current_user, agency.id, payload.entity_id, channel)
 
     obj = AgencyLoginId(
         user_id=current_user.id,
         tenant_id=current_user.tenant_id,
-        agency_id=agency_id,
+        agency_id=agency.id,
+        channel=channel,
         login_id=login_val,
         airline_name=(payload.airline_name or "").strip() or None,
         airline_code=(payload.airline_code or "").strip() or None,
@@ -163,7 +271,7 @@ async def bulk_upload_login_ids(
 ):
     content = await file.read()
     filename = (file.filename or "").lower()
-    required = {"LOGIN_ID", "AGENCY"}
+    required = {"LOGIN_ID", "AGENCY", "CHANNEL"}
 
     def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         df.columns = [
@@ -195,9 +303,9 @@ async def bulk_upload_login_ids(
 
         if df is None:
             detail = (
-                "Missing required columns: LOGIN_ID, AGENCY. Check that the header is in the first few rows."
+                "Missing required columns: LOGIN_ID, AGENCY, CHANNEL. Check that the header is in the first few rows."
                 if last_missing is None else
-                f"Missing required columns: {sorted(last_missing)}. Required: LOGIN_ID, AGENCY"
+                f"Missing required columns: {sorted(last_missing)}. Required: LOGIN_ID, AGENCY, CHANNEL"
             )
             raise HTTPException(status_code=400, detail=detail)
     except Exception as e:
@@ -213,19 +321,23 @@ async def bulk_upload_login_ids(
             if key:
                 vendor_lookup.setdefault(str(key).strip().lower(), s.id)
 
-    # Pre-load this user's agencies (by name) and entities (by code/name within agency)
+    # This user's agencies, resolved by (name, branch) rather than name alone —
+    # a vendor is onboarded once per branch, so a bare name can be ambiguous.
     agencies = (await db.execute(select(Agency).where(Agency.user_id == current_user.id))).scalars().all()
-    agency_lookup = {str(a.name).strip().lower(): a.id for a in agencies if a.name}
+    resolve_agency = _agency_resolver(agencies)
 
     entities = (await db.execute(
         select(AgencyEntity).where(AgencyEntity.user_id == current_user.id)
     )).scalars().all()
-    # keyed by (agency_id, code|name) so an entity code resolves within its agency
-    entity_lookup: dict[tuple[int, str], int] = {}
+    # Keyed by (agency_id, code|name) so an entity code resolves within its agency.
+    # NO channel in the key, deliberately: entities carry a channel SCOPE rather
+    # than being duplicated per channel, so a code is still unique per agency and
+    # this .setdefault cannot silently collapse two rows into one.
+    entity_lookup: dict[tuple[int, str], AgencyEntity] = {}
     for e in entities:
         for key in (e.code, e.name):
             if key:
-                entity_lookup.setdefault((e.agency_id, str(key).strip().lower()), e.id)
+                entity_lookup.setdefault((e.agency_id, str(key).strip().lower()), e)
 
     total = len(df)
     success = 0
@@ -238,9 +350,17 @@ async def bulk_upload_login_ids(
         if not login_val or not agency_raw:
             errors.append(f"Row {row_num}: LOGIN_ID and AGENCY are required.")
             continue
-        agency_id = agency_lookup.get(agency_raw.lower())
-        if agency_id is None:
-            errors.append(f"Row {row_num}: agency '{agency_raw}' not found in your agencies — skipped.")
+        agency, why = resolve_agency(
+            agency_raw, _cell(row.get("AGENCY_BRANCH")), _cell(row.get("CHANNEL")),
+        )
+        if agency is None:
+            errors.append(f"Row {row_num}: {why}")
+            continue
+
+        try:
+            channel = _validate_channel(agency, row.get("CHANNEL"))
+        except HTTPException as e:
+            errors.append(f"Row {row_num}: {e.detail}")
             continue
 
         vendor_id: int | None = None
@@ -254,10 +374,17 @@ async def bulk_upload_login_ids(
         entity_id: int | None = None
         entity_raw = _cell(row.get("ENTITY_CODE"))
         if entity_raw:
-            entity_id = entity_lookup.get((agency_id, entity_raw.lower()))
-            if entity_id is None:
+            entity = entity_lookup.get((agency.id, entity_raw.lower()))
+            if entity is None:
                 errors.append(f"Row {row_num}: entity '{entity_raw}' not found under agency '{agency_raw}' — skipped.")
                 continue
+            if not scope_covers(entity.channels, channel):
+                errors.append(
+                    f"Row {row_num}: entity '{entity_raw}' is scoped to {entity.channels} only — "
+                    f"it cannot hold a {channel} credential."
+                )
+                continue
+            entity_id = entity.id
 
         active_raw = _cell(row.get("ACTIVE")).lower()
         is_active = active_raw not in ("0", "no", "false", "inactive", "n")
@@ -266,7 +393,8 @@ async def bulk_upload_login_ids(
             db.add(AgencyLoginId(
                 user_id=current_user.id,
                 tenant_id=current_user.tenant_id,
-                agency_id=agency_id,
+                agency_id=agency.id,
+                channel=channel,
                 login_id=login_val,
                 airline_name=_cell(row.get("AIRLINE_NAME")) or None,
                 airline_code=_cell(row.get("AIRLINE_CODE")) or None,
@@ -291,8 +419,18 @@ async def download_login_id_template():
     wb = Workbook()
     ws = wb.active
     ws.title = "Agency Login ID Template"
-    ws.append(["LOGIN_ID", "AGENCY", "ENTITY_CODE", "AIRLINE_NAME", "AIRLINE_CODE", "LOB", "VENDOR", "ACTIVE"])
-    ws.append(["AI-DEL-001", "Lords Travels", "DEL-001", "Air India", "AI", "B2B", "Acme Travels", "yes"])
+    # LOGIN_ID holds the mirror ID on a GDS row and the portal login / airline ID
+    # on an LCC row — one column, relabelled by channel in the app.
+    # AGENCY_BRANCH is only needed when a vendor is onboarded on several branches.
+    ws.append([
+        "CHANNEL", "LOGIN_ID", "AGENCY", "AGENCY_BRANCH", "ENTITY_CODE",
+        "AIRLINE_NAME", "AIRLINE_CODE", "LOB", "VENDOR", "ACTIVE",
+    ])
+    # VENDOR is optional and must match the Suppliers master when set, so the
+    # samples leave it blank — a sample row that fails on a name this particular
+    # database has never heard of teaches the wrong lesson.
+    ws.append(["GDS", "6X2K-DEL", "Lords Travels", "DEL", "DEL-001", "", "", "B2B", "", "yes"])
+    ws.append(["LCC", "6E-AGT-88213", "Lords Travels", "DEL", "DEL-001", "IndiGo", "6E", "B2B", "", "yes"])
 
     bio = BytesIO()
     wb.save(bio)
@@ -323,25 +461,37 @@ async def update_login_id(
     obj = await _load(login_id_pk, db, current_user)
     data = payload.model_dump(exclude_unset=True)
 
-    # resolve the target agency (may be changing) so entity ownership is checked against it
-    target_agency = obj.agency_id
+    # resolve the target agency (may be changing) so channel and entity are
+    # checked against the agency this credential will actually belong to
+    agency = None
     if "agency_id" in data:
-        target_agency = await _validate_agency(db, current_user, data["agency_id"])
-        data["agency_id"] = target_agency
+        agency = await _validate_agency(db, current_user, data["agency_id"])
+        data["agency_id"] = agency.id
+    target_agency = agency.id if agency else obj.agency_id
+
+    # `channel` must not reach the blind setattr below unvalidated. Re-check it
+    # whenever EITHER side moves — switching a credential to a GDS-only agency
+    # has to invalidate an LCC channel just as surely as changing the channel does.
+    if "channel" in data or agency is not None:
+        agency = agency or await _validate_agency(db, current_user, obj.agency_id)
+        data["channel"] = _validate_channel(agency, data.get("channel", obj.channel))
+    channel = data.get("channel", obj.channel)
 
     if "vendor_id" in data:
         data["vendor_id"] = await _validate_vendor(db, data["vendor_id"])
 
-    # if the agency changed but entity wasn't re-specified, re-check the existing entity still fits
+    # If the agency or channel changed but the entity was not re-specified,
+    # re-check that the existing entity still fits both.
     if "entity_id" in data:
-        data["entity_id"] = await _validate_entity(db, current_user, target_agency, data["entity_id"])
-    elif "agency_id" in data and obj.entity_id is not None:
-        await _validate_entity(db, current_user, target_agency, obj.entity_id)
+        data["entity_id"] = await _validate_entity(db, current_user, target_agency, data["entity_id"], channel)
+    elif obj.entity_id is not None and ("agency_id" in data or "channel" in data):
+        await _validate_entity(db, current_user, target_agency, obj.entity_id, channel)
 
     if "login_id" in data:
         new_login = (data["login_id"] or "").strip()
         if not new_login:
-            raise HTTPException(status_code=400, detail="login_id cannot be empty.")
+            label = "Mirror ID" if channel == "GDS" else "Login ID / Airline ID"
+            raise HTTPException(status_code=400, detail=f"{label} cannot be empty.")
         data["login_id"] = new_login
 
     for field, value in data.items():

@@ -9,8 +9,20 @@ class AgencyEntity(Base):
     ("Agency Profile → Agency Onboarding → Agency Entities").
 
     User-scoped and parented to an Agency: one agency -> many entities
-    (e.g. Lords agency has entities in Delhi and Mumbai). `code` is unique per
+    (e.g. Lords Delhi has a head office and a sales office). `code` is unique per
     agency, so two agencies can each reuse the same code.
+
+    `channels` IS A SCOPE, NOT A DISCRIMINATOR — and the difference matters.
+    A legal entity does not acquire a second GSTIN because a booking went through
+    a GDS, so one entity says which channels it trades on (GDS | LCC | BOTH)
+    rather than being duplicated once per channel. Duplicating would have meant
+    widening `uq_agency_entities_agency_code` to include the channel, and two
+    live consumers cannot survive that: the bulk `entity_lookup` in
+    agency_login_ids.py is keyed (agency_id, code|name) with .setdefault, so
+    duplicate codes would silently attach every LCC login id to the GDS entity;
+    and deals/new resolves an entity by NAME, because `Deal.entity` stores a name
+    and not an id. An entity's scope must be covered by its agency's — see
+    scope_covers in app.models.agency.
     """
     __tablename__ = "agency_entities"
     __table_args__ = (
@@ -24,6 +36,7 @@ class AgencyEntity(Base):
 
     name:       Mapped[str]        = mapped_column(String(255), nullable=False)
     code:       Mapped[str]        = mapped_column(String(50),  nullable=False)
+    channels:   Mapped[str]        = mapped_column(String(10),  nullable=False)   # GDS | LCC | BOTH
     address:    Mapped[str | None] = mapped_column(String(500), nullable=True)
     state:      Mapped[str | None] = mapped_column(String(100), nullable=True)
     city:       Mapped[str | None] = mapped_column(String(100), nullable=True)

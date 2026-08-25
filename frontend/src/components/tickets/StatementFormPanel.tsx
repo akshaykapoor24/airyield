@@ -10,6 +10,12 @@ export { AIRLINE_AGENCIES };
 /** Searchable single-select that always opens downward. */
 export function AgencyDropdown({
   agency, setAgency, agencyOptions, touched, fieldCls, disabled,
+  // Optional so the Internal Statement caller is unchanged. The customer-side
+  // panel reuses this control to pick an agency, a corporate or a customer, so
+  // the wording has to follow whichever it is.
+  label = "Statement Agency",
+  placeholder = "— Select agency —",
+  requiredMark = true,
 }: {
   agency: string;
   setAgency: (v: string) => void;
@@ -17,6 +23,9 @@ export function AgencyDropdown({
   touched: boolean;
   fieldCls: (v: string) => string;
   disabled?: boolean;
+  label?: string;
+  placeholder?: string;
+  requiredMark?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -37,7 +46,7 @@ export function AgencyDropdown({
     <div>
       <label className="block text-xs font-semibold text-gray-600 mb-1.5 uppercase tracking-wide">
         <Building2 className="w-3.5 h-3.5 inline mr-1" />
-        Statement Agency <span className="text-red-500">*</span>
+        {label} {requiredMark && <span className="text-red-500">*</span>}
       </label>
       <div className="relative" ref={ref}>
         <button
@@ -47,7 +56,7 @@ export function AgencyDropdown({
           className={`${fieldCls(agency)} w-full text-left flex items-center justify-between pr-8 disabled:opacity-60 disabled:cursor-not-allowed`}
         >
           <span className={agency ? "text-gray-800" : "text-gray-400"}>
-            {agency || "— Select agency —"}
+            {agency || placeholder}
           </span>
           <ChevronDown className="w-4 h-4 text-gray-400 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
         </button>
@@ -68,7 +77,7 @@ export function AgencyDropdown({
             </div>
             <ul className="max-h-48 overflow-y-auto py-1">
               {filtered.length === 0 ? (
-                <li className="px-3 py-2 text-xs text-gray-400 italic">No agencies found</li>
+                <li className="px-3 py-2 text-xs text-gray-400 italic">No matches</li>
               ) : filtered.map((a) => (
                 <li key={a}>
                   <button
@@ -87,7 +96,7 @@ export function AgencyDropdown({
         )}
       </div>
       {touched && !agency && (
-        <p className="text-[11px] text-red-500 mt-1">Agency is required</p>
+        <p className="text-[11px] text-red-500 mt-1">{label} is required</p>
       )}
     </div>
   );

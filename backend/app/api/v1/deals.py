@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from typing import Optional
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, status, Query, Form
@@ -13,7 +14,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models.user import User
-from app.models.airline import Airline
 from app.models.deal_batch import DealBatch
 from app.schemas.airline_deal import AirlineDealCreate, AirlineDealResponse
 from app.schemas.b2b_deal import B2BDealCreate, B2BDealResponse
@@ -44,15 +44,128 @@ from app.schemas.approval_workflow import (
 )
 from app.services.deal_extraction import DealExtractionService
 from app.services.ai_deal_extraction import AIDealExtractionService
+from app.services.airline_resolver import (
+    RESOLVED,
+    AirlineIndex,
+    AirlineMatch,
+    carrier_code_from_row_field,
+    resolve_and_create_airlines,
+)
 import json as _json
 from app.models.deal import (
     DealStatement, Deal as UnifiedDeal, DealIncentiveConfig,
     DealIncentiveSlab, DealIncentiveSlabValue, DealRule, DealRuleCondition,
     DealSourceType, DealKind, DealTagType, DealStatusType, DealLifecycleType,
-    DealDirection, SlabTypeEnum, SlabValueTypeEnum, RuleOperatorEnum,
+    DealDirection, DealScopeType, SlabTypeEnum, SlabValueTypeEnum, RuleOperatorEnum,
 )
+from app.models.agency import Agency
+from app.models.agency_entity import AgencyEntity
+from app.models.corporate import Corporate
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+# ── Outgoing-deal scope ────────────────────────────────────────────────────
+
+class ResolvedScope(BaseModel):
+    """The scope block to write onto a Deal, with the party already authorised."""
+    scope_type:       DealScopeType
+    agency_id:        Optional[int] = None
+    corporate_id:     Optional[int] = None
+    agency_entity_id: Optional[int] = None
+    party_name:       Optional[str] = None
+    # What supplier_name should read for this scope. Never blank: it is the
+    # repository's "Supplier / Source" column and its search key, and a NULL there
+    # collapses the whole Outgoing list to "—".
+    supplier_label:   str
+
+
+def _corporate_display_name(c: Corporate) -> str:
+    return (c.company or "").strip() or f"{c.first_name} {c.last_name or ''}".strip()
+
+
+async def _resolve_scope(
+    db: AsyncSession,
+    current_user: User,
+    direction: DealDirection,
+    scope_type: Optional[str],
+    agency_id: Optional[int],
+    corporate_id: Optional[int],
+    agency_entity_id: Optional[int],
+    fallback_label: Optional[str] = None,
+) -> ResolvedScope:
+    """Authorise the named party and return the scope to persist.
+
+    The Pydantic mixin has already checked the SHAPE (that the right id
+    accompanies the scope). What it cannot check is OWNERSHIP, which is why this
+    exists: a foreign key alone would happily let one user pin a deal to another
+    user's agency by guessing an integer. Note the two masters are scoped
+    differently — agencies by `user_id` alone, corporates by tenant + creator.
+
+    An inbound deal is forced to ALL rather than rejected: income received from an
+    airline has no customer, and inbound clients send no scope at all.
+    """
+    if direction != DealDirection.OUTBOUND:
+        return ResolvedScope(
+            scope_type=DealScopeType.ALL,
+            supplier_label=(fallback_label or "").strip() or "—",
+        )
+
+    st = DealScopeType(scope_type or DealScopeType.ALL.value)
+
+    if st == DealScopeType.AGENCY:
+        agency = (await db.execute(
+            select(Agency).where(Agency.id == agency_id, Agency.user_id == current_user.id)
+        )).scalar_one_or_none()
+        if not agency:
+            raise HTTPException(status_code=400, detail=f"Agency id {agency_id} not found in your agencies.")
+
+        entity_id = None
+        if agency_entity_id is not None:
+            entity = (await db.execute(
+                select(AgencyEntity).where(
+                    AgencyEntity.id == agency_entity_id,
+                    AgencyEntity.agency_id == agency.id,
+                    AgencyEntity.user_id == current_user.id,
+                )
+            )).scalar_one_or_none()
+            if not entity:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Entity id {agency_entity_id} does not belong to agency '{agency.name}'.",
+                )
+            entity_id = entity.id
+
+        # The agency NAME only. `Deal.supplier_name` is String(255) and so is
+        # agencies.name, an exact fit — the full "name — branch · channel" label
+        # would overflow. Branch and channel render from agency_id.
+        return ResolvedScope(
+            scope_type=st, agency_id=agency.id, agency_entity_id=entity_id,
+            party_name=agency.name, supplier_label=agency.name,
+        )
+
+    if st == DealScopeType.CORPORATE:
+        corporate = (await db.execute(
+            select(Corporate).where(
+                Corporate.id == corporate_id,
+                Corporate.tenant_id == current_user.tenant_id,
+                Corporate.created_by_id == current_user.id,
+            )
+        )).scalar_one_or_none()
+        if not corporate:
+            raise HTTPException(status_code=400, detail=f"Corporate id {corporate_id} not found in your corporates.")
+        name = _corporate_display_name(corporate)
+        return ResolvedScope(
+            scope_type=st, corporate_id=corporate.id,
+            party_name=name, supplier_label=name,
+        )
+
+    # The only remaining party-less scope.
+    return ResolvedScope(
+        scope_type=DealScopeType.ALL,
+        party_name="All Customers", supplier_label="All Customers",
+    )
 
 
 class UploadConfirmResult(BaseModel):
@@ -174,7 +287,81 @@ async def ai_extract_deals(
         )
     deals = [AIDeal(**d) for d in result.get("deals", [])]
 
-    # Apply Contract Valid To fallback when AI didn't extract the date
+    # ── Airline-master resolution — READ ONLY ────────────────────────────────
+    # Nothing is written here on purpose: a previewed-then-cancelled upload must
+    # leave the master untouched. Missing airlines are created in
+    # /upload/confirm, which is also the only place that sees the reviewer's
+    # edits. The status fields are advisory for the UI; confirm re-resolves from
+    # scratch and never trusts them.
+    index = await AirlineIndex.load(db)
+    resolutions: dict[tuple[str | None, str | None], AirlineMatch] = {}
+    splits: dict[tuple[str | None, str | None], list[AirlineMatch]] = {}
+
+    def _apply(deal: AIDeal, match: AirlineMatch) -> AIDeal:
+        deal.airline_status = match.status
+        deal.airline_master_name = match.canonical_name
+        deal.airline_note = match.note
+        deal.airline_code = match.code or deal.airline_code
+        # `saved_name` is the master's canonical name ONLY when the row resolved;
+        # for conflict / new / unresolved it is the sheet's own wording with just
+        # the channel qualifier removed. Assigning it unconditionally is what
+        # keeps this identical to what confirm_upload will write — the two must
+        # never disagree, or the review table shows one name and the save stores
+        # another.
+        deal.airline_name = match.saved_name or deal.airline_name
+        return deal
+
+    # (source row, carrier, class) — a split row must sit with its own carrier,
+    # not interleaved by class across all three.
+    _CLASS_RANK = {"Economy": 0, "Premium": 1, "Business": 2}
+    ordered: list[tuple[tuple[int, int, int], AIDeal]] = []
+
+    for deal in deals:
+        key = (deal.airline_name, deal.airline_code)
+        match = resolutions.get(key)
+        if match is None:
+            # One sheet yields ~345 deal objects but only ~110 distinct pairs —
+            # Air India's 10 source rows x 3 classes collapse to about 2.
+            match = resolutions[key] = index.resolve(*key)
+        rank = _CLASS_RANK.get((deal.incentive_data.get("PLB") or {}).get("class"), 9)
+
+        # A row quoting one rate for several carriers is several deals.
+        # "AirFrance / KLM / Delta" x Economy/Premium/Business is nine, and the
+        # split has to happen here rather than in the extraction service, which
+        # has no database and so cannot tell a carrier list from a trade name.
+        #
+        # Attempted for every status except RESOLVED, not just MULTI_CARRIER: the
+        # sheet that transposes the columns ("AF/KL (NDC)" in the name cell,
+        # "AirFrance / KLM" in the code cell) leaves no usable code, so it lands
+        # in UNRESOLVED while still naming two carriers. `split_carriers` refuses
+        # anything it cannot account for in full, so widening the trigger cannot
+        # invent a split — a single-carrier row has one fragment and is rejected.
+        if match.status != RESOLVED:
+            carriers = splits.get(key)
+            if carriers is None:
+                carriers = splits[key] = index.split_carriers(*key)
+            if len(carriers) >= 2:
+                for ix, carrier in enumerate(carriers):
+                    ordered.append(((deal.src_n or 0, ix, rank),
+                                    _apply(deal.model_copy(deep=True), carrier)))
+                continue
+
+        ordered.append(((deal.src_n or 0, 0, rank), _apply(deal, match)))
+
+    ordered.sort(key=lambda pair: pair[0])
+    deals = [deal for _, deal in ordered]
+
+    # Counted over distinct airlines rather than rows, and after the split, so a
+    # carrier list reads as the carriers it became.
+    airline_summary: dict[str, int] = {}
+    for key, match in resolutions.items():
+        for m in (splits.get(key) or [match]):
+            airline_summary[m.status] = airline_summary.get(m.status, 0) + 1
+
+    # Apply Contract Valid To fallback when AI didn't extract the date.
+    # Reads contract_year off the index already loaded above; before the names
+    # were resolved this lookup could never match, because every name still
+    # carried its "(XO SALE)" qualifier.
     if valid_from and deals:
         vf_date: date | None = None
         try:
@@ -183,20 +370,8 @@ async def ai_extract_deals(
             pass
 
         if vf_date:
-            airline_names_lower = [d.airline_name.lower() for d in deals if d.airline_name]
-            airline_rows = await db.execute(
-                select(Airline.name, Airline.contract_year).where(
-                    func.lower(Airline.name).in_(airline_names_lower)
-                )
-            )
-            cy_map: dict[str, str] = {
-                row.name.lower(): row.contract_year
-                for row in airline_rows.all()
-                if row.contract_year
-            }
-
             for deal in deals:
-                cy = cy_map.get((deal.airline_name or "").lower())
+                cy = index.contract_year_for(deal.airline_name)
                 if not cy:
                     continue
                 fallback = _fallback_valid_to(vf_date, cy).isoformat()
@@ -213,6 +388,7 @@ async def ai_extract_deals(
         file_name=result.get("file_name", file.filename or ""),
         confidence=result.get("confidence", 0.0),
         warning=result.get("warning"),
+        airline_summary=airline_summary,
     )
 
 
@@ -794,6 +970,11 @@ def _unified_deal_to_repo_item(d: UnifiedDeal) -> DealRepositoryItem:
         batch_id=d.statement.batch_id if d.statement else None,
         supplier_name=d.supplier_name,
         direction=d.direction.value if hasattr(d.direction, "value") else str(d.direction or "inbound"),
+        scope_type=d.scope_type.value if hasattr(d.scope_type, "value") else str(d.scope_type or "all"),
+        agency_id=d.agency_id,
+        corporate_id=d.corporate_id,
+        agency_entity_id=d.agency_entity_id,
+        scope_party_name=d.scope_party_name,
     )
 
 
@@ -876,6 +1057,18 @@ async def _close_matching_unified_deals(
             UnifiedDeal.tenant_id == new_deal.tenant_id,
             UnifiedDeal.created_by_id == new_deal.created_by_id,
             UnifiedDeal.deal_lifecycle_status == DealLifecycleType.ACTIVE,
+            # Never close across directions. An incoming deal (income you earn) and
+            # an outgoing one (commission you pay) can name the same airline and the
+            # same maker without conflicting — they are different sides of the book.
+            UnifiedDeal.direction == new_deal.direction,
+            # Never close across SCOPES either. An agency-specific deal and a
+            # common one for the same airline are not rivals — they are the two
+            # rungs of the priority ladder the commission engine walks down, so
+            # closing one when the other is approved destroys the arrangement.
+            # Two deals conflict only when they would reach the same party.
+            UnifiedDeal.scope_type == new_deal.scope_type,
+            UnifiedDeal.agency_id.is_not_distinct_from(new_deal.agency_id),
+            UnifiedDeal.corporate_id.is_not_distinct_from(new_deal.corporate_id),
             UnifiedDeal.deal_maker_name == new_deal.deal_maker_name,
             UnifiedDeal.airline_name == new_deal.airline_name,
             UnifiedDeal.airline_type == new_deal.airline_type,
@@ -926,6 +1119,17 @@ async def confirm_upload(
     use_b2b = bool(payload.business_type) or direction == DealDirection.OUTBOUND
     batch_id = str(uuid.uuid4())
 
+    # WHO this deal is for. Outbound only; inbound is forced to ALL. The label it
+    # returns replaces the typed supplier name on an outbound deal, so a Common
+    # deal reads "All Agencies" rather than blank.
+    scope = await _resolve_scope(
+        db, current_user, direction,
+        payload.scope_type, payload.agency_id, payload.corporate_id, payload.agency_entity_id,
+        fallback_label=supplier_name or payload.source_agent,
+    )
+    if direction == DealDirection.OUTBOUND:
+        supplier_name = scope.supplier_label
+
     # Keep DealBatch for /batches endpoint backward compat
     batch = DealBatch(
         batch_id=batch_id,
@@ -960,6 +1164,29 @@ async def confirm_upload(
     db.add(statement)
     await db.flush()
 
+    # ── Airline-master resolution / creation ────────────────────────────────
+    # Runs once for the whole batch, before the deal loop, so a sheet listing
+    # "AI" on ten rows x three classes resolves once and creates one master row.
+    #
+    # Built from the payload, NOT from anything the extract step cached: if the
+    # reviewer retyped the airline name, that edit is what must be resolved.
+    #
+    # Applies to the column-mapping path too, which fails `deal_matching` the
+    # same way; that path has no airline_code field but `deal_extraction`
+    # already cleans the sheet's CODE column into `iata_code`, so it is read as
+    # a fallback — guarded so a 7-8 digit agency IATA number can never be
+    # mistaken for a carrier designator.
+    def _airline_key(r) -> tuple[str | None, str | None]:
+        name = (r.airline_name or payload.airline_name or "") or None
+        code = r.airline_code or carrier_code_from_row_field(r.iata_code)
+        return name, code
+
+    airline_pairs = {_airline_key(r) for r in rows}
+    airline_matches, _airline_summary = await resolve_and_create_airlines(
+        db, airline_pairs, current_user,
+    )
+    logger.info("deal upload %s airline resolution: %s", batch_id, _airline_summary)
+
     created_ids: list[int] = []
 
     for r in rows:
@@ -980,12 +1207,27 @@ async def confirm_upload(
             tenant_id=current_user.tenant_id,
             deal_type=DealKind.B2B if use_b2b else DealKind.AIRLINE,
             direction=direction,
+            scope_type=scope.scope_type,
+            agency_id=scope.agency_id,
+            corporate_id=scope.corporate_id,
+            agency_entity_id=scope.agency_entity_id,
+            scope_party_name=scope.party_name,
             source_agent=source_agent,
             deal_maker_name=(r.deal_maker_name or payload.deal_maker_name) or None,
-            supplier_name=(r.supplier_name or supplier_name) if use_b2b else None,
+            # Outbound ignores any per-row supplier cell: the counterparty is the
+            # scope, picked once for the whole upload. Letting a stray sheet column
+            # win would name a different party on some rows than on others.
+            supplier_name=(
+                supplier_name if direction == DealDirection.OUTBOUND
+                else ((r.supplier_name or supplier_name) if use_b2b else None)
+            ),
             remark=(r.remarks or payload.remark) or None,
             airline_type=(r.airline_type or payload.airline_type) or None,
-            airline_name=(r.airline_name or payload.airline_name) or None,
+            # The master's canonical name when the row resolved, the
+            # channel-qualifier-stripped name otherwise. Never the raw
+            # "Virgin Atlantic (XO SALE)" — that string cannot match a ticket.
+            airline_name=(airline_matches[_airline_key(r)].saved_name
+                          or r.airline_name or payload.airline_name) or None,
             contract_year=None if use_b2b else (r.contract_year or payload.contract_year or None),
             valid_from=effective_vf,
             valid_to=effective_vt,
@@ -996,7 +1238,14 @@ async def confirm_upload(
             iata_commission=(r.iata_commission or payload.iata_commission) or None,
             business_type=(r.business_type or payload.business_type) or None,
             entity_lcc=(r.entity_lcc or payload.entity_lcc) or None,
-            login_id=(r.login_id or payload.login_id) or None,
+            # Row-wins everywhere except outbound, where the login IDs are picked
+            # once from the scoped agency's own credentials — a free-text per-row
+            # cell must not silently override a real selection.
+            login_id=(
+                (payload.login_id or r.login_id) if direction == DealDirection.OUTBOUND
+                else (r.login_id or payload.login_id)
+            ) or None,
+            login_ids=payload.login_ids or None,
             status=DealStatusType.PENDING_APPROVAL,
             deal_lifecycle_status=DealLifecycleType.DRAFT,
             created_by_id=current_user.id,
@@ -1162,12 +1411,25 @@ async def create_b2b_deal(
     # inbound = deal received from this supplier; outbound = deal floated to it.
     direction = DealDirection.OUTBOUND if (payload.direction or "").lower() == "outbound" else DealDirection.INBOUND
 
+    # WHO this deal is for. Outbound only; inbound is forced to ALL. On an outbound
+    # deal the resolved label replaces the typed supplier name entirely, so a
+    # Common deal reads "All Agencies" instead of leaving the repository blank.
+    scope = await _resolve_scope(
+        db, current_user, direction,
+        payload.scope_type, payload.agency_id, payload.corporate_id, payload.agency_entity_id,
+        fallback_label=payload.supplier_name,
+    )
+    supplier_name = (
+        scope.supplier_label if direction == DealDirection.OUTBOUND
+        else (payload.supplier_name or None)
+    )
+
     batch = DealBatch(
         batch_id=batch_id,
         tenant_id=current_user.tenant_id,
         deal_type="b2b",
         deal_tag=payload.deal_tag or "standard",
-        supplier_name=payload.supplier_name or None,
+        supplier_name=supplier_name,
         file_name="manual",
         file_type="manual",
         incentive_types=payload.incentive_types or [],
@@ -1186,7 +1448,7 @@ async def create_b2b_deal(
         direction=direction,
         file_type="manual",
         batch_id=batch_id,
-        supplier_name=payload.supplier_name or None,
+        supplier_name=supplier_name,
         created_by_id=current_user.id,
     )
     db.add(statement)
@@ -1197,9 +1459,14 @@ async def create_b2b_deal(
         tenant_id=current_user.tenant_id,
         deal_type=DealKind.B2B,
         direction=direction,
+        scope_type=scope.scope_type,
+        agency_id=scope.agency_id,
+        corporate_id=scope.corporate_id,
+        agency_entity_id=scope.agency_entity_id,
+        scope_party_name=scope.party_name,
         source_agent=payload.source_agent or "manual",
         deal_maker_name=payload.deal_maker_name or None,
-        supplier_name=payload.supplier_name or None,
+        supplier_name=supplier_name,
         remark=payload.remark or None,
         airline_type=payload.airline_type or None,
         airline_name=payload.airline_name or None,
@@ -1366,6 +1633,19 @@ async def get_deal_form(
         "id": deal.id,
         "deal_type": deal.deal_type.value if hasattr(deal.deal_type, "value") else str(deal.deal_type),
         "deal_tag": stmt.deal_tag.value if stmt and hasattr(stmt.deal_tag, "value") else "standard",
+        # Read-only for the edit form: it decides which repository's form to render
+        # (Incoming vs Outgoing). Without it the form defaulted to "inbound" and an
+        # edited outgoing deal came back wearing the incoming form. Deliberately NOT
+        # accepted on DealUpdatePayload — a PATCH must never move a deal between the
+        # two repositories.
+        "direction": deal.direction.value if hasattr(deal.direction, "value") else str(deal.direction or "inbound"),
+        # Outgoing-deal scope, so the edit form re-opens on the right branch with
+        # the right party already selected.
+        "scope_type": deal.scope_type.value if hasattr(deal.scope_type, "value") else str(deal.scope_type or "all"),
+        "agency_id": deal.agency_id,
+        "corporate_id": deal.corporate_id,
+        "agency_entity_id": deal.agency_entity_id,
+        "scope_party_name": deal.scope_party_name,
         "airline_type": deal.airline_type,
         "airline_name": deal.airline_name,
         "valid_from": deal.valid_from.isoformat() if deal.valid_from else None,
@@ -1635,8 +1915,12 @@ async def _update_unified_deal(
     if not deal:
         raise HTTPException(status_code=404, detail="Deal not found")
 
-    # 1. Header fields — everything except the normalized incentive/incl-excl keys.
-    normalized_keys = {"incentive_types", "incentive_data", "incl_excl_types", "incl_excl_data", "vice_versa"}
+    # 1. Header fields — everything except the normalized incentive/incl-excl keys
+    #    and the scope block, which needs the explicit handling in step 1b.
+    normalized_keys = {
+        "incentive_types", "incentive_data", "incl_excl_types", "incl_excl_data", "vice_versa",
+        "scope_type", "agency_id", "corporate_id", "agency_entity_id",
+    }
     update_data = payload.model_dump(exclude_none=True)
     for field, value in update_data.items():
         if field in normalized_keys:
@@ -1645,6 +1929,31 @@ async def _update_unified_deal(
             value = date.fromisoformat(value) if value else None
         if hasattr(deal, field):
             setattr(deal, field, value)
+
+    # 1b. Scope — cannot ride the loop above, because that loop runs on
+    #     exclude_none=True. Switching a deal from Agency Specific back to Common
+    #     sends agency_id=None, which exclude_none drops, leaving scope_type='all'
+    #     beside a still-populated agency_id — a CHECK violation surfacing as a 500.
+    #     (exclude_none stays for the rest: the Create Deal form unconditionally
+    #     sends iata_number=null and entity_lcc=null, and dropping those is what
+    #     stops an edit from wiping them.)
+    #
+    #     model_fields_set is what distinguishes "not sent" from "sent as null".
+    #     Re-deriving the ids from the scope afterwards means no client payload can
+    #     reach the CHECK at all — it degrades to a backstop against direct SQL.
+    if "scope_type" in payload.model_fields_set and payload.scope_type is not None:
+        scope = await _resolve_scope(
+            db, current_user, deal.direction,
+            payload.scope_type, payload.agency_id, payload.corporate_id, payload.agency_entity_id,
+            fallback_label=payload.supplier_name or deal.supplier_name,
+        )
+        deal.scope_type       = scope.scope_type
+        deal.agency_id        = scope.agency_id
+        deal.corporate_id     = scope.corporate_id
+        deal.agency_entity_id = scope.agency_entity_id
+        deal.scope_party_name = scope.party_name
+        if deal.direction == DealDirection.OUTBOUND:
+            deal.supplier_name = scope.supplier_label
 
     # 2. Rebuild incentive/slab/rule rows only when the edit touched them.
     touches_relations = (

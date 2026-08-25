@@ -141,6 +141,16 @@ class UploadedTicket(Base):
     exclusion_reason:      Mapped[str | None]   = mapped_column(String(500), nullable=True)
     adm_acm_ra:            Mapped[str | None]   = mapped_column(String(10), nullable=True)   # 'ADM' | 'ACM' | 'RA'
 
+    # ── WHO this ticket was sold to ───────────────────────────────────────────
+    # Copied down from the statement at upload, or set per ticket by Create
+    # Tickets. THIS is what the customer-side commission run matches an outgoing
+    # deal against — never the statement's copy, because one statement can hold
+    # rows sold to different customers.
+    customer_type:      Mapped[str | None] = mapped_column(String(12), nullable=True)   # agency | corporate | direct
+    customer_agency_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("agencies.id", ondelete="SET NULL"), nullable=True)
+    corporate_id:       Mapped[int | None] = mapped_column(Integer, ForeignKey("corporates.id", ondelete="SET NULL"), nullable=True)
+    customer_id:        Mapped[int | None] = mapped_column(Integer, ForeignKey("customers.id", ondelete="SET NULL"), nullable=True)
+
     # ── Billing status ────────────────────────────────────────────────────────
     # A ticket is billed to at most one customer billing. Locked once billed;
     # cleared when that billing is deleted.

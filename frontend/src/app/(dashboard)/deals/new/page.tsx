@@ -13,12 +13,21 @@ import {
   SelectField, SearchSelectField, MultiSearchSelectField, DateField, TabBar, SectionCard,
   IncentiveTabContent, InclExclTabContent, incentiveEntryToForm,
 } from "@/components/deals/IncentiveInclExclShared";
+import OutgoingScopeFields, { type ScopeSelection } from "@/components/deals/OutgoingScopeFields";
+import {
+  OUTGOING_DEAL_KINDS, KIND_BUSINESS_TYPE, buildScopePayload, dealsHref, directionLabel,
+  fromScopeType, toScopeType,
+  type DealScopeType, type OutgoingDealKind,
+} from "@/lib/dealScope";
 
 // ── static options ───────────────────────────────────────────────────────────
 const CONTRACT_YEARS = ["Calendar year", "Financial year"];
 const TRIGGER_TYPES  = ["Flown", "Sales"];
 const PAYOUT_TYPES   = ["Flown", "Sales"];
 const BUSINESS_TYPES = ["B2B", "B2C", "B2E", "MICE"];
+
+/** An onboarded agency, as matched from the chosen Supplier name. */
+type AgencyMatch = { id: number; name: string; branch_name: string | null; branch_code: string; channels: string };
 
 // Entity codes and Login IDs / IATA come from the User Master. Login IDs are
 // filtered by airline name + vendor (supplier) + LoB (= business type).
@@ -53,13 +62,24 @@ const INCL_EXCL_META: Record<string, { suffix: string; isExclusion: boolean }> =
 };
 
 // ── deal type selection screen ───────────────────────────────────────────────
-function DealTypeSelector({ direction, onSelect }: { direction: "inbound" | "outbound"; onSelect: (dir: "inbound" | "outbound", t: "airline" | "b2b", tag: "standard" | "adhoc") => void }) {
+function DealTypeSelector({ direction, onSelect }: {
+  direction: "inbound" | "outbound";
+  onSelect: (dir: "inbound" | "outbound", t: "airline" | "b2b", tag: "standard" | "adhoc", scope: DealScopeType) => void;
+}) {
   const [selected, setSelected]   = useState<"airline" | "b2b" | null>(null);
   const [dealTag, setDealTag]     = useState<"standard" | "adhoc">("standard");
+  // Outgoing only: WHO the deal is for. Kept separate from `dealType` on purpose —
+  // `dealType` is the airline-vs-b2b discriminator that drives the API endpoint,
+  // the required-column set and the contract fields, and writing a scope into it
+  // would silently disable all three.
+  const [scopeKind, setScopeKind]   = useState<OutgoingDealKind>("b2b");
 
-  // Floated deals can only be B2B — you can't float a deal back to an airline.
+  // Outgoing deals can only be B2B at the contract level — you can't float a deal
+  // back to an airline. Who it reaches is the scope question below.
   const typeOptions: ReadonlyArray<"airline" | "b2b"> = direction === "outbound" ? ["b2b"] : ["airline", "b2b"];
   const effectiveSelected: "airline" | "b2b" | null = direction === "outbound" ? "b2b" : selected;
+  const outbound = direction === "outbound";
+  const scope: DealScopeType = outbound ? toScopeType(scopeKind) : "all";
 
   return (
     <div className="min-h-[60vh] flex items-center justify-center">
@@ -67,7 +87,7 @@ function DealTypeSelector({ direction, onSelect }: { direction: "inbound" | "out
         <h1 className="text-base font-semibold text-gray-800 mb-1">Deal Details</h1>
         <p className="text-xs text-gray-400 mb-6">Choose the type of deal you want to create.</p>
 
-        {/* Direction is fixed by the entry point (Incoming vs Floated repo) — read-only */}
+        {/* Direction is fixed by the entry point (Incoming vs Outgoing repo) — read-only */}
         <div className="mb-6">
           <p className="text-[11px] font-medium text-gray-500 uppercase tracking-wide mb-2">Deal Direction</p>
           <span className={`inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-medium border ${
@@ -75,42 +95,76 @@ function DealTypeSelector({ direction, onSelect }: { direction: "inbound" | "out
               ? "border-amber-200 bg-amber-50 text-amber-700"
               : "border-emerald-200 bg-emerald-50 text-emerald-700"
           }`}>
-            {direction === "outbound" ? "Floated" : "Incoming"}
+            {direction === "outbound" ? "Outgoing" : "Incoming"}
           </span>
         </div>
 
-        <div className="mb-6">
-          <p className="text-[11px] font-medium text-gray-500 uppercase tracking-wide mb-2">Deal Type</p>
-          <div className="flex gap-3">
-            {typeOptions.map(type => (
-              <label key={type}
-                className={`flex items-start gap-2 border rounded-lg px-4 py-2.5 cursor-pointer transition-colors flex-1 ${
-                  effectiveSelected === type
-                    ? "border-blue-500 bg-blue-50/60"
-                    : "border-gray-200 hover:border-gray-300 hover:bg-gray-50/60"
-                }`}>
-                <input
-                  type="radio"
-                  name="dealType"
-                  value={type}
-                  checked={effectiveSelected === type}
-                  onChange={() => setSelected(type)}
-                  className="w-3.5 h-3.5 mt-0.5 accent-blue-600"
-                />
-                <div>
-                  <span className="text-xs font-medium text-gray-800">
-                    {type === "airline" ? "Airline" : "B2B"}
-                  </span>
-                  <p className="text-[10px] text-gray-400 mt-0.5 leading-tight">
-                    {type === "airline"
-                      ? "Airline contract with full incentive and payout details"
-                      : "B2B deal without contract year"}
-                  </p>
-                </div>
-              </label>
-            ))}
+        {outbound ? (
+          <div className="mb-6">
+            <p className="text-[11px] font-medium text-gray-500 uppercase tracking-wide mb-2">Deal Type</p>
+            <div className="grid grid-cols-3 gap-2">
+              {OUTGOING_DEAL_KINDS.map(k => (
+                <label key={k.key}
+                  className={`flex flex-col gap-1 border rounded-lg px-3 py-2.5 cursor-pointer transition-colors ${
+                    scopeKind === k.key
+                      ? "border-blue-500 bg-blue-50/60"
+                      : "border-gray-200 hover:border-gray-300 hover:bg-gray-50/60"
+                  }`}>
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="radio"
+                      name="scopeKind"
+                      value={k.key}
+                      checked={scopeKind === k.key}
+                      onChange={() => setScopeKind(k.key)}
+                      className="w-3.5 h-3.5 accent-blue-600"
+                    />
+                    <span className="text-xs font-medium text-gray-800">{k.label}</span>
+                  </div>
+                  <p className="text-[10px] text-gray-400 leading-tight">{k.blurb}</p>
+                </label>
+              ))}
+            </div>
+            <p className="text-[10px] text-gray-400 mt-2 leading-tight">
+              {scopeKind === "common"
+                ? "Applies to every customer — no party to pick."
+                : `You will pick the ${scopeKind === "b2b" ? "agency" : "corporate"} on the next screen.`}
+            </p>
           </div>
-        </div>
+        ) : (
+          <div className="mb-6">
+            <p className="text-[11px] font-medium text-gray-500 uppercase tracking-wide mb-2">Deal Type</p>
+            <div className="flex gap-3">
+              {typeOptions.map(type => (
+                <label key={type}
+                  className={`flex items-start gap-2 border rounded-lg px-4 py-2.5 cursor-pointer transition-colors flex-1 ${
+                    effectiveSelected === type
+                      ? "border-blue-500 bg-blue-50/60"
+                      : "border-gray-200 hover:border-gray-300 hover:bg-gray-50/60"
+                  }`}>
+                  <input
+                    type="radio"
+                    name="dealType"
+                    value={type}
+                    checked={effectiveSelected === type}
+                    onChange={() => setSelected(type)}
+                    className="w-3.5 h-3.5 mt-0.5 accent-blue-600"
+                  />
+                  <div>
+                    <span className="text-xs font-medium text-gray-800">
+                      {type === "airline" ? "Airline" : "B2B"}
+                    </span>
+                    <p className="text-[10px] text-gray-400 mt-0.5 leading-tight">
+                      {type === "airline"
+                        ? "Airline contract with full incentive and payout details"
+                        : "B2B deal without contract year"}
+                    </p>
+                  </div>
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
 
         <div className="mb-8">
           <p className="text-[11px] font-medium text-gray-500 uppercase tracking-wide mb-2">Deal Tag</p>
@@ -140,7 +194,7 @@ function DealTypeSelector({ direction, onSelect }: { direction: "inbound" | "out
         <button
           type="button"
           disabled={!effectiveSelected}
-          onClick={() => effectiveSelected && onSelect(direction, effectiveSelected, dealTag)}
+          onClick={() => effectiveSelected && onSelect(direction, effectiveSelected, dealTag, scope)}
           className="w-full py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
           Continue →
         </button>
@@ -172,6 +226,15 @@ export default function NewDealPage() {
   // Login ID / IATA — multi-select from the User Master, shared by Airline and B2B.
   const [loginIds, setLoginIds]         = useState<string[]>([]);
   const [supplierName, setSupplierName] = useState("");
+
+  // ── Outgoing-deal scope: WHO this deal is floated to ──────────────────────
+  // Orthogonal to `dealType`, which stays "b2b" for every outbound deal.
+  const [scopeType, setScopeType] = useState<DealScopeType>("all");
+  const [scopeSel, setScopeSel]   = useState<ScopeSelection>({
+    agencyId: null, corporateId: null, agencyEntityId: null, entity: "", loginIds: [],
+  });
+  /** Set on the first save attempt, so required-field hints appear only after one. */
+  const [submitAttempted, setSubmitAttempted] = useState(false);
 
   // top-level tab
   const [activeTopTab, setActiveTopTab] = useState<"deal" | "incentive">("deal");
@@ -206,7 +269,15 @@ export default function NewDealPage() {
   // from the user's Agency Profile (the agency whose name matches the chosen
   // Supplier) rather than the User Master. Agency names are copied from the
   // Supplier master, so Supplier → Agency is a name match.
-  const [agencies, setAgencies]             = useState<{ id: number; name: string }[]>([]);
+  //
+  // That match can now return SEVERAL agencies: a vendor is onboarded once per
+  // branch AND once per channel, so Lords Delhi GDS, Lords Delhi LCC and Lords
+  // Mumbai are three rows with different entities and credentials. When it
+  // returns more than one, a Branch field appears and picking one is what
+  // resolves the agency — silently taking the first would load the wrong
+  // entities and put the wrong login IDs on the deal.
+  const [agencies, setAgencies]             = useState<AgencyMatch[]>([]);
+  const [agencyBranch, setAgencyBranch]     = useState<number | null>(null);
   const [agencyEntities, setAgencyEntities] = useState<{ id: number; name: string; code: string }[]>([]);
   const [agencyLoginIds, setAgencyLoginIds] = useState<{ id: number; login_id: string; entity_id: number | null }[]>([]);
   const [agencyEntityId, setAgencyEntityId] = useState<number | null>(null);   // selected agency entity (drives login ids)
@@ -226,11 +297,19 @@ export default function NewDealPage() {
 
   // B2B Standard reroutes Entity + Login ID to the Agency Onboarding data.
   const isB2bStandard = dealType === "b2b" && dealTag === "standard";
-  // Resolve the agency matching the chosen Supplier (name match — agency names
-  // are copied from the Supplier master at onboarding time).
-  const agencyId = isB2bStandard
-    ? (agencies.find(a => (a.name ?? "").trim().toLowerCase() === supplierName.trim().toLowerCase())?.id ?? null)
-    : null;
+  // Deliberately NOT folded into isB2bStandard: that flag also drives the
+  // incentive tab's date-wise slabs and the incl/excl class list, so widening it
+  // would quietly change the incentive form for outgoing adhoc deals. This one
+  // only governs which party fields render and where entity/logins come from.
+  const outboundScoped = direction === "outbound";
+  // Every onboarded branch of the chosen Supplier, by name.
+  const agencyMatches = isB2bStandard
+    ? agencies.filter(a => (a.name ?? "").trim().toLowerCase() === supplierName.trim().toLowerCase())
+    : [];
+  // One match resolves itself; several need the Branch field below.
+  const agencyId = agencyMatches.length === 1
+    ? agencyMatches[0].id
+    : (agencyBranch != null && agencyMatches.some(a => a.id === agencyBranch) ? agencyBranch : null);
 
   useEffect(() => {
     api.get<{ id: number; name: string }[]>("/suppliers/?limit=5000")
@@ -241,10 +320,13 @@ export default function NewDealPage() {
   // The user's own agencies (Agency Profile → Agency Onboarding). Used to map the
   // chosen Supplier to an agency for the B2B Standard Entity/Login ID lists.
   useEffect(() => {
-    api.get<{ id: number; name: string }[]>("/agencies/", { params: { limit: 1000 } })
+    api.get<AgencyMatch[]>("/agencies/", { params: { limit: 1000 } })
       .then(r => setAgencies(r.data))
       .catch(() => {});
   }, []);
+
+  // A different Supplier means a different set of branches — drop the old pick.
+  useEffect(() => { setAgencyBranch(null); }, [supplierName]);
 
   // Edit mode — read ?editId once and pre-fill the whole form from the deal.
   useEffect(() => {
@@ -252,11 +334,13 @@ export default function NewDealPage() {
     const raw = params.get("editId");
     const id = Number(raw || "");
     setEditChecked(true);
-    if (!raw || !Number.isFinite(id) || id <= 0) {
-      // Create mode — direction is fixed by the entry point (Incoming vs Floated repo).
-      if (params.get("direction") === "outbound") setDirection("outbound");
-      return;
-    }
+    // Direction is fixed by the entry point (Incoming vs Outgoing repo) and is set
+    // for BOTH modes. In edit mode the value below is only a seed — the authoritative
+    // one comes back from /form — but seeding it means the correct form renders
+    // straight away, and Cancel still returns to the right repository if that
+    // request fails.
+    if (params.get("direction") === "outbound") setDirection("outbound");
+    if (!raw || !Number.isFinite(id) || id <= 0) return;
     let cancelled = false;
     setLoadingEdit(true);
     suppressAgencyResetRef.current = true;   // keep prefilled entity/login (B2B Standard)
@@ -277,8 +361,20 @@ export default function NewDealPage() {
         setEntity((data.entity as string) ?? "");
         setBusinessType((data.business_type as string) ?? "");
         setIataCommission((data.iata_commission as string) ?? "");
-        setLoginIds(Array.isArray(data.login_ids) ? (data.login_ids as string[]) : []);
+        const savedLoginIds = Array.isArray(data.login_ids) ? (data.login_ids as string[]) : [];
+        setLoginIds(savedLoginIds);
         setSupplierName((data.supplier_name as string) ?? "");
+        // Outgoing scope. Without this the form re-opened on the Incoming branch
+        // with no party, and saving would have re-scoped the deal to whatever the
+        // default happened to be.
+        setScopeType((data.scope_type as DealScopeType) ?? "all");
+        setScopeSel({
+          agencyId:       (data.agency_id as number) ?? null,
+          corporateId:    (data.corporate_id as number) ?? null,
+          agencyEntityId: (data.agency_entity_id as number) ?? null,
+          entity:         (data.entity as string) ?? "",
+          loginIds:       savedLoginIds,
+        });
         setRemark((data.remark as string) ?? "");
         setDealMakerName((data.deal_maker_name as string) ?? "");
         // Incentives: rebuild the boolean map + per-incentive flat form (repo slabs[]
@@ -400,6 +496,7 @@ export default function NewDealPage() {
   const entityPlaceholder = !isB2bStandard
     ? "Search and select"
     : !supplierName            ? "Select a supplier first"
+    : agencyMatches.length > 1 && agencyId == null ? "Select a branch first"
     : agencyId == null         ? "No matching agency for this supplier"
     : agencyEntities.length === 0 ? "No entities for this agency"
     :                            "Search and select";
@@ -496,7 +593,12 @@ export default function NewDealPage() {
    *  form checked only three of them, and the API's `str` type accepts "" and
    *  stores it as NULL, so nothing complained either side. */
   const requiredHeaderFields = () => [
-    { label: "Supplier Name",       value: supplierName, when: dealType === "b2b" },
+    // Incoming only: an outgoing deal names its counterparty through the scope
+    // below, not through the supplier master.
+    { label: "Supplier Name",       value: supplierName, when: !outboundScoped && dealType === "b2b" },
+    // Outgoing, and only for the two "specific" scopes — a Common deal has no party.
+    { label: "Agency",              value: scopeSel.agencyId ? "set" : "",    when: outboundScoped && scopeType === "agency" },
+    { label: "Corporate",           value: scopeSel.corporateId ? "set" : "", when: outboundScoped && scopeType === "corporate" },
     { label: "Airline Name",        value: airlineName },
     // Auto-filled from the class/RBD master when an airline is picked, but that
     // master does not cover every airline, so it still has to be checked.
@@ -505,7 +607,10 @@ export default function NewDealPage() {
     { label: "Contract Valid To",   value: validTo },
   ];
 
-  const validateCore = (): boolean => requireFields(requiredHeaderFields());
+  const validateCore = (): boolean => {
+    setSubmitAttempted(true);
+    return requireFields(requiredHeaderFields());
+  };
 
   /** Contract dates must also make sense against each other — an inverted range
    *  silently produces incentives that can never trigger. */
@@ -517,6 +622,7 @@ export default function NewDealPage() {
   };
 
   const buildPayload = (): Record<string, unknown> => {
+    const effectiveLoginIds = outboundScoped ? scopeSel.loginIds : loginIds;
     const payload: Record<string, unknown> = {
       source_type:      "manual",
       source_agent:     dealMakerName || "manual",
@@ -531,13 +637,15 @@ export default function NewDealPage() {
       // Entity + Login ID/IATA are single fields on both forms, always sent and
       // not gated by Airline Type. iata_number / entity_lcc are no longer split
       // out separately — the consolidated values live in entity / login_id.
-      entity:           entity       || null,
+      // On an outgoing deal the entity and credentials belong to the scoped
+      // AGENCY, not to the User Master, so they come off the scope selection.
+      entity:           (outboundScoped ? scopeSel.entity : entity) || null,
       iata_number:      null,
       iata_commission:  iataCommission || null,
       business_type:    businessType || null,
       entity_lcc:       null,
-      login_id:         loginIds.join(", ") || null,   // joined display (back-compat)
-      login_ids:        loginIds.length ? loginIds : null,
+      login_id:         effectiveLoginIds.join(", ") || null,   // joined display (back-compat)
+      login_ids:        effectiveLoginIds.length ? effectiveLoginIds : null,
       remark:           remark        || null,
       deal_maker_name:  dealMakerName || null,
       incentive_types:  selectedIncentives,
@@ -554,7 +662,16 @@ export default function NewDealPage() {
       payload.payout_type   = payoutType   || null;
     }
     if (dealType === "b2b") {
-      payload.supplier_name = supplierName || null;
+      // Outgoing derives supplier_name server-side from the scope, so the label
+      // reads "All Agencies" rather than blank on a common deal.
+      payload.supplier_name = outboundScoped ? null : (supplierName || null);
+    }
+    if (outboundScoped) {
+      // buildScopePayload mirrors the server's own re-derivation, so a stale id
+      // left behind by a scope change can never travel attached to the wrong scope.
+      Object.assign(payload, buildScopePayload(
+        scopeType, scopeSel.agencyId, scopeSel.corporateId, scopeSel.agencyEntityId,
+      ));
     }
     return payload;
   };
@@ -576,7 +693,7 @@ export default function NewDealPage() {
         await api.post(endpoint, { ...buildPayload(), save_as_draft: true });
         toast.success("Deal saved as draft.");
       }
-      router.push("/deals");
+      router.push(dealsHref(direction));
     } catch (err: unknown) {
       const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
       setSubmitError(msg ?? "Failed to save draft. Make sure the backend is running.");
@@ -607,7 +724,7 @@ export default function NewDealPage() {
         await api.post(endpoint, buildPayload());
         toast.success("Deal submitted for approval.");
       }
-      router.push("/deals");
+      router.push(dealsHref(direction));
     } catch (err: unknown) {
       const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
       setSubmitError(msg ?? "Failed to submit deal. Make sure the backend is running.");
@@ -625,7 +742,10 @@ export default function NewDealPage() {
         </div>
       );
     }
-    return <DealTypeSelector direction={direction} onSelect={(d, t, tag) => { setDirection(d); setDealType(t); setDealTag(tag); setBusinessType(t === "b2b" ? "B2B" : ""); }} />;
+    return <DealTypeSelector direction={direction} onSelect={(d, t, tag, scope) => { setDirection(d); setDealType(t); setDealTag(tag); setScopeType(scope);
+      // Outgoing seeds Business Type from the scope — a corporate customer is B2E.
+      // Still editable on the form; this is a default, not a constraint.
+      setBusinessType(d === "outbound" ? KIND_BUSINESS_TYPE[fromScopeType(scope)] : (t === "b2b" ? "B2B" : "")); }} />;
   }
 
   // ── Step 1: two-tab form ─────────────────────────────────────────────────
@@ -634,7 +754,7 @@ export default function NewDealPage() {
 
       {/* Page header */}
       <div className="flex items-center gap-2 mb-3">
-        <button type="button" onClick={() => editingId != null ? router.push("/deals") : setDealType(null)}
+        <button type="button" onClick={() => editingId != null ? router.push(dealsHref(direction)) : setDealType(null)}
           className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 transition-colors">
           <ArrowLeft className="w-3.5 h-3.5" />
           Back
@@ -645,7 +765,7 @@ export default function NewDealPage() {
           <span className="text-blue-600">{dealType === "airline" ? "Airline" : "B2B"}</span>
           <span className="ml-2 text-[11px] font-normal text-gray-400 capitalize">{dealTag}</span>
           <span className={`ml-2 px-1.5 py-0.5 rounded text-[10px] font-medium ${direction === "outbound" ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}>
-            {direction === "outbound" ? "Floated" : "Incoming"}
+            {directionLabel(direction)}
           </span>
         </h1>
       </div>
@@ -682,8 +802,20 @@ export default function NewDealPage() {
           {/* Airline Contract Details */}
           <SectionCard title="Airline Contract Details">
             <div className="px-4 py-3 grid grid-cols-2 gap-3">
-              {/* [1] Supplier Name — B2B only */}
-              {dealType === "b2b" && (
+              {/* [1] WHO the deal is for.
+                  Outgoing picks the party straight from Agency / Corporate Master,
+                  so there is a real id to match a ticket against later — and no
+                  branch to disambiguate, because one agency row IS one branch on
+                  one channel. Incoming keeps the supplier-name search: it names a
+                  vendor from the global supplier master, which is a different set. */}
+              {outboundScoped ? (
+                <OutgoingScopeFields
+                  scope={scopeType}
+                  value={scopeSel}
+                  onChange={setScopeSel}
+                  touched={submitAttempted}
+                />
+              ) : dealType === "b2b" && (
                 <SearchSelectField
                   label="Supplier Name"
                   required
@@ -692,6 +824,38 @@ export default function NewDealPage() {
                   onChange={v => { suppressAgencyResetRef.current = false; setSupplierName(v); }}
                   placeholder={supplierOptions.length ? "Search and select supplier" : "Loading suppliers..."}
                 />
+              )}
+
+              {/* [1b] Branch — only when this supplier is onboarded more than once.
+                  Entities and login IDs belong to a BRANCH, so without this the
+                  form would load one branch's and attach them to the other's deal.
+                  Outgoing never needs it: the agency picker already names the exact
+                  branch + channel row. */}
+              {!outboundScoped && isB2bStandard && agencyMatches.length > 1 && (
+                <div>
+                  <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">
+                    Branch <span className="text-red-500">*</span>
+                  </label>
+                  <select
+                    value={agencyBranch ?? ""}
+                    onChange={e => { suppressAgencyResetRef.current = false; setAgencyBranch(e.target.value ? Number(e.target.value) : null); }}
+                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-400 bg-gray-50"
+                  >
+                    <option value="">— Select branch —</option>
+                    {/* Channel as well as branch: one branch working both channels
+                        is onboarded twice, and the two rows carry different
+                        entities and credentials under the same branch name. */}
+                    {agencyMatches.map(a => (
+                      <option key={a.id} value={a.id}>
+                        {a.branch_name || a.branch_code} · {a.channels}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[10px] text-gray-400 mt-1">
+                    This agency is onboarded {agencyMatches.length} times — per branch and per channel — and each
+                    has its own entities and login IDs.
+                  </p>
+                </div>
               )}
 
               {/* [2] Airline Name — full master list; picking one auto-fills the type */}
@@ -746,7 +910,12 @@ export default function NewDealPage() {
                    and B2B. Not gated by Airline Type, and unaffected when other
                    fields (Airline Type, Contract Year, …) change. For B2B Standard
                    these come from Agency Onboarding (agency-by-supplier → entities →
-                   login ids); otherwise from the User Master. */}
+                   login ids); otherwise from the User Master.
+                   Hidden on an outgoing deal: OutgoingScopeFields renders its own
+                   Agency Entity / Agency Login ID above, sourced from the picked
+                   agency, and two sets of the same field would disagree. */}
+              {!outboundScoped && (
+              <>
               <SearchSelectField
                 label="Entity"
                 placeholder={entityPlaceholder}
@@ -766,6 +935,8 @@ export default function NewDealPage() {
                 values={loginIds}
                 onChange={setLoginIds}
               />
+              </>
+              )}
 
               {/* IATA Commission (%) — free numeric input, after Login ID / IATA */}
               <div>
@@ -964,7 +1135,7 @@ export default function NewDealPage() {
         <div className="flex items-center justify-center gap-3 py-2.5">
 
           {/* Cancel — always visible */}
-          <button type="button" onClick={() => router.push("/deals")}
+          <button type="button" onClick={() => router.push(dealsHref(direction))}
             className="px-6 py-1.5 border border-red-400 text-red-500 rounded-full text-xs font-medium hover:bg-red-50 transition-colors">
             Cancel
           </button>

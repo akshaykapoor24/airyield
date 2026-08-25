@@ -22,6 +22,7 @@ from app.schemas.airport import (
     AirportApprovalRead, AirportApprovalEdit, ApprovalAction, BulkUploadResult,
 )
 from app.services.master_approval_edit import apply_admin_edit, AIRPORT_FIELDS
+from app.services.master_export import master_export_response
 
 router = APIRouter()
 
@@ -397,6 +398,39 @@ async def download_airport_template():
         bio,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": 'attachment; filename="airport_template.xlsx"'},
+    )
+
+
+@router.get("/export")
+async def export_airports(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_role(PLATFORM)),
+):
+    """The whole airport master as .xlsx, for review in Excel.
+
+    Column headers match download_airport_template so a reviewed sheet can go
+    straight back through /bulk-upload; APT_ID is ignored on the way back in.
+    """
+    result = await db.execute(select(Airport).order_by(Airport.iata_code))
+    airports = result.scalars().all()
+
+    headers = [
+        "APT_ID", "IATA_CODE", "COUNTRY", "CATEGORIZATION",
+        "CONTINENT", "CITY_AIRPORT_NAME", "ACTIVE",
+    ]
+    rows = [
+        [
+            a.apt_id, a.iata_code, a.country, a.categorization,
+            a.continent, a.city_airport_name, a.is_active,
+        ]
+        for a in airports
+    ]
+
+    return master_export_response(
+        sheet_title="Airport Master",
+        filename="airport_master.xlsx",
+        headers=headers,
+        rows=rows,
     )
 
 

@@ -21,6 +21,7 @@ import { canManageGlobalMasters, canSubmitMasterRequest, canViewMasterRequests }
 import { useAppSelector } from "@/store/hooks";
 import Pagination from "@/components/ui/Pagination";
 import MasterDiffModal, { DiffFieldSpec } from "@/components/masters/MasterDiffModal";
+import ExportMasterButton from "@/components/masters/ExportMasterButton";
 
 type AirlineClassMaster = {
   id: number;
@@ -886,6 +887,10 @@ export default function ClassesMasterPage() {
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
           </button>
+          {/* Only Master Governance sees the master list, so only it can export one. */}
+          {isPlatformAdmin && (
+            <ExportMasterButton resource="classes" filename="airline_class_master.xlsx" />
+          )}
           {canSubmitRequest && (
             <button
               onClick={() => setShowAdd(true)}

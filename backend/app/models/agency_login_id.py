@@ -5,12 +5,27 @@ from app.database import Base
 
 
 class AgencyLoginId(Base):
-    """An airline-portal login id / IATA code belonging to one of a user's
-    agencies ("Agency Profile → Agency Onboarding → Agency Login IDs").
+    """A booking credential belonging to one of a user's agencies
+    ("Agency Profile → Agency Onboarding → Agency Login IDs").
 
     User-scoped. Each login id belongs to one agency (one agency -> many login
     ids) and optionally to one of that agency's entities (one entity -> many
     login ids). vendor_id references the (global) suppliers master.
+
+    `channel` IS GDS OR LCC, NEVER BOTH — note the asymmetry with AgencyEntity,
+    because it is the thing a reader trips over. An entity may trade on both
+    channels; a credential cannot. A mirror id is a GDS artifact and an airline
+    portal login is an LCC artifact, and they are not interchangeable.
+
+    `login_id` IS THE CREDENTIAL FOR BOTH CHANNELS, relabelled in the UI —
+    "Mirror ID" on GDS, "Login ID / Airline ID" on LCC. It is deliberately not
+    split into a `mirror_id` sibling column: this column is NOT NULL and indexed,
+    it is the order-by key and the primary display column, it is the option value
+    in the deals form (landing in `Deal.login_id` / `Deal.login_ids`), and it is
+    snapshotted into `CustomerStatement.login_ids`. Making it nullable so a
+    parallel column could exist would break every one of those. `Deal.entity_lcc`
+    is the repo's own worked example of that mistake — a per-channel sibling
+    column beside `Deal.entity`, now dead code.
     """
     __tablename__ = "agency_login_ids"
 
@@ -20,7 +35,8 @@ class AgencyLoginId(Base):
     agency_id:     Mapped[int]        = mapped_column(Integer, ForeignKey("agencies.id", ondelete="CASCADE"), nullable=False, index=True)
     entity_id:     Mapped[int | None] = mapped_column(Integer, ForeignKey("agency_entities.id", ondelete="SET NULL"), nullable=True, index=True)
 
-    login_id:      Mapped[str]        = mapped_column(String(100), nullable=False, index=True)  # "Login ID / IATA Code"
+    channel:       Mapped[str]        = mapped_column(String(10),  nullable=False)  # GDS | LCC — never BOTH
+    login_id:      Mapped[str]        = mapped_column(String(100), nullable=False, index=True)  # mirror id (GDS) | portal login / airline id (LCC)
     airline_name:  Mapped[str | None] = mapped_column(String(255), nullable=True)
     airline_code:  Mapped[str | None] = mapped_column(String(20),  nullable=True)
     lob:           Mapped[str | None] = mapped_column(String(100), nullable=True)               # line of business (free text)

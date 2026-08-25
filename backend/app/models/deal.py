@@ -2,7 +2,7 @@ import enum
 from datetime import datetime, date
 from sqlalchemy import (
     BigInteger, Integer, SmallInteger, String, Text, Date, DateTime,
-    Boolean, Numeric, ForeignKey, Enum as SAEnum, UniqueConstraint,
+    Boolean, Numeric, ForeignKey, Enum as SAEnum, UniqueConstraint, CheckConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -67,6 +67,27 @@ class DealDirection(str, enum.Enum):
     OUTBOUND = "outbound"   # deal you FLOAT to a small agency at a commission → you PAY
 
 
+class DealScopeType(str, enum.Enum):
+    """WHO an outgoing deal is for. Meaningful only when direction=OUTBOUND;
+    inbound deals are forced to ALL because income received has no customer.
+
+    Three values, matching the three choices the form offers. AGENCY and CORPORATE
+    each name ONE party — "B2B" on the form means agency-specific and "Corporate"
+    means corporate-specific. A deal meant to reach everyone is ALL; there is
+    deliberately no per-type "all agencies" middle rung.
+
+    The commission engine asks one question of it. For a ticket sold to a party of
+    kind k ('agency' | 'corporate' | 'direct') with id p:
+
+        scope_type = 'all'
+        OR (scope_type = 'agency'    AND agency_id    = :p)
+        OR (scope_type = 'corporate' AND corporate_id = :p)
+    """
+    AGENCY    = "agency"      # one named agency     → agency_id
+    CORPORATE = "corporate"   # one named corporate  → corporate_id
+    ALL       = "all"         # every customer, of any kind
+
+
 def _vals(e):
     return [m.value for m in e]
 
@@ -118,6 +139,29 @@ class Deal(Base):
     whether it was entered manually or uploaded from a file.
     """
     __tablename__ = "deals"
+    # Mirrored from migration cust_scope_01. Declared here too, or the next
+    # `alembic revision --autogenerate` sees constraints the models don't know
+    # about and writes a migration that drops them.
+    __table_args__ = (
+        CheckConstraint(
+            "scope_type IN ('agency','corporate','all')",
+            name="ck_deals_scope_type",
+        ),
+        # "=" between two booleans enforces both directions at once: the id is
+        # present exactly when the scope calls for it, and absent otherwise.
+        CheckConstraint(
+            "(scope_type = 'agency') = (agency_id IS NOT NULL)",
+            name="ck_deals_scope_agency",
+        ),
+        CheckConstraint(
+            "(scope_type = 'corporate') = (corporate_id IS NOT NULL)",
+            name="ck_deals_scope_corporate",
+        ),
+        CheckConstraint(
+            "agency_entity_id IS NULL OR scope_type = 'agency'",
+            name="ck_deals_scope_entity",
+        ),
+    )
 
     id           : Mapped[int]       = mapped_column(BigInteger, primary_key=True)
     statement_id : Mapped[int]       = mapped_column(BigInteger, ForeignKey("deal_statements.id", ondelete="CASCADE"), nullable=False)
@@ -128,6 +172,28 @@ class Deal(Base):
     # counterparty either way — the source (inbound) or whom it was floated to (outbound).
     direction    : Mapped[DealDirection] = mapped_column(SAEnum(DealDirection, native_enum=False, values_callable=_vals), default=DealDirection.INBOUND, server_default="inbound", index=True)
 
+    # ── Outgoing-deal scope: WHO this floated deal is for ────────────────────
+    # Always ALL on an inbound deal (forced by the API — income received has no
+    # customer). The party ids are Integer, not BigInteger: agencies.id and
+    # corporates.id are plain primary keys, unlike this table's own id.
+    #
+    # RESTRICT rather than SET NULL on the two party FKs. SET NULL would blank the
+    # id and then trip ck_deals_scope_agency on the very same row, so deleting an
+    # agency would abort with an unreadable CheckViolation; RESTRICT lets the
+    # endpoint refuse with a 409 that names the count instead.
+    scope_type       : Mapped[DealScopeType] = mapped_column(
+        SAEnum(DealScopeType, native_enum=False, values_callable=_vals),
+        default=DealScopeType.ALL, server_default="all", nullable=False, index=True,
+    )
+    agency_id        : Mapped[int | None] = mapped_column(Integer, ForeignKey("agencies.id", ondelete="RESTRICT"), nullable=True, index=True)
+    corporate_id     : Mapped[int | None] = mapped_column(Integer, ForeignKey("corporates.id", ondelete="RESTRICT"), nullable=True, index=True)
+    # Optional narrowing within the chosen agency. SET NULL is safe — no check
+    # depends on it being present.
+    agency_entity_id : Mapped[int | None] = mapped_column(Integer, ForeignKey("agency_entities.id", ondelete="SET NULL"), nullable=True)
+    # Display snapshot, so the repository still reads correctly after the party is
+    # renamed in its master.
+    scope_party_name : Mapped[str | None] = mapped_column(String(255), nullable=True)
+
     # ── Shared header fields ─────────────────────────────────────────────────
     source_agent    : Mapped[str]      = mapped_column(String(255), nullable=False, server_default="manual")
     deal_maker_name : Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -136,7 +202,9 @@ class Deal(Base):
     airline_name    : Mapped[str | None] = mapped_column(String(255), nullable=True)
     valid_from      : Mapped[date | None] = mapped_column(Date, nullable=True)
     valid_to        : Mapped[date | None] = mapped_column(Date, nullable=True)
-    entity          : Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # 255 to match agency_entities.name: on a B2B Standard / agency-scoped deal the
+    # form offers the AGENCY's entity names here, not a short User Master code.
+    entity          : Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     # ── Airline-only fields ──────────────────────────────────────────────────
     contract_year : Mapped[str | None] = mapped_column(String(50), nullable=True)   # FY | CY
@@ -151,7 +219,9 @@ class Deal(Base):
     # ── LCC fields (airline or B2B can be LCC) ───────────────────────────────
     business_type  : Mapped[str | None] = mapped_column(String(50), nullable=True)
     entity_lcc     : Mapped[str | None] = mapped_column(String(50), nullable=True)
-    login_id       : Mapped[str | None] = mapped_column(String(100), nullable=True)   # joined display string (back-compat)
+    # Text, not String(100): this is ", ".join(login_ids), and each individual
+    # login id is itself up to 100 chars, so two selections already overflowed.
+    login_id       : Mapped[str | None] = mapped_column(Text, nullable=True)   # joined display string (back-compat)
     login_ids      : Mapped[list | None] = mapped_column(JSONB, nullable=True)         # multiple login ids / IATA selected on the deal
 
     # ── Approval & lifecycle ─────────────────────────────────────────────────

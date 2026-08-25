@@ -10,6 +10,7 @@ import { canManageGlobalMasters, canSubmitMasterRequest, canViewMasterRequests }
 import { useAppSelector } from "@/store/hooks";
 import Pagination from "@/components/ui/Pagination";
 import MasterDiffModal, { DiffFieldSpec } from "@/components/masters/MasterDiffModal";
+import ExportMasterButton from "@/components/masters/ExportMasterButton";
 
 type Airline = {
   id: number;
@@ -749,6 +750,10 @@ export default function AirlinesPage() {
             className="flex items-center gap-1.5 bg-white border border-gray-200 text-gray-600 px-3 py-2 rounded-lg text-xs font-medium hover:bg-gray-50 disabled:opacity-50">
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
           </button>
+          {/* Only Master Governance sees the master list, so only it can export one. */}
+          {isPlatformAdmin && (
+            <ExportMasterButton resource="airlines" filename="airline_master.xlsx" />
+          )}
           {canSubmitRequest && (
             <button onClick={() => setShowAdd(true)}
               className="flex items-center gap-1.5 text-white text-xs font-semibold px-3.5 py-2 rounded-lg shadow-sm hover:opacity-90"

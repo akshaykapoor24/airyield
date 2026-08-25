@@ -6,6 +6,7 @@ import {
   AlertCircle, Building2, ChevronRight, RefreshCw, Search, Ticket, X,
 } from "lucide-react";
 import api from "@/lib/api";
+import { useStatementSectionBase } from "@/lib/statementSection";
 import Pagination from "@/components/ui/Pagination";
 import { inr, type TicketRow } from "@/lib/ticketFields";
 
@@ -54,6 +55,8 @@ const SELECT =
  * approach does not carry over here.
  */
 export default function AllTicketsView() {
+  // Row click must stay in whichever section this list is rendered in.
+  const sectionBase = useStatementSectionBase();
   const router = useRouter();
 
   const [page, setPage] = useState<Page | null>(null);
@@ -238,7 +241,7 @@ export default function AllTicketsView() {
                 {page.rows.map((t) => (
                   <tr
                     key={t.id}
-                    onClick={() => router.push(`/tickets/${t.batch_id}`)}
+                    onClick={() => router.push(`${sectionBase}/${t.batch_id}`)}
                     className="hover:bg-blue-50/40 cursor-pointer transition-colors group"
                   >
                     <td className="px-4 py-2 whitespace-nowrap">

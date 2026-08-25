@@ -211,6 +211,10 @@ type DealRepositoryItem = {
   id:              number;
   deal_no:         string;
   deal_type:       DealType;
+  // Which repository the deal belongs to. This page loads batches from BOTH
+  // (it fetches with direction=all), so Edit has to read it per deal to return
+  // the user to the list they came from.
+  direction:       string | null;
   source_agent:    string;
   airline_type:    string | null;
   airline_name:    string | null;
@@ -1523,7 +1527,7 @@ export default function DealBatchPage() {
                           <Clock className="w-3 h-3" /> History
                         </button>
                         <button
-                          onClick={() => (d.status === "approved" || d.status === "rejected") && router.push(`/deals/new?editId=${d.id}`)}
+                          onClick={() => (d.status === "approved" || d.status === "rejected") && router.push(`/deals/new?editId=${d.id}&direction=${d.direction ?? "inbound"}`)}
                           disabled={d.status !== "approved" && d.status !== "rejected" || d.deal_lifecycle_status === "closed"}
                           title={
                             d.status === "rejected" ? "Edit and resubmit for approval" :

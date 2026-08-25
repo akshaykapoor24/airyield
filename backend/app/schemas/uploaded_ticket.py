@@ -129,11 +129,26 @@ class ConfirmTicketUploadPayload(BaseModel):
     rows:           list[TicketRow]
     statement_type: str = "B2B"
     agency:         str
+    # Which onboarded agency BRANCH this statement belongs to. `agency` alone is
+    # a bare vendor name and a vendor is onboarded once per branch, so without
+    # this Agency Billing cannot tell Lords Delhi from Lords Mumbai and refuses
+    # to bill rather than guess. Optional so older clients still upload.
+    agency_id:      Optional[int] = None
     valid_from:     date
     valid_to:       date
     # User-supplied label for the statement. Blank falls back to the derived
     # "<type> - <agency> - <valid_from>" name.
     statement_name: Optional[str] = None
+
+    # ── WHO this statement was sold to ───────────────────────────────────────
+    # 'agency' | 'corporate' | 'direct'. Exactly one id accompanies it, matching
+    # the type; a direct customer picked from Customer Master sets customer_id,
+    # and a walk-in with no master record can be left with the type alone.
+    customer_type:      Optional[str] = None
+    customer_agency_id: Optional[int] = None
+    corporate_id:       Optional[int] = None
+    customer_id:        Optional[int] = None
+
 
 
 class AppendTicketsPayload(BaseModel):
@@ -157,6 +172,11 @@ class ManualTicketPreviewPayload(BaseModel):
 
 
 class TicketStatementRead(BaseModel):
+    # Customer tagging — drives the type badge and Customer column in the repo.
+    customer_type:      Optional[str] = None
+    customer_agency_id: Optional[int] = None
+    corporate_id:       Optional[int] = None
+    customer_id:        Optional[int] = None
     batch_id:         str
     statement_type:   str = "B2B"
     statement_name:   Optional[str] = None
