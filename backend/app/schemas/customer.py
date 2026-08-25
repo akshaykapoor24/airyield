@@ -5,6 +5,9 @@ from typing import Optional
 class CustomerCreate(BaseModel):
     first_name: str
     last_name: Optional[str] = None
+    # The corporate this person works for; None = individual / direct. `company`
+    # is derived from it and ignored on input whenever corporate_id is set.
+    corporate_id: Optional[int] = None
     company: Optional[str] = None
     title: Optional[str] = None
     phone: Optional[str] = None
@@ -20,6 +23,7 @@ class CustomerCreate(BaseModel):
 class CustomerUpdate(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
+    corporate_id: Optional[int] = None   # send explicitly as null to unlink
     company: Optional[str] = None
     title: Optional[str] = None
     phone: Optional[str] = None
@@ -37,6 +41,7 @@ class CustomerRead(BaseModel):
     id: int
     first_name: str
     last_name: Optional[str] = None
+    corporate_id: Optional[int] = None
     company: Optional[str] = None
     title: Optional[str] = None
     phone: Optional[str] = None
@@ -50,6 +55,35 @@ class CustomerRead(BaseModel):
     is_active: bool
 
     model_config = {"from_attributes": True}
+
+
+class CustomerBulkCreateRow(BaseModel):
+    """One row of the import wizard, after the user mapped and reviewed it.
+
+    All-optional so a single bad row cannot 422 the batch — `first_name` is
+    checked per row in the endpoint and reported against that row's number, the
+    way the .xls path does. Reviewed in the browser is not validated: the
+    endpoint re-checks and re-normalises everything.
+
+    `company` is a NAME here, not an id: it is matched to Corporate Master the
+    same way the .xls import matches it, so a sheet of employees links itself.
+    """
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    company: Optional[str] = None
+    title: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    gst_registered: Optional[bool] = None
+    gst_no: Optional[str] = None
+    pan_no: Optional[str] = None
+    markup_type: Optional[str] = None
+    markup_value: Optional[float] = None
+    billing_type: Optional[str] = None
+
+
+class CustomerBulkCreate(BaseModel):
+    rows: list[CustomerBulkCreateRow]
 
 
 class CustomerBulkUploadResult(BaseModel):

@@ -5,7 +5,7 @@ import { Building2, Calendar, ChevronDown, FilePlus, Layers, Lock, Search, Tag, 
 import { AIRLINE_AGENCIES, type StatementType } from "@/lib/ticketFields";
 import api from "@/lib/api";
 import { agencyLabel, type AgencyRow } from "@/lib/counterparty";
-import { partyName, type Party } from "@/lib/party";
+import { corporateLabel, partyName, type Party } from "@/lib/party";
 import { CUSTOMER_TYPES, CUSTOMER_TYPE_LABEL, CUSTOMER_TYPE_MASTER, type CustomerTag } from "@/lib/customerType";
 
 export type StatementOption = {
@@ -231,13 +231,13 @@ function CustomerPartySelect({
   const label = kind === "agency" ? "Agency" : kind === "corporate" ? "Corporate" : "Customer";
   const options =
       kind === "agency"    ? agencies.map(agencyLabel)
-    : kind === "corporate" ? corporates.map(corpLabel)
+    : kind === "corporate" ? corporates.map(corporateLabel)
     : kind === "direct"    ? customers.map(partyName)
     : [];
 
   const current =
       kind === "agency"    ? (agencies.find(a => a.id === tag.agencyId)    ? agencyLabel(agencies.find(a => a.id === tag.agencyId)!) : "")
-    : kind === "corporate" ? (corporates.find(c => c.id === tag.corporateId) ? corpLabel(corporates.find(c => c.id === tag.corporateId)!) : "")
+    : kind === "corporate" ? (corporates.find(c => c.id === tag.corporateId) ? corporateLabel(corporates.find(c => c.id === tag.corporateId)!) : "")
     : kind === "direct"    ? (customers.find(c => c.id === tag.customerId)  ? partyName(customers.find(c => c.id === tag.customerId)!)  : tag.partyName)
     : "";
 
@@ -246,7 +246,7 @@ function CustomerPartySelect({
       const a = agencies.find(x => agencyLabel(x) === v);
       setTag({ ...tag, agencyId: a?.id ?? null, partyName: a?.name ?? v });
     } else if (kind === "corporate") {
-      const c = corporates.find(x => corpLabel(x) === v);
+      const c = corporates.find(x => corporateLabel(x) === v);
       setTag({ ...tag, corporateId: c?.id ?? null, partyName: c ? ((c.company || "").trim() || partyName(c)) : v });
     } else {
       const c = customers.find(x => partyName(x) === v);
@@ -291,11 +291,6 @@ function CustomerPartySelect({
       placeholder={loaded ? "— select —" : "loading…"}
     />
   );
-}
-
-function corpLabel(c: Party): string {
-  const n = partyName(c);
-  return c.company ? `${c.company} — ${n}` : n;
 }
 
 function AgencySelect({

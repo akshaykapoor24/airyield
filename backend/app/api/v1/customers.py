@@ -12,13 +12,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models.customer import Customer
+from app.models.corporate import Corporate
 from app.models.billing import Billing
 from app.models.uploaded_ticket import UploadedTicket
 from app.models.user import User
 from app.models.tenant import Tenant
 from app.schemas.customer import (
     CustomerCreate, CustomerUpdate, CustomerRead, CustomerBulkUploadResult,
-    SoldTicketRead, SoldTicketsResponse, SoldTicketsSummary,
+    CustomerBulkCreate, SoldTicketRead, SoldTicketsResponse, SoldTicketsSummary,
 )
 from app.schemas.billing import BillingCreate, BillingUpdate, BillingRead, BillingListItem
 from app.services.billing_pdf import build_billing_pdf
@@ -35,6 +36,9 @@ router = APIRouter()
 _MARKUP_TYPES = {"percentage", "fixed"}
 _BILLING_TYPES = {"reseller", "agency"}
 _TRUTHY = {"registered", "yes", "true", "y", "1"}
+
+# Ceiling for one bulk-create request — see the same constant in corporates.py.
+_MAX_BULK_ROWS = 2000
 
 
 def _clean_upper(value) -> Optional[str]:
@@ -58,6 +62,52 @@ def _norm_choice(value: Optional[str], allowed: set[str]) -> Optional[str]:
         return None
     v = str(value).strip().lower()
     return v if v in allowed else None
+
+
+async def _resolve_corporate(
+    corporate_id: Optional[int], db: AsyncSession, current_user: User
+) -> Optional[Corporate]:
+    """The corporate this employee belongs to, or None for individual / direct.
+
+    Scoped like everything else here: you cannot attach one of your people to a
+    corporate in someone else's workspace, and a stale id 404s rather than
+    silently filing them under nobody.
+    """
+    if corporate_id is None:
+        return None
+    res = await db.execute(
+        select(Corporate).where(
+            Corporate.id == corporate_id,
+            Corporate.tenant_id == current_user.tenant_id,
+            Corporate.created_by_id == current_user.id,
+        )
+    )
+    corporate = res.scalar_one_or_none()
+    if not corporate:
+        raise HTTPException(status_code=404, detail="Corporate not found")
+    return corporate
+
+
+async def _find_corporate_by_name(
+    name: Optional[str], db: AsyncSession, current_user: User
+) -> Optional[Corporate]:
+    """Match a typed-in company name to a corporate, for the Excel import.
+
+    The template has always had a free-text COMPANY column and people fill it in
+    with the employer's name. When that name IS a corporate on file, the import
+    links to it instead of leaving another unlinked string behind. No match just
+    means the value stays free text.
+    """
+    if not name or not name.strip():
+        return None
+    res = await db.execute(
+        select(Corporate).where(
+            func.lower(Corporate.company) == name.strip().lower(),
+            Corporate.tenant_id == current_user.tenant_id,
+            Corporate.created_by_id == current_user.id,
+        )
+    )
+    return res.scalars().first()
 
 
 async def _get_owned_customer(customer_id: int, db: AsyncSession, current_user: User) -> Customer:
@@ -117,12 +167,16 @@ async def create_customer(
     if not first_name:
         raise HTTPException(status_code=400, detail="first_name is required.")
     gst_registered = bool(payload.gst_registered)
+    corporate = await _resolve_corporate(payload.corporate_id, db, current_user)
     customer = Customer(
         tenant_id=current_user.tenant_id,
         created_by_id=current_user.id,
         first_name=first_name,
         last_name=(payload.last_name or "").strip() or None,
-        company=(payload.company or "").strip() or None,
+        corporate_id=corporate.id if corporate else None,
+        # Linked: the corporate's name wins over anything typed. Unlinked: keep
+        # whatever free text came in, so an individual can still name an employer.
+        company=(corporate.company if corporate else (payload.company or "").strip() or None),
         title=(payload.title or "").strip() or None,
         phone=(payload.phone or "").strip() or None,
         email=(payload.email or "").strip() or None,
@@ -213,13 +267,19 @@ async def bulk_upload_customers(
 
         gst_registered = str(row.get("GST_REGISTERED", "") or "").strip().lower() in _TRUTHY
 
+        # COMPANY names an employer; if that employer is a corporate on file the
+        # row is LINKED to it rather than left as another unlinked string.
+        company_raw = str(row.get("COMPANY", "") or "").strip() or None
+        corporate = await _find_corporate_by_name(company_raw, db, current_user)
+
         try:
             customer = Customer(
                 tenant_id=current_user.tenant_id,
                 created_by_id=current_user.id,
                 first_name=first_name,
                 last_name=str(row.get("LAST_NAME", "") or "").strip() or None,
-                company=str(row.get("COMPANY", "") or "").strip() or None,
+                corporate_id=corporate.id if corporate else None,
+                company=corporate.company if corporate else company_raw,
                 title=str(row.get("TITLE", "") or "").strip() or None,
                 phone=str(row.get("PHONE", "") or "").strip() or None,
                 email=str(row.get("EMAIL", "") or "").strip() or None,
@@ -231,6 +291,73 @@ async def bulk_upload_customers(
                 billing_type=_norm_choice(str(row.get("BILLING_TYPE", "") or ""), _BILLING_TYPES),
             )
             db.add(customer)
+            await db.commit()
+            success += 1
+        except Exception as e:
+            await db.rollback()
+            errors.append(f"{row_prefix}: {e}")
+
+    return CustomerBulkUploadResult(total=total, success=success, failed=total - success, errors=errors)
+
+
+# Rows already mapped and reviewed in the browser wizard. Declared BEFORE
+# /{customer_id} so the path is not swallowed by it.
+@router.post("/bulk-create", response_model=CustomerBulkUploadResult)
+async def bulk_create_customers(
+    payload: CustomerBulkCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Save the reviewed output of the import wizard.
+
+    The wizard has already mapped columns and shown the user every row, so this
+    is not a parser — but it IS the validation boundary, and it re-checks and
+    re-normalises each row exactly as the .xls path does, employer link included.
+    Partial success is the point: one rejected row reports itself and the rest
+    still save.
+    """
+    if not payload.rows:
+        raise HTTPException(status_code=400, detail="No rows to save.")
+    if len(payload.rows) > _MAX_BULK_ROWS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many rows in one import ({len(payload.rows)}). Split the file into batches of {_MAX_BULK_ROWS}.",
+        )
+
+    total = len(payload.rows)
+    success = 0
+    errors: list[str] = []
+
+    for i, row in enumerate(payload.rows):
+        # The wizard sends only the rows it kept, so its sheet-line numbers cannot
+        # be reconciled here. Number what was actually sent.
+        row_prefix = f"Row {i + 1}"
+        first_name = (row.first_name or "").strip()
+        if not first_name:
+            errors.append(f"{row_prefix}: First name is required.")
+            continue
+
+        company_raw = (row.company or "").strip() or None
+        corporate = await _find_corporate_by_name(company_raw, db, current_user)
+        gst_registered = bool(row.gst_registered)
+        try:
+            db.add(Customer(
+                tenant_id=current_user.tenant_id,
+                created_by_id=current_user.id,
+                first_name=first_name,
+                last_name=(row.last_name or "").strip() or None,
+                corporate_id=corporate.id if corporate else None,
+                company=corporate.company if corporate else company_raw,
+                title=(row.title or "").strip() or None,
+                phone=(row.phone or "").strip() or None,
+                email=(row.email or "").strip() or None,
+                gst_registered=gst_registered,
+                gst_no=_clean_upper(row.gst_no) if gst_registered else None,
+                pan_no=_clean_upper(row.pan_no),
+                markup_type=_norm_choice(row.markup_type, _MARKUP_TYPES),
+                markup_value=row.markup_value,
+                billing_type=_norm_choice(row.billing_type, _BILLING_TYPES),
+            ))
             await db.commit()
             success += 1
         except Exception as e:
@@ -288,6 +415,16 @@ async def update_customer(
 ):
     obj = await _get_owned_customer(customer_id, db, current_user)
     data = payload.model_dump(exclude_unset=True)
+    # Linking or unlinking always rewrites `company`, because it mirrors the
+    # corporate's name (models/customer.py). Sending corporate_id: null unlinks
+    # and clears it — an ex-employee is an individual, not one with a leftover
+    # employer — unless the same request supplies free text of its own.
+    if "corporate_id" in data:
+        corporate = await _resolve_corporate(data["corporate_id"], db, current_user)
+        data["company"] = (
+            corporate.company if corporate
+            else ((data.get("company") or "").strip() or None)
+        )
     if "markup_type" in data:
         data["markup_type"] = _norm_choice(data["markup_type"], _MARKUP_TYPES)
     if "billing_type" in data:

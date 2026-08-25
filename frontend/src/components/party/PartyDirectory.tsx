@@ -13,13 +13,20 @@ import PartyModal from "@/components/party/PartyModal";
 import PartyUploadModal from "@/components/party/PartyUploadModal";
 import { PARTY_ICON } from "@/components/party/icons";
 import {
-  PARTY, billingTypeLabel, markupTypeLabel, markupValueLabel, partyName,
+  PARTY, billingTypeLabel, corporateTypeLabel, markupTypeLabel, markupValueLabel, partyName,
   type Party, type PartyKind, type PartyMode,
 } from "@/lib/party";
 
 const PAGE_SIZE = 25;
 
-const COLUMNS = ["NAME", "COMPANY", "TITLE", "EMAIL", "PHONE", "GST NO", "PAN NO", "MARKUP TYPE", "MARKUP VALUE", "BILLING"];
+// The first three columns are what a customer and a corporate disagree about: a
+// customer is a person at a company, a corporate is an organisation of some legal
+// form, somewhere. The rest — contact, tax ids, markup, billing — is shared.
+const LEAD_COLUMNS: Record<PartyKind, string[]> = {
+  customer: ["NAME", "CORPORATE", "TITLE"],
+  corporate: ["CORPORATE NAME", "TYPE", "CITY"],
+};
+const TAIL_COLUMNS = ["EMAIL", "PHONE", "GST NO", "PAN NO", "MARKUP TYPE", "MARKUP VALUE", "BILLING"];
 
 /**
  * The customer / corporate list, in one of two modes:
@@ -33,6 +40,12 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
   const cfg = PARTY[kind];
   const Icon = PARTY_ICON[kind];
   const isMaster = mode === "master";
+  const isCorporate = kind === "corporate";
+  const columns = useMemo(() => [...LEAD_COLUMNS[kind], ...TAIL_COLUMNS], [kind]);
+  // User master calls a customer an Employee; Billing calls them a Customer.
+  // Same rows, two contexts — see PartyConfig in lib/party.ts.
+  const one = isMaster ? cfg.masterSingular : cfg.singular;
+  const many = isMaster ? cfg.masterPlural : cfg.plural;
   const router = useRouter();
 
   const [parties, setParties] = useState<Party[]>([]);
@@ -53,11 +66,11 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
       const { data } = await api.get<Party[]>(`/${cfg.resource}/`, { params: { limit: 500 } });
       setParties(data);
     } catch {
-      setError(`Failed to load ${cfg.plural.toLowerCase()}.`);
+      setError(`Failed to load ${many.toLowerCase()}.`);
     } finally {
       setLoading(false);
     }
-  }, [cfg.resource, cfg.plural]);
+  }, [cfg.resource, many]);
 
   useEffect(() => {
     fetchParties();
@@ -67,7 +80,7 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
     const q = search.trim().toLowerCase();
     if (!q) return parties;
     return parties.filter((p) =>
-      [p.first_name, p.last_name, p.company, p.email, p.phone]
+      [p.first_name, p.last_name, p.company, p.email, p.phone, p.city, p.state]
         .filter(Boolean)
         .some((v) => String(v).toLowerCase().includes(q))
     );
@@ -88,13 +101,13 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
       setDeleteTarget(null);
       fetchParties();
     } catch {
-      alert(`Failed to delete ${cfg.singular.toLowerCase()}.`);
+      alert(`Failed to delete ${one.toLowerCase()}.`);
     } finally {
       setDeleting(false);
     }
   };
 
-  const colCount = COLUMNS.length + (isMaster ? 1 : 0);
+  const colCount = columns.length + (isMaster ? 1 : 0);
 
   const crossLink = isMaster
     ? { href: cfg.billingHref, label: cfg.billingLabel }
@@ -107,14 +120,14 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
       <div className="flex items-start justify-between">
         {isMaster ? (
           <p className="text-xs text-gray-500 self-center">
-            {parties.length} {parties.length === 1 ? cfg.singular.toLowerCase() : cfg.plural.toLowerCase()}
+            {parties.length} {parties.length === 1 ? one.toLowerCase() : many.toLowerCase()}
           </p>
         ) : (
           <div>
             <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-0.5">Billing</p>
             <h1 className="text-xl font-bold text-gray-900">{cfg.billingLabel}</h1>
             <p className="text-xs text-gray-500 mt-0.5">
-              Pick a {cfg.singular.toLowerCase()} to bill. Add or edit {cfg.plural.toLowerCase()} in {cfg.masterLabel}.
+              Pick a {cfg.singular.toLowerCase()} to bill. Add or edit {cfg.masterPlural.toLowerCase()} in {cfg.masterLabel}.
             </p>
           </div>
         )}
@@ -145,7 +158,7 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
                 onClick={() => setShowAdd(true)}
                 className="flex items-center gap-1.5 bg-[#1e3a5f] hover:bg-[#16304f] text-white text-xs font-semibold px-3.5 py-2 rounded-lg shadow-sm"
               >
-                <Plus className="w-3.5 h-3.5" /> Add {cfg.singular}
+                <Plus className="w-3.5 h-3.5" /> Add {one}
               </button>
             </>
           )}
@@ -162,7 +175,11 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
                 setSearch(e.target.value);
                 setPage(1);
               }}
-              placeholder="Search by name, company, email or phone…"
+              placeholder={
+                isCorporate
+                  ? "Search by name, city, email or phone…"
+                  : "Search by name, company, email or phone…"
+              }
               className="w-full pl-8 pr-3 py-1.5 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-1 focus:ring-[#1e3a5f]/40 bg-gray-50"
             />
           </div>
@@ -175,7 +192,7 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
           <table className="w-full">
             <thead>
               <tr style={{ background: "#1e3a5f" }}>
-                {[...COLUMNS, ...(isMaster ? ["ACTIONS"] : [])].map((h) => (
+                {[...columns, ...(isMaster ? ["ACTIONS"] : [])].map((h) => (
                   <th key={h} className="px-3 py-2.5 text-left text-[10px] font-semibold text-white uppercase tracking-wider whitespace-nowrap">
                     {h}
                   </th>
@@ -186,7 +203,7 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
               {loading ? (
                 <tr>
                   <td colSpan={colCount} className="px-4 py-12 text-center text-xs text-gray-400">
-                    <RefreshCw className="w-4 h-4 animate-spin mx-auto mb-2 text-gray-300" /> Loading {cfg.plural.toLowerCase()}…
+                    <RefreshCw className="w-4 h-4 animate-spin mx-auto mb-2 text-gray-300" /> Loading {many.toLowerCase()}…
                   </td>
                 </tr>
               ) : pageItems.length === 0 ? (
@@ -196,15 +213,15 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
                       <div className="w-14 h-14 bg-gray-50 rounded-full flex items-center justify-center mb-3">
                         <Icon className="w-7 h-7 text-gray-300" />
                       </div>
-                      <p className="text-sm font-medium text-gray-600">No {cfg.plural.toLowerCase()} yet</p>
+                      <p className="text-sm font-medium text-gray-600">No {many.toLowerCase()} yet</p>
                       {isMaster ? (
                         <>
                           <p className="text-xs text-gray-400 mt-1 mb-4">
-                            Add a {cfg.singular.toLowerCase()} manually or import from Excel.
+                            Add a {one.toLowerCase()} manually or import from Excel.
                           </p>
                           <div className="flex gap-2">
                             <button onClick={() => setShowAdd(true)} className="flex items-center gap-1.5 bg-[#1e3a5f] hover:bg-[#16304f] text-white text-xs font-semibold px-3.5 py-2 rounded-lg">
-                              <Plus className="w-3.5 h-3.5" /> Add {cfg.singular}
+                              <Plus className="w-3.5 h-3.5" /> Add {one}
                             </button>
                             <button onClick={() => setShowUpload(true)} className="flex items-center gap-1.5 bg-white border border-gray-200 text-gray-700 text-xs font-semibold px-3.5 py-2 rounded-lg hover:bg-gray-50">
                               <Upload className="w-3.5 h-3.5" /> Upload Excel
@@ -214,7 +231,7 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
                       ) : (
                         <>
                           <p className="text-xs text-gray-400 mt-1 mb-4">
-                            {cfg.plural} are added in {cfg.masterLabel}.
+                            {cfg.masterPlural} are added in {cfg.masterLabel}.
                           </p>
                           <Link href={cfg.masterHref} className="flex items-center gap-1.5 bg-[#1e3a5f] hover:bg-[#16304f] text-white text-xs font-semibold px-3.5 py-2 rounded-lg">
                             Go to {cfg.masterLabel} <ArrowRight className="w-3.5 h-3.5" />
@@ -237,8 +254,24 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
                         {!isMaster && <ChevronRight className="w-3 h-3 text-gray-300 group-hover:text-[#1e3a5f]" />}
                       </div>
                     </td>
-                    <td className="px-3 py-2 text-[11px] text-gray-600">{p.company ?? "—"}</td>
-                    <td className="px-3 py-2 text-[11px] text-gray-500">{p.title ?? "—"}</td>
+                    {isCorporate ? (
+                      <>
+                        <td className="px-3 py-2 text-[11px] text-gray-600">{corporateTypeLabel(p.corporate_type)}</td>
+                        <td className="px-3 py-2 text-[11px] text-gray-500">{p.city ?? "—"}</td>
+                      </>
+                    ) : (
+                      <>
+                        <td className="px-3 py-2 text-[11px] text-gray-600">
+                          {p.company ? (
+                            p.company
+                          ) : (
+                            // No employer is a real answer here, not missing data.
+                            <span className="text-gray-400">Individual / Direct</span>
+                          )}
+                        </td>
+                        <td className="px-3 py-2 text-[11px] text-gray-500">{p.title ?? "—"}</td>
+                      </>
+                    )}
                     <td className="px-3 py-2 text-[11px] text-gray-500">{p.email ?? "—"}</td>
                     <td className="px-3 py-2 text-[11px] text-gray-500">{p.phone ?? "—"}</td>
                     <td className="px-3 py-2 text-[11px] font-mono text-gray-600">
@@ -298,7 +331,7 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
                 <div className="w-8 h-8 rounded-lg bg-red-50 flex items-center justify-center">
                   <AlertTriangle className="w-4 h-4 text-red-500" />
                 </div>
-                <h2 className="text-sm font-bold text-gray-900">Delete {cfg.singular}</h2>
+                <h2 className="text-sm font-bold text-gray-900">Delete {one}</h2>
               </div>
               <button onClick={() => setDeleteTarget(null)} className="p-1.5 hover:bg-gray-100 rounded-lg">
                 <X className="w-4 h-4 text-gray-500" />
@@ -308,7 +341,7 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
               <p className="text-sm text-gray-600">
                 Are you sure you want to delete{" "}
                 <span className="font-semibold text-gray-900">{partyName(deleteTarget)}</span>? This action cannot be
-                undone, and any saved billings for this {cfg.singular.toLowerCase()} will be deleted with it.
+                undone, and any saved billings for this {one.toLowerCase()} will be deleted with it.
               </p>
             </div>
             <div className="px-6 pb-5 flex gap-3">

@@ -7,6 +7,12 @@
 
 import { Building, Building2, Contact, type LucideIcon } from "lucide-react";
 
+// NOTE ON THE FIRST TAB'S NAME. The table behind it is `customers` and the API
+// segment is /customers/ — only the SURFACE is "Employee Master", because what a
+// user maintains here is people, each either an employee of a corporate or an
+// individual. Billing still calls them customers (Billing → Customer Billing),
+// so the two names coexist by design; see lib/party.ts.
+
 export type UserMasterTab = {
   slug: string;
   label: string;
@@ -16,10 +22,10 @@ export type UserMasterTab = {
 
 export const USER_MASTER_NAV: UserMasterTab[] = [
   {
-    slug: "customer-master",
-    label: "Customer Master",
+    slug: "employee-master",
+    label: "Employee Master",
     icon: Contact,
-    blurb: "The customers you work with. Add, edit and import them here, then bill them from Customer Billing.",
+    blurb: "The people you sell tickets to. Link each one to the corporate they work for, or mark them individual / direct.",
   },
   {
     slug: "agency-master",

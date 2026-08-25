@@ -2,7 +2,7 @@
 
 // Billing → Customer Billing. A picker: search the customers you already have
 // and click one to bill it. Adding / editing / importing customers lives in
-// User master → Customer Master (/user-master/customer-master).
+// User master → Employee Master (/user-master/employee-master).
 
 import PartyDirectory from "@/components/party/PartyDirectory";
 

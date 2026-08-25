@@ -7,7 +7,7 @@ import { ArrowLeft, RefreshCw, Building, Ticket, FileText, Download, Trash2, Sav
 import api from "@/lib/api";
 // Editing a corporate lives in Corporate Master (/user-master/corporate-master);
 // this page is the billing workspace and reads the record.
-import { type Party as Corporate } from "@/lib/party";
+import { corporateTypeLabel, partyAddress, partyName, type Party as Corporate } from "@/lib/party";
 import { INCENTIVE_TYPE_COLS } from "@/lib/incentives";
 
 type SoldTicket = {
@@ -405,9 +405,11 @@ export default function CorporateDetailPage() {
           <div>
             <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-0.5">Corporate Billing</p>
             <h1 className="text-xl font-bold text-gray-900">
-              {corporate ? `${corporate.first_name} ${corporate.last_name ?? ""}`.trim() : "Corporate"}
+              {corporate ? partyName(corporate) : "Corporate"}
             </h1>
-            {corporate?.company && <p className="text-xs text-gray-500 mt-0.5">{corporate.company}</p>}
+            {corporate?.corporate_type && (
+              <p className="text-xs text-gray-500 mt-0.5">{corporateTypeLabel(corporate.corporate_type)}</p>
+            )}
           </div>
         </div>
         {corporate && (
@@ -450,12 +452,15 @@ export default function CorporateDetailPage() {
       ) : !corporate ? null : tab === "Corporate Details" ? (
         <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-6">
           <div className="grid grid-cols-2 md:grid-cols-3 gap-5">
-            <DetailRow label="First Name" value={corporate.first_name} />
-            <DetailRow label="Last Name" value={corporate.last_name} />
-            <DetailRow label="Company" value={corporate.company} />
-            <DetailRow label="Title" value={corporate.title} />
+            <DetailRow label="Corporate Name" value={corporate.company} />
+            <DetailRow label="Corporate Type" value={corporate.corporate_type ? corporateTypeLabel(corporate.corporate_type) : "—"} />
             <DetailRow label="Phone / Contact" value={corporate.phone} />
             <DetailRow label="Email" value={corporate.email} />
+            <DetailRow label="Address" value={partyAddress(corporate) || "—"} />
+            <DetailRow label="City" value={corporate.city} />
+            <DetailRow label="State" value={corporate.state} />
+            <DetailRow label="Pincode" value={corporate.pincode} />
+            <DetailRow label="Country" value={corporate.country} />
             <DetailRow label="GST Registration" value={corporate.gst_registered ? "Registered" : "Unregistered"} />
             <DetailRow label="GST No" value={corporate.gst_registered ? corporate.gst_no : "—"} />
             <DetailRow label="PAN No" value={corporate.pan_no} />
@@ -555,7 +560,7 @@ export default function CorporateDetailPage() {
               <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
                 <div className="px-4 py-3 border-b border-gray-100">
                   <p className="text-xs font-semibold text-gray-700">
-                    Tickets by {dateField === "travel" ? "travel" : "issue"} date {dateFrom} → {dateTo} for {corporate.first_name} {corporate.last_name ?? ""}
+                    Tickets by {dateField === "travel" ? "travel" : "issue"} date {dateFrom} → {dateTo} for {partyName(corporate)}
                   </p>
                   <p className="text-[10px] text-gray-400 mt-0.5">
                     Markup: {markupLabel(corporate)}

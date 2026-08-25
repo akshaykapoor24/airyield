@@ -15,7 +15,7 @@ import Link from "next/link";
 import { AlertCircle } from "lucide-react";
 import api from "@/lib/api";
 import { agencyLabel, type AgencyRow } from "@/lib/counterparty";
-import { partyName, type Party } from "@/lib/party";
+import { corporateLabel, type Party } from "@/lib/party";
 import { SearchSelectField, MultiSearchSelectField } from "@/components/deals/IncentiveInclExclShared";
 import type { DealScopeType } from "@/lib/dealScope";
 
@@ -194,11 +194,6 @@ export default function OutgoingScopeFields({
       )}
     </>
   );
-}
-
-function corporateLabel(c: Party): string {
-  const name = partyName(c);
-  return c.company ? `${name} — ${c.company}` : name;
 }
 
 function EmptyMaster({ what, href, label }: { what: string; href: string; label: string }) {

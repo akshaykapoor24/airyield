@@ -9,7 +9,7 @@
 // that instead, and the answer is what the commission run prices against.
 //
 // "Direct Customer" deliberately does not require picking anyone: a walk-in with
-// no record in Customer Master is still neither an agency nor a corporate, and
+// no record in Employee Master is still neither an agency nor a corporate, and
 // that alone is enough to match a common deal.
 
 import { useEffect, useState } from "react";
@@ -17,7 +17,7 @@ import Link from "next/link";
 import { Calendar, CheckCircle, FileText, Lock, Tag, Users } from "lucide-react";
 import api from "@/lib/api";
 import { agencyLabel, type AgencyRow } from "@/lib/counterparty";
-import { partyName, type Party } from "@/lib/party";
+import { corporateLabel, partyName, type Party } from "@/lib/party";
 import { AgencyDropdown } from "@/components/tickets/StatementFormPanel";
 import {
   CUSTOMER_TYPES, CUSTOMER_TYPE_MASTER, isTagComplete,
@@ -74,7 +74,7 @@ export default function CustomerPartyPanel({
   // once per branch AND once per channel, so a bare name shows duplicate options.
   const partyOptions =
     tag.customerType === "agency"    ? agencies.map(agencyLabel)
-  : tag.customerType === "corporate" ? corporates.map(corpLabel)
+  : tag.customerType === "corporate" ? corporates.map(corporateLabel)
   : tag.customerType === "direct"    ? customers.map(partyName)
   : [];
 
@@ -83,7 +83,7 @@ export default function CustomerPartyPanel({
       const a = agencies.find(x => agencyLabel(x) === label);
       setTag({ ...tag, agencyId: a?.id ?? null, partyName: a?.name ?? label });
     } else if (tag.customerType === "corporate") {
-      const c = corporates.find(x => corpLabel(x) === label);
+      const c = corporates.find(x => corporateLabel(x) === label);
       setTag({ ...tag, corporateId: c?.id ?? null, partyName: c ? corpName(c) : label });
     } else {
       const c = customers.find(x => partyName(x) === label);
@@ -95,7 +95,7 @@ export default function CustomerPartyPanel({
     tag.customerType === "agency"
       ? (agencies.find(a => a.id === tag.agencyId) ? agencyLabel(agencies.find(a => a.id === tag.agencyId)!) : "")
   : tag.customerType === "corporate"
-      ? (corporates.find(c => c.id === tag.corporateId) ? corpLabel(corporates.find(c => c.id === tag.corporateId)!) : "")
+      ? (corporates.find(c => c.id === tag.corporateId) ? corporateLabel(corporates.find(c => c.id === tag.corporateId)!) : "")
   : tag.customerType === "direct"
       ? (customers.find(c => c.id === tag.customerId) ? partyName(customers.find(c => c.id === tag.customerId)!) : tag.partyName)
       : "";
@@ -233,12 +233,9 @@ export default function CustomerPartyPanel({
   );
 }
 
+/** The name a corporate is FILED under — its own, never a contact's. */
 function corpName(c: Party): string {
   return (c.company || "").trim() || partyName(c);
-}
-function corpLabel(c: Party): string {
-  const n = partyName(c);
-  return c.company ? `${c.company} — ${n}` : n;
 }
 function labelFor(t: CustomerType | null): string {
   return t === "agency" ? "B2B" : t === "corporate" ? "Corporate" : "Direct";
