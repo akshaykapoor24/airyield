@@ -196,6 +196,71 @@ export function corporateLabel(p: Party): string {
   return org || person || "—";
 }
 
+// ── What an employee inherits from their corporate ───────────────────────────
+
+/**
+ * The fields an employee picks up from the corporate they are attached to.
+ *
+ * These are terms of the relationship with the employer, not facts about the
+ * person: the markup and billing type were agreed with the corporate, and when
+ * the corporate is the party being invoiced, the GSTIN, PAN and billing contact
+ * on that invoice are the corporate's too. Retyping them per employee is how
+ * fifty people under one company end up on three different markups.
+ *
+ * INHERITED IS A DEFAULT, NOT A BINDING. Each value is copied into the
+ * employee's own columns and can be edited straight after; nothing re-reads the
+ * corporate later, so changing a corporate's markup does NOT move the employees
+ * already on file. That is deliberate — a per-employee override has to survive
+ * an edit to the parent, or it is not an override. (`company` is the exception
+ * and really is kept in sync; see models/customer.py for why.)
+ */
+export const INHERITED_FIELDS = [
+  "phone", "email", "markup_type", "markup_value",
+  "billing_type", "gst_registered", "gst_no", "pan_no",
+] as const;
+
+export type InheritedField = (typeof INHERITED_FIELDS)[number];
+
+/** Form values are all strings; GST Registration's empty state is "false", not "". */
+export function isBlankInherited(key: InheritedField, value: string): boolean {
+  return key === "gst_registered" ? value !== "true" : value.trim() === "";
+}
+
+/**
+ * Re-seed the inherited fields after the user picks a different employer.
+ *
+ * A field is overwritten only when it is still blank, or when it is still
+ * holding the LAST corporate's value (`held`) — anything the user typed is
+ * theirs and survives. Picking Individual / Direct (corporate `null`) clears
+ * what was inherited and leaves everything else alone.
+ *
+ * Returns the new values and the new held-set; nothing is mutated.
+ */
+export function seedFromCorporate(
+  current: Record<InheritedField, string>,
+  held: ReadonlySet<string>,
+  corporate: Party | null,
+): { values: Record<InheritedField, string>; held: Set<InheritedField> } {
+  const source: Record<InheritedField, string> = {
+    phone: corporate?.phone ?? "",
+    email: corporate?.email ?? "",
+    markup_type: corporate?.markup_type ?? "",
+    markup_value: corporate?.markup_value != null ? String(corporate.markup_value) : "",
+    billing_type: corporate?.billing_type ?? "",
+    gst_registered: corporate?.gst_registered ? "true" : "false",
+    gst_no: corporate?.gst_no ?? "",
+    pan_no: corporate?.pan_no ?? "",
+  };
+  const values = { ...current };
+  const nextHeld = new Set<InheritedField>();
+  for (const key of INHERITED_FIELDS) {
+    if (!held.has(key) && !isBlankInherited(key, current[key])) continue;   // theirs, not ours
+    values[key] = source[key];
+    if (corporate) nextHeld.add(key);
+  }
+  return { values, held: nextHeld };
+}
+
 /** "12 MG Road, Mumbai, Maharashtra - 400069, India" — blanks dropped. */
 export function partyAddress(p: Party): string {
   const locality = [p.city, p.state].filter(Boolean).join(", ");
