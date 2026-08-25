@@ -1,7 +1,7 @@
 "use client";
 
 // Customer Directory — every counterparty we sell to, in one table:
-// direct customers (Customer Master), B2B agencies (Agency Master) and
+// direct customers (Employee Master), B2B agencies (Agency Master) and
 // corporates (Corporate Master).
 //
 // Four fetches, merged on the client. That is the repo's convention at these

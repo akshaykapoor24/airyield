@@ -75,6 +75,16 @@ def build_billing_pdf(billing, customer, agency: dict | None = None) -> io.Bytes
         to_cell.append(Paragraph(cust_contact, body))
     if customer.title:
         to_cell.append(Paragraph(customer.title, body))
+    # Corporates carry a registered address; customers have no address columns,
+    # hence getattr. Street on its own line, then "City, State - Pincode".
+    if getattr(customer, "address", None):
+        to_cell.append(Paragraph(str(customer.address).replace("\n", "<br/>"), body))
+    _locality = ", ".join(x for x in (getattr(customer, "city", None), getattr(customer, "state", None)) if x)
+    _pin = getattr(customer, "pincode", None)
+    if _locality or _pin:
+        to_cell.append(Paragraph(f"{_locality} - {_pin}" if _locality and _pin else (_locality or _pin), body))
+    if getattr(customer, "country", None):
+        to_cell.append(Paragraph(str(customer.country), body))
     if customer.email:
         to_cell.append(Paragraph(customer.email, body))
     if customer.phone:

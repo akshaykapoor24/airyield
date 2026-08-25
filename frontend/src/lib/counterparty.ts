@@ -33,8 +33,8 @@ export const COUNTERPARTY: Record<CounterpartyKind, {
     label: "Direct",
     plural: "Direct customers",
     badge: "bg-emerald-50 text-emerald-700 border-emerald-200",
-    masterHref: "/user-master/customer-master",
-    masterLabel: "Customer Master",
+    masterHref: "/user-master/employee-master",
+    masterLabel: "Employee Master",
   },
   agency: {
     label: "Agency",

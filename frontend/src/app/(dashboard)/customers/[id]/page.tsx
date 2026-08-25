@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { ArrowLeft, Edit2, RefreshCw, Contact, Ticket, FileText, Download, Trash2, Save, X, Eye } from "lucide-react";
 import api from "@/lib/api";
-// Editing a customer lives in Customer Master (/user-master/customer-master);
+// Editing a customer lives in Employee Master (/user-master/employee-master);
 // this page is the billing workspace and reads the record.
 import { type Party as Customer } from "@/lib/party";
 import { INCENTIVE_TYPE_COLS } from "@/lib/incentives";
@@ -418,10 +418,10 @@ export default function CustomerDetailPage() {
         </div>
         {customer && (
           <Link
-            href="/user-master/customer-master"
+            href="/user-master/employee-master"
             className="flex items-center gap-1.5 bg-white border border-gray-200 text-gray-700 px-3.5 py-2 rounded-lg text-xs font-semibold hover:bg-gray-50"
           >
-            <Edit2 className="w-3.5 h-3.5" /> Edit in Customer Master
+            <Edit2 className="w-3.5 h-3.5" /> Edit in Employee Master
           </Link>
         )}
       </div>

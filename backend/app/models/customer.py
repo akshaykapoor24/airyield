@@ -5,10 +5,23 @@ from app.database import Base
 
 
 class Customer(Base):
-    """A customer maintained privately by an agency user ("My Customers").
+    """A traveller maintained privately by an agency user — "Employee Master".
 
     Scoped per user: queries always filter by tenant_id + created_by_id.
     Markup config (type/value) is applied to the customer's sold tickets.
+
+    WHO THEY WORK FOR. `corporate_id` is the link to Corporate Master: set, this
+    person is an employee of that corporate and their tickets are what Corporate
+    Billing bills; NULL, they are an individual / direct customer billed in their
+    own right. Nullable is the meaningful state, not a missing one.
+
+    `company` IS A MIRROR of the linked corporate's name, not an independent
+    field, and the API writes it on every link/unlink (api/v1/customers.py) and
+    re-writes it when a corporate is renamed (api/v1/corporates.py). It exists
+    because the billing PDF, the counterparty directory, the search filter and
+    the statement panels all read a party's company as a STRING and none of them
+    can join; keeping it in step is cheaper than teaching all of them the join.
+    A row with a `company` but no `corporate_id` is a pre-link free-text value.
     """
     __tablename__ = "customers"
 
@@ -18,7 +31,9 @@ class Customer(Base):
 
     first_name:    Mapped[str]        = mapped_column(String(200), nullable=False)
     last_name:     Mapped[str | None] = mapped_column(String(200), nullable=True)
-    company:       Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Deleting a corporate does not delete its people — they become individuals.
+    corporate_id:  Mapped[int | None] = mapped_column(Integer, ForeignKey("corporates.id", ondelete="SET NULL"), nullable=True, index=True)
+    company:       Mapped[str | None] = mapped_column(String(255), nullable=True)   # mirror of corporates.company — see docstring
     title:         Mapped[str | None] = mapped_column(String(100), nullable=True)
     phone:         Mapped[str | None] = mapped_column(String(50),  nullable=True)
     email:         Mapped[str | None] = mapped_column(String(255), nullable=True)

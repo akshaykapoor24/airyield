@@ -5,6 +5,7 @@ sold tickets (matched by passenger name) over a date range with markup/GST, and
 bill them. Billings are stored in the shared `billings` table with `corporate_id`
 set. All rows are scoped per user (tenant_id + created_by_id).
 """
+import re
 from datetime import date
 from io import BytesIO
 from typing import Optional
@@ -19,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models.corporate import Corporate
+from app.models.customer import Customer
 from app.models.billing import Billing
 from app.models.deal import Deal
 from app.models.uploaded_ticket import UploadedTicket
@@ -26,7 +28,7 @@ from app.models.user import User
 from app.models.tenant import Tenant
 from app.schemas.corporate import (
     CorporateCreate, CorporateUpdate, CorporateRead, CorporateBulkUploadResult,
-    CorporateSoldTicketsResponse,
+    CorporateBulkCreate, CorporateSoldTicketsResponse,
 )
 from app.schemas.customer import SoldTicketRead, SoldTicketsSummary
 from app.schemas.billing import BillingCreate, BillingUpdate, BillingRead, BillingListItem
@@ -44,6 +46,60 @@ router = APIRouter()
 _MARKUP_TYPES = {"percentage", "fixed"}
 _BILLING_TYPES = {"reseller", "agency"}
 _TRUTHY = {"registered", "yes", "true", "y", "1"}
+
+# Ceiling for one bulk-create request. The wizard commits per row, so a runaway
+# paste is a long transaction loop rather than a rejected payload without it.
+_MAX_BULK_ROWS = 2000
+
+# Legal form of the corporate entity. Stored as these slugs; the labels the user
+# picks from live in frontend/src/lib/party.ts (CORPORATE_TYPES) — keep the two in step.
+_CORPORATE_TYPES = {
+    "proprietorship", "partnership", "llp", "private_limited", "public_limited",
+    "opc", "huf", "trust", "society", "government", "other",
+}
+
+# Excel is typed by hand, so the bulk upload accepts the way people actually write
+# these ("Pvt Ltd", "Partnership Firm") — and the full dropdown labels too, since
+# the obvious way to fill the column is to copy one out of the form.
+_CORPORATE_TYPE_ALIASES = {
+    "sole_proprietorship": "proprietorship", "proprietary_firm": "proprietorship",
+    "proprietor": "proprietorship", "proprietary": "proprietorship",
+    "proprietorship_proprietary_firm": "proprietorship",
+    "partnership_firm": "partnership",
+    "limited_liability_partnership": "llp",
+    "llp_limited_liability_partnership": "llp",
+    "pvt_ltd": "private_limited", "private_ltd": "private_limited",
+    "private_limited_company": "private_limited",
+    "public_ltd": "public_limited", "public_limited_company": "public_limited",
+    "one_person_company": "opc", "one_person_company_opc": "opc",
+    "hindu_undivided_family": "huf", "huf_hindu_undivided_family": "huf",
+    "ngo": "society", "society_ngo": "society",
+    "psu": "government", "government_psu": "government", "govt": "government",
+}
+
+
+def _norm_corporate_type(value) -> Optional[str]:
+    """'Pvt. Ltd' / 'Society / NGO' / 'private_limited' → the stored slug, else None."""
+    if not value:
+        return None
+    v = re.sub(r"[^a-z0-9]+", "_", str(value).strip().lower()).strip("_")
+    v = _CORPORATE_TYPE_ALIASES.get(v, v)
+    return v if v in _CORPORATE_TYPES else None
+
+
+def _cell(row, column: str) -> Optional[str]:
+    """One trimmed string out of an uploaded row, or None.
+
+    `pd.read_excel(dtype=str)` gives a BLANK cell as NaN, not "" — and NaN is
+    truthy, so the obvious `str(row.get(c, "") or "")` stores the literal "nan".
+    Most of these columns are optional and usually empty, so that has to be
+    caught here rather than at every call site.
+    """
+    value = row.get(column)
+    if value is None or value != value:      # NaN != NaN
+        return None
+    v = str(value).strip()
+    return v or None
 
 
 def _clean_upper(value) -> Optional[str]:
@@ -106,12 +162,14 @@ async def list_corporates(
     if search and search.strip():
         term = f"%{search.strip()}%"
         q = q.where(or_(
-            Corporate.first_name.ilike(term),
-            Corporate.last_name.ilike(term),
             Corporate.company.ilike(term),
             Corporate.email.ilike(term),
+            Corporate.city.ilike(term),
+            # Pre-split rows may still carry the contact's name and no company.
+            Corporate.first_name.ilike(term),
+            Corporate.last_name.ilike(term),
         ))
-    q = q.order_by(Corporate.first_name, Corporate.last_name).offset(skip).limit(limit)
+    q = q.order_by(Corporate.company, Corporate.first_name).offset(skip).limit(limit)
     result = await db.execute(q)
     return result.scalars().all()
 
@@ -122,19 +180,22 @@ async def create_corporate(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    first_name = (payload.first_name or "").strip()
-    if not first_name:
-        raise HTTPException(status_code=400, detail="first_name is required.")
+    company = (payload.company or "").strip()
+    if not company:
+        raise HTTPException(status_code=400, detail="Corporate name is required.")
     gst_registered = bool(payload.gst_registered)
     corporate = Corporate(
         tenant_id=current_user.tenant_id,
         created_by_id=current_user.id,
-        first_name=first_name,
-        last_name=(payload.last_name or "").strip() or None,
-        company=(payload.company or "").strip() or None,
-        title=(payload.title or "").strip() or None,
+        company=company,
+        corporate_type=_norm_corporate_type(payload.corporate_type),
         phone=(payload.phone or "").strip() or None,
         email=(payload.email or "").strip() or None,
+        address=(payload.address or "").strip() or None,
+        city=(payload.city or "").strip() or None,
+        state=(payload.state or "").strip() or None,
+        pincode=(payload.pincode or "").strip() or None,
+        country=(payload.country or "").strip() or None,
         gst_registered=gst_registered,
         gst_no=_clean_upper(payload.gst_no) if gst_registered else None,
         pan_no=_clean_upper(payload.pan_no),
@@ -156,7 +217,7 @@ async def bulk_upload_corporates(
 ):
     content = await file.read()
     filename = (file.filename or "").lower()
-    required = {"FIRST_NAME"}
+    required = {"COMPANY"}
 
     def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         df.columns = [
@@ -189,9 +250,9 @@ async def bulk_upload_corporates(
 
         if df is None:
             detail = (
-                "Missing required column: FIRST_NAME. Check that the header is in the first few rows."
+                "Missing required column: COMPANY. Check that the header is in the first few rows."
                 if last_missing is None else
-                f"Missing required columns: {sorted(last_missing)}. Required: FIRST_NAME"
+                f"Missing required columns: {sorted(last_missing)}. Required: COMPANY"
             )
             raise HTTPException(status_code=400, detail=detail)
     except Exception as e:
@@ -206,12 +267,12 @@ async def bulk_upload_corporates(
     for i, row in df.iterrows():
         row_num = i + used_header_row + 2
         row_prefix = f"Row {row_num}"
-        first_name = str(row.get("FIRST_NAME", "") or "").strip()
-        if not first_name:
-            errors.append(f"{row_prefix}: FIRST_NAME is required.")
+        company = _cell(row, "COMPANY")
+        if not company:
+            errors.append(f"{row_prefix}: COMPANY is required.")
             continue
 
-        markup_value_raw = str(row.get("MARKUP_VALUE", "") or "").strip()
+        markup_value_raw = _cell(row, "MARKUP_VALUE")
         markup_value: float | None = None
         if markup_value_raw:
             try:
@@ -220,26 +281,96 @@ async def bulk_upload_corporates(
                 errors.append(f"{row_prefix}: MARKUP_VALUE '{markup_value_raw}' is not a number.")
                 continue
 
-        gst_registered = str(row.get("GST_REGISTERED", "") or "").strip().lower() in _TRUTHY
+        gst_registered = (_cell(row, "GST_REGISTERED") or "").lower() in _TRUTHY
 
         try:
             corporate = Corporate(
                 tenant_id=current_user.tenant_id,
                 created_by_id=current_user.id,
-                first_name=first_name,
-                last_name=str(row.get("LAST_NAME", "") or "").strip() or None,
-                company=str(row.get("COMPANY", "") or "").strip() or None,
-                title=str(row.get("TITLE", "") or "").strip() or None,
-                phone=str(row.get("PHONE", "") or "").strip() or None,
-                email=str(row.get("EMAIL", "") or "").strip() or None,
+                company=company,
+                corporate_type=_norm_corporate_type(_cell(row, "CORPORATE_TYPE")),
+                phone=_cell(row, "PHONE"),
+                email=_cell(row, "EMAIL"),
+                address=_cell(row, "ADDRESS"),
+                city=_cell(row, "CITY"),
+                state=_cell(row, "STATE"),
+                pincode=_cell(row, "PINCODE"),
+                country=_cell(row, "COUNTRY"),
                 gst_registered=gst_registered,
-                gst_no=_clean_upper(row.get("GST_NO")) if gst_registered else None,
-                pan_no=_clean_upper(row.get("PAN_NO")),
-                markup_type=_norm_choice(str(row.get("MARKUP_TYPE", "") or ""), _MARKUP_TYPES),
+                gst_no=_clean_upper(_cell(row, "GST_NO")) if gst_registered else None,
+                pan_no=_clean_upper(_cell(row, "PAN_NO")),
+                markup_type=_norm_choice(_cell(row, "MARKUP_TYPE"), _MARKUP_TYPES),
                 markup_value=markup_value,
-                billing_type=_norm_choice(str(row.get("BILLING_TYPE", "") or ""), _BILLING_TYPES),
+                billing_type=_norm_choice(_cell(row, "BILLING_TYPE"), _BILLING_TYPES),
             )
             db.add(corporate)
+            await db.commit()
+            success += 1
+        except Exception as e:
+            await db.rollback()
+            errors.append(f"{row_prefix}: {e}")
+
+    return CorporateBulkUploadResult(total=total, success=success, failed=total - success, errors=errors)
+
+
+# Rows already mapped and reviewed in the browser wizard. Declared BEFORE
+# /{corporate_id} so the path is not swallowed by it.
+@router.post("/bulk-create", response_model=CorporateBulkUploadResult)
+async def bulk_create_corporates(
+    payload: CorporateBulkCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Save the reviewed output of the import wizard.
+
+    The wizard has already mapped columns and shown the user every row, so this
+    is not a parser — but it IS the validation boundary, and it re-checks and
+    re-normalises each row exactly as the .xls path does. Partial success is the
+    point: one rejected row reports itself and the rest still save.
+    """
+    if not payload.rows:
+        raise HTTPException(status_code=400, detail="No rows to save.")
+    if len(payload.rows) > _MAX_BULK_ROWS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many rows in one import ({len(payload.rows)}). Split the file into batches of {_MAX_BULK_ROWS}.",
+        )
+
+    total = len(payload.rows)
+    success = 0
+    errors: list[str] = []
+
+    for i, row in enumerate(payload.rows):
+        # The wizard labels rows by their line in the sheet, but it only sends the
+        # ones it kept, so the two numberings cannot be reconciled here. Count
+        # what was actually sent and say so.
+        row_prefix = f"Row {i + 1}"
+        company = (row.company or "").strip()
+        if not company:
+            errors.append(f"{row_prefix}: Corporate name is required.")
+            continue
+
+        gst_registered = bool(row.gst_registered)
+        try:
+            db.add(Corporate(
+                tenant_id=current_user.tenant_id,
+                created_by_id=current_user.id,
+                company=company,
+                corporate_type=_norm_corporate_type(row.corporate_type),
+                phone=(row.phone or "").strip() or None,
+                email=(row.email or "").strip() or None,
+                address=(row.address or "").strip() or None,
+                city=(row.city or "").strip() or None,
+                state=(row.state or "").strip() or None,
+                pincode=(row.pincode or "").strip() or None,
+                country=(row.country or "").strip() or None,
+                gst_registered=gst_registered,
+                gst_no=_clean_upper(row.gst_no) if gst_registered else None,
+                pan_no=_clean_upper(row.pan_no),
+                markup_type=_norm_choice(row.markup_type, _MARKUP_TYPES),
+                markup_value=row.markup_value,
+                billing_type=_norm_choice(row.billing_type, _BILLING_TYPES),
+            ))
             await db.commit()
             success += 1
         except Exception as e:
@@ -258,13 +389,18 @@ async def download_corporate_template():
     ws.title = "Corporate Template"
 
     headers = [
-        "FIRST_NAME", "LAST_NAME", "COMPANY", "TITLE", "PHONE", "EMAIL",
+        "COMPANY", "CORPORATE_TYPE", "PHONE", "EMAIL",
+        "ADDRESS", "CITY", "STATE", "PINCODE", "COUNTRY",
         "GST_REGISTERED", "GST_NO", "PAN_NO",
         "MARKUP_TYPE", "MARKUP_VALUE", "BILLING_TYPE",
     ]
     ws.append(headers)
-    ws.append(["John", "Doe", "Acme Pvt Ltd", "Mr", "9876543210", "john@acme.com", "Registered", "27ABCDE1234F1Z5", "ABCDE1234F", "percentage", "10", "reseller"])
-    ws.append(["Jane", "Roe", "Beta Corp", "Ms", "9123456780", "jane@beta.com", "Unregistered", "", "", "fixed", "500", "agency"])
+    ws.append(["Acme Pvt Ltd", "Private Limited", "9876543210", "accounts@acme.com",
+               "12 MG Road, Andheri East", "Mumbai", "Maharashtra", "400069", "India",
+               "Registered", "27ABCDE1234F1Z5", "ABCDE1234F", "percentage", "10", "reseller"])
+    ws.append(["Beta Traders", "Proprietorship", "9123456780", "info@betatraders.in",
+               "Shop 4, Sector 18", "Noida", "Uttar Pradesh", "201301", "India",
+               "Unregistered", "", "", "fixed", "500", "agency"])
 
     bio = BytesIO()
     wb.save(bio)
@@ -295,6 +431,13 @@ async def update_corporate(
 ):
     obj = await _get_owned_corporate(corporate_id, db, current_user)
     data = payload.model_dump(exclude_unset=True)
+    if "company" in data:
+        company = (data["company"] or "").strip()
+        if not company:
+            raise HTTPException(status_code=400, detail="Corporate name is required.")
+        data["company"] = company
+    if "corporate_type" in data:
+        data["corporate_type"] = _norm_corporate_type(data["corporate_type"])
     if "markup_type" in data:
         data["markup_type"] = _norm_choice(data["markup_type"], _MARKUP_TYPES)
     if "billing_type" in data:
@@ -306,8 +449,21 @@ async def update_corporate(
     registered = data.get("gst_registered", obj.gst_registered)
     if not registered:
         data["gst_no"] = None
+    renamed_to = data["company"] if data.get("company") and data["company"] != obj.company else None
     for field, value in data.items():
         setattr(obj, field, value)
+    # customers.company mirrors this name (models/customer.py), so a rename has
+    # to reach the employees or every one of them keeps advertising the old one.
+    if renamed_to:
+        await db.execute(
+            update(Customer)
+            .where(
+                Customer.corporate_id == obj.id,
+                Customer.tenant_id == current_user.tenant_id,
+                Customer.created_by_id == current_user.id,
+            )
+            .values(company=renamed_to)
+        )
     await db.commit()
     await db.refresh(obj)
     return obj
@@ -334,6 +490,19 @@ async def delete_corporate(
                    "Close or re-scope those deals first, or mark the corporate inactive.",
         )
 
+    # customers.corporate_id is ON DELETE SET NULL — its people survive as
+    # individuals. `company` mirrors the name, so it has to go with the link;
+    # left behind it would read as a free-text employer that no longer exists.
+    await db.execute(
+        update(Customer)
+        .where(
+            Customer.corporate_id == obj.id,
+            Customer.tenant_id == current_user.tenant_id,
+            Customer.created_by_id == current_user.id,
+        )
+        .values(company=None)
+    )
+
     await db.delete(obj)
     await db.commit()
 
@@ -349,21 +518,37 @@ async def get_corporate_sold_tickets(
 ):
     corporate = await _get_owned_corporate(corporate_id, db, current_user)
 
-    fn = (corporate.first_name or "").strip().lower()
-    ln = (corporate.last_name or "").strip().lower()
+    # WHOSE TICKETS COUNT AS THIS CORPORATE'S. An organisation is not a passenger,
+    # so the names to match are its EMPLOYEES' — every customer in Employee Master
+    # linked to it (customers.corporate_id).
+    emp_res = await db.execute(
+        select(Customer.first_name, Customer.last_name).where(
+            Customer.corporate_id == corporate.id,
+            Customer.tenant_id == current_user.tenant_id,
+            Customer.created_by_id == current_user.id,
+        )
+    )
+    names = [(f, l) for f, l in emp_res.all()]
+    # Plus the corporate's own contact name, for rows that predate corp_entity_01
+    # and were billed by it before the employee link existed.
+    if corporate.first_name:
+        names.append((corporate.first_name, corporate.last_name))
 
     # Match by passenger first+last name (case-insensitive); also match the
     # combined pax_name (airline statements store the full name in one field).
     conds = []
-    if fn and ln:
-        conds.append(and_(
-            func.lower(UploadedTicket.first_name) == fn,
-            func.lower(UploadedTicket.last_name) == ln,
-        ))
-        conds.append(UploadedTicket.pax_name.ilike(f"%{fn}%{ln}%"))
-    elif fn:
-        conds.append(func.lower(UploadedTicket.first_name) == fn)
-        conds.append(UploadedTicket.pax_name.ilike(f"%{fn}%"))
+    for raw_fn, raw_ln in names:
+        fn = (raw_fn or "").strip().lower()
+        ln = (raw_ln or "").strip().lower()
+        if fn and ln:
+            conds.append(and_(
+                func.lower(UploadedTicket.first_name) == fn,
+                func.lower(UploadedTicket.last_name) == ln,
+            ))
+            conds.append(UploadedTicket.pax_name.ilike(f"%{fn}%{ln}%"))
+        elif fn:
+            conds.append(func.lower(UploadedTicket.first_name) == fn)
+            conds.append(UploadedTicket.pax_name.ilike(f"%{fn}%"))
 
     if not conds:
         tickets: list[UploadedTicket] = []

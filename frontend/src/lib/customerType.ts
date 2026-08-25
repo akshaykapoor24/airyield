@@ -4,14 +4,14 @@
 //
 //   agency     a B2B customer  — an agency onboarded in Agency Master
 //   corporate  a B2E customer  — a company in Corporate Master
-//   direct     anyone else     — a walk-in, optionally in Customer Master
+//   direct     anyone else     — a walk-in, optionally in Employee Master
 //
 // This is the CUSTOMER axis, and it is not the same thing as the statement's
 // `statement_type` (B2B | AIRLINE), which describes the shape of the FILE the
 // rows came from. The customer-side commission run matches an outgoing deal
 // against this; it never looks at statement_type.
 //
-// "direct" needs no id: a walk-in who is not in Customer Master is still not an
+// "direct" needs no id: a walk-in who is not in Employee Master is still not an
 // agency and not a corporate, and that alone is enough to price the ticket.
 
 export type CustomerType = "agency" | "corporate" | "direct";
@@ -37,7 +37,7 @@ export const CUSTOMER_TYPE_BADGE: Record<CustomerType, string> =
 export const CUSTOMER_TYPE_MASTER: Record<CustomerType, { href: string; label: string }> = {
   agency:    { href: "/user-master/agency-master",    label: "Agency Master" },
   corporate: { href: "/user-master/corporate-master", label: "Corporate Master" },
-  direct:    { href: "/user-master/customer-master",  label: "Customer Master" },
+  direct:    { href: "/user-master/employee-master",  label: "Employee Master" },
 };
 
 /** What a statement/ticket sends to the API. */

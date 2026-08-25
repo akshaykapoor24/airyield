@@ -8,7 +8,7 @@ import { useSelectedLayoutSegment } from "next/navigation";
 import { USER_MASTER_NAV } from "@/lib/userMasterNav";
 
 export default function UserMasterLayout({ children }: { children: React.ReactNode }) {
-  // The immediate child segment, e.g. "customer-master".
+  // The immediate child segment, e.g. "employee-master".
   const segment = useSelectedLayoutSegment();
   const active = USER_MASTER_NAV.find((t) => t.slug === segment);
 
