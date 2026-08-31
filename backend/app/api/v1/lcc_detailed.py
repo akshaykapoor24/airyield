@@ -16,13 +16,16 @@ from __future__ import annotations
 import asyncio
 import io
 import uuid
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 import pandas as pd
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import (
+    APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status,
+)
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import and_, column, delete, func, literal, select, update
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -43,6 +46,14 @@ router = APIRouter()
 _MIN_MATCHED_COLUMNS = 3
 _SAMPLE_ROWS = 50
 
+# Drill-in filters arrive as `f.<field>` (and `f.<field>.from` / `.to` for a date range),
+# the same wire protocol the generic statements router uses, so adding one is a spec edit
+# rather than a signature change. Unknown fields are ignored, never rejected — a stale
+# bookmark should degrade, not 400.
+_FILTER_PREFIX = "f."
+# Facet dropdowns past this are unusable anyway; the client falls back to typing.
+_MAX_FACET_VALUES = 200
+
 
 def _bucket() -> str:
     return settings.GCS_BSP_BUCKET_NAME or settings.GCS_TICKETS_BUCKET_NAME
@@ -50,6 +61,123 @@ def _bucket() -> str:
 
 def _scope(model, user: User):
     return (model.tenant_id == user.tenant_id, model.created_by_id == user.id)
+
+
+# ── drill-in filtering ───────────────────────────────────────────────────────
+_FILTER_BY_FIELD: dict[str, dict] = {f["field"]: f for f in spec.FILTERS}
+# Resolved ONCE at import, so a typo in the spec is an AttributeError at startup rather
+# than a 500 in production — and so no request path ever calls getattr on user input.
+# `__segments__` is excluded: it has no column, see _segments_cond.
+_FILTER_COLS = {
+    f["field"]: getattr(LccDetailed, f["field"])
+    for f in spec.FILTERS if f["field"] != spec.SEGMENTS_FILTER_FIELD
+}
+_SUMMARY_COLS = {f["field"]: getattr(LccDetailed, f["field"]) for f in spec.SUMMARY_FIELDS}
+# The date columns are DateTime; departure_date is a real Date. Drives the end-of-day
+# handling in _date_cond, which is the one place this distinction changes the answer.
+_DATE_ONLY_FIELDS = {"departure_date"}
+
+
+def _like(value: str) -> str:
+    """`%value%` with LIKE wildcards escaped, so a literal `_` or `%` searches for itself.
+
+    Payment numbers and promo codes routinely contain underscores, and `_` is LIKE's
+    single-character wildcard — unescaped, the search silently over-matches. Pair with
+    `.ilike(pattern, escape="\\\\")`.
+    """
+    esc = value.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+    return f"%{esc}%"
+
+
+def _as_date(raw: str):
+    """`YYYY-MM-DD` — what <input type="date"> emits — or None if it won't parse."""
+    try:
+        return date.fromisoformat(raw.strip()[:10])
+    except (ValueError, AttributeError):
+        return None
+
+
+def _segments_cond(value: str):
+    """Contains-match over the rendered `route flight_no` of ANY leg in `segments`.
+
+    An EXISTS over jsonb_array_elements rather than casting the whole JSONB to text: the
+    cast matches the object KEYS too, so searching "route" or "leg" would return every
+    row. The string matched here is exactly what _seg_str puts in the Segments cell, so
+    what you type is what you see.
+    """
+    seg = func.jsonb_array_elements(LccDetailed.segments).table_valued(column("value", JSONB))
+    leg = seg.c.value
+    return and_(
+        LccDetailed.segments.isnot(None),
+        select(literal(1)).select_from(seg).where(
+            func.concat_ws(" ", leg["route"].astext, leg["flight_no"].astext)
+            .ilike(_like(value), escape="\\")
+        ).correlate(LccDetailed).exists(),
+    )
+
+
+def _date_cond(field: str, bound: str, value: str):
+    """One end of a date range, or None if the value doesn't parse."""
+    d = _as_date(value)
+    if d is None:
+        return None
+    col = _FILTER_COLS[field]
+    if field in _DATE_ONLY_FIELDS:
+        return col >= d if bound == "from" else col <= d
+    # DateTime column: `<= to` compares against 00:00:00 and would drop everything
+    # transacted later that same day, so the upper bound is the NEXT midnight,
+    # exclusive. Bare comparisons, no ::date cast, so any index still applies.
+    return (col >= datetime.combine(d, datetime.min.time()) if bound == "from"
+            else col < datetime.combine(d + timedelta(days=1), datetime.min.time()))
+
+
+def _filter_conds(request: Request | None) -> list:
+    """Declared `f.<field>` params on the request → SQLAlchemy conditions.
+
+    The field name is only ever a dict key into the spec's allowlist, and the column comes
+    from the pre-resolved _FILTER_COLS. Anything unknown, blank or unparseable is skipped
+    rather than rejected — a stale bookmark should degrade, not 400.
+    """
+    if request is None:
+        return []
+    conds: list = []
+    for key, raw in request.query_params.multi_items():
+        if not key.startswith(_FILTER_PREFIX):
+            continue
+        field, _, bound = key[len(_FILTER_PREFIX):].partition(".")
+        f = _FILTER_BY_FIELD.get(field)
+        value = (raw or "").strip()
+        if not f or not value:
+            continue
+
+        if f["type"] == "daterange":
+            if bound in ("from", "to"):
+                cond = _date_cond(field, bound, value)
+                if cond is not None:
+                    conds.append(cond)
+        elif bound:
+            continue          # `f.name1.from` on a non-daterange filter is malformed
+        elif field == spec.SEGMENTS_FILTER_FIELD:
+            conds.append(_segments_cond(value))
+        elif f["type"] == "select":
+            if f.get("options"):
+                # Statically declared Yes/No over the `international` boolean.
+                b = {"yes": True, "no": False}.get(value.lower())
+                if b is not None:
+                    conds.append(_FILTER_COLS[field].is_(b))
+            else:
+                conds.append(_FILTER_COLS[field] == value)
+        else:
+            conds.append(_FILTER_COLS[field].ilike(_like(value), escape="\\"))
+    return conds
+
+
+def _record_conds(user: User, batch_id: str | None, request: Request | None) -> list:
+    """Scope + batch + whichever declared `f.<field>` filters the request carries."""
+    conds = [*_scope(LccDetailed, user)]
+    if batch_id:
+        conds.append(LccDetailed.batch_id == batch_id)
+    return conds + _filter_conds(request)
 
 
 async def _tenant_airline(db: AsyncSession, user: User, tenant_airline_id: int) -> TenantAirline:
@@ -137,6 +265,11 @@ def _disp(v) -> str:
     if isinstance(v, bool):
         return "Yes" if v else "No"
     return str(v)
+
+
+def _money_str(value) -> str | None:
+    """Serialize a summed Decimal as a string — a float round-trip would lose paise."""
+    return None if value is None else format(value.normalize(), "f")
 
 
 # ── mapping / metadata ───────────────────────────────────────────────────────
@@ -821,19 +954,36 @@ async def send_to_billing(
 
 @router.get("/records")
 async def list_records(
+    request: Request,
     batch_id: str | None = Query(None),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Paginated typed rows + folded Taxes/Segments/SSR display columns."""
-    base = select(LccDetailed).where(*_scope(LccDetailed, current_user))
-    if batch_id:
-        base = base.where(LccDetailed.batch_id == batch_id)
+    """Paginated typed rows + folded Taxes/Segments/SSR display columns.
 
-    total = await db.scalar(select(func.count()).select_from(base.subquery()))
-    q = base.order_by(LccDetailed.id.desc()).limit(limit).offset(offset)
+    Narrowed by the `f.<field>` filters declared in `spec.FILTERS`; `total` and `summary`
+    both cover the whole filtered set, so they stay consistent with what the grid shows.
+    """
+    conds = _record_conds(current_user, batch_id, request)
+
+    # Count, pax and the column totals in one round trip — they all share the same WHERE,
+    # and the summary covers the ENTIRE filtered set, not the visible page. No numeric-cast
+    # guard is needed here (unlike _num() in the JSONB-backed statements router): these are
+    # real NUMERIC(14,2) columns, so SUM() is exact.
+    agg = (await db.execute(
+        select(
+            func.count().label("n"),
+            func.coalesce(func.sum(LccDetailed.pax_count), 0).label("pax"),
+            *[func.sum(_SUMMARY_COLS[f["field"]]).label(f"s_{f['field']}")
+              for f in spec.SUMMARY_FIELDS],
+        ).select_from(LccDetailed).where(*conds)
+    )).one()
+    total = agg.n or 0
+
+    q = (select(LccDetailed).where(*conds)
+         .order_by(LccDetailed.id.desc()).limit(limit).offset(offset))
     rows = (await db.execute(q)).scalars().all()
 
     fmt = ""
@@ -876,7 +1026,59 @@ async def list_records(
         d["id"] = r.id
         out_rows.append(d)
 
-    return {"total": total or 0, "limit": limit, "offset": offset, "columns": columns, "rows": out_rows}
+    return {
+        "total": total, "limit": limit, "offset": offset,
+        "columns": columns, "rows": out_rows,
+        "filters": spec.FILTERS,
+        "summary": {
+            "fields": spec.SUMMARY_FIELDS,
+            # Serialized as strings — a float round-trip would lose paise.
+            "computed": {
+                f["field"]: _money_str(getattr(agg, f"s_{f['field']}")) or "0"
+                for f in spec.SUMMARY_FIELDS
+            },
+            "row_count": total,
+            "pax_count": int(agg.pax or 0),
+        },
+    }
+
+
+@router.get("/records/facets")
+async def record_facets(
+    batch_id: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Distinct values for every facet-backed `select` filter, for the dropdowns.
+
+    Scoped to the batch — the question is "what payment methods are in THIS file" — but
+    deliberately NOT narrowed by the other active filters, so the options don't vanish
+    from under the user as they narrow. One query rather than one per column: the batch
+    is scanned once and every facet aggregated in the same pass.
+
+    Filters that declare static `options` (the `international` boolean) are absent; the
+    client uses their declared options instead.
+    """
+    selects = [f for f in spec.FILTERS if f["type"] == "select" and not f.get("options")]
+    if not selects:
+        return {}
+
+    conds = [*_scope(LccDetailed, current_user)]
+    if batch_id:
+        conds.append(LccDetailed.batch_id == batch_id)
+
+    row = (await db.execute(
+        select(*[func.array_agg(func.distinct(_FILTER_COLS[f["field"]])) for f in selects])
+        .where(*conds)
+    )).one()
+
+    out: dict[str, list[str]] = {}
+    for i, f in enumerate(selects):
+        # array_agg(DISTINCT x) keeps NULL as an element, and an empty batch aggregates
+        # to NULL rather than to an empty array.
+        values = sorted({v for v in (row[i] or []) if v not in (None, "")})
+        out[f["field"]] = values[:_MAX_FACET_VALUES]
+    return out
 
 
 _PREVIEW_ROWS = 2000   # rows converted to xlsx for the Excel Online preview

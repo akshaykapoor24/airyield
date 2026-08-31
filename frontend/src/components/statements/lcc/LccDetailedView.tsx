@@ -1,16 +1,21 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import {
   Upload, RefreshCw, Trash2, Download, Eye, ArrowLeft, AlertTriangle,
   ChevronLeft, ChevronRight, FolderOpen, CheckCircle2, Loader2, Clock, XCircle,
+  X, Search, SlidersHorizontal, ChevronDown, ChevronUp,
 } from "lucide-react";
 import api from "@/lib/api";
+import { inr } from "@/lib/money";
 import toast from "react-hot-toast";
 import LccUploadWizard from "./LccUploadWizard";
 import LccBillingWorklist from "./LccBillingWorklist";
 
 const PAGE = 50;
+const SELECT_CLS = "border border-slate-200 rounded-lg px-2 py-1.5 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-400";
+const TEXT_CLS = "pl-8 pr-3 py-1.5 border border-slate-200 rounded-lg text-xs w-36 bg-white focus:outline-none focus:ring-1 focus:ring-blue-400";
+const DATE_CLS = "border border-slate-200 rounded-md px-1.5 py-1 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-400";
 
 type BatchStatus = "staged" | "pending" | "processing" | "completed" | "failed";
 type Batch = {
@@ -46,6 +51,32 @@ type TenantAirlineOpt = {
   id: number; ref_id: string; airline_name: string | null; airline_code: string | null;
 };
 
+// Declared by the backend spec (services/lcc_detailed_spec.py FILTERS), so adding a
+// filter is a server-side edit and this view needs no change. `primary` filters sit in
+// the always-visible row, the rest behind "More filters". `options` is set only where the
+// values are fixed rather than discovered from the data (the International boolean).
+type FilterSpec = {
+  field: string; label: string;
+  type: "text" | "select" | "daterange";
+  primary?: boolean; options?: string[];
+};
+type Summary = {
+  fields: { field: string; label: string }[];
+  // Strings, not numbers — a float round-trip through JSON would lose paise.
+  computed: Record<string, string>;
+  row_count: number;
+  pax_count: number;
+};
+type RecordsResponse = {
+  total: number; columns: Column[]; rows: Row[];
+  filters?: FilterSpec[]; summary?: Summary;
+};
+
+/** The fvals keys a filter owns — a date range holds two, everything else one. */
+function fkeys(f: FilterSpec): string[] {
+  return f.type === "daterange" ? [`${f.field}.from`, `${f.field}.to`] : [f.field];
+}
+
 function fmtDate(s: string | null): string {
   if (!s) return "—";
   try { return new Date(s).toLocaleString(); } catch { return s; }
@@ -76,6 +107,80 @@ function StatusCell({ b }: { b: Batch }) {
   );
 }
 
+function Stat({ label, value, sub, accent }: { label: string; value: string; sub?: string; accent?: string }) {
+  return (
+    <div className="bg-white border border-slate-200 rounded-xl px-3 py-2.5">
+      <p className="text-[10px] uppercase tracking-wide text-slate-400">{label}</p>
+      <p className={`text-sm font-bold mt-0.5 tabular-nums ${accent ?? "text-slate-800"}`}>{value}</p>
+      {sub && <p className="text-[10px] mt-0.5 text-slate-400">{sub}</p>}
+    </div>
+  );
+}
+
+/**
+ * Totals over the WHOLE filtered set, not the visible page.
+ *
+ * The field order mirrors the identity a reconciler eyeballs — Total ≈ Base Fare + Taxes
+ * + Other Fees + SSR — so a file that doesn't add up shows it without exporting anything.
+ * Unlike the BSP/TGQ slab there is no declared figure to compare against: an LCC export
+ * carries no grand-total line, so these are computed figures only.
+ */
+function TotalsStrip({ summary, filtered }: { summary: Summary; filtered: boolean }) {
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-8 gap-2 mb-3">
+      <Stat label="Rows" value={summary.row_count.toLocaleString("en-IN")} sub={filtered ? "filtered" : undefined} />
+      <Stat label="Pax" value={summary.pax_count.toLocaleString("en-IN")} />
+      {summary.fields.map((f) => {
+        const n = Number(summary.computed[f.field] ?? "0");
+        // Refunds and payment reversals are genuinely negative — that should read as a
+        // refund, not as a typo.
+        return <Stat key={f.field} label={f.label} value={inr(n, 2)}
+          accent={n < 0 ? "text-red-600" : undefined} />;
+      })}
+    </div>
+  );
+}
+
+function FilterControl({ f, fvals, setFvals, facets }: {
+  f: FilterSpec;
+  fvals: Record<string, string>;
+  setFvals: Dispatch<SetStateAction<Record<string, string>>>;
+  facets: Record<string, string[]>;
+}) {
+  // Delete rather than store "", so `hasFilters` and the active-count badge stay honest.
+  const set = (k: string, v: string) =>
+    setFvals((p) => { const n = { ...p }; if (v) n[k] = v; else delete n[k]; return n; });
+
+  if (f.type === "select") {
+    return (
+      <select value={fvals[f.field] ?? ""} className={SELECT_CLS} title={f.label}
+        onChange={(e) => set(f.field, e.target.value)}>
+        <option value="">All {f.label}</option>
+        {(f.options ?? facets[f.field] ?? []).map((v) => <option key={v} value={v}>{v}</option>)}
+      </select>
+    );
+  }
+  if (f.type === "daterange") {
+    return (
+      <div className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2 py-1">
+        <span className="text-[10px] uppercase tracking-wide text-slate-400 whitespace-nowrap">{f.label}</span>
+        <input type="date" className={DATE_CLS} aria-label={`${f.label} from`}
+          value={fvals[`${f.field}.from`] ?? ""} onChange={(e) => set(`${f.field}.from`, e.target.value)} />
+        <span className="text-slate-300 text-xs">→</span>
+        <input type="date" className={DATE_CLS} aria-label={`${f.label} to`}
+          value={fvals[`${f.field}.to`] ?? ""} onChange={(e) => set(`${f.field}.to`, e.target.value)} />
+      </div>
+    );
+  }
+  return (
+    <div className="relative">
+      <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
+      <input value={fvals[f.field] ?? ""} placeholder={f.label} className={TEXT_CLS}
+        onChange={(e) => set(f.field, e.target.value)} />
+    </div>
+  );
+}
+
 export default function LccDetailedView({ apiBase, title }: { apiBase: string; title: string }) {
   const [batches, setBatches] = useState<Batch[]>([]);
   const [loading, setLoading] = useState(true);
@@ -100,6 +205,24 @@ export default function LccDetailedView({ apiBase, title }: { apiBase: string; t
   const [roffset, setRoffset] = useState(0);
   const [rloading, setRloading] = useState(false);
 
+  // drill-in filters — all declared by the backend, so this view has no field list of its own
+  const [filters, setFilters] = useState<FilterSpec[]>([]);
+  const [fvals, setFvals] = useState<Record<string, string>>({});
+  const [facets, setFacets] = useState<Record<string, string[]>>({});
+  const [summary, setSummary] = useState<Summary | null>(null);
+  const [showMore, setShowMore] = useState(false);
+  // Opening a batch should feel instant; only filter edits are worth debouncing.
+  const skipDebounce = useRef(true);
+  // Monotonic request id. Debouncing cancels pending TIMERS, not in-flight REQUESTS, so
+  // without this a slow "DEL" response can land after a fast "DELHI" one and paint the
+  // wrong rows and totals under the newer text.
+  const reqSeq = useRef(0);
+
+  const hasFilters = Object.values(fvals).some(Boolean);
+  const primaryFilters = filters.filter((f) => f.primary);
+  const moreFilters = filters.filter((f) => !f.primary);
+  const moreActive = moreFilters.filter((f) => fkeys(f).some((k) => fvals[k])).length;
+
   const fetchBatches = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
     try { const { data } = await api.get<Batch[]>(`${apiBase}/batches`); setBatches(data); }
@@ -107,7 +230,10 @@ export default function LccDetailedView({ apiBase, title }: { apiBase: string; t
     finally { if (!silent) setLoading(false); }
   }, [apiBase]);
 
-  useEffect(() => { setSelected(null); fetchBatches(); }, [fetchBatches]);
+  useEffect(() => {
+    setSelected(null); setFvals({}); setFilters([]); setFacets({}); setSummary(null);
+    fetchBatches();
+  }, [fetchBatches]);
 
   // Poll while any upload is still queued/processing.
   const hasActive = batches.some((b) => b.status === "pending" || b.status === "processing");
@@ -118,19 +244,53 @@ export default function LccDetailedView({ apiBase, title }: { apiBase: string; t
   }, [hasActive, fetchBatches]);
 
   const loadRecords = useCallback(async (batchId: string, offset: number) => {
+    const seq = ++reqSeq.current;
     setRloading(true);
     try {
-      const { data } = await api.get<{ total: number; columns: Column[]; rows: Row[] }>(
-        `${apiBase}/records`, { params: { batch_id: batchId, offset, limit: PAGE } });
+      const params: Record<string, string | number> = { batch_id: batchId, offset, limit: PAGE };
+      for (const [k, v] of Object.entries(fvals)) if (v) params[`f.${k}`] = v;
+      const { data } = await api.get<RecordsResponse>(`${apiBase}/records`, { params });
+      if (seq !== reqSeq.current) return;   // a newer request already landed
       setColumns(data.columns); setRows(data.rows); setRtotal(data.total); setRoffset(offset);
-    } catch { toast.error("Failed to load rows."); }
-    finally { setRloading(false); }
-  }, [apiBase]);
+      setFilters(data.filters ?? []); setSummary(data.summary ?? null);
+    } catch { if (seq === reqSeq.current) toast.error("Failed to load rows."); }
+    finally { if (seq === reqSeq.current) setRloading(false); }
+  }, [apiBase, fvals]);
+
+  // One effect covers typing, dropdowns and date pickers, and always returns to page 1 —
+  // a filtered view still paged to offset 300 would otherwise land on an empty page with
+  // a working Prev button and no rows.
+  useEffect(() => {
+    if (!selected) return;
+    const delay = skipDebounce.current ? 0 : 250;
+    skipDebounce.current = false;
+    const t = setTimeout(() => loadRecords(selected.batch_id, 0), delay);
+    return () => clearTimeout(t);
+  }, [selected, loadRecords]);
+
+  // Facet values are per batch, not per active filter, so the options don't disappear as
+  // you narrow. A failure just leaves the dropdowns empty — not worth a toast.
+  useEffect(() => {
+    if (!selected) return;
+    api.get<Record<string, string[]>>(`${apiBase}/records/facets`, { params: { batch_id: selected.batch_id } })
+      .then((r) => setFacets(r.data ?? {}))
+      .catch(() => {});
+  }, [apiBase, selected]);
 
   const openBatch = (b: Batch) => {
     if (b.status !== "completed") { toast(b.status === "failed" ? "This upload failed." : "This upload is still processing."); return; }
-    setSelected(b); loadRecords(b.batch_id, 0);
+    // No loadRecords call here — the effect above does it. Doing both fires two requests.
+    skipDebounce.current = true;
+    setFvals({}); setFacets({}); setSummary(null); setShowMore(false);
+    setSelected(b);
   };
+
+  const closeBatch = () => {
+    setSelected(null);
+    setFvals({}); setFilters([]); setFacets({}); setSummary(null); setShowMore(false);
+  };
+
+  const clearFilters = () => { setFvals({}); setShowMore(false); };
 
   const downloadFile = async (b: Batch) => {
     try { const { data } = await api.get<{ url: string }>(`${apiBase}/batches/${b.batch_id}/file-url`, { params: { inline: false } }); window.open(data.url, "_blank"); }
@@ -156,7 +316,9 @@ export default function LccDetailedView({ apiBase, title }: { apiBase: string; t
       await api.delete(`${apiBase}/batches/${deleteTarget.batch_id}`);
       toast.success("Upload deleted.");
       setDeleteTarget(null);
-      if (selected?.batch_id === deleteTarget.batch_id) setSelected(null);
+      // closeBatch, not setSelected(null): deleting the upload you are drilled into must
+      // drop its filters too, or they leak onto the next upload you open.
+      if (selected?.batch_id === deleteTarget.batch_id) closeBatch();
       fetchBatches();
     } catch { toast.error("Failed to delete."); }
     finally { setDeleting(false); }
@@ -215,10 +377,15 @@ export default function LccDetailedView({ apiBase, title }: { apiBase: string; t
     return (
       <div>
         <div className="flex items-center gap-2 mb-3">
-          <button onClick={() => setSelected(null)} className="flex items-center gap-1 text-xs text-slate-400 hover:text-slate-700"><ArrowLeft className="w-3.5 h-3.5" /> Back to uploads</button>
+          <button onClick={closeBatch} className="flex items-center gap-1 text-xs text-slate-400 hover:text-slate-700"><ArrowLeft className="w-3.5 h-3.5" /> Back to uploads</button>
           <span className="text-slate-300">|</span>
           <h3 className="text-sm font-semibold text-slate-800 truncate max-w-[320px]" title={selected.source_file ?? undefined}>{title} · {selected.source_file || "upload"}</h3>
-          <span className="text-[11px] text-slate-400">· {selected.row_count.toLocaleString()} entries · {fmtDate(selected.uploaded_at)}</span>
+          <span className="text-[11px] text-slate-400">
+            {/* the filtered count, not the batch's — those differ the moment you filter */}
+            · {rtotal.toLocaleString()} {rtotal === 1 ? "entry" : "entries"}
+            {hasFilters && <span className="text-amber-600"> (filtered from {selected.row_count.toLocaleString()})</span>}
+            {" "}· {fmtDate(selected.uploaded_at)}
+          </span>
           {selected.has_file && (
             <div className="ml-auto flex items-center gap-2">
               <button onClick={() => previewFile(selected)} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-blue-700 border border-blue-200 bg-blue-50 rounded-lg hover:bg-blue-100"><Eye className="w-3.5 h-3.5" /> Preview</button>
@@ -226,7 +393,42 @@ export default function LccDetailedView({ apiBase, title }: { apiBase: string; t
             </div>
           )}
         </div>
+        {summary && <TotalsStrip summary={summary} filtered={hasFilters} />}
+
         <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+          {filters.length > 0 && (
+            <div className="border-b border-slate-100 bg-slate-50/40">
+              <div className="flex items-center gap-2 flex-wrap px-3 py-2.5">
+                {primaryFilters.map((f) => (
+                  <FilterControl key={f.field} f={f} fvals={fvals} setFvals={setFvals} facets={facets} />
+                ))}
+                {moreFilters.length > 0 && (
+                  <button onClick={() => setShowMore((s) => !s)}
+                    className="inline-flex items-center gap-1 px-2 py-1.5 text-xs text-slate-500 border border-slate-200 rounded-lg bg-white hover:bg-slate-50">
+                    <SlidersHorizontal className="w-3.5 h-3.5" /> More filters
+                    {/* the count, so a filter hidden inside the disclosure is never invisible */}
+                    {moreActive > 0 && (
+                      <span className="px-1.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-semibold tabular-nums">{moreActive}</span>
+                    )}
+                    {showMore ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                  </button>
+                )}
+                {hasFilters && (
+                  <button onClick={clearFilters} className="inline-flex items-center gap-1 text-xs text-slate-500 hover:text-slate-800">
+                    <X className="w-3.5 h-3.5" /> Clear
+                  </button>
+                )}
+                <span className="ml-auto text-[11px] text-slate-400 tabular-nums">{rtotal.toLocaleString()} rows</span>
+              </div>
+              {showMore && (
+                <div className="flex items-center gap-2 flex-wrap px-3 pb-2.5 pt-1 border-t border-slate-100">
+                  {moreFilters.map((f) => (
+                    <FilterControl key={f.field} f={f} fvals={fvals} setFvals={setFvals} facets={facets} />
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           <div className="overflow-x-auto">
             <table className="text-left border-collapse text-sm">
               <thead>
@@ -234,11 +436,15 @@ export default function LccDetailedView({ apiBase, title }: { apiBase: string; t
                   {columns.map((c) => <th key={c.field} className="px-3 py-2 font-semibold whitespace-nowrap">{c.header}</th>)}
                 </tr>
               </thead>
-              <tbody>
-                {rloading ? (
+              {/* Dim the current page rather than blanking it: with a 250 ms debounce,
+                  swapping to "Loading…" on every keystroke reads as a strobe. */}
+              <tbody className={rloading && rows.length > 0 ? "opacity-50 transition-opacity" : ""}>
+                {rloading && rows.length === 0 ? (
                   <tr><td colSpan={columns.length || 1} className="px-3 py-8 text-center text-slate-400">Loading…</td></tr>
                 ) : rows.length === 0 ? (
-                  <tr><td colSpan={columns.length || 1} className="px-3 py-8 text-center text-slate-400">No rows.</td></tr>
+                  <tr><td colSpan={columns.length || 1} className="px-3 py-8 text-center text-slate-400">
+                    {hasFilters ? "No rows match these filters." : "No rows."}
+                  </td></tr>
                 ) : rows.map((r) => (
                   <tr key={r.id} className="border-b border-slate-100 hover:bg-slate-50/60">
                     {columns.map((c) => {
