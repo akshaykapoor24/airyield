@@ -103,6 +103,75 @@ CORE_COLUMNS: list[dict] = [c for c in LCC_STANDARD_COLUMNS if c["role"] == "cor
 _CORE_FIELDS: list[str] = [c["field"] for c in CORE_COLUMNS]
 
 
+# ── drill-in filters ─────────────────────────────────────────────────────────
+# Declared here rather than in the endpoint signature, mirroring `_TGQ_FILTERS` in
+# services/statement_spec.py: adding a filter is a spec edit, and this list doubles as
+# the ALLOWLIST the endpoint resolves `f.<field>` params through — user input is only
+# ever a dict key into this list, never an attribute name.
+#
+# `field` is both the `f.<field>` query-param suffix and the LccDetailed column it maps
+# to, so what the user filters lines up with the column they see. The split is by
+# cardinality: identifiers a person types (a PNR, a passenger) are `text` and match with
+# ILIKE; short code vocabularies are `select` and get a facet dropdown of the values
+# actually present in the batch; the three date columns are `daterange`, because a
+# dropdown of a few thousand distinct timestamps is unusable.
+#
+# `primary` filters sit in the always-visible row; the rest live behind "More filters",
+# so the toolbar plus the totals strip don't push the data itself below the fold.
+SEGMENTS_FILTER_FIELD = "__segments__"   # pseudo-field: legs live in the `segments` JSONB
+
+FILTERS: list[dict] = [
+    # The most-used lookups: "the passenger who called about PNR X", and the two axes a
+    # reconciler splits a statement along.
+    {"field": "name1",                    "label": "Passenger",       "type": "text",      "primary": True},
+    {"field": "record_locator",           "label": "Record Locator",  "type": "text",      "primary": True},
+    {"field": "payment_method_code",      "label": "Payment Method",  "type": "select",    "primary": True},
+    {"field": "payment_status",           "label": "Payment Status",  "type": "select",    "primary": True},
+    {"field": "transaction_date",         "label": "Txn Date",        "type": "daterange", "primary": True},
+
+    # `name` is the account/agency the booking sits under, NOT the passenger (that is
+    # `name1`). It repeats heavily within one file — often a single value — so it is
+    # demoted below Passenger, but it is the visible NAME column and must be filterable.
+    {"field": "name",                     "label": "Name",            "type": "text"},
+    {"field": "gds_record_locator",       "label": "GDS Locator",     "type": "text"},
+    {"field": "payment_number",           "label": "Payment No.",     "type": "text"},
+    # Text, not a facet: one code per agent login, so a mid-size consolidator blows past
+    # _MAX_FACET_VALUES and the dropdown would silently offer an incomplete list.
+    {"field": "source_agent_code",        "label": "Agent Code",      "type": "text"},
+    # The only reliable traveller key when the name is mangled (MR/, MSTR, transliteration).
+    {"field": "email_address",            "label": "Email",           "type": "text"},
+    {"field": SEGMENTS_FILTER_FIELD,      "label": "Sector / Flight", "type": "text"},
+    {"field": "source_organization_code", "label": "Source Org",      "type": "select"},
+    {"field": "product_class",            "label": "Class",           "type": "select"},
+    # Cheap, and it matters the moment a file mixes currencies — the totals strip sums
+    # across them otherwise.
+    {"field": "currency_code",            "label": "Currency",        "type": "select"},
+    # Boolean column, so a distinct-value facet would offer "true"/"false". The options
+    # are declared statically instead and mapped back to a bool when the condition is
+    # built — and they match what _disp() renders, so the filter reads like the column.
+    {"field": "international",            "label": "Intl",            "type": "select",
+     "options": ["Yes", "No"]},
+    {"field": "booking_date",             "label": "Booking Date",    "type": "daterange"},
+    # Ranked last: departure_date is DERIVED from the first leg carrying a dep date
+    # (see build_typed_row), so rows whose legs had none are NULL and any range on it
+    # silently excludes them.
+    {"field": "departure_date",           "label": "Departure",       "type": "daterange"},
+]
+
+# Totalled over the WHOLE filtered set (not the visible page) and shown above the grid.
+# Ordered as the identity a reconciler eyeballs — Total ≈ Base Fare + Taxes + Other Fees
+# + SSR — so a statement that doesn't add up is visible without exporting anything.
+# Every one of these is a real NUMERIC column, so the total is a plain SUM.
+SUMMARY_FIELDS: list[dict] = [
+    {"field": "total",           "label": "Total"},
+    {"field": "base_fare",       "label": "Base Fare"},
+    {"field": "taxes_total",     "label": "Taxes"},
+    {"field": "other_fee_total", "label": "Other Fees"},
+    {"field": "other_ssr_total", "label": "SSR"},
+    {"field": "payment_amount",  "label": "Payment Amt"},
+]
+
+
 def grouped_columns() -> list[dict]:
     """[{group, columns:[{header, field, role, dtype}]}] for the mapping UI."""
     order = [GROUP_CORE, GROUP_TAX, GROUP_LEG]
