@@ -74,6 +74,16 @@ class BspStatement(Base):
     commission_unmatched_rows:  Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     commission_excluded_rows:   Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     commission_skipped_rows:    Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    # A deal matched, but it pays only on a cabin class / travel window / route
+    # this settlement row does not carry, so the amount could not be verified.
+    # Counted separately from `unmatched` because the answer is different: a
+    # matched deal is on file and the fix is to upload the TGQ HMPR, not to write
+    # a new deal.
+    commission_needs_data_rows: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    # Rows no run has touched. Previously these fell into NO bucket, so a
+    # statement whose run had never happened reported "8 matched, 0 unmatched"
+    # over 15,204 rows and read as calculated-but-poor rather than uncalculated.
+    commission_pending_rows:    Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     # How many rows found a TGQ HMPR counterpart, so the UI can distinguish "the deals
     # don't apply" from "the other half of the data hasn't been uploaded".
     commission_enriched_rows:   Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")

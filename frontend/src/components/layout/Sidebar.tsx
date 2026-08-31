@@ -7,12 +7,11 @@ import {
   BarChart2, FileText, FolderOpen, FolderOutput, Settings,
   ChevronLeft, ChevronDown, Send, UserCircle, KeyRound, LogOut,
   Plane, Building, Building2, MapPin, Route, Tag, DollarSign, Percent,
-  Calculator, ClipboardCheck, CheckSquare,
+  Calculator, CheckSquare,
   Edit3, Users, Shield, GitMerge, Search,
-  History, LayoutGrid, Plus, Contact, Layers,
-  CreditCard,
+  History, LayoutGrid, Contact, Layers,
+  CreditCard, TrendingUp,
 } from "lucide-react";
-import { loadDashboards, type CustomDashboard } from "@/lib/customDashboards";
 import { USER_MASTER_NAV, userMasterHref } from "@/lib/userMasterNav";
 import { cn } from "@/lib/utils";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
@@ -38,8 +37,9 @@ const TENANT_NAV: NavItem[] = [
     id: "dashboard", label: "Dashboard", icon: BarChart2,
     children: [
       { label: "Overview", href: "/dashboard", icon: LayoutGrid },
-      { label: "Pending Actions", href: "/pending-actions", icon: ClipboardCheck },
-      { label: "Supplier Comparison", href: "/supplier-comparison", icon: GitMerge },
+      // The PLB accrual board — supplier income earned on flown revenue, before
+      // the airline pays it. The number finance books as a receivable.
+      { label: "PLB Accrual", href: "/dashboard/accrual", icon: TrendingUp },
     ],
   },
 
@@ -196,16 +196,11 @@ export default function Sidebar() {
     router.push("/login");
   };
 
-  const [customDashboards, setCustomDashboards] = useState<CustomDashboard[]>([]);
-
-  useEffect(() => {
-    const refresh = () => setCustomDashboards(loadDashboards());
-    refresh();
-    window.addEventListener("storage", refresh);
-    return () => window.removeEventListener("storage", refresh);
-  }, [pathname]);
-
   const isActive = (href: string) =>
+    // "/dashboard" is Overview, and it has a sibling at /dashboard/accrual — so it
+    // must match exactly. The generic startsWith(href + "/") below would otherwise
+    // light Overview up while the accrual board is open.
+    href === "/dashboard" ? pathname === "/dashboard" :
     // Incoming / Outgoing deal repos share the /deals page and differ only by the
     // ?direction query, so match on pathname + the direction param.
     href === "/deals"
@@ -230,19 +225,12 @@ export default function Sidebar() {
       ? pathname === "/customers" || /^\/customers\/\d+$/.test(pathname)
     : pathname === href || pathname.startsWith(href + "/");
 
-  const isOnCustomDashboard = pathname.startsWith("/dashboard/");
-
-  const hasActiveChild = (item: NavItem) => {
-    if (item.id === "dashboard" && isOnCustomDashboard) return true;
-    return item.children?.some((c) => isActive(c.href)) ?? false;
-  };
+  const hasActiveChild = (item: NavItem) =>
+    item.children?.some((c) => isActive(c.href)) ?? false;
 
   const getExpandedFromPathname = () =>
     navItems
-      .filter((n) => n.children && (
-        n.children.some((c) => isActive(c.href)) ||
-        (n.id === "dashboard" && isOnCustomDashboard)
-      ))
+      .filter((n) => n.children?.some((c) => isActive(c.href)))
       .map((n) => n.id);
 
   const [expanded, setExpanded] = useState<string[]>(getExpandedFromPathname);
@@ -404,42 +392,6 @@ export default function Sidebar() {
                       </Link>
                     );
                   })}
-
-                  {/* Custom dashboards (legacy Dashboard group only) */}
-                  {item.id === "dashboard" && (
-                    <>
-                      {customDashboards.length > 0 && (
-                        <div className="pt-1.5 pb-0.5">
-                          <p className="text-[9px] uppercase font-bold text-slate-400 tracking-wider px-2.5 mb-1">Custom</p>
-                          {customDashboards.map((cd) => {
-                            const href = `/dashboard/${cd.id}`;
-                            const active = isActive(href);
-                            return (
-                              <Link
-                                key={cd.id}
-                                href={href}
-                                className={cn(
-                                  "flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all duration-150",
-                                  active ? "font-semibold" : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"
-                                )}
-                                style={active ? { background: theme.softBg, color: theme.accent } : {}}
-                              >
-                                <LayoutGrid className="w-3.5 h-3.5 shrink-0" style={active ? { color: theme.accent } : { color: "#94a3b8" }} />
-                                <span className="truncate">{cd.name}</span>
-                              </Link>
-                            );
-                          })}
-                        </div>
-                      )}
-                      <Link
-                        href="/dashboard/new"
-                        className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[10px] font-medium text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-all duration-150 mt-0.5 border border-dashed border-[#e6ebf2] hover:border-slate-300"
-                      >
-                        <Plus className="w-3 h-3 shrink-0" />
-                        <span>Create Dashboard</span>
-                      </Link>
-                    </>
-                  )}
                 </div>
               )}
             </div>

@@ -57,8 +57,14 @@ from app.models.user_entity_access import UserEntityAccess
 # with no model behind them and proposed DROP TABLE for all three.
 from app.models.entity import Entity
 from app.models.login_id import LoginId
+from app.models.tenant_airline import TenantAirline
 from app.models.iata_commission import IataCommission
 from app.models.iata_commission_approval import IataCommissionApproval
+from app.models.plb_accrual import (
+    PlbAccrualInput,
+    PlbAirlineSetting,
+    PlbAccrualSnapshot,
+)
 from app.models.deal import (
     DealStatement,
     Deal,
@@ -112,7 +118,8 @@ __all__ = [
     "TicketReconciliation",
     "DealBatch",
     "Agency", "AgencyEntity", "AgencyLoginId", "AgencyTerms", "AgencyLedger",
-    "Entity", "LoginId", "IataCommission", "IataCommissionApproval",
+    "Entity", "LoginId", "TenantAirline", "IataCommission", "IataCommissionApproval",
+    "PlbAccrualInput", "PlbAirlineSetting", "PlbAccrualSnapshot",
     # New unified deal schema
     "DealStatement", "Deal",
     "DealIncentiveConfig", "DealIncentiveSlab", "DealIncentiveSlabValue",

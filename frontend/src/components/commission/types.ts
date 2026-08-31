@@ -26,7 +26,16 @@ export type CommissionStatement = {
   unmatched_rows: number;
   excluded_rows: number;
   skipped_rows: number;
-  enriched_rows: number;             // rows that found a TGQ HMPR counterpart
+  // A deal matched, but it pays only on a criterion this statement does not
+  // print (cabin class, travel window, route), so the amount is withheld.
+  needs_data_rows: number;
+  // Rows no run has touched. Without this a never-run statement looks identical
+  // to a fully-run one that matched almost nothing.
+  pending_rows: number;
+  enriched_rows: number;             // rows where TGQ actually recovered a field
+  // TGQ HMPR data has arrived since this was last calculated. Enrichment only
+  // runs inside a commission run, so it changes nothing until a re-run.
+  tgq_stale: boolean;
 
   created_at: string;
 };
@@ -141,5 +150,16 @@ export const STATUS_STYLE: Record<string, { cls: string; label: string }> = {
   excluded:   { cls: "bg-red-50 text-red-600 border-red-200",             label: "Excluded" },
   unmatched:  { cls: "bg-orange-50 text-orange-600 border-orange-200",    label: "Unmatched" },
   skipped:    { cls: "bg-slate-100 text-slate-500 border-slate-200",      label: "Skipped" },
+  // Reads as Unmatched, because that is what it is: a deal was found but could
+  // not be confirmed against the terms it pays on, so nothing is earned and every
+  // money column on the row is empty. The status VALUE stays distinct so the
+  // count, the filter and the gaps bucket can still separate the rows that only
+  // need a TGQ HMPR upload from the ones with no deal at all.
+  needs_data: { cls: "bg-orange-50 text-orange-600 border-orange-200",    label: "Unmatched" },
   pending:    { cls: "bg-slate-50 text-slate-400 border-slate-200",       label: "Not run" },
 };
+
+/** Statuses that mean "a run has looked at this row". */
+export const RUN_STATUSES = [
+  "calculated", "needs_data", "reversed", "excluded", "unmatched", "skipped",
+] as const;

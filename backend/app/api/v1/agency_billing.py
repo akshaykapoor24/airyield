@@ -236,6 +236,32 @@ async def create_agency_billing(
     if not tickets:
         raise HTTPException(status_code=400, detail="No matching tickets found for this billing.")
 
+    # Every id must resolve — a partial match used to bill fewer tickets silently.
+    missing = set(ticket_ids) - {t.id for t in tickets}
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{len(missing)} of the selected tickets no longer exist. Refresh and try again.",
+        )
+
+    # An agency's tickets are the ones under a statement scoped to it. Resolving the
+    # same clause the list endpoint uses is what makes its ambiguous-agency refusal
+    # bind on POST too, instead of only on GET.
+    scope_clause, _ambiguous = await agency_statement_scope(db, agency, current_user)
+    allowed = {
+        b for (b,) in (await db.execute(
+            select(TicketStatement.batch_id).where(scope_clause)
+        )).all()
+    }
+    foreign = [t.ticket_number or t.pax_name or str(t.id) for t in tickets
+               if t.batch_id not in allowed]
+    if foreign:
+        raise HTTPException(
+            status_code=400,
+            detail=("These tickets are not tagged to this agency: "
+                    f"{', '.join(foreign[:5])}{'…' if len(foreign) > 5 else ''}."),
+        )
+
     # A ticket may belong to at most one billing (customer or agency). The UI
     # prevents selecting already-billed rows, so one here means a stale view.
     already = [t.ticket_number or str(t.id) for t in tickets if t.is_billed]

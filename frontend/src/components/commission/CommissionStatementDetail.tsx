@@ -28,6 +28,12 @@ type Tab = "results" | "summary" | "gaps";
 
 /** Tooltip explaining where a row's sector/class/travel date came from. */
 function enrichTitle(r: CommissionRow): string {
+  // These three columns are written by the commission run, not by the parse, so
+  // an unrun row shows blanks even when TGQ HMPR does cover its ticket. Saying so
+  // is the difference between "we have no TGQ data" and "we have not looked yet".
+  if (r.commission_status === "pending") {
+    return "Not calculated yet — run this statement to pull in the TGQ HMPR data";
+  }
   if (!r.enrichment_source) return "No TGQ HMPR counterpart — this criterion was not evaluated";
   const legs = r.enriched_leg_count ?? 1;
   return `From TGQ HMPR · ${legs} ${legs === 1 ? "sector" : "sectors"}`;
@@ -310,18 +316,81 @@ export default function CommissionStatementDetail({
       )}
 
       {/* Stat cards */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3 mb-4">
         <Stat label="Estimated commission" value={`₹${inr(stmt.total_incentive)}`} accent="text-emerald-700" />
         <Stat label="IATA commission" value={`₹${inr(stmt.iata_total)}`} accent="text-teal-700" />
         <Stat label="Matched" value={stmt.matched_rows.toLocaleString("en-IN")} />
-        <Stat label="Unmatched" value={stmt.unmatched_rows.toLocaleString("en-IN")} accent="text-orange-600" />
-        <Stat label="Excluded / skipped" value={`${stmt.excluded_rows + stmt.skipped_rows}`} accent="text-slate-500" />
+        {/* Every row that earns nothing and shows no deal — the two are one
+            bucket on screen, because they read identically in the grid. */}
+        <Stat
+          label="Unmatched"
+          value={(stmt.unmatched_rows + stmt.needs_data_rows).toLocaleString("en-IN")}
+          accent="text-orange-600"
+          hint={
+            stmt.needs_data_rows > 0
+              ? `${stmt.needs_data_rows.toLocaleString("en-IN")} of these matched a deal that pays only on a cabin class, travel window or route this statement does not print — uploading the TGQ HMPR and re-running settles them. The other ${stmt.unmatched_rows.toLocaleString("en-IN")} have no deal at all.`
+              : "No approved airline deal covers these rows."
+          }
+        />
+        {/* Broken out because it is a different job: one file to upload, versus
+            writing a deal that does not exist yet. */}
+        <Stat
+          label="Of which need TGQ"
+          value={stmt.needs_data_rows.toLocaleString("en-IN")}
+          accent={stmt.needs_data_rows > 0 ? "text-amber-700" : undefined}
+          hint="Unmatched only because the cabin class, travel window or route the deal pays on is not printed on a BSP statement. Upload the matching TGQ HMPR and re-run."
+        />
+        <Stat
+          label="Excluded / skipped"
+          value={(stmt.excluded_rows + stmt.skipped_rows).toLocaleString("en-IN")}
+          accent="text-slate-500"
+        />
+        {/* Denominated on row_count — the statement's own settlement-row count,
+            already printed in the subtitle. It used to divide by
+            commission_total_rows, which only a queued whole-statement run ever
+            set, so a statement touched only by the per-row ▶ read "5 of 0". */}
         <Stat
           label="Enriched from TGQ"
-          value={`${stmt.enriched_rows.toLocaleString("en-IN")} of ${stmt.total_rows.toLocaleString("en-IN")}`}
+          value={`${stmt.enriched_rows.toLocaleString("en-IN")} of ${stmt.row_count.toLocaleString("en-IN")}`}
           accent={stmt.enriched_rows === 0 ? "text-amber-600" : "text-sky-700"}
+          hint="Rows where a TGQ HMPR statement supplied the cabin class, sector or travel date that BSP does not print."
         />
       </div>
+
+      {/* Nothing has been calculated. Previously invisible: rows still at
+          `pending` fell into no counter, so an untouched statement reported
+          "8 matched, 0 unmatched" and read as calculated-but-poor. */}
+      {stmt.pending_rows > 0 && (
+        <div className="flex items-start gap-2 px-3 py-2.5 mb-4 rounded-xl border border-slate-300 bg-slate-50 text-xs text-slate-700">
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-px text-slate-400" />
+          <span>
+            <strong>{stmt.pending_rows.toLocaleString("en-IN")} of{" "}
+            {stmt.row_count.toLocaleString("en-IN")} rows have not been calculated yet.</strong>{" "}
+            {stmt.pending_rows === stmt.row_count
+              ? "Nothing on this screen reflects them."
+              : "The figures above cover only the rows that have been run."}{" "}
+            Use <em>{hasResults ? "Re-run all" : "Run all"}</em> to calculate the whole statement.
+          </span>
+        </div>
+      )}
+
+      {/* Uploading a TGQ HMPR after a run does nothing until the statement is
+          re-run — enrichment happens inside the run. Without this the user
+          uploads exactly the data that was missing, sees no change, and
+          reasonably concludes the feature is broken. */}
+      {stmt.tgq_stale && (
+        <div className="flex items-start gap-2 px-3 py-2.5 mb-4 rounded-xl border border-sky-200 bg-sky-50 text-xs text-sky-800">
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-px" />
+          <span>
+            <strong>TGQ HMPR data has arrived since this was last calculated.</strong>{" "}
+            Cabin class, sector and travel date are recovered during the run, so re-run
+            to pick it up
+            {stmt.needs_data_rows > 0
+              ? ` — it may settle some of the ${stmt.needs_data_rows.toLocaleString("en-IN")} rows waiting on data.`
+              : "."}
+          </span>
+        </div>
+      )}
 
       {/* The difference between "no deal applies" and "the other half of the data is missing". */}
       {hasResults && stmt.enriched_rows === 0 && (
@@ -429,10 +498,16 @@ export default function CommissionStatementDetail({
                     const st = STATUS_STYLE[r.commission_status] ?? STATUS_STYLE.pending;
                     const bd = r.incentive_breakdown || {};
                     const busy = busyRows.has(r.id);
+                    // A row nobody has run is not a row that ran and found
+                    // nothing — the blank cells mean "not looked at", including
+                    // Sector/Class/Travel date, which are only written BY a run.
+                    // Muting the whole row is what keeps the two apart at a glance.
+                    const notRun = r.commission_status === "pending";
                     return (
                       <tr key={r.id} className={cn(
                         "border-b border-slate-100 hover:bg-slate-50/60 whitespace-nowrap",
                         selected.has(r.id) && "bg-blue-50/50",
+                        notRun && "opacity-55 bg-slate-50/40",
                       )}>
                         <td className="px-3 py-2">
                           <input
@@ -648,9 +723,11 @@ export default function CommissionStatementDetail({
   );
 }
 
-function Stat({ label, value, accent }: { label: string; value: string; accent?: string }) {
+function Stat({
+  label, value, accent, hint,
+}: { label: string; value: string; accent?: string; hint?: string }) {
   return (
-    <div className="bg-white border border-slate-200 rounded-xl px-3 py-2.5">
+    <div className="bg-white border border-slate-200 rounded-xl px-3 py-2.5" title={hint}>
       <p className="text-[10px] uppercase tracking-wide text-slate-400">{label}</p>
       <p className={cn("text-sm font-bold mt-0.5 tabular-nums", accent ?? "text-slate-800")}>{value}</p>
     </div>

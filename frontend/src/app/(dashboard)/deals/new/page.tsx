@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
 import api from "@/lib/api";
@@ -84,6 +85,17 @@ function DealTypeSelector({ direction, onSelect }: {
   return (
     <div className="min-h-[60vh] flex items-center justify-center">
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-10 w-full max-w-md">
+        {/* This is the first screen, so there is no earlier step to go back to —
+            the way out is the repository this deal was started from. Same target
+            and styling as the Back on the next screen, which uses dealsHref too,
+            so Outgoing returns to ?direction=outbound rather than Incoming. */}
+        <Link
+          href={dealsHref(direction)}
+          className="inline-flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 transition-colors mb-4"
+        >
+          <ArrowLeft className="w-3.5 h-3.5" />
+          Back to {directionLabel(direction)} deals
+        </Link>
         <h1 className="text-base font-semibold text-gray-800 mb-1">Deal Details</h1>
         <p className="text-xs text-gray-400 mb-6">Choose the type of deal you want to create.</p>
 

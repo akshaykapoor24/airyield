@@ -22,6 +22,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models.bsp_statement import BspStatement, BspStatementRow, BspTaxBreakup
+# Enrichment runs inside the commission run, so a TGQ HMPR uploaded afterwards is
+# inert until a re-run — the detail screen says so, and needs this to know.
+from app.models.statement_row import TgqHmpr
 from app.models.user import User
 from app.schemas.bsp_commission import (
     BspCommissionRowRead,
@@ -47,6 +50,8 @@ STALE_AFTER = timedelta(minutes=5)
 # A hand-picked selection runs inline in the request; this caps how many rows one
 # such call may carry so it stays a quick check, not a full run in disguise.
 MAX_INLINE_ROWS = 500
+# Distinct (status, reason) buckets the gaps tab will return.
+MAX_GAP_GROUPS = 50
 
 
 def _is_stale(s: BspStatement) -> bool:
@@ -70,7 +75,25 @@ def _f(v) -> Optional[float]:
     return float(v) if v is not None else None
 
 
-def _to_read(s: BspStatement) -> BspCommissionStatementRead:
+async def _latest_tgq_upload(db: AsyncSession, user: User) -> datetime | None:
+    """When this user last uploaded a TGQ HMPR statement.
+
+    One query for a whole page of statements rather than one each. Used to tell
+    the user that re-running would now find data it could not find before —
+    enrichment happens inside the run, so a TGQ uploaded afterwards is inert
+    until then, and nothing on screen said so.
+    """
+    return await db.scalar(
+        select(func.max(TgqHmpr.uploaded_at)).where(
+            TgqHmpr.tenant_id == user.tenant_id,
+            TgqHmpr.created_by_id == user.id,
+        )
+    )
+
+
+def _to_read(
+    s: BspStatement, latest_tgq: datetime | None = None,
+) -> BspCommissionStatementRead:
     return BspCommissionStatementRead(
         batch_id=s.batch_id,
         statement_name=s.statement_name,
@@ -94,7 +117,14 @@ def _to_read(s: BspStatement) -> BspCommissionStatementRead:
         unmatched_rows=s.commission_unmatched_rows,
         excluded_rows=s.commission_excluded_rows,
         skipped_rows=s.commission_skipped_rows,
+        needs_data_rows=s.commission_needs_data_rows,
+        pending_rows=s.commission_pending_rows,
         enriched_rows=s.commission_enriched_rows,
+        tgq_stale=bool(
+            latest_tgq
+            and s.commission_calculated_at
+            and latest_tgq > s.commission_calculated_at
+        ),
         created_at=s.created_at,
     )
 
@@ -128,7 +158,8 @@ async def list_commission_statements(
         )
         .order_by(BspStatement.created_at.desc())
     )).scalars().all()
-    return [_to_read(s) for s in rows]
+    latest_tgq = await _latest_tgq_upload(db, current_user)
+    return [_to_read(s, latest_tgq) for s in rows]
 
 
 @router.get("/statements/{batch_id}", response_model=BspCommissionStatementRead)
@@ -137,7 +168,10 @@ async def get_commission_statement(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return _to_read(await _owned(batch_id, db, current_user))
+    return _to_read(
+        await _owned(batch_id, db, current_user),
+        await _latest_tgq_upload(db, current_user),
+    )
 
 
 # ── Run ────────────────────────────────────────────────────────────────────
@@ -424,7 +458,13 @@ async def commission_gaps(
             BspStatementRow.statement_id == batch_id,
             BspStatementRow.tenant_id == current_user.tenant_id,
             BspStatementRow.created_by_id == current_user.id,
-            BspStatementRow.commission_status.in_(["unmatched", "skipped", "excluded"]),
+            # `needs_data` belongs here: it is a gap the user can close, and the
+            # reason string says how. `pending` deliberately does NOT — a row
+            # nobody has run yet is not a shortfall in the deal setup, and adding
+            # it would bury the real gaps under every untouched row.
+            BspStatementRow.commission_status.in_(
+                ["unmatched", "skipped", "excluded", "needs_data"]
+            ),
         )
     )).all()
 
@@ -436,10 +476,11 @@ async def commission_gaps(
         if doc and len(g["sample_documents"]) < 5:
             g["sample_documents"].append(doc)
 
-    return [
-        BspCommissionReasonGroup(**g)
-        for g in sorted(groups.values(), key=lambda g: (-g["count"], g["status"]))
-    ]
+    # Capped. This tab is a shortlist of things to act on, and one reason string
+    # that accidentally varies per row (a ticket number in it, say) would other-
+    # wise return a group per row — 12,000 groups and a megabyte of JSON.
+    ordered = sorted(groups.values(), key=lambda g: (-g["count"], g["status"]))
+    return [BspCommissionReasonGroup(**g) for g in ordered[:MAX_GAP_GROUPS]]
 
 
 # ── Per-row diagnosis ("why did / didn't this match?") ─────────────────────

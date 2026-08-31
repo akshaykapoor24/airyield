@@ -8,6 +8,7 @@ import {
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import LccUploadWizard from "./LccUploadWizard";
+import LccBillingWorklist from "./LccBillingWorklist";
 
 const PAGE = 50;
 
@@ -25,9 +26,25 @@ type Batch = {
   row_count: number;
   has_file: boolean;
   created_by_name: string | null;
+  // Declared at upload from User Master → Airline Master. Null on batches imported
+  // before the airline was captured — those are fixed with "Set airline", not re-uploaded.
+  airline_name: string | null;
+  airline_code: string | null;
+  airline_ref_id: string | null;
+  tenant_airline_id: number | null;
+  // Billing: how many of this upload's rows have a party, and whether they have been
+  // projected into uploaded_tickets yet. See LccBillingWorklist.
+  billable_rows: number;
+  resolved_rows: number;
+  unresolved_rows: number;
+  projected_rows: number;
+  resolution_status: "none" | "resolved" | "projected";
 };
 type Column = { header: string; field: string };
 type Row = Record<string, string | number | null> & { id: number };
+type TenantAirlineOpt = {
+  id: number; ref_id: string; airline_name: string | null; airline_code: string | null;
+};
 
 function fmtDate(s: string | null): string {
   if (!s) return "—";
@@ -66,6 +83,15 @@ export default function LccDetailedView({ apiBase, title }: { apiBase: string; t
   const [deleteTarget, setDeleteTarget] = useState<Batch | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [selected, setSelected] = useState<Batch | null>(null);
+  // The billing worklist is a third view, alongside the uploads list and the records
+  // drill-in. Kept as local state rather than a route, matching `selected`.
+  const [billingTarget, setBillingTarget] = useState<Batch | null>(null);
+
+  // Backfilling the airline onto an already-imported batch.
+  const [airlineTarget, setAirlineTarget] = useState<Batch | null>(null);
+  const [airlineOpts, setAirlineOpts] = useState<TenantAirlineOpt[]>([]);
+  const [airlinePick, setAirlinePick] = useState<number | "">("");
+  const [savingAirline, setSavingAirline] = useState(false);
 
   // drill-in records
   const [columns, setColumns] = useState<Column[]>([]);
@@ -136,6 +162,30 @@ export default function LccDetailedView({ apiBase, title }: { apiBase: string; t
     finally { setDeleting(false); }
   };
 
+  const openAirlineModal = async (b: Batch) => {
+    setAirlineTarget(b);
+    setAirlinePick(b.tenant_airline_id ?? "");
+    try {
+      const { data } = await api.get<TenantAirlineOpt[]>("/tenant-airlines/", { params: { active: true } });
+      setAirlineOpts(data);
+    } catch { toast.error("Failed to load your Airline Master."); }
+  };
+
+  const saveAirline = async () => {
+    if (!airlineTarget || !airlinePick) return;
+    setSavingAirline(true);
+    try {
+      // One indexed bulk UPDATE server-side — the rows parsed fine, only the carrier
+      // was missing, so there is nothing to re-ingest.
+      const { data } = await api.patch<{ rows_updated: number; airline_name: string | null }>(
+        `${apiBase}/batches/${airlineTarget.batch_id}/airline`, { tenant_airline_id: airlinePick });
+      toast.success(`${data.airline_name ?? "Airline"} set on ${data.rows_updated.toLocaleString()} rows.`);
+      setAirlineTarget(null);
+      fetchBatches();
+    } catch { toast.error("Could not set the airline."); }
+    finally { setSavingAirline(false); }
+  };
+
   const downloadTemplate = async () => {
     try {
       const { data } = await api.get(`${apiBase}/template`, { responseType: "blob" });
@@ -144,6 +194,19 @@ export default function LccDetailedView({ apiBase, title }: { apiBase: string; t
       URL.revokeObjectURL(url);
     } catch { toast.error("Failed to download template."); }
   };
+
+  // ── Billing worklist ──────────────────────────────────────────────────────
+  if (billingTarget) {
+    return (
+      <LccBillingWorklist
+        apiBase={apiBase}
+        batchId={billingTarget.batch_id}
+        fileName={billingTarget.source_file}
+        onBack={() => { setBillingTarget(null); fetchBatches(); }}
+        onChanged={() => fetchBatches(true)}
+      />
+    );
+  }
 
   // ── Drill-in: one upload's rows ───────────────────────────────────────────
   if (selected) {
@@ -221,18 +284,20 @@ export default function LccDetailedView({ apiBase, title }: { apiBase: string; t
           <thead>
             <tr className="bg-slate-50 border-b border-slate-200 text-[11px] uppercase tracking-wide text-slate-400">
               <th className="text-left px-3 py-2.5 font-semibold">File</th>
+              <th className="text-left px-3 py-2.5 font-semibold">Airline</th>
               <th className="text-left px-3 py-2.5 font-semibold">Uploaded</th>
               <th className="text-left px-3 py-2.5 font-semibold">Status</th>
               <th className="text-right px-3 py-2.5 font-semibold">Entries</th>
+              <th className="text-left px-3 py-2.5 font-semibold">Billing</th>
               <th className="text-left px-3 py-2.5 font-semibold">Uploaded by</th>
               <th className="text-right px-3 py-2.5 font-semibold">Actions</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={6} className="px-3 py-10 text-center text-slate-400">Loading…</td></tr>
+              <tr><td colSpan={8} className="px-3 py-10 text-center text-slate-400">Loading…</td></tr>
             ) : batches.length === 0 ? (
-              <tr><td colSpan={6} className="px-3 py-12 text-center text-slate-400">No uploads yet. <button onClick={() => setWizardOpen(true)} className="text-blue-600 hover:underline">Upload an XLS</button>.</td></tr>
+              <tr><td colSpan={8} className="px-3 py-12 text-center text-slate-400">No uploads yet. <button onClick={() => setWizardOpen(true)} className="text-blue-600 hover:underline">Upload an XLS</button>.</td></tr>
             ) : batches.map((b) => (
               <tr key={b.batch_id} className="border-b border-slate-100 hover:bg-slate-50/60">
                 <td className="px-3 py-2">
@@ -240,6 +305,20 @@ export default function LccDetailedView({ apiBase, title }: { apiBase: string; t
                     <FolderOpen className="w-4 h-4 text-slate-400" />
                     <span className="font-medium truncate max-w-[240px]" title={b.source_file ?? undefined}>{b.source_file || "upload"}</span>
                   </button>
+                </td>
+                <td className="px-3 py-2 whitespace-nowrap">
+                  {b.airline_name ? (
+                    <span className="text-xs text-slate-700">
+                      {b.airline_code && <span className="font-semibold">{b.airline_code}</span>} {b.airline_name}
+                      {b.airline_ref_id && <span className="text-slate-400"> · {b.airline_ref_id}</span>}
+                    </span>
+                  ) : (
+                    <button onClick={() => openAirlineModal(b)}
+                      className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-700 border border-amber-200 bg-amber-50 rounded-md px-2 py-1 hover:bg-amber-100"
+                      title="This upload has no airline — the file doesn't name one">
+                      <AlertTriangle className="w-3 h-3" /> Set airline
+                    </button>
+                  )}
                 </td>
                 <td className="px-3 py-2 text-xs text-slate-500 whitespace-nowrap">{fmtDate(b.uploaded_at)}</td>
                 <td className="px-3 py-2"><StatusCell b={b} /></td>
@@ -255,9 +334,31 @@ export default function LccDetailedView({ apiBase, title }: { apiBase: string; t
                     )
                   )}
                 </td>
+                <td className="px-3 py-2 whitespace-nowrap">
+                  {b.status !== "completed" ? (
+                    <span className="text-[11px] text-slate-300">—</span>
+                  ) : b.resolution_status === "none" ? (
+                    <button onClick={() => setBillingTarget(b)}
+                      className="text-[11px] font-medium text-blue-600 hover:underline">
+                      Set up billing
+                    </button>
+                  ) : (
+                    <button onClick={() => setBillingTarget(b)} className="text-left group">
+                      <span className="text-[11px] tabular-nums text-slate-700 group-hover:underline">
+                        {b.resolved_rows.toLocaleString()} / {b.billable_rows.toLocaleString()} billable
+                      </span>
+                      <span className="block text-[10px]">
+                        {b.projected_rows > 0
+                          ? <span className="text-emerald-600">{b.projected_rows.toLocaleString()} in billing</span>
+                          : <span className="text-amber-600">not sent to billing yet</span>}
+                      </span>
+                    </button>
+                  )}
+                </td>
                 <td className="px-3 py-2 text-xs text-slate-500">{b.created_by_name || "—"}</td>
                 <td className="px-3 py-2 text-right whitespace-nowrap">
                   <button onClick={() => openBatch(b)} disabled={b.status !== "completed"} className="text-xs font-medium text-blue-600 hover:underline mr-3 disabled:text-slate-300 disabled:no-underline">Open</button>
+                  {b.airline_name && <button onClick={() => openAirlineModal(b)} className="text-xs font-medium text-slate-500 hover:underline mr-3" title="Change the airline on this upload">Airline</button>}
                   {b.has_file && <button onClick={() => previewFile(b)} className="p-1 text-slate-400 hover:text-blue-600 mr-1" title="Preview file"><Eye className="w-3.5 h-3.5" /></button>}
                   {b.has_file && <button onClick={() => downloadFile(b)} className="p-1 text-slate-400 hover:text-slate-700 mr-1" title="Download original"><Download className="w-3.5 h-3.5" /></button>}
                   <button onClick={() => setDeleteTarget(b)} className="p-1 text-slate-400 hover:text-red-600" title="Delete upload"><Trash2 className="w-3.5 h-3.5" /></button>
@@ -275,6 +376,39 @@ export default function LccDetailedView({ apiBase, title }: { apiBase: string; t
           onClose={() => setWizardOpen(false)}
           onDone={() => { setWizardOpen(false); fetchBatches(); }}
         />
+      )}
+
+      {airlineTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-5">
+            <h2 className="text-sm font-semibold text-slate-800 mb-1">Set the airline for this upload</h2>
+            <p className="text-xs text-slate-500 mb-3">
+              An LCC statement doesn&apos;t name its carrier, so it has to be declared. This stamps it
+              onto the upload and all {airlineTarget.row_count.toLocaleString()} of its rows — nothing is re-imported.
+            </p>
+            <select
+              value={airlinePick}
+              onChange={(e) => setAirlinePick(e.target.value ? Number(e.target.value) : "")}
+              className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-400"
+            >
+              <option value="">Select your airline ID…</option>
+              {airlineOpts.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.ref_id} — {a.airline_name ?? "?"}{a.airline_code ? ` (${a.airline_code})` : ""}
+                </option>
+              ))}
+            </select>
+            {airlineOpts.length === 0 && (
+              <p className="text-[11px] text-amber-600 mt-2">
+                Your Airline Master is empty — add the airline under User Master → Airline Master first.
+              </p>
+            )}
+            <div className="flex justify-end gap-2 mt-4">
+              <button onClick={() => setAirlineTarget(null)} className="px-3 py-1.5 text-xs font-medium text-slate-500 border border-slate-200 rounded-lg hover:bg-slate-50">Cancel</button>
+              <button onClick={saveAirline} disabled={savingAirline || !airlinePick} className="px-4 py-1.5 text-xs font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50">{savingAirline ? "Saving…" : "Set airline"}</button>
+            </div>
+          </div>
+        </div>
       )}
 
       {deleteTarget && (

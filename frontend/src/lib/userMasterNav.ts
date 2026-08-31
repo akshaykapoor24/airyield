@@ -5,7 +5,7 @@
 // app/(dashboard)/user-master/layout.tsx (to build the tab strip and the page
 // heading), so the two can never drift out of sync.
 
-import { Building, Building2, Contact, type LucideIcon } from "lucide-react";
+import { Building, Building2, Contact, Plane, type LucideIcon } from "lucide-react";
 
 // NOTE ON THE FIRST TAB'S NAME. The table behind it is `customers` and the API
 // segment is /customers/ — only the SURFACE is "Employee Master", because what a
@@ -38,6 +38,12 @@ export const USER_MASTER_NAV: UserMasterTab[] = [
     label: "Corporate Master",
     icon: Building,
     blurb: "The corporates you work with. Add, edit and import them here, then bill them from Corporate Billing.",
+  },
+  {
+    slug: "airline-master",
+    label: "Airline Master",
+    icon: Plane,
+    blurb: "The airlines you work with, each with your own ID. Pick that ID when you upload an LCC statement — an LCC file names no carrier, so this is what identifies it.",
   },
   // IATA Commission used to be a fourth tab here. It is one global master, not
   // something each tenant keeps its own copy of, so it now lives in the

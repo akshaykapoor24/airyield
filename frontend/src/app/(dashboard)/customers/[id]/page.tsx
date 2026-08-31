@@ -28,6 +28,8 @@ type SoldTicket = {
   incentive_breakdown: Record<string, number> | null;
   is_billed: boolean;
   billing_id: number | null;
+  /** 'link' = the ticket names this party; 'name' = matched on the passenger's name. */
+  matched_by?: string | null;
   base_amount: number;
   markup_amount: number;
   gst_amount: number;
@@ -586,7 +588,7 @@ export default function CustomerDetailPage() {
                             className="accent-emerald-500 cursor-pointer align-middle"
                           />
                         </th>
-                        {["TICKET #", "AIRLINE", "CODE", "PASSENGER", "SECTOR", "DATE", "TOTAL FARE", "MARKUP", "ADD. MARKUP", "DISCOUNT", "GST", "TOTAL BILLING", "STATUS"].map((h) => (
+                        {["TICKET #", "AIRLINE", "CODE", "PASSENGER", "SECTOR", "DATE", "TOTAL FARE", "MARKUP", "ADD. MARKUP", "DISCOUNT", "GST", "TOTAL BILLING", "STATUS", "MATCHED"].map((h) => (
                           <th key={h} className="px-3 py-2.5 text-left text-[10px] font-semibold text-white uppercase tracking-wider whitespace-nowrap">
                             {h}
                           </th>
@@ -666,6 +668,20 @@ export default function CustomerDetailPage() {
                                   <span className="inline-block bg-emerald-50 text-emerald-700 text-[10px] font-semibold px-2 py-0.5 rounded-full border border-emerald-200">Billed</span>
                                 ) : (
                                   <span className="inline-block bg-gray-100 text-gray-500 text-[10px] font-semibold px-2 py-0.5 rounded-full">Not Billed</span>
+                                )}
+                              </td>
+                              {/* Why this row is here: the ticket explicitly names this
+                                  party, or nobody claimed it and the passenger's name
+                                  matched. Name matching is the fuzzy one, so say which. */}
+                              <td className="px-3 py-2 whitespace-nowrap">
+                                {t.matched_by === "link" ? (
+                                  <span title="This ticket is tagged to this party"
+                                    className="inline-block bg-sky-50 text-sky-700 text-[10px] font-semibold px-2 py-0.5 rounded-full border border-sky-200">Tagged</span>
+                                ) : t.matched_by === "name" ? (
+                                  <span title="No party is tagged on this ticket; the passenger's name matched"
+                                    className="inline-block bg-gray-50 text-gray-500 text-[10px] font-semibold px-2 py-0.5 rounded-full border border-gray-200">By name</span>
+                                ) : (
+                                  <span className="text-gray-300 text-[10px]">—</span>
                                 )}
                               </td>
                               {INCENTIVE_TYPE_COLS.map((col) => {

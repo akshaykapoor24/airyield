@@ -112,6 +112,10 @@ class SoldTicketRead(BaseModel):
     incentive_breakdown: Optional[dict] = None
     is_billed: bool = False
     billing_id: Optional[int] = None
+    # How this ticket reached the party: 'link' = it explicitly names them,
+    # 'name' = nobody claimed it and the passenger's name matched. Computed per row,
+    # not a column — see services/billing_calc.py::ticket_matched_by.
+    matched_by: Optional[str] = None
     # computed
     base_amount: float
     markup_amount: float

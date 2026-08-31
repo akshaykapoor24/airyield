@@ -142,6 +142,9 @@ EXCLUDED_TABLES: frozenset[str] = frozenset({
     "users", "customers", "corporates", "entities", "user_entities",
     "user_login_ids", "login_ids", "agencies", "agency_entities",
     "agency_login_ids", "agency_terms", "iata_commissions", "approval_workflows",
+    # the tenant's own subset of the platform airline master, with its ids —
+    # master data, like login_ids next to it, not a unit of usage
+    "tenant_airlines",
     # the agency's running account. Its `invoice` entries are posted
     # automatically whenever a billing is created, and `billings` is already
     # counted — counting both would report a workspace's agency invoices twice.

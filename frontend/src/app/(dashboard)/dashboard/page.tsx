@@ -1,174 +1,268 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { DollarSign, Ticket, TrendingUp, FileText, RefreshCw } from "lucide-react";
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line } from "recharts";
-import { formatCurrency } from "@/lib/utils";
-import api from "@/lib/api";
+import { useState } from "react";
 import Link from "next/link";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { ArrowRight, LayoutGrid, Lock, RefreshCw } from "lucide-react";
 
-type MonthlyIncome   = { month: string; income: number };
-type AirlineIncome   = { airline: string; income: number };
-type SummaryData = {
-  total_income:      number;
-  total_tickets:     number;
-  active_deals:      number;
-  pending_count:     number;
-  monthly_income:    MonthlyIncome[];
-  income_by_airline: AirlineIncome[];
-};
+import EntityHeatGrid from "@/components/dashboard/charts/EntityHeatGrid";
+import AirlineContribution from "@/components/dashboard/charts/AirlineContribution";
+import FilterBar, { filtersFromUrl, type FilterState } from "@/components/dashboard/FilterBar";
+import KpiTile from "@/components/dashboard/KpiTile";
+import StatusBadge from "@/components/dashboard/StatusBadge";
+import { AccrualByMonthChart, FlownByMonthChart } from "@/components/dashboard/charts/MonthlyCharts";
+import { fetchFilters, fetchOverview, STATUS } from "@/lib/accrual";
+import { inrCompact, pct, rupees } from "@/lib/money";
 
-type RecentDeal = {
-  id: number;
-  deal_no: string;
-  airline_name: string | null;
-  source_type: string;
-  status: string;
-  valid_to: string | null;
-  created_at: string;
-};
+/**
+ * The executive layer over the PLB accrual board.
+ *
+ * Everything here is derived from the same board the grid renders, so the two can
+ * never tell different stories. Exactly one hero figure: the accrual itself, which
+ * is the number that goes on the P&L.
+ */
+export default function OverviewPage() {
+  // Seeded from the query string so the Overview's exception cards can deep-link
+  // into a pre-filtered board.
+  const [filters, setFilters] = useState<FilterState>(filtersFromUrl);
 
-const STATUS_COLOR: Record<string, string> = {
-  approved: "bg-green-100 text-green-700",
-  pending_approval: "bg-yellow-100 text-yellow-700",
-  extracted: "bg-blue-100 text-blue-700",
-  rejected: "bg-red-100 text-red-700",
-  confirmed: "bg-green-100 text-green-700",
-};
+  const filterOptions = useQuery({
+    queryKey: ["accrual-filters", filters.period],
+    queryFn: () => fetchFilters(filters.period || undefined),
+    staleTime: 5 * 60_000,
+  });
 
-function fmt(v: number) {
-  return v.toLocaleString("en-IN", { maximumFractionDigits: 0 });
-}
+  const query = {
+    period: filters.period || undefined,
+    basis: filters.basis,
+    entity: filters.entity,
+    channel: filters.channel,
+  };
 
-export default function DashboardPage() {
-  const [summary, setSummary] = useState<SummaryData | null>(null);
-  const [deals,   setDeals]   = useState<RecentDeal[]>([]);
-  const [loading, setLoading] = useState(true);
+  const ov = useQuery({
+    queryKey: ["accrual-overview", query],
+    queryFn: () => fetchOverview(query),
+    placeholderData: keepPreviousData,
+  });
 
-  useEffect(() => {
-    Promise.all([
-      api.get<SummaryData>("/dashboard/summary"),
-      api.get<RecentDeal[]>("/deals?limit=6"),
-    ]).then(([sumRes, dealsRes]) => {
-      setSummary(sumRes.data);
-      setDeals(dealsRes.data);
-    }).finally(() => setLoading(false));
-  }, []);
+  const d = ov.data;
+  const t = d?.totals;
+  const busy = ov.isFetching;
 
-  const now = new Date();
-  const monthLabel = now.toLocaleString("default", { month: "long", year: "numeric" });
+  const monthly = (d?.monthly ?? []).map((m) => {
+    // The confirmed/provisional split is a period-level ratio; applying it per
+    // month keeps the stacked column honest about the whole without pretending to
+    // a per-month breakdown the board does not carry.
+    const share = t && t.flown_total ? t.flown_confirmed / t.flown_total : 0;
+    return {
+      ...m,
+      confirmed: Math.round(m.flown * share),
+      provisional: Math.round(m.flown * (1 - share)),
+    };
+  });
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64 text-gray-400">
-        <RefreshCw className="w-5 h-5 animate-spin mr-2" /> Loading dashboard…
-      </div>
-    );
-  }
-
-  const s = summary;
-  const kpis = [
-    { label: "Total Income (All time)", value: s ? formatCurrency(s.total_income) : "—", icon: DollarSign, color: "text-green-600 bg-green-50" },
-    { label: "Total Tickets", value: s ? s.total_tickets.toLocaleString() : "—", icon: Ticket, color: "text-purple-600 bg-purple-50" },
-    { label: "Active Deals", value: s ? s.active_deals.toString() : "—", icon: FileText, color: "text-orange-600 bg-orange-50" },
-    { label: "Pending Actions", value: s ? s.pending_count.toString() : "—", icon: TrendingUp, color: "text-blue-600 bg-blue-50" },
-  ];
+  const actions = d?.actions;
+  const actionTotal = actions
+    ? actions.pending_deal_approvals + actions.deals_awaiting_review +
+      actions.statements_awaiting_commission + actions.unmatched_commission_rows
+    : 0;
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
-          <p className="text-sm text-gray-500 mt-0.5">{monthLabel} — Live Overview</p>
+    <div className="space-y-4">
+      <div className="flex items-start gap-3">
+        <div className="w-10 h-10 rounded-lg bg-blue-50 flex items-center justify-center shrink-0">
+          <LayoutGrid className="w-5 h-5 text-blue-600" aria-hidden />
         </div>
+        <div className="min-w-0">
+          <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest">
+            Dashboard
+          </p>
+          <h1 className="text-xl font-bold text-gray-900">Overview</h1>
+          <p className="text-xs text-gray-500 mt-0.5">
+            Supplier income accrued on flown revenue for {d?.period.label ?? "this period"}.
+          </p>
+        </div>
+        <Link
+          href="/dashboard/accrual"
+          className="ml-auto shrink-0 inline-flex items-center gap-1.5 rounded-lg bg-[#1e3a5f] hover:bg-[#16304f] text-white px-3 h-9.5 text-xs font-semibold"
+        >
+          Open the accrual board <ArrowRight className="w-3.5 h-3.5" aria-hidden />
+        </Link>
       </div>
 
-      {/* KPI Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {kpis.map(({ label, value, icon: Icon, color }) => (
-          <div key={label} className="bg-white rounded-xl border border-gray-200 p-5">
-            <div className={`p-2.5 rounded-lg ${color} w-fit mb-3`}>
-              <Icon className="w-4 h-4" />
-            </div>
-            <p className="text-2xl font-bold text-gray-900">{value}</p>
-            <p className="text-xs text-gray-500 mt-0.5">{label}</p>
+      <FilterBar
+        value={filters}
+        onChange={setFilters}
+        options={filterOptions.data}
+        showRowFilters={false}
+        extra={
+          busy ? (
+            <RefreshCw className="w-3.5 h-3.5 text-gray-400 animate-spin" aria-label="Refreshing" />
+          ) : null
+        }
+      />
+
+      {d?.frozen && (
+        <div className="rounded-xl bg-slate-50 ring-1 ring-slate-200 px-4 py-2.5 flex items-center gap-2 text-xs text-slate-700">
+          <Lock className="w-3.5 h-3.5 shrink-0" aria-hidden />
+          <span>
+            <strong>{d.period.label} is frozen.</strong> These figures are the booked
+            accrual and will not move when new statements arrive.
+          </span>
+        </div>
+      )}
+
+      {/* KPI band */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+        <KpiTile
+          hero
+          loading={busy}
+          label={`PLB accrued · ${d?.period.label ?? ""}`}
+          value={t ? rupees(t.accrual) : "—"}
+          sub={
+            t ? (
+              <>
+                {pct(t.effective_yield_pct)} of flown revenue.
+                {t.accrual_at_risk !== 0 && (
+                  <span className="block text-red-600 font-medium mt-0.5">
+                    {rupees(Math.abs(t.accrual_at_risk))} of it rests on contracts that do
+                    not cover these months.
+                  </span>
+                )}
+              </>
+            ) : null
+          }
+        />
+        <KpiTile
+          loading={busy}
+          label="Provisional flown"
+          value={t ? inrCompact(t.flown_total) : "—"}
+          sub={
+            t ? (
+              <>
+                {inrCompact(t.flown_confirmed)} confirmed ·{" "}
+                {inrCompact(t.flown_provisional)} provisional
+              </>
+            ) : null
+          }
+        />
+        <KpiTile
+          loading={busy}
+          label="Commissionable base"
+          value={t ? inrCompact(t.commissionable_base) : "—"}
+          sub={t ? <>Effective deflator {pct(t.effective_deflator_pct)}</> : null}
+        />
+        <KpiTile
+          loading={busy}
+          tone={t && t.flown_at_risk ? "danger" : "default"}
+          label="Flown revenue at risk"
+          value={t ? inrCompact(t.flown_at_risk) : "—"}
+          sub="Flown with an expired deal, no deal, or a 0% rate."
+        />
+        <KpiTile
+          loading={busy}
+          tone={actionTotal ? "warning" : "default"}
+          label="Waiting on someone"
+          value={String(actionTotal)}
+          sub={
+            actions ? (
+              <span className="flex flex-col gap-0.5">
+                <Link href="/deals/approvals" className="hover:text-gray-800 hover:underline">
+                  {actions.pending_deal_approvals} deal approvals
+                </Link>
+                <Link href="/deals" className="hover:text-gray-800 hover:underline">
+                  {actions.deals_awaiting_review} deals awaiting review
+                </Link>
+                <Link href="/vendors/commission-income" className="hover:text-gray-800 hover:underline">
+                  {actions.statements_awaiting_commission} statements not costed
+                </Link>
+              </span>
+            ) : null
+          }
+        />
+      </div>
+
+      {/* Charts — two plots, one y-scale each. See MonthlyCharts for why. */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+        <FlownByMonthChart data={monthly} />
+        <AccrualByMonthChart data={monthly} />
+      </div>
+
+      {/* The Pareto and the exception list are both list-shaped and roughly the
+          same height, so they pair. The entity matrix is wide by nature and gets
+          the full width below them rather than being cut off by a card edge. */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 items-start">
+        <AirlineContribution rows={d?.by_airline ?? []} />
+        <div className="space-y-3">
+          {/* Exceptions — each links into the board, pre-filtered to itself. */}
+          <div className="bg-white rounded-xl border border-gray-200 p-5">
+            <h2 className="text-sm font-semibold text-gray-900">Needs attention</h2>
+            <p className="text-xs text-gray-500 mb-3">
+              The red and amber someone used to apply by hand, computed.
+            </p>
+            {!d?.exceptions.length ? (
+              <p className="text-xs text-gray-400 py-6 text-center">
+                Nothing flagged in this period.
+              </p>
+            ) : (
+              <ul className="divide-y divide-gray-100">
+                {d.exceptions.map((e) => (
+                  <li key={e.code}>
+                    <Link
+                      href={`/dashboard/accrual?status=${e.code}`}
+                      className="flex items-center gap-3 py-2.5 group"
+                    >
+                      <StatusBadge code={e.code} />
+                      <span className="flex-1 min-w-0">
+                        <span className="block text-xs font-medium text-gray-800 truncate">
+                          {e.label}
+                        </span>
+                        <span className="block text-[11px] text-gray-400 truncate">
+                          {e.airlines.join(", ")}
+                          {e.count > e.airlines.length && " and more"}
+                        </span>
+                      </span>
+                      <span className="text-right shrink-0">
+                        <span className="block text-xs font-semibold text-gray-900 tabular-nums">
+                          {rupees(Math.abs(e.amount))}
+                        </span>
+                        <span className="block text-[10px] text-gray-400">
+                          {e.count} {e.count === 1 ? "line" : "lines"}
+                        </span>
+                      </span>
+                      <ArrowRight
+                        className="w-3.5 h-3.5 text-gray-300 group-hover:text-blue-500 shrink-0"
+                        aria-hidden
+                      />
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
-        ))}
-      </div>
-
-      {/* Charts Row */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 bg-white rounded-xl border border-gray-200 p-6">
-          <h2 className="text-sm font-semibold text-gray-900 mb-4">Monthly Income Trend</h2>
-          {s && s.monthly_income.length > 0 ? (
-            <ResponsiveContainer width="100%" height={220}>
-              <LineChart data={s.monthly_income}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-                <XAxis dataKey="month" tick={{ fontSize: 11 }} />
-                <YAxis tickFormatter={(v) => `₹${(v / 1000).toFixed(0)}k`} tick={{ fontSize: 11 }} />
-                <Tooltip formatter={(v) => formatCurrency(Number(v))} />
-                <Line type="monotone" dataKey="income" stroke="#3b82f6" strokeWidth={2} dot={{ r: 3 }} />
-              </LineChart>
-            </ResponsiveContainer>
-          ) : (
-            <div className="h-[220px] flex items-center justify-center text-gray-400 text-sm">No income data yet</div>
-          )}
-        </div>
-
-        <div className="bg-white rounded-xl border border-gray-200 p-6">
-          <h2 className="text-sm font-semibold text-gray-900 mb-4">Income by Airline</h2>
-          {s && s.income_by_airline.length > 0 ? (
-            <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={s.income_by_airline} layout="vertical">
-                <XAxis type="number" tickFormatter={(v) => `₹${(v / 1000).toFixed(0)}k`} tick={{ fontSize: 10 }} />
-                <YAxis type="category" dataKey="airline" tick={{ fontSize: 10 }} width={70} />
-                <Tooltip formatter={(v) => formatCurrency(Number(v))} />
-                <Bar dataKey="income" fill="#6366f1" radius={[0, 4, 4, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          ) : (
-            <div className="h-[220px] flex items-center justify-center text-gray-400 text-sm">No data yet</div>
-          )}
         </div>
       </div>
 
-      {/* Recent Deals */}
-      <div className="bg-white rounded-xl border border-gray-200">
-        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-gray-900">Recent Deals</h2>
-          <Link href="/deals" className="text-xs text-blue-600 hover:underline">View all →</Link>
+      {d && <EntityHeatGrid rows={d.by_entity} airlines={d.entity_airlines} />}
+
+      {!!d?.data_quality.unattributed_airlines.length && (
+        <div className="rounded-xl bg-amber-50 ring-1 ring-amber-200 px-4 py-2.5 text-xs text-amber-900">
+          <strong>{d.data_quality.unattributed_airlines.length} airlines</strong> have flown
+          revenue that could not be attributed to a single entity
+          ({d.data_quality.unattributed_airlines.slice(0, 5).join(", ")}
+          {d.data_quality.unattributed_airlines.length > 5 && ", …"}). Their accrual is
+          understated until the split is keyed on the{" "}
+          <Link href="/dashboard/accrual?status=NEEDS_SPLIT" className="underline font-semibold">
+            accrual board
+          </Link>
+          , or the matching BSP summary statements are uploaded so the agent codes resolve.
         </div>
-        {deals.length === 0 ? (
-          <div className="px-6 py-10 text-center text-xs text-gray-400">No deals yet. <Link href="/deals/upload" className="text-blue-500 hover:underline">Upload a deal</Link></div>
-        ) : (
-          <table className="w-full text-sm">
-            <thead className="bg-gray-50 text-gray-500 text-xs uppercase">
-              <tr>
-                <th className="px-6 py-3 text-left">Reference</th>
-                <th className="px-6 py-3 text-left">Airline</th>
-                <th className="px-6 py-3 text-left">Type</th>
-                <th className="px-6 py-3 text-left">Valid To</th>
-                <th className="px-6 py-3 text-left">Status</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {deals.map((d) => (
-                <tr key={d.id} className="hover:bg-gray-50">
-                  <td className="px-6 py-3 font-mono text-xs text-gray-600">{d.deal_no ?? `DEAL-${String(d.id).padStart(4,"0")}`}</td>
-                  <td className="px-6 py-3 font-medium">{d.airline_name ?? "—"}</td>
-                  <td className="px-6 py-3 text-gray-500 capitalize">{d.source_type}</td>
-                  <td className="px-6 py-3 text-gray-500">{d.valid_to ?? "—"}</td>
-                  <td className="px-6 py-3">
-                    <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_COLOR[d.status] ?? "bg-gray-100 text-gray-600"}`}>
-                      {d.status.replace(/_/g, " ")}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
+      )}
+
+      <p className="text-[11px] text-gray-400 text-center pt-2">
+        {STATUS.UNCONFIRMED.blurb} Every figure here is also in the{" "}
+        <Link href="/dashboard/accrual" className="underline">accrual board</Link>, row by row.
+      </p>
     </div>
   );
 }

@@ -24,11 +24,17 @@ from app.models.agency_login_id import AgencyLoginId
 from app.models.agency_terms import AgencyTerms
 from app.models.deal import Deal
 from app.models.supplier import Supplier
+from app.models.supplier_approval import SupplierApproval
 from app.models.user import User
 from app.schemas.agency import (
     AGENCY_TYPES, BILLING_CYCLES,
     AgencyCreate, AgencyUpdate, AgencyRead, AgencyOverviewRow, AgencyTermsInput,
     AgencyTermsSummary, AgencyFromSuppliers, AgencyFromSuppliersResult, BulkUploadResult,
+)
+# An agency typed in by hand is a request to add that vendor to the shared master.
+# Same queue, same rules as the Suppliers page — see the service.
+from app.services.supplier_master_request import (
+    can_submit_master_request, create_or_request_supplier, supplier_values_from_agency,
 )
 
 router = APIRouter()
@@ -309,12 +315,37 @@ async def _current_terms_map(db: AsyncSession, agency_ids: list[int]) -> dict[in
     return out
 
 
+async def _request_status_map(
+    db: AsyncSession, agencies: list[Agency],
+) -> dict[int, tuple[str | None, str | None]]:
+    """approval id -> (status, rejection_reason) for the agencies on this page.
+
+    One query for the whole list rather than one per row. Only agencies typed in
+    by hand carry a request, so this is usually a short list and often empty.
+    """
+    ids = {a.supplier_request_id for a in agencies if a.supplier_request_id}
+    if not ids:
+        return {}
+    rows = (await db.execute(
+        select(
+            SupplierApproval.id,
+            SupplierApproval.status,
+            SupplierApproval.rejection_reason,
+        ).where(SupplierApproval.id.in_(ids))
+    )).all()
+    return {rid: (status_, reason) for rid, status_, reason in rows}
+
+
 async def _with_terms(db: AsyncSession, agencies: list[Agency]) -> list[AgencyRead]:
     terms = await _current_terms_map(db, [a.id for a in agencies])
+    requests = await _request_status_map(db, agencies)
     out = []
     for a in agencies:
         read = AgencyRead.model_validate(a)
         read.terms = terms.get(a.id, [])
+        status_, reason = requests.get(a.supplier_request_id, (None, None))
+        read.supplier_request_status = (status_ or "").lower() or None
+        read.supplier_request_reason = reason
         out.append(read)
     return out
 
@@ -504,6 +535,69 @@ async def agencies_overview(
     ]
 
 
+async def _attach_master_request(
+    db: AsyncSession, user: User, agency: Agency, payload,
+) -> None:
+    """Give a hand-entered agency its place in the shared supplier master.
+
+    The master holds a couple of thousand agencies; the trade has lakhs. "Not in
+    the list" is therefore the ordinary case, and the answer is not to block the
+    user — the agency is created and usable immediately — but to ask the platform
+    admin to add the vendor for everybody, through the same queue the Suppliers
+    page already uses.
+
+    Three shapes, in priority order:
+
+      supplier_id set          → picked from the master. Nothing to request.
+      supplier_request_id sent → the same vendor's other channel, or a follow-up.
+                                 Reuse that request: one vendor, one request, two
+                                 agency rows pointing at it. Verified to belong to
+                                 this user and still be pending, or it is ignored —
+                                 a client must not be able to attach an agency to
+                                 somebody else's request.
+      request_master_entry     → file a new one.
+
+    Runs INSIDE create_agency's transaction on purpose. An agency whose request
+    silently failed would sit there looking approved-in-progress forever, and a
+    request with no agency behind it would confuse the admin; rolling both back is
+    the honest outcome.
+    """
+    if payload.supplier_id:
+        return
+
+    if payload.supplier_request_id:
+        existing = (await db.execute(
+            select(SupplierApproval).where(
+                SupplierApproval.id == payload.supplier_request_id,
+                SupplierApproval.submitted_by_id == user.id,
+                func.lower(SupplierApproval.status) == "pending",
+            )
+        )).scalar_one_or_none()
+        if existing is not None:
+            agency.supplier_request_id = existing.id
+            return
+
+    if not getattr(payload, "request_master_entry", False):
+        return
+
+    # A view-only user can hold agencies but does not propose master changes, the
+    # same rule `POST /suppliers/` enforces. The agency is still created — it just
+    # carries no request, and the row offers "Request master entry" to a colleague
+    # who may.
+    if not can_submit_master_request(user):
+        return
+
+    supplier, approval = await create_or_request_supplier(
+        db, user, supplier_values_from_agency(agency),
+    )
+    # A platform admin writes the master directly, so there is nothing to wait for
+    # — the agency is in the master the moment it is created.
+    if supplier is not None:
+        agency.supplier_id = supplier.id
+    else:
+        agency.supplier_request_id = approval.id
+
+
 @router.post("/", response_model=AgencyRead, status_code=status.HTTP_201_CREATED)
 async def create_agency(
     payload: AgencyCreate,
@@ -567,6 +661,8 @@ async def create_agency(
     db.add(agency)
     await db.flush()   # need agency.id before the opening terms rows
 
+    await _attach_master_request(db, current_user, agency, payload)
+
     # Opening every arrangement here (rather than lazily) means the switch guard
     # always has a period to close, and the ledger always has a terms_id to file
     # entries under.
@@ -575,6 +671,71 @@ async def create_agency(
     await db.flush()   # need terms ids for the deposit entries
 
     db.add_all(_opening_deposits(agency, current_user, rows, terms, today))
+    await db.commit()
+    await db.refresh(agency)
+    return (await _with_terms(db, [agency]))[0]
+
+
+@router.post("/{agency_id}/master-request", response_model=AgencyRead)
+async def request_master_entry(
+    agency_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Ask the platform admin to add this agency's vendor to the shared master.
+
+    Covers the three ways an agency comes to have no master entry:
+
+      * it was typed in before this flow existed,
+      * it arrived through the XLS upload, which carries no supplier id (and does
+        not file requests of its own — a 300-row sheet would bury the admin's
+        inbox, so those rows ask one at a time, here),
+      * its earlier request was REJECTED. The agency was never withdrawn: it has
+        been trading all along, and rejection means the master entry was refused,
+        not that the relationship is void. Correct the details on the agency and
+        resubmit; this files a fresh request and repoints the link at it.
+
+    Refuses when the vendor is already in the master, or a request is still
+    pending — asking twice for the same thing only costs the admin a rejection.
+    """
+    agency = (await db.execute(
+        select(Agency).where(Agency.id == agency_id, Agency.user_id == current_user.id)
+    )).scalar_one_or_none()
+    if agency is None:
+        raise HTTPException(status_code=404, detail="Agency not found.")
+
+    if not can_submit_master_request(current_user):
+        raise HTTPException(
+            status_code=403,
+            detail="A view-only user cannot submit master data requests.",
+        )
+
+    if agency.supplier_id:
+        raise HTTPException(
+            status_code=400,
+            detail="This agency is already in the shared supplier master.",
+        )
+
+    if agency.supplier_request_id:
+        current = (await db.execute(
+            select(SupplierApproval.status)
+            .where(SupplierApproval.id == agency.supplier_request_id)
+        )).scalar_one_or_none()
+        if (current or "").lower() == "pending":
+            raise HTTPException(
+                status_code=409,
+                detail="A request for this agency is already waiting for approval.",
+            )
+
+    supplier, approval = await create_or_request_supplier(
+        db, current_user, supplier_values_from_agency(agency),
+    )
+    if supplier is not None:
+        agency.supplier_id = supplier.id
+        agency.supplier_request_id = None
+    else:
+        agency.supplier_request_id = approval.id
+
     await db.commit()
     await db.refresh(agency)
     return (await _with_terms(db, [agency]))[0]

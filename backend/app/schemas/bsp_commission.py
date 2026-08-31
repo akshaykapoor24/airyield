@@ -30,7 +30,17 @@ class BspCommissionStatementRead(BaseModel):
     unmatched_rows:  int = 0
     excluded_rows:   int = 0
     skipped_rows:    int = 0
-    enriched_rows:   int = 0   # rows with a TGQ HMPR counterpart
+    # A deal matched but pays only on a criterion this statement does not print
+    # (cabin class, travel window, route) — the amount is withheld, not zero.
+    needs_data_rows: int = 0
+    # Rows no run has touched. Without this a never-run statement is
+    # indistinguishable from a fully-run one that matched almost nothing.
+    pending_rows:    int = 0
+    enriched_rows:   int = 0   # rows where TGQ actually recovered a field
+    # A TGQ HMPR statement has been uploaded since this was last calculated.
+    # Enrichment only ever runs inside a commission run, so new TGQ data changes
+    # nothing at all until the statement is re-run — silently, without this flag.
+    tgq_stale:       bool = False
 
     created_at:      datetime
 

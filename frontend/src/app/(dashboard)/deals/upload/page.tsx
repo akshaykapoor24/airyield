@@ -4,7 +4,7 @@ import { useCallback, useState, useRef, useEffect } from "react";
 import {
   Upload, FileText, FileSpreadsheet, File, Check,
   ChevronRight, AlertTriangle, X, RefreshCw, Save,
-  Plus, Trash2, ChevronDown, ArrowRight, Info, Settings2, Search,
+  Plus, Trash2, ChevronDown, ArrowLeft, ArrowRight, Info, Settings2, Search,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import Link from "next/link";
@@ -2173,10 +2173,25 @@ export default function UploadDealPage(){
 
       {/* Header */}
       <div className="flex items-start justify-between">
-        <div>
-          <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-0.5">Deals</p>
-          <h1 className="text-xl font-bold text-gray-900">Upload Deal File</h1>
-          <p className="text-xs text-gray-500 mt-0.5">Import deal sheets — automated extraction with manual review</p>
+        <div className="flex items-start gap-3">
+          {/* Back to the repository this upload belongs to — the outgoing repo is
+              the same page behind ?direction=outbound, so the link has to carry
+              the direction or an Outgoing upload would land in Incoming. */}
+          <Link
+            href={outbound?"/deals?direction=outbound":"/deals"}
+            title={outbound?"Back to Outgoing deals":"Back to Incoming deals"}
+            className="mt-1 p-1.5 rounded-lg border border-gray-200 bg-white text-gray-500 hover:text-gray-900 hover:bg-gray-50 transition-colors shrink-0"
+          >
+            <ArrowLeft className="w-4 h-4"/>
+            <span className="sr-only">{outbound?"Back to Outgoing deals":"Back to Incoming deals"}</span>
+          </Link>
+          <div>
+            <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-0.5">
+              Deals · {outbound?"Outgoing":"Incoming"}
+            </p>
+            <h1 className="text-xl font-bold text-gray-900">Upload Deal File</h1>
+            <p className="text-xs text-gray-500 mt-0.5">Import deal sheets — automated extraction with manual review</p>
+          </div>
         </div>
         <StepBar step={step}/>
       </div>
@@ -2275,19 +2290,29 @@ export default function UploadDealPage(){
                   value={dealTag==="adhoc"?"Adhoc":"Standard"}
                   onChange={v=>setDealTag(v.toLowerCase())}
                 />
-                <SearchSelectField
-                  label="Entity"
-                  placeholder={entityOptions.length?"Search entity…":"No entities in your profile"}
-                  options={entityOptions}
-                  value={entity}
-                  onChange={setEntity}
-                />
-                {entityOptions.length===0&&(
-                  <p className="text-[10px] text-gray-400">
-                    Add entities under{" "}
-                    <Link href="/profile" className="text-blue-600 hover:underline">My Profile → Entities</Link>
-                    {" "}to file deals against one.
-                  </p>
+                {/* Incoming deals only. On an outgoing deal OutgoingScopeFields
+                    already asked for Agency Entity above, and that is what fills
+                    Deal.entity (see the payload: outbound reads scopeSel.entity).
+                    Showing this too offers a second control over the same column
+                    that the save silently ignores. Mirrors /deals/new, which
+                    hides it on `outboundScoped` for the same reason. */}
+                {!outbound&&(
+                  <>
+                    <SearchSelectField
+                      label="Entity"
+                      placeholder={entityOptions.length?"Search entity…":"No entities in your profile"}
+                      options={entityOptions}
+                      value={entity}
+                      onChange={setEntity}
+                    />
+                    {entityOptions.length===0&&(
+                      <p className="text-[10px] text-gray-400">
+                        Add entities under{" "}
+                        <Link href="/profile" className="text-blue-600 hover:underline">My Profile → Entities</Link>
+                        {" "}to file deals against one.
+                      </p>
+                    )}
+                  </>
                 )}
                 <div>
                   <label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">Valid From Date</label>

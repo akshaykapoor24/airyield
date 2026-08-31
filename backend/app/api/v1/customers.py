@@ -29,6 +29,8 @@ from app.services.billing_calc import (
     compute_gst as _compute_gst,
     safe_date as _safe_date,
     passenger_name as _passenger_name,
+    customer_ticket_scope as _customer_ticket_scope,
+    ticket_matched_by as _ticket_matched_by,
 )
 
 router = APIRouter()
@@ -483,20 +485,19 @@ async def get_customer_sold_tickets(
         conds.append(func.lower(UploadedTicket.first_name) == fn)
         conds.append(UploadedTicket.pax_name.ilike(f"%{fn}%"))
 
-    if not conds:
-        tickets: list[UploadedTicket] = []
-    else:
-        q = (
-            select(UploadedTicket)
-            .where(
-                UploadedTicket.tenant_id == current_user.tenant_id,
-                UploadedTicket.created_by_id == current_user.id,
-                or_(*conds),
-            )
-            .order_by(UploadedTicket.created_at.desc())
+    # The explicit link wins; the name conditions above only apply to tickets no party
+    # has claimed. See services/billing_calc.py for why all four columns are checked.
+    q = (
+        select(UploadedTicket)
+        .where(
+            UploadedTicket.tenant_id == current_user.tenant_id,
+            UploadedTicket.created_by_id == current_user.id,
+            _customer_ticket_scope(customer, conds),
         )
-        result = await db.execute(q)
-        tickets = result.scalars().all()
+        .order_by(UploadedTicket.created_at.desc())
+    )
+    result = await db.execute(q)
+    tickets = result.scalars().all()
 
     # Filter by date range (date fields are strings; parse in Python).
     # date_field selects which date to filter on: 'travel' uses departure/travel date,
@@ -544,6 +545,9 @@ async def get_customer_sold_tickets(
             incentive_breakdown=t.incentive_breakdown,
             is_billed=bool(t.is_billed),
             billing_id=t.billing_id,
+            matched_by=_ticket_matched_by(
+                t, customer=customer, names=[(customer.first_name, customer.last_name)]
+            ),
             base_amount=round(base, 2),
             markup_amount=round(markup_amount, 2),
             gst_amount=round(gst_amount, 2),
@@ -592,6 +596,27 @@ async def create_billing(
     tickets = res.scalars().all()
     if not tickets:
         raise HTTPException(status_code=400, detail="No matching tickets found for this billing.")
+
+    # Every id the client sent must resolve. Previously a partial match billed fewer
+    # tickets than the user selected and said nothing about it.
+    missing = set(ticket_ids) - {t.id for t in tickets}
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{len(missing)} of the selected tickets no longer exist. Refresh and try again.",
+        )
+
+    # The tickets must actually be THIS customer's. Without this the endpoint accepts
+    # any ticket id the caller owns, which makes the selector above decorative.
+    names = [(customer.first_name, customer.last_name)]
+    foreign = [t.ticket_number or t.pax_name or str(t.id) for t in tickets
+               if not _ticket_matched_by(t, customer=customer, names=names)]
+    if foreign:
+        raise HTTPException(
+            status_code=400,
+            detail=("These tickets are not this customer's: "
+                    f"{', '.join(foreign[:5])}{'…' if len(foreign) > 5 else ''}."),
+        )
 
     # A ticket may belong to at most one billing. The UI prevents selecting
     # already-billed rows, so an already-billed ticket here means a stale view.
