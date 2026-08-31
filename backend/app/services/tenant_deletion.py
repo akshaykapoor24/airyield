@@ -148,9 +148,12 @@ DELETION_GROUPS: tuple[DeletionGroup, ...] = (
         ("agencies", "agency_entities", "agency_login_ids", "agency_terms", "agency_ledger"),
     ),
     DeletionGroup(
-        "entities", "Entities & login IDs", "Company entities, airline login IDs and per-user access grants.",
+        "entities", "Entities & login IDs",
+        "Company entities, airline login IDs, the airlines this workspace registered, "
+        "and per-user access grants.",
         GroupCategory.SETUP,
-        ("entities", "login_ids", "user_entities", "user_login_ids", "user_entity_access"),
+        ("entities", "login_ids", "tenant_airlines", "user_entities", "user_login_ids",
+         "user_entity_access"),
     ),
     DeletionGroup(
         "iata_commissions", "IATA commissions",

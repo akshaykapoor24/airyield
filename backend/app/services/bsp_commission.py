@@ -95,10 +95,6 @@ BSP_SKIP_CRITERIA = {SKIP_CLASS, SKIP_TRAVEL_DATE}
 # `sector` is None; only `class` needs to be named explicitly.
 BSP_SKIP_RULE_FIELDS = {"class"}
 
-# What an unenriched row reports as not-checked. Enriched rows report less — see
-# BspRowContext.skipped_labels, which is the value actually written to the row.
-_SKIPPED_CRITERIA_LABELS = ["class", "sector", "travel_date"]
-
 # BSP is a sales settlement — deals whose trigger_type is "Flown" correctly do
 # not match a BSP row.
 _BSP_INVOICE_TYPE = "Sales"
@@ -179,7 +175,12 @@ class BspRowContext:
 @dataclass
 class RowCalcResult:
     row_id:  int
-    status:  str            # calculated | excluded | reversed | skipped | unmatched
+    # calculated | needs_data | excluded | reversed | skipped | unmatched
+    #
+    # needs_data: a deal matched, but it restricts by a criterion this settlement
+    # row does not carry (no TGQ counterpart), so the figure could not be verified.
+    # `incentive` is None there — not 0 — see calculate_row.
+    status:  str
     incentive: float | None = None
     iata_commission: float = 0.0
     deal_id:   int | None = None
@@ -494,15 +495,32 @@ async def build_original_index(
     return index
 
 
+# Rule condition fields that can only be answered from a SECTOR, and from a
+# TRAVEL DATE. A BSP row prints neither, so a rule built on one of these is not
+# evaluated at all — exclusion_evaluator self-skips a field it cannot resolve.
+# Silently passing such a rule is how an unenriched row gets paid on terms nobody
+# checked, so the caller is told which ones went unchecked instead.
+_SECTOR_RULE_FIELDS = {
+    "continent", "originAirport", "destAirport", "originCountry", "destCountry",
+    "domesticCountry", "city", "soto", "route", "sector",
+}
+_TRAVEL_RULE_FIELDS = {"departure", "departureFrom", "departureTo", "travelDate"}
+
+
 async def _apply_payout_rules(
     db: AsyncSession,
     deal_id: int,
     breakdown: dict[str, float],
     ctx: BspRowContext,
-) -> tuple[bool, bool, str | None]:
+) -> tuple[bool, bool, str | None, set[str]]:
     """Run the matched deal's payout inclusion/exclusion rules.
 
-    Returns (blocked, had_inclusion_rule, reason).
+    Returns (blocked, had_inclusion_rule, reason, unconfirmed).
+
+    `unconfirmed` names the criteria a rule DEPENDS ON that this row could not
+    supply. A rule keyed on route cannot be judged against a settlement row with
+    no sector; reporting that is the difference between "these terms were met"
+    and "these terms were never looked at".
     """
     res = await db.execute(
         select(UnifiedDeal)
@@ -523,6 +541,7 @@ async def _apply_payout_rules(
     travel_raw = ctx.travel_date.isoformat() if ctx.travel_date else None
     skip_fields = ctx.skip_rule_fields
     had_inclusion = False
+    unconfirmed: set[str] = set()
 
     for config in deal.incentives:
         if config.incentive_type not in breakdown:
@@ -531,6 +550,16 @@ async def _apply_payout_rules(
             rule_dict = build_rule_dict(rule.conditions)
             if not rule_dict:
                 continue
+            # Note what this rule needed and the row could not give it, before
+            # running it — the evaluator answers "not blocked" either way.
+            fields = set(rule_dict)
+            if ctx.sector is None and (fields & _SECTOR_RULE_FIELDS):
+                unconfirmed.add("sector")
+            if ctx.travel_date is None and (fields & _TRAVEL_RULE_FIELDS):
+                unconfirmed.add(SKIP_TRAVEL_DATE)
+            if ctx.booking_class is None and "class" in fields:
+                unconfirmed.add(SKIP_CLASS)
+
             if rule.rule_category == "payout_inclusion":
                 had_inclusion = True
                 ok, reason = await evaluate_inclusion_for_payout_values(
@@ -541,7 +570,7 @@ async def _apply_payout_rules(
                     skip_fields=skip_fields,
                 )
                 if not ok:
-                    return True, had_inclusion, reason
+                    return True, had_inclusion, reason, unconfirmed
             elif rule.rule_category == "payout_exclusion":
                 excluded, reason = await evaluate_exclusion_for_payout_values(
                     db, rule_dict,
@@ -551,8 +580,31 @@ async def _apply_payout_rules(
                     skip_fields=skip_fields,
                 )
                 if excluded:
-                    return True, had_inclusion, reason
-    return False, had_inclusion, None
+                    return True, had_inclusion, reason, unconfirmed
+    return False, had_inclusion, None, unconfirmed
+
+
+_NEEDS_DATA_LABEL = {
+    SKIP_CLASS: "cabin class",
+    SKIP_TRAVEL_DATE: "travel date",
+    "sector": "sector",
+}
+
+
+def _needs_data_reason(deal_no: str, unconfirmed: list[str]) -> str:
+    """Say what is missing, why it matters, and what to do about it.
+
+    DELIBERATELY IDENTICAL FOR EVERY ROW WITH THE SAME GAP. The "Unmatched &
+    skipped" tab groups rows by (status, reason), so naming the ticket here — as
+    an earlier version did — gave 9,021 rows 9,021 distinct reasons and turned one
+    actionable bucket into 12,088 groups and a 959 KB response. The tab already
+    carries sample document numbers per bucket; that is where the specifics live.
+    """
+    missing = ", ".join(_NEEDS_DATA_LABEL.get(c, c) for c in unconfirmed)
+    return (
+        f"{missing.capitalize()} not known — deal {deal_no} pays only on specific "
+        f"{missing}. Upload the TGQ HMPR covering this period and re-run."
+    )[:500]
 
 
 async def calculate_row(
@@ -683,7 +735,9 @@ async def calculate_row(
             iata_pct = 0.0
     row.iata_commission = round(iata_pct / 100.0 * float(ctx.fare_amount or 0), 2)
 
-    blocked, had_inclusion, reason = await _apply_payout_rules(db, match.deal_id, breakdown, ctx)
+    blocked, had_inclusion, reason, rule_unconfirmed = await _apply_payout_rules(
+        db, match.deal_id, breakdown, ctx,
+    )
     if blocked:
         row.calculated_incentive = 0
         row.incentive_breakdown = {}
@@ -692,6 +746,37 @@ async def calculate_row(
             iata_commission=float(row.iata_commission or 0),
             deal_id=match.deal_id, deal_type=match.deal_type, deal_name=match.deal_name,
             reason=reason,
+        ))
+
+    # ── Did we actually check everything this deal pays on? ─────────────────
+    # A criterion the source does not print is skipped by the matcher, not
+    # satisfied by it. Where the deal RESTRICTS by such a criterion, the figure
+    # above is a guess: this deal pays Economy only, and nobody knows what class
+    # this ticket was. NOTHING IS EARNED, so nothing is reported: the deal, the
+    # breakdown and the amount are all cleared, and the row reads exactly like an
+    # unmatched one — which is what it is. An earlier version kept the figures
+    # visible "for information" and that was wrong: a column showing ₹245.40 on a
+    # row that pays nothing is read as money, however the status is labelled.
+    #
+    # The STATUS stays `needs_data` even though the screen calls it Unmatched.
+    # That is the one thing worth keeping apart, and it costs nothing: 9,021 rows
+    # that only need a TGQ HMPR upload are a different job from 2,986 rows with no
+    # deal at all, and the count, the filter and the gaps bucket all depend on
+    # being able to tell them apart.
+    unconfirmed = sorted(set(match.unconfirmed_criteria) | rule_unconfirmed)
+    if unconfirmed:
+        row.calculated_incentive = None
+        row.incentive_breakdown = {}
+        row.matched_deal_id = None
+        row.matched_deal_type = None
+        row.matched_deal_name = None
+        # The IATA commission goes too. It is the unconfirmed deal's own
+        # percentage applied to the fare — leaving it behind would keep one number
+        # on the row sourced from a deal we just declined to apply.
+        row.iata_commission = None
+        return _finish(row, RowCalcResult(
+            row_id=row.id, status="needs_data", incentive=None,
+            reason=_needs_data_reason(match.deal_no, unconfirmed),
         ))
 
     return _finish(row, RowCalcResult(
@@ -718,6 +803,7 @@ def _set_progress(stmt: BspStatement, processed: int) -> None:
 class RunSummary:
     total:      int = 0
     calculated: int = 0
+    needs_data: int = 0
     excluded:   int = 0
     reversed_:  int = 0
     skipped:    int = 0
@@ -858,6 +944,8 @@ class BspCommissionService:
                         originals[key] = ctx.row
                 if result.status == "calculated":
                     summary.calculated += 1
+                elif result.status == "needs_data":
+                    summary.needs_data += 1
                 elif result.status == "excluded":
                     summary.excluded += 1
                 elif result.status == "reversed":
@@ -865,6 +953,9 @@ class BspCommissionService:
                 elif result.status == "skipped":
                     summary.skipped += 1
                 else:
+                    # Anything unrecognised lands here deliberately, so a status
+                    # added without touching this chain is visible as unmatched
+                    # rather than silently dropped from the tally.
                     summary.unmatched += 1
                 summary.total_incentive += float(result.incentive or 0)
                 summary.total_iata += float(result.iata_commission or 0)
@@ -889,24 +980,57 @@ class BspCommissionService:
         """
         agg = (await db.execute(
             select(
+                func.count(),
                 func.coalesce(func.sum(BspStatementRow.calculated_incentive), 0),
                 func.coalesce(func.sum(BspStatementRow.iata_commission), 0),
                 func.count().filter(BspStatementRow.commission_status.in_(["calculated", "reversed"])),
                 func.count().filter(BspStatementRow.commission_status == "unmatched"),
                 func.count().filter(BspStatementRow.commission_status == "excluded"),
                 func.count().filter(BspStatementRow.commission_status == "skipped"),
-                func.count().filter(BspStatementRow.enrichment_source.is_not(None)),
-            ).where(BspStatementRow.statement_id == stmt.batch_id)
+                func.count().filter(BspStatementRow.commission_status == "needs_data"),
+                # Rows nobody has calculated yet. Counted because they used to fall
+                # into no bucket at all: a statement where the run never happened
+                # showed 8 matched / 0 / 0 / 0 and looked calculated but poor,
+                # rather than 15,196 rows untouched.
+                func.count().filter(BspStatementRow.commission_status == "pending"),
+                # "Enriched" means a criterion was actually RECOVERED, not merely
+                # that a TGQ row was found. A counterpart whose sector and travel
+                # date both failed to parse still sets enrichment_source, so
+                # counting that column overstated coverage against rows the grid
+                # renders blank.
+                func.count().filter(
+                    BspStatementRow.enrichment_source.is_not(None)
+                    & (
+                        BspStatementRow.enriched_sector.is_not(None)
+                        | BspStatementRow.enriched_booking_class.is_not(None)
+                        | BspStatementRow.enriched_travel_date.is_not(None)
+                    )
+                ),
+            ).where(
+                BspStatementRow.statement_id == stmt.batch_id,
+                # Scoped like every other query in this file. statement_id is a
+                # uuid so this changes nothing today, but an unscoped aggregate in
+                # a per-user product is a bug waiting for its first collision.
+                BspStatementRow.tenant_id == stmt.tenant_id,
+                BspStatementRow.created_by_id == stmt.created_by_id,
+            )
         )).one()
 
-        total, iata, matched, unmatched, excluded, skipped, enriched = agg
+        rows, total, iata, matched, unmatched, excluded, skipped, needs_data, pending, enriched = agg
         stmt.commission_total_incentive = round(float(total or 0), 2)
         stmt.commission_iata_total = round(float(iata or 0), 2)
         stmt.commission_matched_rows = matched or 0
         stmt.commission_unmatched_rows = unmatched or 0
         stmt.commission_excluded_rows = excluded or 0
         stmt.commission_skipped_rows = skipped or 0
+        stmt.commission_needs_data_rows = needs_data or 0
+        stmt.commission_pending_rows = pending or 0
         stmt.commission_enriched_rows = enriched or 0
+        # Set here, not only in run(). It was written in exactly one place — the
+        # start of a queued whole-statement run — so a statement only ever touched
+        # by the inline per-row path kept the column at its 0 default, and the UI
+        # divided by it: "Enriched from TGQ — 5 of 0".
+        stmt.commission_total_rows = rows or 0
         stmt.commission_calculated_at = datetime.utcnow()
 
     @staticmethod

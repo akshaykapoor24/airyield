@@ -34,6 +34,11 @@ type StatusResp = {
   expected_rows: number | null; progress_pct: number; error: string | null;
 };
 
+/** One entry from User Master → Airline Master. `ref_id` is the user's own id. */
+type TenantAirlineOpt = {
+  id: number; ref_id: string; airline_name: string | null; airline_code: string | null;
+};
+
 const SKIP = "";   // "— not in file —"
 
 /**
@@ -117,6 +122,11 @@ export default function LccUploadWizard({
   const [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [expectedRows, setExpectedRows] = useState("");   // user-declared record count (optional)
+  // Airline — REQUIRED. An LCC export names no carrier (no airline column, and bare
+  // flight numbers in Segments), so the user's Airline Master id is the only thing
+  // that identifies it. Sent with /extract so a batch is never airline-less.
+  const [airlines, setAirlines] = useState<TenantAirlineOpt[]>([]);
+  const [tenantAirlineId, setTenantAirlineId] = useState<number | "">("");
   const inputRef = useRef<HTMLInputElement>(null);
   const expectedNum = (() => { const n = parseInt(expectedRows.replace(/[^\d]/g, ""), 10); return Number.isFinite(n) && n > 0 ? n : null; })();
 
@@ -133,6 +143,13 @@ export default function LccUploadWizard({
       .then((r) => setGroups(r.data.groups))
       .catch(() => toast.error("Failed to load column definitions."));
   }, [apiBase]);
+
+  // The user's Airline Master, active entries only.
+  useEffect(() => {
+    api.get<TenantAirlineOpt[]>("/tenant-airlines/", { params: { active: true } })
+      .then((r) => setAirlines(r.data))
+      .catch(() => toast.error("Failed to load your Airline Master."));
+  }, []);
 
   const allCols: StdCol[] = useMemo(() => groups.flatMap((g) => g.columns), [groups]);
   const totalStd = allCols.length || extracted?.standard_total || 0;
@@ -169,9 +186,15 @@ export default function LccUploadWizard({
 
   const doExtract = async () => {
     if (!file) { notifyRequired("Choose a statement file (.xlsx, .xls or .csv) to continue."); return; }
+    if (!tenantAirlineId) {
+      notifyRequired("Select the airline this statement belongs to — the file itself doesn't say.");
+      return;
+    }
     setUploading(true);
     try {
-      const fd = new FormData(); fd.append("file", file);
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("tenant_airline_id", String(tenantAirlineId));
       const { data } = await api.post<ExtractResp>(`${apiBase}/extract`, fd);
       setExtracted(data);
       setColumnMap(data.suggested_mapping || {});
@@ -302,6 +325,39 @@ export default function LccUploadWizard({
                   </>
                 )}
                 <input ref={inputRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={(e) => pickFile(e.target.files?.[0] ?? null)} />
+              </div>
+
+              {/* Airline — REQUIRED. Nothing in an LCC export identifies the carrier:
+                  there is no airline column and the flight numbers are bare, so this
+                  selection is the only source of it. */}
+              <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50/60 px-3.5 py-3">
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <label htmlFor="lcc-airline" className="text-xs font-semibold text-slate-700">
+                    Airline <span className="text-red-500">*</span>
+                  </label>
+                  <select
+                    id="lcc-airline"
+                    value={tenantAirlineId}
+                    onChange={(e) => setTenantAirlineId(e.target.value ? Number(e.target.value) : "")}
+                    disabled={airlines.length === 0}
+                    className="min-w-56 px-3 py-1.5 border border-slate-200 rounded-lg text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 disabled:bg-slate-100 disabled:text-slate-400"
+                  >
+                    <option value="">Select your airline ID…</option>
+                    {airlines.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.ref_id} — {a.airline_name ?? "?"}{a.airline_code ? ` (${a.airline_code})` : ""}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="text-[11px] text-slate-400">
+                    An LCC export doesn&apos;t name the carrier, so pick the ID you gave it.
+                  </span>
+                </div>
+                {airlines.length === 0 && (
+                  <p className="text-[11px] text-amber-600 mt-2">
+                    Your Airline Master is empty. Add the airline under User Master → Airline Master first.
+                  </p>
+                )}
               </div>
 
               {/* Expected record count — a manual sanity check confirmed after import. */}

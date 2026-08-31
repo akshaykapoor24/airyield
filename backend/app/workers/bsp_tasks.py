@@ -504,8 +504,65 @@ async def _parse_bsp_statement(batch_id: str, tenant_id: int, user_id: int):
                     await _reconcile_group(db, group_id, tenant_id)
                 except Exception as gex:   # noqa: BLE001
                     logger.warning("Group reconcile failed for %s: %s", group_id, gex)
+
+            # Commission income, without anybody having to ask for it.
+            await _queue_commission(db, batch_id, tenant_id, user_id)
     finally:
         await engine.dispose()
+
+
+async def _queue_commission(db, batch_id: str, tenant_id: int, user_id: int) -> None:
+    """Queue the commission run for a statement that has just finished parsing.
+
+    Nothing calculated until somebody pressed a button, and the per-row ▶ only
+    ever touches the rows you tick — which is how a 15,204-row statement came to
+    have 15,196 rows in `pending` while its tiles read "8 matched, 0 unmatched"
+    and looked calculated.
+
+    Best-effort, and deliberately last: the parse has already been committed as
+    `completed` and must stay that way. A dead broker leaves a message on the
+    statement and the Run all button still works.
+    """
+    from sqlalchemy import select, update
+    from app.models.bsp_statement import BspStatement
+
+    try:
+        # Don't stack a second job on a run that is already in flight.
+        current = (await db.execute(
+            select(BspStatement.commission_status).where(BspStatement.batch_id == batch_id)
+        )).scalar_one_or_none()
+        if current in ("queued", "processing"):
+            logger.info("BSP statement %s already has a commission run — not queueing", batch_id)
+            return
+
+        async with db.begin():
+            await db.execute(
+                update(BspStatement).where(BspStatement.batch_id == batch_id).values(
+                    commission_status="queued",
+                    commission_error=None,
+                    commission_processed_rows=0,
+                    commission_heartbeat_at=datetime.utcnow(),
+                )
+            )
+
+        from app.workers.bsp_commission_tasks import calculate_bsp_commission
+        calculate_bsp_commission.delay(batch_id, tenant_id, user_id)
+        logger.info("BSP statement %s queued for commission calculation", batch_id)
+    except Exception as cex:   # noqa: BLE001 — broker down, or not configured
+        logger.warning("Could not auto-queue commission for %s: %s", batch_id, cex)
+        try:
+            async with db.begin():
+                await db.execute(
+                    update(BspStatement).where(BspStatement.batch_id == batch_id).values(
+                        commission_status="idle",
+                        commission_error=(
+                            "Parsed successfully, but the commission calculation could not be "
+                            f"queued automatically — press Run all to try again. ({cex})"
+                        )[:2000],
+                    )
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception("could not record the commission queue failure for %s", batch_id)
 
 
 async def _fail(db, batch_id: str, message: str):

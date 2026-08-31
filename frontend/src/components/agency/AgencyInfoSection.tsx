@@ -28,7 +28,10 @@
 
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
-import { Edit2, Trash2, RefreshCw, Search, Wallet, ArrowRight } from "lucide-react";
+import {
+  AlertTriangle, ArrowRight, Check, Clock, Edit2, PencilLine,
+  RefreshCw, Search, Trash2, Wallet,
+} from "lucide-react";
 import api from "@/lib/api";
 import SearchSelect from "@/components/ui/SearchSelect";
 import {
@@ -81,7 +84,22 @@ export type AgencyRow = {
   notes: string | null;
   is_active: boolean;
   terms: AgencyTerms[];
+  // Where this agency stands with the shared supplier master. `supplier_id` set
+  // means it is in there; otherwise a request may be waiting on the platform
+  // admin, or have been rejected, or never have been filed (an agency typed in
+  // before this existed, or uploaded from a sheet).
+  supplier_request_id: number | null;
+  supplier_request_status: "pending" | "approved" | "rejected" | null;
+  supplier_request_reason: string | null;
 };
+
+/** What the MASTER column shows for a row, and why. */
+export function masterState(a: AgencyRow) {
+  if (a.supplier_id) return "in_master" as const;
+  if (a.supplier_request_status === "pending") return "pending" as const;
+  if (a.supplier_request_status === "rejected") return "rejected" as const;
+  return "unlisted" as const;
+}
 
 // The master fields an agency copies from at add-time. Note phone/email come
 // from the DIRECTORY columns: contact_phone / contact_email are empty across the
@@ -112,6 +130,16 @@ const CHANNEL_CHOICES: { value: Channel; label: string; hint: string }[] = [
   { value: "GDS", label: "GDS", hint: "Books on your IATA stock via a mirror office" },
   { value: "LCC", label: "LCC", hint: "Books on each airline's own agent portal" },
 ];
+
+// Words that describe the trade rather than name the company. Nearly every row in
+// the master carries one, so matching on them tells you nothing — see nearMatches.
+const GENERIC_NAME_WORDS = new Set([
+  "travel", "travels", "travelling", "tour", "tours", "tourism", "trip", "trips",
+  "holiday", "holidays", "vacation", "vacations", "air", "airways", "aviation",
+  "world", "global", "international", "india", "indian", "services", "service",
+  "solutions", "enterprises", "agency", "agencies", "company", "consultants",
+  "pvt", "private", "ltd", "limited", "llp", "inc", "corp", "and", "the", "for",
+]);
 
 const AGENCY_TYPES = [
   { value: "cash", label: "Cash" },
@@ -217,7 +245,20 @@ export default function AgencyInfoSection({
     } catch (e) { alert(apiError(e)); }
   };
 
-  const COLUMNS = ["AGENCY", "BRANCH", "CHANNELS", "GDS TERMS", "LCC TERMS", "GST", "PAN", "PHONE", "STATUS", "ACTIONS"];
+  // Ask the platform admin to add this agency's vendor to the shared master.
+  // Used both for a first request (an agency typed in before this existed, or
+  // uploaded from a sheet) and to resubmit after a rejection.
+  const [requesting, setRequesting] = useState<number | null>(null);
+  const requestMaster = async (row: AgencyRow) => {
+    setRequesting(row.id);
+    try {
+      const { data } = await api.post<AgencyRow>(`/agencies/${row.id}/master-request`);
+      setRows(p => p.map(r => (r.id === row.id ? data : r)));
+    } catch (e) { alert(apiError(e)); }
+    finally { setRequesting(null); }
+  };
+
+  const COLUMNS = ["AGENCY", "BRANCH", "CHANNELS", "GDS TERMS", "LCC TERMS", "GST", "PAN", "PHONE", "MASTER", "STATUS", "ACTIONS"];
 
   return (
     <div className="space-y-3">
@@ -270,6 +311,13 @@ export default function AgencyInfoSection({
                     </td>
                     <td className="px-3 py-2 text-[11px] text-gray-600">{r.pan_number || "—"}</td>
                     <td className="px-3 py-2 text-[11px] text-gray-600 max-w-40 truncate" title={r.contact_phone ?? ""}>{r.contact_phone || "—"}</td>
+                    <td className="px-3 py-2">
+                      <MasterCell
+                        row={r}
+                        busy={requesting === r.id}
+                        onRequest={() => requestMaster(r)}
+                      />
+                    </td>
                     <td className="px-3 py-2"><ActiveBadge active={r.is_active} onClick={() => toggle(r)} /></td>
                     <td className="px-3 py-2">
                       <div className="flex items-center gap-1">
@@ -296,6 +344,74 @@ export default function AgencyInfoSection({
   );
 }
 
+/**
+ * Where an agency stands with the shared supplier master.
+ *
+ * Four states, and the difference between the last two matters: a REJECTED
+ * request was refused for a reason the user can act on, while UNLISTED simply
+ * means nobody has asked yet — an agency typed in before this flow existed, or
+ * one that arrived in an XLS upload, which does not file requests of its own.
+ * Both keep working either way; being outside the master limits nothing except
+ * whether other workspaces can find the vendor.
+ */
+function MasterCell({
+  row, busy, onRequest,
+}: {
+  row: AgencyRow;
+  busy: boolean;
+  onRequest: () => void;
+}) {
+  const state = masterState(row);
+
+  if (state === "in_master") {
+    return (
+      <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-700 bg-emerald-50 ring-1 ring-emerald-200 rounded-full px-2 py-0.5"
+        title="This vendor is in the shared supplier master.">
+        <Check className="w-3 h-3" /> In master
+      </span>
+    );
+  }
+
+  if (state === "pending") {
+    return (
+      <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-amber-800 bg-amber-50 ring-1 ring-amber-200 rounded-full px-2 py-0.5"
+        title="Sent to the platform admin. The agency works normally while it waits.">
+        <Clock className="w-3 h-3" /> Awaiting approval
+      </span>
+    );
+  }
+
+  if (state === "rejected") {
+    return (
+      <div className="flex flex-col gap-1 items-start">
+        <span
+          className="inline-flex items-center gap-1 text-[10px] font-semibold text-red-700 bg-red-50 ring-1 ring-red-200 rounded-full px-2 py-0.5 cursor-help"
+          title={row.supplier_request_reason || "The platform admin declined this request."}
+        >
+          <AlertTriangle className="w-3 h-3" /> Declined
+        </span>
+        {row.supplier_request_reason && (
+          <span className="text-[10px] text-gray-400 max-w-48 line-clamp-2" title={row.supplier_request_reason}>
+            {row.supplier_request_reason}
+          </span>
+        )}
+        <button onClick={onRequest} disabled={busy}
+          className="text-[10px] font-semibold text-sky-600 hover:underline disabled:opacity-50">
+          {busy ? "Sending…" : "Fix and resubmit"}
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <button onClick={onRequest} disabled={busy}
+      className="text-[10px] font-semibold text-sky-600 hover:underline disabled:opacity-50"
+      title="Ask the platform admin to add this vendor to the shared master, so every workspace can find it.">
+      {busy ? "Sending…" : "Request master entry"}
+    </button>
+  );
+}
+
 /** One channel's terms as typed into the form — all strings until save. */
 type TermsDraft = { agency_type: string; billing_cycle: string; deposit_amount: string; usage_percent: string; credit_limit: string };
 const emptyTerms = (): TermsDraft => ({ agency_type: "", billing_cycle: "", deposit_amount: "", usage_percent: "", credit_limit: "" });
@@ -319,6 +435,15 @@ function AgencyModal({
 
   const [vendorName, setVendorName] = useState("");
   const [supplierId, setSupplierId] = useState<number | null>(null);
+  // The master holds a couple of thousand agencies and the trade has lakhs, so
+  // "it isn't in the list" is ordinary rather than exceptional. In manual mode the
+  // picker becomes a plain name box, the branch key defaults to MAIN, and the save
+  // files a supplier-master request so the platform admin can add the vendor for
+  // everyone. The agency itself is usable the moment it is created.
+  const [manualEntry, setManualEntry] = useState(false);
+  // Set only by "Also add on the other channel" after a hand-entered create, so
+  // the second row attaches to the first row's request instead of raising another.
+  const [reuseRequestId, setReuseRequestId] = useState<number | null>(null);
   const [channels, setChannels] = useState<Channel>("GDS");
   // Keyed by channel so switching GDS → LCC → GDS does not lose what was typed.
   const [terms, setTerms] = useState<Record<Channel, TermsDraft>>({ GDS: emptyTerms(), LCC: emptyTerms() });
@@ -424,10 +549,76 @@ function AgencyModal({
 
   const pickVendor = (name: string) => {
     setVendorName(name);
+    setManualEntry(false);
+    // Picking from the master ends any hand-entered thread, including a request
+    // carried over from the other channel.
+    setReuseRequestId(null);
     const list = vendors.get(name) ?? [];
     if (list.length > 0) applyBranch(list[0]);
     else setSupplierId(null);
   };
+
+  /** Switch to typing the agency in, carrying across whatever was already there. */
+  const startManualEntry = () => {
+    setManualEntry(true);
+    setSupplierId(null);
+    setVendorName("");
+    setForm(p => ({ ...p, branch_code: p.branch_code.trim() || "MAIN" }));
+  };
+
+  /**
+   * The name box is the authority in manual mode, and it is also editable after a
+   * master pick — so a picked vendor whose name is then changed is no longer that
+   * vendor. Drop `supplier_id` when that happens, or the agency would be saved
+   * under one name while claiming provenance from a different master row, with
+   * nothing reconciling the two.
+   */
+  const setName = (v: string) => {
+    setForm(p => ({ ...p, name: v }));
+    if (!manualEntry && supplierId !== null && v.trim().toLowerCase() !== vendorName.trim().toLowerCase()) {
+      setSupplierId(null);
+      setVendorName("");
+      setManualEntry(true);
+    }
+  };
+
+  /**
+   * Close matches for a typed name — the duplicate defence.
+   *
+   * The master is one row per BRANCH, so "Riya Travel & Tours" legitimately exists
+   * fourteen times; a server-side uniqueness rule would reject valid requests.
+   * Catching a near-miss here, before it reaches the admin, is the only guard that
+   * can work — and it stays advisory, because the user is the one who knows
+   * whether their agency really is the one on screen.
+   */
+  const nearMatches = useMemo(() => {
+    const q = form.name.trim().toLowerCase();
+    if (!manualEntry || q.length < 3) return [];
+
+    // Matching on any shared word is worthless here: almost every name in the
+    // master contains "travels" or "tours", so "Balaji Travels Mumbai" would
+    // surface every agency in India. Only DISTINCTIVE words count — the ones that
+    // identify a company rather than describe its trade.
+    const tokens = q.split(/\s+/).filter(w => w.length > 2 && !GENERIC_NAME_WORDS.has(w));
+
+    const scored = suppliers
+      .map(s => {
+        const n = (s.name ?? "").toLowerCase();
+        // A whole-string containment is the strongest signal there is. Failing
+        // that, weight by WHICH words match, not just how many: a name leads with
+        // the company ("Balaji Travels Mumbai"), so a hit on the first word counts
+        // for more than one on a trailing city — otherwise every agency in Mumbai
+        // outranks the actual Balaji.
+        const hits = tokens.reduce(
+          (sum, w, i) => (n.includes(w) ? sum + (tokens.length - i) : sum), 0,
+        );
+        return { s, score: n.includes(q) ? 100 : hits };
+      })
+      .filter(x => x.score > 0);
+
+    scored.sort((a, b) => b.score - a.score || a.s.name.localeCompare(b.s.name));
+    return scored.slice(0, 5).map(x => x.s);
+  }, [manualEntry, form.name, suppliers]);
 
   const setTerm = (ch: Channel, k: keyof TermsDraft, v: string) =>
     setTerms(p => ({ ...p, [ch]: { ...p[ch], [k]: v } }));
@@ -462,7 +653,11 @@ function AgencyModal({
 
   const saveSingle = async () => {
     if (!form.name.trim()) { setError("Agency is required."); return; }
-    if (!isEdit && !form.branch_code.trim()) { setError("Pick a branch."); return; }
+    // `branch_code` is only ever written by applyBranch, so an empty one on a
+    // master-picked create means no branch was chosen. In manual mode there is no
+    // branch to pick — startManualEntry defaults it to MAIN, the key the model
+    // reserves for a hand-entered agency.
+    if (!isEdit && !manualEntry && !form.branch_code.trim()) { setError("Pick a branch."); return; }
 
     const bad = taxProblem();
     if (bad) { setError(bad); return; }
@@ -532,7 +727,7 @@ function AgencyModal({
       const { data } = await api.post<AgencyRow>("/agencies/", {
         name: form.name.trim(),
         supplier_id: supplierId,
-        branch_code: form.branch_code.trim(),
+        branch_code: form.branch_code.trim() || "MAIN",
         branch_name: form.branch_name || null,
         address: form.address || null,
         ...taxFields,
@@ -544,6 +739,11 @@ function AgencyModal({
         is_active: form.is_active,
         channels,
         terms: payloadTerms,
+        // Typed in rather than picked: ask the platform admin to add the vendor to
+        // the shared master. `reuseRequestId` is set when this is the same vendor's
+        // other channel — one vendor gets one request, not one per channel.
+        request_master_entry: manualEntry && !supplierId,
+        supplier_request_id: reuseRequestId,
       });
       setCreated(data);
       onRefresh();
@@ -647,9 +847,15 @@ function AgencyModal({
 
   /** Reopen the form on the other channel with the identity already filled in.
    *  `terms` is keyed by channel, so the block that appears is empty and the one
-   *  just submitted is untouched. */
+   *  just submitted is untouched.
+   *
+   *  A hand-entered vendor carries its master request across rather than filing a
+   *  second one. It is ONE vendor being added to the master; the fact that we hold
+   *  it as two agency rows is our own bookkeeping, and the admin should not be
+   *  asked to approve the same company twice. */
   const addOnOtherChannel = () => {
     if (!otherChannel) return;
+    setReuseRequestId(created?.supplier_request_id ?? null);
     setChannels(otherChannel);
     setCreated(null);
     setError("");
@@ -731,12 +937,47 @@ function AgencyModal({
 
           <div>
             <label className={LABEL}>Agency *</label>
-            <SearchSelect value={vendorName} options={vendorNames} onChange={pickVendor}
-              placeholder="Search and select an agency" />
-            <p className="text-[10px] text-gray-400 mt-1">Details below are filled in from the master and stay editable.</p>
+            {manualEntry ? (
+              <>
+                <div className="rounded-lg border border-sky-200 bg-sky-50 px-2.5 py-2 flex items-start gap-2">
+                  <PencilLine className="w-3.5 h-3.5 text-sky-600 mt-0.5 shrink-0" />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[11px] font-semibold text-sky-800">Entering this agency by hand</p>
+                    <p className="text-[10px] text-sky-700 leading-snug mt-0.5">
+                      Fill in the details below. The agency is yours to use straight away;
+                      we will also ask the platform admin to add it to the shared list so
+                      every workspace can find it.
+                    </p>
+                    <button type="button"
+                      onClick={() => { setManualEntry(false); setReuseRequestId(null); }}
+                      className="text-[10px] font-semibold text-sky-700 hover:underline mt-1">
+                      Back to picking from the list
+                    </button>
+                  </div>
+                </div>
+                {reuseRequestId !== null && (
+                  <p className="text-[10px] text-gray-400 mt-1">
+                    Using the request already raised for this agency on the other channel —
+                    the admin will not be asked twice.
+                  </p>
+                )}
+              </>
+            ) : (
+              <>
+                <SearchSelect value={vendorName} options={vendorNames} onChange={pickVendor}
+                  placeholder="Search and select an agency" />
+                <p className="text-[10px] text-gray-400 mt-1">
+                  Details below are filled in from the master and stay editable.{" "}
+                  <button type="button" onClick={startManualEntry}
+                    className="font-semibold text-sky-600 hover:underline">
+                    Can&apos;t find it? Enter it manually
+                  </button>
+                </p>
+              </>
+            )}
           </div>
 
-          {branches.length > 0 && (
+          {!manualEntry && branches.length > 0 && (
             <div>
               <label className={LABEL}>Branch *</label>
               <select value={supplierId ?? ""} onChange={e => {
@@ -755,8 +996,35 @@ function AgencyModal({
         </>
       )}
 
+      {/* Through setName, not set("name"): editing this after a master pick means
+          the agency is no longer that vendor, so the provenance link is dropped
+          rather than left pointing at a different master row. */}
       <div><label className={LABEL}>Agency Name *</label>
-        <input value={form.name} onChange={e => set("name", e.target.value)} placeholder="e.g. Lords Travels" className={INPUT} /></div>
+        <input value={form.name} onChange={e => setName(e.target.value)} placeholder="e.g. Lords Travels" className={INPUT} /></div>
+
+      {/* Sits under the box that drives it. Advisory, never blocking: the master
+          is one row per BRANCH, so the same vendor legitimately appears many times
+          and no automatic rule can tell a duplicate from a sibling — only the
+          person typing knows which. */}
+      {manualEntry && nearMatches.length > 0 && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 -mt-1">
+          <p className="text-[11px] font-semibold text-amber-800">
+            Similar {nearMatches.length === 1 ? "entry" : "entries"} already in the list
+          </p>
+          <p className="text-[10px] text-amber-700 mb-1.5">
+            Picking one is instant. Carry on typing if none of these is your agency.
+          </p>
+          <div className="space-y-0.5">
+            {nearMatches.map(s => (
+              <button key={s.id} type="button" onClick={() => pickVendor(s.name)}
+                className="w-full text-left px-2 py-1 rounded text-[11px] text-gray-700 hover:bg-white">
+                <span className="font-semibold">{s.name}</span>
+                <span className="text-gray-400"> — {branchLabel(s)}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div><label className={LABEL}>Address</label>
         <input value={form.address} onChange={e => set("address", e.target.value)} placeholder="e.g. 12 Connaught Place" className={INPUT} />

@@ -39,6 +39,8 @@ from app.services.billing_calc import (
     compute_gst as _compute_gst,
     safe_date as _safe_date,
     passenger_name as _passenger_name,
+    corporate_ticket_scope as _corporate_ticket_scope,
+    ticket_matched_by as _ticket_matched_by,
 )
 
 router = APIRouter()
@@ -550,20 +552,19 @@ async def get_corporate_sold_tickets(
             conds.append(func.lower(UploadedTicket.first_name) == fn)
             conds.append(UploadedTicket.pax_name.ilike(f"%{fn}%"))
 
-    if not conds:
-        tickets: list[UploadedTicket] = []
-    else:
-        q = (
-            select(UploadedTicket)
-            .where(
-                UploadedTicket.tenant_id == current_user.tenant_id,
-                UploadedTicket.created_by_id == current_user.id,
-                or_(*conds),
-            )
-            .order_by(UploadedTicket.created_at.desc())
+    # The explicit link wins; the employee-name conditions above only apply to tickets
+    # no party has claimed. See services/billing_calc.py.
+    q = (
+        select(UploadedTicket)
+        .where(
+            UploadedTicket.tenant_id == current_user.tenant_id,
+            UploadedTicket.created_by_id == current_user.id,
+            _corporate_ticket_scope(corporate, conds),
         )
-        result = await db.execute(q)
-        tickets = result.scalars().all()
+        .order_by(UploadedTicket.created_at.desc())
+    )
+    result = await db.execute(q)
+    tickets = result.scalars().all()
 
     # Filter by date range (date fields are strings; parse in Python).
     if date_from or date_to:
@@ -609,6 +610,7 @@ async def get_corporate_sold_tickets(
             incentive_breakdown=t.incentive_breakdown,
             is_billed=bool(t.is_billed),
             billing_id=t.billing_id,
+            matched_by=_ticket_matched_by(t, corporate=corporate, names=names),
             base_amount=round(base, 2),
             markup_amount=round(markup_amount, 2),
             gst_amount=round(gst_amount, 2),
@@ -657,6 +659,35 @@ async def create_billing(
     tickets = res.scalars().all()
     if not tickets:
         raise HTTPException(status_code=400, detail="No matching tickets found for this billing.")
+
+    # Every id must resolve — a partial match used to bill fewer tickets silently.
+    missing = set(ticket_ids) - {t.id for t in tickets}
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{len(missing)} of the selected tickets no longer exist. Refresh and try again.",
+        )
+
+    # The tickets must be this corporate's — linked to it, or an untagged ticket whose
+    # passenger is one of its employees. Same rule the sold-tickets list applies.
+    emp = await db.execute(
+        select(Customer.first_name, Customer.last_name).where(
+            Customer.corporate_id == corporate.id,
+            Customer.tenant_id == current_user.tenant_id,
+            Customer.created_by_id == current_user.id,
+        )
+    )
+    names = [(f, l) for f, l in emp.all()]
+    if corporate.first_name:
+        names.append((corporate.first_name, corporate.last_name))
+    foreign = [t.ticket_number or t.pax_name or str(t.id) for t in tickets
+               if not _ticket_matched_by(t, corporate=corporate, names=names)]
+    if foreign:
+        raise HTTPException(
+            status_code=400,
+            detail=("These tickets are not this corporate's: "
+                    f"{', '.join(foreign[:5])}{'…' if len(foreign) > 5 else ''}."),
+        )
 
     already = [t.ticket_number or str(t.id) for t in tickets if t.is_billed]
     if already:

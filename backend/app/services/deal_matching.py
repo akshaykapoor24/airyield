@@ -151,6 +151,18 @@ def _class_matches_groups(cabin_groups: set[str], plb_class: str | None) -> bool
     return plb_class.strip().title() in cabin_groups
 
 
+def _class_is_restrictive(plb_class: str | None) -> bool:
+    """Does this incentive pay on ONE cabin class rather than any?
+
+    The question only matters when the source document prints no class. A deal
+    written for "All" does not care what the ticket was, so a missing class costs
+    nothing and the figure is exact; a deal written for "Economy" cannot be
+    confirmed against a ticket whose class nobody knows. Same predicate as
+    _class_matches_groups' early return, named for the decision it drives.
+    """
+    return bool(plb_class) and plb_class.strip().lower() not in ("all", "both", "")
+
+
 
 # ── Filter helpers ─────────────────────────────────────────────────────────
 
@@ -243,9 +255,14 @@ def _compute_slab_incentive(
     config: DealIncentiveConfig,
     base: float,
     segment_type: str | None,
-    cabin_groups: set[str],
+    cabin_groups: set[str] | None,
 ) -> float | None:
-    """Find the right slab band and return the computed incentive, or None."""
+    """Find the right slab band and return the computed incentive, or None.
+
+    `cabin_groups` is None when the source document prints no cabin class, and
+    that is different from an empty set: empty means "resolved, and it is none of
+    the ones we know", None means "never resolved". See the class_key choice below.
+    """
     if not config.slabs:
         return None
 
@@ -260,12 +277,19 @@ def _compute_slab_incentive(
         ticket_segment = None
         seg_key = "all"
 
-    # Pick highest-priority cabin class
-    class_key = "economy"
-    for g in ("Business", "First"):
-        if g in cabin_groups:
-            class_key = g.lower()
-            break
+    # Pick highest-priority cabin class. With no class at all, read the cell the
+    # incentive is WRITTEN for rather than defaulting to Economy — the same rule
+    # _slab_class_key applies on the cumulative path. Defaulting would price a
+    # Business-only deal at its Economy rate for every BSP row.
+    if cabin_groups is None:
+        cfg_class = (config.class_ or "").strip().lower()
+        class_key = cfg_class if cfg_class in ("business", "first", "premium") else "economy"
+    else:
+        class_key = "economy"
+        for g in ("Business", "First"):
+            if g in cabin_groups:
+                class_key = g.lower()
+                break
 
     # Sort by threshold DESC; first slab where base >= threshold wins
     sorted_slabs = sorted(config.slabs, key=lambda s: float(s.base_target_amount or 0), reverse=True)
@@ -310,7 +334,12 @@ def _compute_incentive_from_config(
     target_based = (config.target_based or "Fixed").strip().lower()
 
     if target_based == "slab":
-        return _compute_slab_incentive(config, base, segment_type, cabin_groups or set())
+        # `None` (class unknown) is passed through rather than flattened to an
+        # empty set. _compute_slab_incentive reads an empty set as "we looked and
+        # found no cabin", and defaults the rate cell to Economy — which silently
+        # prices a Business ticket at the Economy rate on any source that prints no
+        # class. The cumulative slab path already honoured None; this one did not.
+        return _compute_slab_incentive(config, base, segment_type, cabin_groups)
 
     # Fixed path
     if config.incentive_amt_pct is None:
@@ -768,6 +797,15 @@ class DealMatchResult:
     # None on inbound matches, which have no scope.
     scope_tier:           int | None  = None
     scope_label:          str | None  = None
+    # Criteria this deal RESTRICTS BY that the source document could not supply.
+    #
+    # A skipped criterion is not the same as a satisfied one. A BSP settlement row
+    # prints no cabin class, so a deal written for Economy only cannot be confirmed
+    # against it — the deal still appears here, because the caller needs to know
+    # which deal WOULD have paid, but the caller must decide whether to pay on an
+    # unverified match. Empty means every criterion the deal cares about was
+    # actually checked, so the figure is exact.
+    unconfirmed_criteria: list[str] = field(default_factory=list)
 
 
 # ── Main service ───────────────────────────────────────────────────────────
@@ -895,20 +933,40 @@ class DealMatchingService:
 
             # Per-incentive matching: flight type, class, sub-validity, compute
             breakdown: dict[str, float] = {}
+            # Criteria this deal restricts by that the source could not supply. Only
+            # collected for incentives that went on to contribute — a config that
+            # dropped out for some other reason never gated anything.
+            unconfirmed: set[str] = set()
             for config in deal.incentives:
                 if not _flight_type_matches(segment_type, config.flight_type):
                     continue
-                if SKIP_CLASS not in skips and not _class_matches_groups(cabin_groups or set(), config.class_):
+
+                # CLASS. Skipping is not passing. When the source cannot supply a
+                # class we still let the config through — otherwise nothing would
+                # ever match a BSP row — but if the config is written for ONE class
+                # we record that we never actually checked it, so the caller can
+                # decline to pay on an unverified match.
+                config_unconfirmed: set[str] = set()
+                if SKIP_CLASS in skips:
+                    if _class_is_restrictive(config.class_):
+                        config_unconfirmed.add(SKIP_CLASS)
+                elif not _class_matches_groups(cabin_groups or set(), config.class_):
                     continue
+
                 vf = config.contract_valid_from
                 vt = config.contract_valid_to
                 if vf and vt and not (vf <= contract_date <= vt):
                     continue
+
                 # Travel-date window (B2B Standard, date-wise). Only enforced when both
-                # bounds are set; NULL on legacy/airline deals ⇒ no travel filter.
+                # bounds are set; NULL on legacy/airline deals ⇒ no travel filter, and
+                # therefore nothing to be unsure about.
                 tvf = config.travel_valid_from
                 tvt = config.travel_valid_to
-                if SKIP_TRAVEL_DATE not in skips and tvf and tvt and not (tvf <= travel_date <= tvt):
+                if SKIP_TRAVEL_DATE in skips:
+                    if tvf and tvt:
+                        config_unconfirmed.add(SKIP_TRAVEL_DATE)
+                elif tvf and tvt and not (tvf <= travel_date <= tvt):
                     continue
                 if config.ancillary_items:
                     # Ancillary → from the ticket's own fee columns, not the base fare.
@@ -928,6 +986,9 @@ class DealMatchingService:
                     )
                 if inc is not None:
                     breakdown[config.incentive_type] = inc
+                    # Only now, because a config that computed nothing did not gate
+                    # anything and should not make the whole match look unverified.
+                    unconfirmed |= config_unconfirmed
 
             if breakdown:
                 # Total incentive = sum of all computed types; used for ranking + Delta Comm
@@ -949,6 +1010,7 @@ class DealMatchingService:
                     iata_commission=deal.iata_commission,
                     scope_tier=scope_tier,
                     scope_label=_deal_scope_label(deal) if is_outbound else None,
+                    unconfirmed_criteria=sorted(unconfirmed),
                 ))
 
         # ── Scope ladder (outgoing only) ───────────────────────────────────

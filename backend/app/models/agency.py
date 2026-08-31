@@ -111,6 +111,25 @@ class Agency(Base):
     # supplier_id is provenance only (which row we copied from) and may be NULL for
     # a hand-entered agency; branch_code is the key that makes the row unique.
     supplier_id:   Mapped[int | None] = mapped_column(Integer, ForeignKey("suppliers.id", ondelete="SET NULL"), nullable=True, index=True)
+    # The supplier-master request this agency was typed in under, when it was not
+    # picked from the master. The master holds a couple of thousand agencies and
+    # the trade has lakhs, so "not in the list" is the normal case, not an error:
+    # the agency is created and usable at once, and a request goes to the platform
+    # admin in parallel. Approving it inserts the vendor into `suppliers` for
+    # everybody and back-fills `supplier_id` here — see the approve endpoint in
+    # api/v1/suppliers.py.
+    #
+    # Two rows share ONE request when a vendor is onboarded on both channels; the
+    # back-link updates every agency pointing at the approval, not just one.
+    #
+    # NULL means one of three different things, and they are distinguishable only
+    # together with supplier_id: picked from the master (supplier_id set), typed in
+    # before this existed or via an XLS upload (both NULL — those rows offer a
+    # "Request master entry" action), or a request that was deleted.
+    supplier_request_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("supplier_approvals.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
     branch_code:   Mapped[str]        = mapped_column(String(50),  nullable=False)   # copied from supplier.code, else "MAIN"
     branch_name:   Mapped[str | None] = mapped_column(String(255), nullable=True)    # supplier.branch or city, display only
 

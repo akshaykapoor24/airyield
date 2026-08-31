@@ -82,6 +82,10 @@ export default function CommissionIncomeView() {
                 <th className="text-right px-3 py-2.5 font-semibold">Rows</th>
                 <th className="text-center px-3 py-2.5 font-semibold">Status</th>
                 <th className="text-right px-3 py-2.5 font-semibold">Matched</th>
+                {/* Without this the biggest population on a statement is invisible
+                    from the picker: 9,021 rows that matched a deal but could not be
+                    verified read as neither matched nor unmatched. */}
+                <th className="text-right px-3 py-2.5 font-semibold text-amber-700">Needs TGQ</th>
                 <th className="text-right px-3 py-2.5 font-semibold">Unmatched</th>
                 <th className="text-right px-3 py-2.5 font-semibold text-teal-600">IATA comm</th>
                 <th className="text-right px-3 py-2.5 font-semibold text-emerald-700">Estimated commission</th>
@@ -112,7 +116,13 @@ export default function CommissionIncomeView() {
                   <td className="px-3 py-2 text-right tabular-nums text-slate-600">{s.row_count.toLocaleString("en-IN")}</td>
                   <td className="px-3 py-2 text-center"><StatusBadge s={s} /></td>
                   <td className="px-3 py-2 text-right tabular-nums text-slate-600">{s.matched_rows.toLocaleString("en-IN")}</td>
-                  <td className="px-3 py-2 text-right tabular-nums text-orange-600">{s.unmatched_rows.toLocaleString("en-IN")}</td>
+                  <td
+                    className="px-3 py-2 text-right tabular-nums text-amber-700"
+                    title="Matched a deal, but it pays only on a cabin class, travel window or route this statement does not print — upload the matching TGQ HMPR and re-run."
+                  >
+                    {s.needs_data_rows.toLocaleString("en-IN")}
+                  </td>
+                  <td className="px-3 py-2 text-right tabular-nums text-orange-600">{(s.unmatched_rows + s.needs_data_rows).toLocaleString("en-IN")}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-teal-700">
                     {s.iata_total != null ? `₹${inr(s.iata_total)}` : <span className="text-slate-300">—</span>}
                   </td>

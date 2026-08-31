@@ -7,12 +7,14 @@ from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from fastapi.responses import StreamingResponse
 from typing import Optional
 
-from sqlalchemy import select, func, or_
+from sqlalchemy import select, func, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.database import get_db
 from app.dependencies import get_current_user, is_platform_admin, require_role
+# Approving a NEW supplier back-links the agencies that were waiting on it.
+from app.models.agency import Agency
 from app.models.supplier import Supplier
 from app.models.supplier_approval import SupplierApproval
 from app.models.user import User, UserRole
@@ -22,6 +24,7 @@ from app.schemas.supplier import (
 )
 from app.services.master_approval_edit import apply_admin_edit, SUPPLIER_CORE_FIELDS
 from app.services.master_export import master_export_response
+from app.services import supplier_master_request as _sup_req
 
 router = APIRouter()
 PLATFORM = UserRole.PLATFORM_ADMIN
@@ -35,33 +38,17 @@ SUBMITTERS = (
 )
 
 
-# Directory / member-list fields shared by Supplier and SupplierApproval.
-# Kept in one place so create/update/approve/bulk-upload stay in sync.
-DIRECTORY_FIELDS = (
-    "region_chapter", "membership_category",
-    "address_1", "address_2", "address_3",
-    "city", "pincode", "telephone_mobile", "website",
-    "email_address", "alternate_email_id", "accounts_email",
-    "fax_no", "representative_1", "representative_2",
-)
-
-
-def _directory_kwargs(obj) -> dict:
-    """Extract the directory fields from a payload/ORM object as a kwargs dict."""
-    return {f: getattr(obj, f, None) for f in DIRECTORY_FIELDS}
-
+# Directory / member-list fields shared by Supplier and SupplierApproval, and the
+# "create it or request it" rule itself, both now live in the service — Agency
+# Master files the same kind of request and must not carry a second copy of either.
+# Re-exported under their original names so this module reads as it always did.
+DIRECTORY_FIELDS = _sup_req.DIRECTORY_FIELDS
+_directory_kwargs = _sup_req.directory_kwargs
+_generate_code = _sup_req.generate_code
 
 # Everything a platform admin may change on a pending request. Composed from
 # DIRECTORY_FIELDS so that constant stays the single source for those 15 names.
 SUPPLIER_FIELDS = (*SUPPLIER_CORE_FIELDS, *DIRECTORY_FIELDS)
-
-
-
-
-async def _generate_code(db: AsyncSession) -> str:
-    result = await db.execute(select(func.max(Supplier.id)))
-    max_id = result.scalar() or 0
-    return f"SUPP-{(max_id + 1):04d}"
 
 
 @router.get("/count")
@@ -166,55 +153,24 @@ async def create_supplier(
         await db.refresh(approval)
         return {"status": "pending_approval", "approval_id": approval.id}
 
-    # request_type == "new"
-    if is_platform_admin(current_user):
-        code = payload.code.strip() if payload.code else await _generate_code(db)
+    # request_type == "new" — who may write the master directly, and what a request
+    # carries, is the service's decision. Agency Master files the same kind of
+    # request through the same function.
+    code = payload.code.strip() if payload.code else None
+    if code and is_platform_admin(current_user):
         existing = await db.execute(select(Supplier).where(Supplier.code == code))
         if existing.scalar_one_or_none():
             raise HTTPException(status_code=400, detail=f"Supplier with code '{code}' already exists.")
-        supplier = Supplier(
-            name=payload.name.strip(),
-            code=code,
-            vendor_type=payload.vendor_type,
-            vendor_name=payload.vendor_name,
-            branch=payload.branch,
-            branches=payload.branches,
-            contact_phone=payload.contact_phone,
-            alternate_phone=payload.alternate_phone,
-            contact_email=payload.contact_email,
-            alternate_email=payload.alternate_email,
-            gst_number=payload.gst_number,
-            pan_number=payload.pan_number,
-            notes=payload.notes,
-            **_directory_kwargs(payload),
-        )
-        db.add(supplier)
-        await db.commit()
+
+    supplier, approval = await _sup_req.create_or_request_supplier(
+        db, current_user, _sup_req.value_kwargs(payload), code=code,
+    )
+    await db.commit()
+
+    if supplier is not None:
         await db.refresh(supplier)
         return {"status": "added", "supplier": SupplierRead.model_validate(supplier)}
 
-    approval = SupplierApproval(
-        name=payload.name.strip(),
-        vendor_type=payload.vendor_type,
-        vendor_name=payload.vendor_name,
-        branch=payload.branch,
-        branches=payload.branches,
-        contact_phone=payload.contact_phone,
-        alternate_phone=payload.alternate_phone,
-        contact_email=payload.contact_email,
-        alternate_email=payload.alternate_email,
-        gst_number=payload.gst_number,
-        pan_number=payload.pan_number,
-        notes=payload.notes,
-        **_directory_kwargs(payload),
-        submitted_by_id=current_user.id,
-        tenant_id=current_user.tenant_id,
-        status="pending",
-        request_type="new",
-        target_supplier_id=None,
-    )
-    db.add(approval)
-    await db.commit()
     await db.refresh(approval)
     return {"status": "pending_approval", "approval_id": approval.id}
 
@@ -575,6 +531,27 @@ async def approve_supplier(
         **_directory_kwargs(approval),
     )
     db.add(supplier)
+    await db.flush()   # need supplier.id for the agency back-link below
+
+    # A request raised from Agency Master has agencies waiting on it — the user has
+    # been trading against them since the day they typed them in. Now that the
+    # vendor exists in the master, point them at it. Several rows can be waiting on
+    # one request: a vendor onboarded on both GDS and LCC is two agencies.
+    #
+    # ONLY `supplier_id` IS WRITTEN. `branch_code` keeps whatever it had ("MAIN"
+    # for a hand-entered agency) rather than taking the new SUPP-nnnn code: it is
+    # part of uq_agencies_user_name_branch_channel, so rewriting it could collide
+    # with a sibling row, and an agency's details are copied at add-time and never
+    # rewritten afterwards by design (see the Agency docstring).
+    await db.execute(
+        update(Agency)
+        .where(
+            Agency.supplier_request_id == approval.id,
+            Agency.supplier_id.is_(None),
+        )
+        .values(supplier_id=supplier.id)
+    )
+
     approval.status = "approved"
     approval.reviewed_by_id = current_user.id
     approval.reviewed_at = datetime.utcnow()

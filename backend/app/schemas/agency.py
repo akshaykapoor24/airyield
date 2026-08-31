@@ -73,6 +73,14 @@ class AgencyCreate(AgencyBase):
     supplier_id: Optional[int] = None
     branch_code: Optional[str] = None
     branch_name: Optional[str] = None
+    # Typed in rather than picked from the master: file a supplier-master request
+    # so the platform admin can add the vendor for everybody. Ignored when
+    # `supplier_id` is set — that agency is already in the master.
+    request_master_entry: Optional[bool] = False
+    # Reuse a request that already exists instead of filing a second one. Set when
+    # the same vendor is onboarded on its other channel: one vendor, one request,
+    # two agency rows sharing it.
+    supplier_request_id: Optional[int] = None
     # GDS or LCC — never BOTH on a create. An agency that works both channels is
     # onboarded twice, so each channel gets its own terms, deposit, ledger and row.
     channels: str
@@ -111,6 +119,16 @@ class AgencyRead(AgencyBase):
     branch_code: str
     branch_name: Optional[str] = None
     channels: str
+    # Where this agency stands with the shared supplier master.
+    #   supplier_id set                    → it is in the master
+    #   status "pending"                   → typed in, waiting on the platform admin
+    #   status "rejected" + reason         → declined; the agency still works, and
+    #                                        can be corrected and resubmitted
+    #   both None                          → typed in before this existed, or via
+    #                                        XLS; offered a "Request master entry"
+    supplier_request_id: Optional[int] = None
+    supplier_request_status: Optional[str] = None
+    supplier_request_reason: Optional[str] = None
     # Non-optional on the way out, unlike on AgencyBase — every stored row has an
     # answer, so a screen can show "Unregistered" rather than an empty GST cell.
     gst_registered: bool = False

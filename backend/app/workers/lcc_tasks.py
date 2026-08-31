@@ -157,10 +157,28 @@ async def _ingest(batch_id: str, tenant_id: int, user_id: int):
                 if batch.status == "completed":
                     logger.info("LCC batch %s already completed — skipping", batch_id)
                     return
+                if batch.resolution_status == "projected":
+                    # Re-ingest DELETEs every row below and re-inserts with new PKs,
+                    # which would strand the projected tickets pointing at rows that
+                    # no longer exist. Unreachable through the API today, but the
+                    # consequence is permanent, so refuse rather than rely on that.
+                    logger.warning(
+                        "LCC batch %s has been sent to billing — refusing to re-ingest", batch_id
+                    )
+                    batch.error = (
+                        "This upload has already been sent to billing, so its rows cannot be "
+                        "re-imported. Delete the billing and the upload, then upload again."
+                    )
+                    return
                 file_url = batch.file_url
                 header_row = batch.header_row or 0
                 column_map = dict(batch.column_map or {})
                 source_file = batch.source_file or ""
+                # Denormalised onto every row: an LCC export names no carrier, so the
+                # airline the user declared at upload is the only source of it.
+                airline_id = batch.airline_id
+                airline_name = batch.airline_name
+                airline_code = batch.airline_code
                 batch.status = "processing"
                 batch.error = None
                 batch.processed_rows = 0
@@ -189,6 +207,9 @@ async def _ingest(batch_id: str, tenant_id: int, user_id: int):
                 built["tenant_id"] = tenant_id
                 built["created_by_id"] = user_id
                 built["batch_id"] = batch_id
+                built["airline_id"] = airline_id
+                built["airline_name"] = airline_name
+                built["airline_code"] = airline_code
                 buf.append(built)
                 seen += 1
                 if len(buf) >= CHUNK_ROWS:
