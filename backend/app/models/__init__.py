@@ -37,6 +37,8 @@ from app.models.statement_row import (
     ThirdPartyGds, ThirdPartyLcc, STATEMENT_MODELS,
 )
 from app.models.lcc_detailed import LccDetailed, LccDetailedBatch
+from app.models.lcc_batch_airline_id import LccBatchAirlineId
+from app.models.statement_batch_airline_id import StatementBatchAirlineId
 from app.models.bsp_statement import BspStatement, BspStatementRow, BspTaxBreakup, BspParseError
 from app.models.bsp_summary import BspSummaryStatement, BspSummaryRow
 from app.models.ticket_reconciliation import TicketReconciliation
@@ -112,7 +114,7 @@ __all__ = [
     "AirlineADM", "AirlineACM", "AirlineRA", "ADJUSTMENT_MODELS",
     "TgqHmpr", "Ndc", "LccDi", "LccDividedPnr", "LccFlownReport", "LccCtaBta",
     "ThirdPartyGds", "ThirdPartyLcc", "STATEMENT_MODELS",
-    "LccDetailed", "LccDetailedBatch",
+    "LccDetailed", "LccDetailedBatch", "LccBatchAirlineId", "StatementBatchAirlineId",
     "BspStatement", "BspStatementRow", "BspTaxBreakup", "BspParseError",
     "BspSummaryStatement", "BspSummaryRow",
     "TicketReconciliation",

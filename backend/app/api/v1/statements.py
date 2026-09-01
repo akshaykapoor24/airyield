@@ -17,7 +17,9 @@ import uuid
 from datetime import datetime
 
 import pandas as pd
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi import (
+    APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status,
+)
 from fastapi.responses import StreamingResponse
 from sqlalchemy import Numeric, case, cast, delete, func, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,9 +27,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database import get_db
 from app.dependencies import get_current_user
+from app.models.statement_batch_airline_id import StatementBatchAirlineId
 from app.models.statement_row import STATEMENT_MODELS
+from app.models.tenant_airline import TenantAirline
 from app.models.user import User
 from app.services import sector_split, statement_spec as spec
+from app.services.lcc_airline_selection import resolve_for_upload
 
 router = APIRouter()
 
@@ -329,15 +334,42 @@ async def get_columns(slug: str, current_user: User = Depends(get_current_user))
     return _display_columns(slug)
 
 
+async def _airline_selection(
+    db: AsyncSession, slug: str, user: User, tenant_airline_ids: list[int]
+) -> list[TenantAirline]:
+    """The Airline Master ids declared for this upload.
+
+    Required only for the types whose spec says so — the LCC ones, whose exports name
+    no carrier. TGQ HMPR, NDC and the third-party types share this endpoint and carry
+    their own airline, so a selection sent for them is ignored rather than stored.
+    """
+    if not spec.requires_airline_id(slug):
+        return []
+    try:
+        return await resolve_for_upload(db, user.tenant_id, tenant_airline_ids)
+    except ValueError as exc:
+        # MixedAirlineSelection and UnknownAirlineId are both ValueErrors and both
+        # carry a message written for the user.
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @router.post("/{slug}/upload")
 async def upload_statement(
     slug: str,
     file: UploadFile = File(...),
+    tenant_airline_ids: list[int] = Form(default=[]),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Parse a statement export → verbatim fixed columns + folded taxes, under one batch."""
+    """Parse a statement export → verbatim fixed columns + folded taxes, under one batch.
+
+    For the LCC types the uploader must also declare which of their Airline Master ids
+    the file covers — the export names no carrier, so nothing else identifies it. That
+    is resolved BEFORE the file is parsed or stored, so a rejected selection cannot
+    leave a half-imported batch behind.
+    """
     slug, model = _resolve(slug)
+    airlines = await _airline_selection(db, slug, current_user, tenant_airline_ids)
 
     content = await file.read()
     max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
@@ -401,6 +433,11 @@ async def upload_statement(
         raise HTTPException(status_code=400, detail="No data rows were found in the file.")
 
     db.add_all(objs)
+    for ta in airlines:
+        db.add(StatementBatchAirlineId(
+            tenant_id=current_user.tenant_id, slug=slug,
+            batch_id=batch_id, tenant_airline_id=ta.id,
+        ))
     await db.commit()
     return {
         "batch_id": batch_id,
@@ -410,6 +447,9 @@ async def upload_statement(
         "matched_columns": matched,
         "source_rows": source_rows,
         "leg_rows": sum(1 for o in objs if not getattr(o, "is_total", False)),
+        "airline_name": airlines[0].airline_name if airlines else None,
+        "airline_code": airlines[0].airline_code if airlines else None,
+        "airline_ref_ids": [ta.ref_id for ta in airlines],
     }
 
 
@@ -661,6 +701,24 @@ async def list_batches(slug: str, db: AsyncSession = Depends(get_db), current_us
         .order_by(func.max(model.uploaded_at).desc())
     )
     rows = (await db.execute(q)).all()
+
+    # The declared airline ids, for the types that have them. ONE query for the whole
+    # list rather than a lookup per batch. Empty for every other type, and for uploads
+    # made before the airline was captured — those show "—" rather than a guess.
+    links: dict[str, list[TenantAirline]] = {}
+    if spec.requires_airline_id(slug) and rows:
+        for batch_id, ta in (await db.execute(
+            select(StatementBatchAirlineId.batch_id, TenantAirline)
+            .join(TenantAirline, TenantAirline.id == StatementBatchAirlineId.tenant_airline_id)
+            .where(
+                StatementBatchAirlineId.slug == slug,
+                StatementBatchAirlineId.tenant_id == current_user.tenant_id,
+                StatementBatchAirlineId.batch_id.in_([r.batch_id for r in rows]),
+            )
+            .order_by(TenantAirline.ref_id)
+        )).all():
+            links.setdefault(batch_id, []).append(ta)
+
     return [
         {
             "batch_id": r.batch_id,
@@ -669,6 +727,12 @@ async def list_batches(slug: str, db: AsyncSession = Depends(get_db), current_us
             "row_count": r.row_count,
             "has_file": bool(r.file_url),
             "created_by_name": current_user.full_name,
+            # Every id in a batch shares one carrier, so the first row's airline is
+            # the batch's airline — see services/lcc_airline_selection.py.
+            "airline_name": links[r.batch_id][0].airline_name if links.get(r.batch_id) else None,
+            "airline_code": links[r.batch_id][0].airline_code if links.get(r.batch_id) else None,
+            "airline_ref_ids": [ta.ref_id for ta in links.get(r.batch_id, [])],
+            "tenant_airline_ids": [ta.id for ta in links.get(r.batch_id, [])],
         }
         for r in rows
     ]
@@ -723,6 +787,16 @@ async def delete_batch(slug: str, batch_id: str, db: AsyncSession = Depends(get_
     """Delete an entire upload (all rows sharing the batch_id)."""
     slug, model = _resolve(slug)
     res = await db.execute(delete(model).where(model.batch_id == batch_id, *_scope(model, current_user)))
+    # Explicitly: batch_id carries no FK, because these types keep no batch header row
+    # for one to point at. Left behind, these links would keep an airline id looking
+    # in-use forever and block its deletion from the Airline Master.
+    await db.execute(
+        delete(StatementBatchAirlineId).where(
+            StatementBatchAirlineId.slug == slug,
+            StatementBatchAirlineId.batch_id == batch_id,
+            StatementBatchAirlineId.tenant_id == current_user.tenant_id,
+        )
+    )
     await db.commit()
     if not res.rowcount:
         raise HTTPException(status_code=404, detail="Upload not found.")

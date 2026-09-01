@@ -41,8 +41,44 @@ export type IataCommissionRow = {
   is_active: boolean;
 };
 
+/** One id the tenant holds for an airline. A tenant normally holds several per
+ *  carrier, which is why the Airline Master groups these under the airline. */
+export type TenantAirlineIdRow = {
+  id: number;
+  ref_id: string;
+  is_active: boolean;
+  /** LCC batches uploaded against this id — delete is refused above zero. */
+  in_use_count: number;
+  /** The master was renamed after this id was added; its statements still carry
+   *  the old name, so the difference is shown rather than hidden. */
+  snapshot_name_drifted: boolean;
+};
+
+/** One platform airline as it appears in User Master → Airline Master: the
+ *  master's own columns, plus this tenant's ids for it (possibly none). */
+export type AirlineCatalogEntry = {
+  airline_id: number;
+  name: string;
+  iata_code: string;
+  iata_numeric_code: string | null;
+  contract_year: string | null;
+  master_is_active: boolean;
+  ids: TenantAirlineIdRow[];
+  id_count: number;
+  active_id_count: number;
+};
+
 export type SupplierOpt = { id: number; name: string };
 export type BulkResult = { total: number; success: number; failed: number; errors: string[] };
+
+/** Resources exposing the /template + /bulk-upload pair that UploadBox drives.
+ *  Named once because it was previously spelled out twice, and adding a resource
+ *  to only one of the two copies fails at the call site rather than at the fix. */
+export type BulkResource =
+  | "entities" | "login-ids" | "iata-commissions"
+  | "user-entities" | "user-login-ids"
+  | "agencies" | "agency-entities" | "agency-login-ids"
+  | "tenant-airlines";
 
 export const INPUT =
   "w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-400 bg-gray-50";
@@ -55,7 +91,7 @@ export function apiError(e: unknown): string {
   return "Request failed.";
 }
 
-export async function downloadTemplate(resource: "entities" | "login-ids" | "iata-commissions" | "user-entities" | "user-login-ids" | "agencies" | "agency-entities" | "agency-login-ids", filename: string) {
+export async function downloadTemplate(resource: BulkResource, filename: string) {
   const res = await api.get(`/${resource}/template`, { responseType: "blob" });
   const url = window.URL.createObjectURL(res.data as Blob);
   const link = document.createElement("a");
@@ -86,7 +122,7 @@ export function ActiveBadge({ active, onClick }: { active: boolean; onClick: () 
 export function UploadBox({
   resource, templateName, columns, onDone,
 }: {
-  resource: "entities" | "login-ids" | "iata-commissions" | "user-entities" | "user-login-ids" | "agencies" | "agency-entities" | "agency-login-ids";
+  resource: BulkResource;
   templateName: string;
   columns: string;
   onDone: () => void;

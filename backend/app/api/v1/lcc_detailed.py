@@ -33,12 +33,14 @@ from app.database import get_db
 from app.dependencies import get_current_user
 from app.models.corporate import Corporate
 from app.models.customer import Customer
+from app.models.lcc_batch_airline_id import LccBatchAirlineId
 from app.models.lcc_detailed import LccDetailed, LccDetailedBatch
 from app.models.tenant_airline import TenantAirline
 from app.models.user import User
 from app.services import customer_resolver as cres
 from app.services import gcs
 from app.services import lcc_detailed_spec as spec
+from app.services.lcc_airline_selection import resolve_for_upload
 from app.services.lcc_statement import _clean, detect_format
 
 router = APIRouter()
@@ -180,29 +182,66 @@ def _record_conds(user: User, batch_id: str | None, request: Request | None) -> 
     return conds + _filter_conds(request)
 
 
-async def _tenant_airline(db: AsyncSession, user: User, tenant_airline_id: int) -> TenantAirline:
-    """Resolve one of the user's Airline Master entries. An LCC export carries no
-    carrier, so this selection is the ONLY thing that identifies the airline."""
-    obj = (await db.execute(
-        select(TenantAirline).where(
-            TenantAirline.id == tenant_airline_id,
-            TenantAirline.tenant_id == user.tenant_id,
-        )
-    )).scalar_one_or_none()
-    if not obj:
-        raise HTTPException(
-            status_code=400,
-            detail="That airline is not in your Airline Master. Add it under User Master → Airline Master.",
-        )
-    return obj
+async def _tenant_airlines(
+    db: AsyncSession, user: User, tenant_airline_ids: list[int]
+) -> list[TenantAirline]:
+    """Resolve the user's Airline Master entries for an upload.
+
+    An LCC export carries no carrier, so this selection is the ONLY thing that
+    identifies the airline. A statement may cover SEVERAL of the user's ids for that
+    carrier — but not ids from two carriers; see services/lcc_airline_selection.py.
+    """
+    try:
+        return await resolve_for_upload(db, user.tenant_id, tenant_airline_ids)
+    except ValueError as exc:
+        # MixedAirlineSelection and UnknownAirlineId are both ValueErrors and both
+        # carry a message written for the user.
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
-def _stamp_airline(batch: LccDetailedBatch, ta: TenantAirline) -> None:
-    batch.tenant_airline_id = ta.id
-    batch.airline_id = ta.airline_id
-    batch.airline_name = ta.airline_name
-    batch.airline_code = ta.airline_code
-    batch.airline_ref_id = ta.ref_id
+async def _stamp_airline(
+    db: AsyncSession, batch: LccDetailedBatch, tas: list[TenantAirline]
+) -> None:
+    """Put the selection on the batch: the scalar columns from the primary (first)
+    id, and the full set in the link table.
+
+    The scalar airline_* columns stay single-valued and correct because every id in
+    the selection shares one carrier — that is the whole reason for that rule.
+    """
+    primary = tas[0]
+    batch.tenant_airline_id = primary.id
+    batch.airline_id = primary.airline_id
+    batch.airline_name = primary.airline_name
+    batch.airline_code = primary.airline_code
+    batch.airline_ref_id = primary.ref_id
+
+    # Replace rather than merge: re-declaring the airline on a batch means "these are
+    # the ids now", so an id dropped from the selection must not linger.
+    await db.execute(
+        delete(LccBatchAirlineId).where(LccBatchAirlineId.batch_id == batch.batch_id)
+    )
+    for ta in tas:
+        db.add(LccBatchAirlineId(batch_id=batch.batch_id, tenant_airline_id=ta.id))
+
+
+async def _batch_airline_ids(
+    db: AsyncSession, batch_ids: list[str]
+) -> dict[str, list[tuple[int, str]]]:
+    """`{batch_id: [(tenant_airline_id, ref_id), ...]}` for a whole page of batches in
+    ONE query — the batches list renders every row's id set, so a query per row would
+    be an N+1 on the busiest screen in this view."""
+    if not batch_ids:
+        return {}
+    rows = (await db.execute(
+        select(LccBatchAirlineId.batch_id, TenantAirline.id, TenantAirline.ref_id)
+        .join(TenantAirline, TenantAirline.id == LccBatchAirlineId.tenant_airline_id)
+        .where(LccBatchAirlineId.batch_id.in_(batch_ids))
+        .order_by(TenantAirline.ref_id)
+    )).all()
+    out: dict[str, list[tuple[int, str]]] = {}
+    for batch_id, ta_id, ref_id in rows:
+        out.setdefault(batch_id, []).append((ta_id, ref_id))
+    return out
 
 
 def _progress_pct(b: LccDetailedBatch) -> int:
@@ -303,16 +342,26 @@ async def download_template(current_user: User = Depends(get_current_user)):
 @router.post("/extract")
 async def extract(
     file: UploadFile = File(...),
-    tenant_airline_id: int = Form(...),
+    tenant_airline_ids: list[int] = Form(default=[]),
+    tenant_airline_id: int | None = Form(default=None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Store the file, detect headers, auto-map, and stage a batch. Nothing is
     ingested yet — the user reviews the mapping, then calls /confirm.
 
-    `tenant_airline_id` is required and resolved here rather than at /confirm, so a
-    batch is never in a state where rows could be ingested without an airline."""
-    ta = await _tenant_airline(db, current_user, tenant_airline_id)
+    The airline selection is required and resolved here rather than at /confirm, so a
+    batch is never in a state where rows could be ingested without an airline. Several
+    ids may be sent — one statement usually covers more than one of the user's logins
+    for that carrier — but they must all be the same airline.
+
+    `tenant_airline_id` (singular) is still accepted so a client that has not picked up
+    the new field cannot suddenly 422 mid-upload."""
+    picked = list(tenant_airline_ids)
+    if tenant_airline_id is not None and tenant_airline_id not in picked:
+        picked.append(tenant_airline_id)
+    tas = await _tenant_airlines(db, current_user, picked)
+    ta = tas[0]
     content = await file.read()
     max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
     if len(content) > max_bytes:
@@ -355,8 +404,9 @@ async def extract(
         matched_columns=matched_columns,
         uploaded_at=datetime.utcnow(),
     )
-    _stamp_airline(batch, ta)
     db.add(batch)
+    # After db.add: _stamp_airline writes the link rows, whose FK is the batch.
+    await _stamp_airline(db, batch, tas)
     await db.commit()
 
     return {
@@ -365,6 +415,8 @@ async def extract(
         "airline_name": ta.airline_name,
         "airline_code": ta.airline_code,
         "airline_ref_id": ta.ref_id,
+        "airline_ref_ids": [t.ref_id for t in tas],
+        "tenant_airline_ids": [t.id for t in tas],
         "total_rows": total_rows,
         "header_row": header_row,
         "source_format": source_format,
@@ -455,6 +507,7 @@ async def list_batches(
         .where(*_scope(LccDetailedBatch, current_user))
         .order_by(LccDetailedBatch.uploaded_at.desc())
     )).scalars().all()
+    links = await _batch_airline_ids(db, [b.batch_id for b in rows])
     return [
         {
             "batch_id": b.batch_id,
@@ -473,6 +526,16 @@ async def list_batches(
             "airline_code": b.airline_code,
             "airline_ref_id": b.airline_ref_id,
             "tenant_airline_id": b.tenant_airline_id,
+            # The full set this upload covers. Falls back to the primary columns for a
+            # batch that predates the link table and was never re-saved.
+            "airline_ref_ids": (
+                [ref for _, ref in links[b.batch_id]] if b.batch_id in links
+                else ([b.airline_ref_id] if b.airline_ref_id else [])
+            ),
+            "tenant_airline_ids": (
+                [tid for tid, _ in links[b.batch_id]] if b.batch_id in links
+                else ([b.tenant_airline_id] if b.tenant_airline_id else [])
+            ),
             "billable_rows": b.billable_rows,
             "resolved_rows": b.resolved_rows,
             "unresolved_rows": b.unresolved_rows,
@@ -484,7 +547,17 @@ async def list_batches(
 
 
 class BatchAirlinePayload(BaseModel):
-    tenant_airline_id: int
+    # Several ids may be sent — one statement usually covers more than one of the
+    # user's logins for that carrier. The singular field is still accepted so an
+    # older client keeps working; see extract() for the same pairing.
+    tenant_airline_ids: list[int] = []
+    tenant_airline_id: int | None = None
+
+    def picked(self) -> list[int]:
+        out = list(self.tenant_airline_ids)
+        if self.tenant_airline_id is not None and self.tenant_airline_id not in out:
+            out.append(self.tenant_airline_id)
+        return out
 
 
 @router.patch("/batches/{batch_id}/airline")
@@ -507,8 +580,9 @@ async def set_batch_airline(
     if not batch:
         raise HTTPException(status_code=404, detail="Upload not found.")
 
-    ta = await _tenant_airline(db, current_user, payload.tenant_airline_id)
-    _stamp_airline(batch, ta)
+    tas = await _tenant_airlines(db, current_user, payload.picked())
+    ta = tas[0]
+    await _stamp_airline(db, batch, tas)
 
     result = await db.execute(
         update(LccDetailed)
@@ -526,6 +600,8 @@ async def set_batch_airline(
         "airline_name": ta.airline_name,
         "airline_code": ta.airline_code,
         "airline_ref_id": ta.ref_id,
+        "airline_ref_ids": [t.ref_id for t in tas],
+        "tenant_airline_ids": [t.id for t in tas],
         "rows_updated": result.rowcount or 0,
     }
 

@@ -19,6 +19,11 @@ export type StatementType = {
   blurb?: string;
   apiBase?: string;               // spec-repo: full API base, e.g. "/statements/tgq-hmpr"
   variants?: StatementVariant[];  // spec-repo with an inner switch, e.g. ADM/ACM/RA
+  /** Upload demands an Airline Master ID — the LCC exports name no carrier, so the
+   *  uploader is the only source of it. Mirrors `requires_airline_id` in the backend
+   *  spec (services/statement_spec.py), which is what actually enforces it; opt-in per
+   *  type because every spec-repo type shares one view and one upload endpoint. */
+  requiresAirlineId?: boolean;
 };
 
 export type StatementCategory = {
@@ -60,10 +65,11 @@ export const STATEMENT_NAV: StatementCategory[] = [
     label: "LCC",
     types: [
       { slug: "statement-detailed", label: "Detailed Statement", kind: "lcc-detailed", status: "ready", apiBase: "/lcc-detailed", blurb: "LCC detailed statement — map any airline export to the standard 129-column template, then ingest." },
-      { slug: "di",                 label: "DI Statement",       kind: "spec-repo", status: "ready", apiBase: "/statements/lcc-di", blurb: "Deposit (DI) statement — deposit or agency ledger, normalized." },
-      { slug: "divided-pnr",        label: "Divided PNR",        kind: "spec-repo", status: "ready", apiBase: "/statements/lcc-divided-pnr", blurb: "Divided PNR statement — parent→child PNR splits, normalized." },
-      { slug: "flown-report",       label: "Flown Report",       kind: "spec-repo", status: "ready", apiBase: "/statements/lcc-flown-report", blurb: "Flown (uplifted) segment report — normalized." },
-      { slug: "cta-bta",            label: "CTA/BTA Report",     kind: "spec-repo", status: "ready", apiBase: "/statements/lcc-cta-bta", blurb: "CTA/BTA (Central/Business Travel Account) lodged-account settlement report — normalized." },
+      // requiresAirlineId on all four: like Detailed, an LCC export names no carrier.
+      { slug: "di",                 label: "DI Statement",       kind: "spec-repo", status: "ready", apiBase: "/statements/lcc-di", requiresAirlineId: true, blurb: "Deposit (DI) statement — deposit or agency ledger, normalized." },
+      { slug: "divided-pnr",        label: "Divided PNR",        kind: "spec-repo", status: "ready", apiBase: "/statements/lcc-divided-pnr", requiresAirlineId: true, blurb: "Divided PNR statement — parent→child PNR splits, normalized." },
+      { slug: "flown-report",       label: "Flown Report",       kind: "spec-repo", status: "ready", apiBase: "/statements/lcc-flown-report", requiresAirlineId: true, blurb: "Flown (uplifted) segment report — normalized." },
+      { slug: "cta-bta",            label: "CTA/BTA Report",     kind: "spec-repo", status: "ready", apiBase: "/statements/lcc-cta-bta", requiresAirlineId: true, blurb: "CTA/BTA (Central/Business Travel Account) lodged-account settlement report — normalized." },
     ],
   },
   {
