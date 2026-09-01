@@ -83,6 +83,7 @@ export default function StatementTypePage() {
       apiBase={type.apiBase}
       title={type.label}
       blurb={type.blurb ?? ""}
+      requiresAirlineId={type.requiresAirlineId}
     />
   );
 }

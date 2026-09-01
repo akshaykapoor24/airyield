@@ -8,6 +8,8 @@ import {
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { notifyRequired } from "@/lib/requiredFields";
+import MultiSelectDropdown from "@/components/ui/MultiSelectDropdown";
+import { type TenantAirlineOpt, sameAirlineOnly, toOptions } from "@/lib/tenantAirlineOptions";
 
 type Step = "upload" | "mapping" | "preview" | "progress" | "done";
 
@@ -32,11 +34,6 @@ type ExtractResp = {
 type StatusResp = {
   batch_id: string; status: string; total_rows: number; processed_rows: number;
   expected_rows: number | null; progress_pct: number; error: string | null;
-};
-
-/** One entry from User Master → Airline Master. `ref_id` is the user's own id. */
-type TenantAirlineOpt = {
-  id: number; ref_id: string; airline_name: string | null; airline_code: string | null;
 };
 
 const SKIP = "";   // "— not in file —"
@@ -123,10 +120,12 @@ export default function LccUploadWizard({
   const [uploading, setUploading] = useState(false);
   const [expectedRows, setExpectedRows] = useState("");   // user-declared record count (optional)
   // Airline — REQUIRED. An LCC export names no carrier (no airline column, and bare
-  // flight numbers in Segments), so the user's Airline Master id is the only thing
+  // flight numbers in Segments), so the user's Airline Master ids are the only thing
   // that identifies it. Sent with /extract so a batch is never airline-less.
+  // Several ids, because one statement usually covers more than one of the user's
+  // logins for that carrier — but all of one carrier; see lib/tenantAirlineOptions.ts.
   const [airlines, setAirlines] = useState<TenantAirlineOpt[]>([]);
-  const [tenantAirlineId, setTenantAirlineId] = useState<number | "">("");
+  const [tenantAirlineIds, setTenantAirlineIds] = useState<number[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const expectedNum = (() => { const n = parseInt(expectedRows.replace(/[^\d]/g, ""), 10); return Number.isFinite(n) && n > 0 ? n : null; })();
 
@@ -150,6 +149,13 @@ export default function LccUploadWizard({
       .then((r) => setAirlines(r.data))
       .catch(() => toast.error("Failed to load your Airline Master."));
   }, []);
+
+  // Once one id is picked the list narrows to that carrier's other ids — the server
+  // refuses a mixed selection, so offering one would only produce a 400.
+  const airlineChoices = useMemo(
+    () => sameAirlineOnly(airlines, tenantAirlineIds),
+    [airlines, tenantAirlineIds],
+  );
 
   const allCols: StdCol[] = useMemo(() => groups.flatMap((g) => g.columns), [groups]);
   const totalStd = allCols.length || extracted?.standard_total || 0;
@@ -186,15 +192,16 @@ export default function LccUploadWizard({
 
   const doExtract = async () => {
     if (!file) { notifyRequired("Choose a statement file (.xlsx, .xls or .csv) to continue."); return; }
-    if (!tenantAirlineId) {
-      notifyRequired("Select the airline this statement belongs to — the file itself doesn't say.");
+    if (!tenantAirlineIds.length) {
+      notifyRequired("Select the airline ID(s) this statement belongs to — the file itself doesn't say.");
       return;
     }
     setUploading(true);
     try {
       const fd = new FormData();
       fd.append("file", file);
-      fd.append("tenant_airline_id", String(tenantAirlineId));
+      // Repeated field, one per id — how FastAPI reads a list from form data.
+      for (const id of tenantAirlineIds) fd.append("tenant_airline_ids", String(id));
       const { data } = await api.post<ExtractResp>(`${apiBase}/extract`, fd);
       setExtracted(data);
       setColumnMap(data.suggested_mapping || {});
@@ -331,26 +338,30 @@ export default function LccUploadWizard({
                   there is no airline column and the flight numbers are bare, so this
                   selection is the only source of it. */}
               <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50/60 px-3.5 py-3">
-                <div className="flex flex-wrap items-center gap-2.5">
-                  <label htmlFor="lcc-airline" className="text-xs font-semibold text-slate-700">
+                <div className="flex flex-wrap items-start gap-2.5">
+                  <label className="text-xs font-semibold text-slate-700 pt-2">
                     Airline <span className="text-red-500">*</span>
                   </label>
-                  <select
-                    id="lcc-airline"
-                    value={tenantAirlineId}
-                    onChange={(e) => setTenantAirlineId(e.target.value ? Number(e.target.value) : "")}
-                    disabled={airlines.length === 0}
-                    className="min-w-56 px-3 py-1.5 border border-slate-200 rounded-lg text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 disabled:bg-slate-100 disabled:text-slate-400"
-                  >
-                    <option value="">Select your airline ID…</option>
-                    {airlines.map((a) => (
-                      <option key={a.id} value={a.id}>
-                        {a.ref_id} — {a.airline_name ?? "?"}{a.airline_code ? ` (${a.airline_code})` : ""}
-                      </option>
-                    ))}
-                  </select>
-                  <span className="text-[11px] text-slate-400">
-                    An LCC export doesn&apos;t name the carrier, so pick the ID you gave it.
+                  <div className="min-w-64 flex-1 max-w-md">
+                    <MultiSelectDropdown
+                      options={toOptions(airlineChoices.options)}
+                      selected={tenantAirlineIds}
+                      onChange={setTenantAirlineIds}
+                      disabled={airlines.length === 0}
+                      placeholder={airlines.length ? "Select your airline ID(s)…" : "No airline IDs yet"}
+                      emptyText="No matching ID"
+                    />
+                    {/* Say why the list is short, or the narrowing reads as data loss. */}
+                    {airlineChoices.lockedAirline && (
+                      <p className="text-[11px] text-slate-400 mt-1.5">
+                        Showing {airlineChoices.lockedAirline} IDs — a statement carries one carrier,
+                        so clear the selection to pick a different airline.
+                      </p>
+                    )}
+                  </div>
+                  <span className="text-[11px] text-slate-400 pt-2 flex-1 min-w-48">
+                    An LCC export doesn&apos;t name the carrier, so pick the ID you gave it. Add every
+                    ID this statement covers.
                   </span>
                 </div>
                 {airlines.length === 0 && (

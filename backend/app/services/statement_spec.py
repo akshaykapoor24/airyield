@@ -144,6 +144,10 @@ STATEMENT_SPECS: dict[str, dict] = {
         "parser": "di",
         "columns": _di.DISPLAY_COLUMNS,
         "fold_taxes": False,
+        # Like LCC Detailed, an LCC export names no carrier — so the uploader declares
+        # it from their Airline Master. Opt-in per type: the BSP, TGQ HMPR, NDC and
+        # third-party types below share this router and must NOT grow the requirement.
+        "requires_airline_id": True,
     },
     # LCC Divided PNR Statement — parent→child PNR split ledger (see services/divided_pnr.py).
     "lcc-divided-pnr": {
@@ -151,6 +155,7 @@ STATEMENT_SPECS: dict[str, dict] = {
         "parser": "divided-pnr",
         "columns": _dp.DISPLAY_COLUMNS,
         "fold_taxes": False,
+        "requires_airline_id": True,
     },
     # LCC Flown Report — flown/uplifted segment ledger (see services/flown_report.py).
     "lcc-flown-report": {
@@ -158,6 +163,7 @@ STATEMENT_SPECS: dict[str, dict] = {
         "parser": "flown-report",
         "columns": _fr.DISPLAY_COLUMNS,
         "fold_taxes": False,
+        "requires_airline_id": True,
     },
     # LCC CTA/BTA Report — lodged-account (Central/Business Travel Account) settlement
     # ledger (see services/cta_bta_report.py).
@@ -166,6 +172,7 @@ STATEMENT_SPECS: dict[str, dict] = {
         "parser": "cta-bta",
         "columns": _cb.DISPLAY_COLUMNS,
         "fold_taxes": False,
+        "requires_airline_id": True,
     },
     # Third Party — a consolidator/big agency sends the sub-agency a GDS/LCC statement of
     # the bookings it made through them (see services/flat_statement.py).
@@ -225,6 +232,19 @@ def parser(slug: str) -> str | None:
 def fold_taxes(slug: str) -> bool:
     s = spec_for(slug)
     return bool(s and s.get("fold_taxes"))
+
+
+def requires_airline_id(slug: str) -> bool:
+    """Must the uploader declare which of their Airline Master ids this file covers?
+
+    True for the LCC types, whose exports name no carrier — the id is the only thing
+    that identifies it, exactly as for LCC Detailed. False everywhere else: a BSP,
+    TGQ HMPR, NDC or third-party statement carries its own airline, and these types
+    share one upload endpoint and one frontend view, so the flag is what stops the
+    requirement leaking onto them.
+    """
+    s = spec_for(slug)
+    return bool(s and s.get("requires_airline_id"))
 
 
 # ── Optional, opt-in behaviours ──────────────────────────────────────────────

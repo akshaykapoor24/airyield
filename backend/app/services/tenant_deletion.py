@@ -105,7 +105,8 @@ DELETION_GROUPS: tuple[DeletionGroup, ...] = (
         GroupCategory.RECORDS,
         ("tgq_hmpr", "ndc", "lcc_di", "lcc_divided_pnr", "lcc_flown_report",
          "lcc_cta_bta", "third_party_gds", "third_party_lcc",
-         "lcc_detailed", "lcc_detailed_batch"),
+         "lcc_detailed", "lcc_detailed_batch", "lcc_batch_airline_ids",
+         "statement_batch_airline_ids"),
     ),
     DeletionGroup(
         "internal_statements", "Internal statements", "The workspace's own ticket statements.",
@@ -226,6 +227,11 @@ CHILD_TABLES: dict[str, ChildTable] = {
     "deal_approval_steps": ChildTable((ParentLink("deal_approval_id", "deal_approvals"),)),
     # BSP parse failures hang off the upload session by its batch_id, not its pk
     "bsp_parse_errors": ChildTable((ParentLink("statement_id", "bsp_statements", "batch_id"),)),
+    # Which airline ids an LCC upload covers. Reached through the batch, not through
+    # tenant_airlines: the batch is what belongs to the workspace's statement data,
+    # and linking it the other way would tie this table to the Setup groups.
+    "lcc_batch_airline_ids": ChildTable(
+        (ParentLink("batch_id", "lcc_detailed_batch", "batch_id"),)),
     "approval_workflow_steps": ChildTable((ParentLink("workflow_id", "approval_workflows"),)),
     "approval_workflow_step_approvers": ChildTable(
         (ParentLink("workflow_step_id", "approval_workflow_steps"),)),

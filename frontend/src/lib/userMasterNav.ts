@@ -43,7 +43,7 @@ export const USER_MASTER_NAV: UserMasterTab[] = [
     slug: "airline-master",
     label: "Airline Master",
     icon: Plane,
-    blurb: "The airlines you work with, each with your own ID. Pick that ID when you upload an LCC statement — an LCC file names no carrier, so this is what identifies it.",
+    blurb: "The airline master, with your own IDs on it. Add every ID you hold per airline — you pick one when you upload an LCC statement, which is the only thing that names the carrier.",
   },
   // IATA Commission used to be a fourth tab here. It is one global master, not
   // something each tenant keeps its own copy of, so it now lives in the

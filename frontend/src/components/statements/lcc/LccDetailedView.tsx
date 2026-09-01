@@ -8,6 +8,8 @@ import {
 } from "lucide-react";
 import api from "@/lib/api";
 import { inr } from "@/lib/money";
+import MultiSelectDropdown from "@/components/ui/MultiSelectDropdown";
+import { type TenantAirlineOpt, sameAirlineOnly, toOptions } from "@/lib/tenantAirlineOptions";
 import toast from "react-hot-toast";
 import LccUploadWizard from "./LccUploadWizard";
 import LccBillingWorklist from "./LccBillingWorklist";
@@ -37,6 +39,10 @@ type Batch = {
   airline_code: string | null;
   airline_ref_id: string | null;
   tenant_airline_id: number | null;
+  // Every id this upload covers — one statement usually spans several of the user's
+  // logins for that carrier. The two singular fields above are the primary (first) one.
+  airline_ref_ids: string[];
+  tenant_airline_ids: number[];
   // Billing: how many of this upload's rows have a party, and whether they have been
   // projected into uploaded_tickets yet. See LccBillingWorklist.
   billable_rows: number;
@@ -47,9 +53,6 @@ type Batch = {
 };
 type Column = { header: string; field: string };
 type Row = Record<string, string | number | null> & { id: number };
-type TenantAirlineOpt = {
-  id: number; ref_id: string; airline_name: string | null; airline_code: string | null;
-};
 
 // Declared by the backend spec (services/lcc_detailed_spec.py FILTERS), so adding a
 // filter is a server-side edit and this view needs no change. `primary` filters sit in
@@ -195,8 +198,11 @@ export default function LccDetailedView({ apiBase, title }: { apiBase: string; t
   // Backfilling the airline onto an already-imported batch.
   const [airlineTarget, setAirlineTarget] = useState<Batch | null>(null);
   const [airlineOpts, setAirlineOpts] = useState<TenantAirlineOpt[]>([]);
-  const [airlinePick, setAirlinePick] = useState<number | "">("");
+  const [airlinePick, setAirlinePick] = useState<number[]>([]);
   const [savingAirline, setSavingAirline] = useState(false);
+  // Narrowed to the carrier already picked — the server refuses a mixed selection,
+  // so offering one would only produce a 400.
+  const airlineChoices = sameAirlineOnly(airlineOpts, airlinePick);
 
   // drill-in records
   const [columns, setColumns] = useState<Column[]>([]);
@@ -326,7 +332,8 @@ export default function LccDetailedView({ apiBase, title }: { apiBase: string; t
 
   const openAirlineModal = async (b: Batch) => {
     setAirlineTarget(b);
-    setAirlinePick(b.tenant_airline_id ?? "");
+    setAirlinePick(b.tenant_airline_ids?.length ? b.tenant_airline_ids
+                   : b.tenant_airline_id ? [b.tenant_airline_id] : []);
     try {
       const { data } = await api.get<TenantAirlineOpt[]>("/tenant-airlines/", { params: { active: true } });
       setAirlineOpts(data);
@@ -334,17 +341,22 @@ export default function LccDetailedView({ apiBase, title }: { apiBase: string; t
   };
 
   const saveAirline = async () => {
-    if (!airlineTarget || !airlinePick) return;
+    if (!airlineTarget || !airlinePick.length) return;
     setSavingAirline(true);
     try {
       // One indexed bulk UPDATE server-side — the rows parsed fine, only the carrier
       // was missing, so there is nothing to re-ingest.
       const { data } = await api.patch<{ rows_updated: number; airline_name: string | null }>(
-        `${apiBase}/batches/${airlineTarget.batch_id}/airline`, { tenant_airline_id: airlinePick });
+        `${apiBase}/batches/${airlineTarget.batch_id}/airline`, { tenant_airline_ids: airlinePick });
       toast.success(`${data.airline_name ?? "Airline"} set on ${data.rows_updated.toLocaleString()} rows.`);
       setAirlineTarget(null);
       fetchBatches();
-    } catch { toast.error("Could not set the airline."); }
+    } catch (e) {
+      // The server refuses a selection spanning two carriers and says which — that is
+      // actionable, so show it rather than a generic failure.
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      toast.error(typeof msg === "string" ? msg : "Could not set the airline.");
+    }
     finally { setSavingAirline(false); }
   };
 
@@ -517,6 +529,16 @@ export default function LccDetailedView({ apiBase, title }: { apiBase: string; t
                     <span className="text-xs text-slate-700">
                       {b.airline_code && <span className="font-semibold">{b.airline_code}</span>} {b.airline_name}
                       {b.airline_ref_id && <span className="text-slate-400"> · {b.airline_ref_id}</span>}
+                      {/* One upload can cover several ids. Show the primary and count
+                          the rest — spelling them all out would wreck the column. */}
+                      {b.airline_ref_ids?.length > 1 && (
+                        <span
+                          className="ml-1 text-[10px] font-semibold text-slate-500 bg-slate-100 border border-slate-200 rounded px-1 py-0.5"
+                          title={`This upload covers ${b.airline_ref_ids.length} IDs: ${b.airline_ref_ids.join(", ")}`}
+                        >
+                          +{b.airline_ref_ids.length - 1}
+                        </span>
+                      )}
                     </span>
                   ) : (
                     <button onClick={() => openAirlineModal(b)}
@@ -592,18 +614,21 @@ export default function LccDetailedView({ apiBase, title }: { apiBase: string; t
               An LCC statement doesn&apos;t name its carrier, so it has to be declared. This stamps it
               onto the upload and all {airlineTarget.row_count.toLocaleString()} of its rows — nothing is re-imported.
             </p>
-            <select
-              value={airlinePick}
-              onChange={(e) => setAirlinePick(e.target.value ? Number(e.target.value) : "")}
-              className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-400"
-            >
-              <option value="">Select your airline ID…</option>
-              {airlineOpts.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.ref_id} — {a.airline_name ?? "?"}{a.airline_code ? ` (${a.airline_code})` : ""}
-                </option>
-              ))}
-            </select>
+            {/* Multi-select: one statement usually covers several of the user's ids
+                for that carrier. Narrowed to one airline — see lib/tenantAirlineOptions.ts. */}
+            <MultiSelectDropdown
+              options={toOptions(airlineChoices.options)}
+              selected={airlinePick}
+              onChange={setAirlinePick}
+              placeholder="Select your airline ID(s)…"
+              emptyText="No matching ID"
+            />
+            {airlineChoices.lockedAirline && (
+              <p className="text-[11px] text-slate-400 mt-1.5">
+                Showing {airlineChoices.lockedAirline} IDs — a statement carries one carrier,
+                so clear the selection to pick a different airline.
+              </p>
+            )}
             {airlineOpts.length === 0 && (
               <p className="text-[11px] text-amber-600 mt-2">
                 Your Airline Master is empty — add the airline under User Master → Airline Master first.
@@ -611,7 +636,7 @@ export default function LccDetailedView({ apiBase, title }: { apiBase: string; t
             )}
             <div className="flex justify-end gap-2 mt-4">
               <button onClick={() => setAirlineTarget(null)} className="px-3 py-1.5 text-xs font-medium text-slate-500 border border-slate-200 rounded-lg hover:bg-slate-50">Cancel</button>
-              <button onClick={saveAirline} disabled={savingAirline || !airlinePick} className="px-4 py-1.5 text-xs font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50">{savingAirline ? "Saving…" : "Set airline"}</button>
+              <button onClick={saveAirline} disabled={savingAirline || !airlinePick.length} className="px-4 py-1.5 text-xs font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50">{savingAirline ? "Saving…" : "Set airline"}</button>
             </div>
           </div>
         </div>

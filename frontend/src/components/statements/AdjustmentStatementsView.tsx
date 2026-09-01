@@ -8,6 +8,8 @@ import {
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { notifyRequired } from "@/lib/requiredFields";
+import MultiSelectDropdown from "@/components/ui/MultiSelectDropdown";
+import { type TenantAirlineOpt, sameAirlineOnly, toOptions } from "@/lib/tenantAirlineOptions";
 
 const PAGE = 50;
 // The API rejects anything below 3 recognised columns (_MIN_MATCHED_COLUMNS in
@@ -24,6 +26,11 @@ type Batch = {
   row_count: number;
   has_file: boolean;
   created_by_name: string | null;
+  // Declared at upload, for the LCC types only (requiresAirlineId). Empty for every
+  // other type, and for uploads made before the airline was captured.
+  airline_name?: string | null;
+  airline_code?: string | null;
+  airline_ref_ids?: string[];
 };
 // `kind: "money"` is set by the backend for amount columns so they right-align and format.
 type Column = { header: string; field: string; kind?: string };
@@ -62,20 +69,48 @@ function fmtMoney(v: string | number | null | undefined): string {
 }
 
 /** XLS/CSV upload modal for one adjustment type. */
-function UploadModal({ apiBase, title, onClose, onDone }: { apiBase: string; title: string; onClose: () => void; onDone: () => void }) {
+function UploadModal({ apiBase, title, requiresAirlineId, onClose, onDone }: {
+  apiBase: string;
+  title: string;
+  /** LCC types only — their exports name no carrier, so the ID is mandatory here. */
+  requiresAirlineId?: boolean;
+  onClose: () => void;
+  onDone: () => void;
+}) {
   const [file, setFile] = useState<File | null>(null);
   const [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [airlines, setAirlines] = useState<TenantAirlineOpt[]>([]);
+  const [tenantAirlineIds, setTenantAirlineIds] = useState<number[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Only fetched for the types that ask for it — the other statement types share this
+  // modal and would be making a call they never use.
+  useEffect(() => {
+    if (!requiresAirlineId) return;
+    api.get<TenantAirlineOpt[]>("/tenant-airlines/", { params: { active: true } })
+      .then((r) => setAirlines(r.data))
+      .catch(() => toast.error("Failed to load your Airline Master."));
+  }, [requiresAirlineId]);
+
+  // Narrowed to the carrier already picked — the server refuses a mixed selection.
+  const airlineChoices = sameAirlineOnly(airlines, tenantAirlineIds);
+
   const pick = (f: File | null) => {
     if (f && !/\.(xlsx|xls|csv)$/i.test(f.name)) { toast.error("Choose an .xlsx, .xls or .csv file."); return; }
     setFile(f);
   };
   const submit = async () => {
     if (!file) { notifyRequired("Choose an .xlsx, .xls or .csv file to import."); return; }
+    if (requiresAirlineId && !tenantAirlineIds.length) {
+      notifyRequired("Select the airline ID(s) this statement belongs to — the file itself doesn't say.");
+      return;
+    }
     setUploading(true);
     try {
       const fd = new FormData(); fd.append("file", file);
+      // Repeated field, one per id — how FastAPI reads a list from form data.
+      for (const id of tenantAirlineIds) fd.append("tenant_airline_ids", String(id));
       const { data } = await api.post<{ inserted: number; matched_columns: number; source_rows?: number; leg_rows?: number }>(`${apiBase}/upload`, fd);
       // Sector-split types insert more rows than the file has lines — say so, or "imported
       // 518" against a 223-line file reads like a bug.
@@ -128,6 +163,43 @@ function UploadModal({ apiBase, title, onClose, onDone }: { apiBase: string; tit
             )}
             <input ref={inputRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={(e) => pick(e.target.files?.[0] ?? null)} />
           </div>
+
+          {/* Airline — REQUIRED for the LCC types. Nothing in those exports identifies
+              the carrier, so this selection is the only source of it. Several ids are
+              normal: one statement usually covers more than one of the user's logins. */}
+          {requiresAirlineId && (
+            <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50/60 px-3.5 py-3">
+              <label className="text-xs font-semibold text-slate-700 block mb-1.5">
+                Airline <span className="text-red-500">*</span>
+              </label>
+              <MultiSelectDropdown
+                options={toOptions(airlineChoices.options)}
+                selected={tenantAirlineIds}
+                onChange={setTenantAirlineIds}
+                disabled={airlines.length === 0}
+                placeholder={airlines.length ? "Select your airline ID(s)…" : "No airline IDs yet"}
+                emptyText="No matching ID"
+              />
+              {/* Say why the list is short, or the narrowing reads as data loss. */}
+              {airlineChoices.lockedAirline ? (
+                <p className="text-[11px] text-slate-400 mt-1.5">
+                  Showing {airlineChoices.lockedAirline} IDs — a statement carries one carrier,
+                  so clear the selection to pick a different airline.
+                </p>
+              ) : (
+                <p className="text-[11px] text-slate-400 mt-1.5">
+                  This export doesn&apos;t name the carrier, so pick the ID you gave it. Add every
+                  ID this statement covers.
+                </p>
+              )}
+              {airlines.length === 0 && (
+                <p className="text-[11px] text-amber-600 mt-2">
+                  Your Airline Master is empty. Add the airline under User Master → Airline Master first.
+                </p>
+              )}
+            </div>
+          )}
+
           <p className="text-[11px] text-slate-400 mt-3">The original file is stored so you can download it later. Columns are matched by header name.</p>
         </div>
         <div className="flex justify-end gap-2 px-5 py-3.5 border-t border-slate-100">
@@ -199,7 +271,12 @@ function SummarySlab({ summary }: { summary: Summary }) {
   );
 }
 
-export default function AdjustmentStatementsView({ apiBase, slug, title }: { apiBase: string; slug: string; title: string; blurb?: string }) {
+export default function AdjustmentStatementsView({ apiBase, slug, title, requiresAirlineId }: {
+  apiBase: string; slug: string; title: string; blurb?: string;
+  /** LCC types only — see lib/statements.ts. Drives the mandatory Airline picker in
+   *  the upload modal and the AIRLINE column below; every other type is unaffected. */
+  requiresAirlineId?: boolean;
+}) {
   const [batches, setBatches] = useState<Batch[]>([]);
   const [loading, setLoading] = useState(true);
   const [uploadOpen, setUploadOpen] = useState(false);
@@ -464,6 +541,7 @@ export default function AdjustmentStatementsView({ apiBase, slug, title }: { api
           <thead>
             <tr className="bg-slate-50 border-b border-slate-200 text-[11px] uppercase tracking-wide text-slate-400">
               <th className="text-left px-3 py-2.5 font-semibold">File</th>
+              {requiresAirlineId && <th className="text-left px-3 py-2.5 font-semibold">Airline</th>}
               <th className="text-left px-3 py-2.5 font-semibold">Uploaded</th>
               <th className="text-right px-3 py-2.5 font-semibold">Entries</th>
               <th className="text-left px-3 py-2.5 font-semibold">Uploaded by</th>
@@ -472,9 +550,9 @@ export default function AdjustmentStatementsView({ apiBase, slug, title }: { api
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={5} className="px-3 py-10 text-center text-slate-400">Loading…</td></tr>
+              <tr><td colSpan={requiresAirlineId ? 6 : 5} className="px-3 py-10 text-center text-slate-400">Loading…</td></tr>
             ) : batches.length === 0 ? (
-              <tr><td colSpan={5} className="px-3 py-12 text-center text-slate-400">No {title} uploads yet. <button onClick={() => setUploadOpen(true)} className="text-blue-600 hover:underline">Upload an XLS</button>.</td></tr>
+              <tr><td colSpan={requiresAirlineId ? 6 : 5} className="px-3 py-12 text-center text-slate-400">No {title} uploads yet. <button onClick={() => setUploadOpen(true)} className="text-blue-600 hover:underline">Upload an XLS</button>.</td></tr>
             ) : batches.map((b) => (
               <tr key={b.batch_id} className="border-b border-slate-100 hover:bg-slate-50/60">
                 <td className="px-3 py-2">
@@ -483,6 +561,30 @@ export default function AdjustmentStatementsView({ apiBase, slug, title }: { api
                     <span className="font-medium truncate max-w-[280px]" title={b.source_file ?? undefined}>{b.source_file || "upload"}</span>
                   </button>
                 </td>
+                {requiresAirlineId && (
+                  <td className="px-3 py-2 whitespace-nowrap">
+                    {b.airline_name ? (
+                      <span className="text-xs text-slate-700">
+                        {b.airline_code && <span className="font-semibold">{b.airline_code}</span>} {b.airline_name}
+                        {b.airline_ref_ids?.[0] && <span className="text-slate-400"> · {b.airline_ref_ids[0]}</span>}
+                        {/* One upload can cover several ids; spelling them all out
+                            would wreck the column, so count the rest. */}
+                        {(b.airline_ref_ids?.length ?? 0) > 1 && (
+                          <span
+                            className="ml-1 text-[10px] font-semibold text-slate-500 bg-slate-100 border border-slate-200 rounded px-1 py-0.5"
+                            title={`This upload covers ${b.airline_ref_ids!.length} IDs: ${b.airline_ref_ids!.join(", ")}`}
+                          >
+                            +{b.airline_ref_ids!.length - 1}
+                          </span>
+                        )}
+                      </span>
+                    ) : (
+                      // Uploaded before the airline was captured. Nothing in the file
+                      // says which carrier it was, so there is nothing to backfill.
+                      <span className="text-xs text-slate-300" title="Uploaded before the airline was captured">—</span>
+                    )}
+                  </td>
+                )}
                 <td className="px-3 py-2 text-xs text-slate-500 whitespace-nowrap">{fmtDate(b.uploaded_at)}</td>
                 <td className="px-3 py-2 text-right tabular-nums text-slate-700">{b.row_count.toLocaleString()}</td>
                 <td className="px-3 py-2 text-xs text-slate-500">{b.created_by_name || "—"}</td>
@@ -498,7 +600,7 @@ export default function AdjustmentStatementsView({ apiBase, slug, title }: { api
         </table>
       </div>
 
-      {uploadOpen && <UploadModal apiBase={apiBase} title={title} onClose={() => setUploadOpen(false)} onDone={() => { setUploadOpen(false); fetchBatches(); }} />}
+      {uploadOpen && <UploadModal apiBase={apiBase} title={title} requiresAirlineId={requiresAirlineId} onClose={() => setUploadOpen(false)} onDone={() => { setUploadOpen(false); fetchBatches(); }} />}
 
       {deleteTarget && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
