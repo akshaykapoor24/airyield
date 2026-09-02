@@ -28,7 +28,11 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"],
+    # "*" covers it today only because nothing sets withCredentials — for a credentialed
+    # request the browser reads "*" as a literal header name, not a wildcard, and
+    # X-Total-Count (the party list pagers) would silently come back undefined. Named
+    # explicitly so that stays true if credentials are ever turned on.
+    expose_headers=["*", "X-Total-Count"],
 )
 
 app.include_router(api_v1_router, prefix="/api/v1")

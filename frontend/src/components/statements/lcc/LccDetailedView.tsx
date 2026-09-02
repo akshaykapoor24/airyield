@@ -376,6 +376,9 @@ export default function LccDetailedView({ apiBase, title }: { apiBase: string; t
         apiBase={apiBase}
         batchId={billingTarget.batch_id}
         fileName={billingTarget.source_file}
+        // "none" is the "Set up billing" case below — the only one where opening the
+        // worklist is allowed to run the matcher.
+        resolutionStatus={billingTarget.resolution_status}
         onBack={() => { setBillingTarget(null); fetchBatches(); }}
         onChanged={() => fetchBatches(true)}
       />

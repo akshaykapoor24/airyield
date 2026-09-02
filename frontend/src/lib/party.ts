@@ -57,6 +57,17 @@ export type Party = {
   markup_value: number | null;
   billing_type: BillingType | null;
   is_active: boolean;
+  /**
+   * Tickets HARD-LINKED to this party — uploaded_tickets.customer_id for a customer,
+   * .corporate_id for a corporate. Sent by the LIST endpoints only, hence optional.
+   *
+   * Untagged tickets that the billing screen additionally reaches by passenger name are
+   * NOT counted here: that half of the rule is per-party and cannot be a grouped
+   * aggregate (backend/app/services/billing_calc.py). So this can read lower than the
+   * drill-down. It is exact for LCC-sourced tickets, which always carry the link.
+   */
+  ticket_count?: number;
+  unbilled_ticket_count?: number;
 };
 
 export type PartyKind = "customer" | "corporate";
@@ -107,7 +118,7 @@ export const PARTY: Record<PartyKind, PartyConfig> = {
     templateColumns:
       "FIRST_NAME, LAST_NAME, COMPANY, TITLE, PHONE, EMAIL, GST_REGISTERED (Registered|Unregistered), GST_NO, PAN_NO, MARKUP_TYPE (percentage|fixed), MARKUP_VALUE, BILLING_TYPE (reseller|agency)",
     templateNote:
-      "COMPANY is matched to Corporate Master by name — an exact match links the employee to that corporate, anything else is left as an individual.",
+      "COMPANY is matched to Corporate Master by name — an exact match links the employee to that corporate AND fills in any markup, billing, GST, PAN, phone or email you left blank, from that corporate. Anything you do fill in is kept. No match is left as an individual.",
     emailPlaceholder: "customer@email.com",
   },
   corporate: {

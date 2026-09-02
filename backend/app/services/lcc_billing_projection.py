@@ -24,7 +24,9 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import func, select
+from collections.abc import Collection
+
+from sqlalchemy import and_, func, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.lcc_detailed import LccDetailed, LccDetailedBatch
@@ -32,13 +34,119 @@ from app.models.ticket_statement import TicketStatement
 from app.models.uploaded_ticket import UploadedTicket
 from app.services import customer_resolver as cres
 
-__all__ = ["BILLABLE_STATUSES", "project_batch", "projected_ticket_ids"]
+__all__ = [
+    "BILLABLE_STATUSES", "BILLING_STATES", "SENDABLE_STATES",
+    "billing_state", "billing_state_cond", "project_batch", "projected_ticket_ids",
+]
 
 # The statuses that mean "a party has been settled for this row".
 BILLABLE_STATUSES = (cres.RESOLVED, cres.DEFAULTED, cres.OVERRIDDEN)
 
+# Where a row stands on its way INTO BILLING — a different question from `bill_status`,
+# which says where it stands on its way to a PARTY. Deliberately two vocabularies: a row
+# can be "Set by you" and still "Ready to send", and the worklist shows both columns
+# because settling one does not settle the other.
+#
+# Listed in evaluation order. `invoiced` wins over everything because it is the only
+# state this system cannot undo — see the frozen-ticket rule in project_batch.
+BILLING_STATES = (
+    "invoiced",      # on an invoice; frozen, whatever the row now says
+    "not_billable",  # a payment movement — no fare, so nothing to bill
+    "no_party",      # not in billing, and still has nobody to bill
+    "ready",         # has a party, not yet in billing
+    "withdrawn",     # in billing, but the row is no longer billable
+    "stale",         # in billing, but under a different party than the row now names
+    "sent",          # in billing, and billing agrees with the row
+)
+
+# Filter-only aggregate: exactly the rows a "send these" would act on.
+SENDABLE_STATES = ("ready", "sent", "stale")
+
 _STATEMENT_TYPE = "LCC"          # `statement_type` is String(10); no CHECK on it.
 _MAX_SECTOR = 200                # UploadedTicket.sector / .flight_no are String(200)
+
+
+# ── billing state: one definition, written twice ─────────────────────────────
+# `billing_state` classifies a row in Python for the response; `billing_state_cond`
+# says the same thing in SQL so the worklist can filter on it. They live together
+# because keeping them apart is exactly how they drift.
+#
+# THE NULL TRAP. A row imported but never resolved has `bill_kind IS NULL`. In Python
+# `None != "payment"` is True; in SQL `NULL != 'payment'` is NULL, so the naive
+# predicate silently drops those rows out of every result set. That divergence already
+# exists in this codebase — lcc_detailed.py's billing-default excludes them, while
+# project_batch below includes them — so everything here goes through `_is_payment` and
+# its `_not_payment_cond` twin, and the two answers finally agree.
+
+
+def _is_payment(bill_kind: str | None) -> bool:
+    return bill_kind == "payment"
+
+
+def _not_payment_cond():
+    """The SQL twin of `not _is_payment(...)`. Explicitly NULL-safe; see the note above."""
+    return or_(LccDetailed.bill_kind.is_(None), LccDetailed.bill_kind != "payment")
+
+
+def billing_state(row, ticket) -> str:
+    """Where one row stands on its way into billing. Pure — no session, no I/O.
+
+    `ticket` is the UploadedTicket this row was projected into, or None. A row whose
+    `projected_ticket_id` was nulled underneath it (the FK is ON DELETE SET NULL) also
+    arrives here as None and correctly falls back to ready/no_party, rather than
+    claiming to be in billing when the ticket is gone.
+    """
+    projected = ticket is not None
+    if projected and ticket.billing_id is not None:
+        return "invoiced"
+    if _is_payment(row.bill_kind):
+        return "not_billable"
+
+    billable = row.bill_status in BILLABLE_STATUSES
+    if not projected:
+        return "ready" if billable else "no_party"
+    if not billable:
+        return "withdrawn"
+
+    same_party = (
+        ticket.customer_type == row.bill_customer_type
+        and ticket.customer_id == row.bill_customer_id
+        and ticket.corporate_id == row.bill_corporate_id
+    )
+    return "sent" if same_party else "stale"
+
+
+def billing_state_cond(state: str, T):
+    """A `billing_state` value (or the `sendable` aggregate) as a SQL condition.
+
+    `T` is an aliased UploadedTicket already LEFT JOINed on `projected_ticket_id`.
+    Returns None for an unknown state, so a caller can treat it as "no filter".
+    """
+    projected = T.id.isnot(None)
+    invoiced = and_(projected, T.billing_id.isnot(None))
+    not_payment = _not_payment_cond()
+    billable = and_(not_payment, LccDetailed.bill_status.in_(BILLABLE_STATUSES))
+    # IS NOT DISTINCT FROM, never `=`: two NULL corporate_ids are a MATCH, but
+    # `NULL = NULL` is NULL, which would report every direct-billed row as stale.
+    same_party = and_(
+        T.customer_type.is_not_distinct_from(LccDetailed.bill_customer_type),
+        T.customer_id.is_not_distinct_from(LccDetailed.bill_customer_id),
+        T.corporate_id.is_not_distinct_from(LccDetailed.bill_corporate_id),
+    )
+    live = not_(invoiced)          # `invoiced` is built from IS NOT NULL, never NULL itself
+
+    return {
+        "invoiced": invoiced,
+        "not_billable": and_(live, LccDetailed.bill_kind == "payment"),
+        "no_party": and_(live, not_payment, not_(projected), not_(billable)),
+        "ready": and_(live, not_(projected), billable),
+        "withdrawn": and_(live, not_payment, projected, not_(billable)),
+        "stale": and_(live, projected, billable, not_(same_party)),
+        "sent": and_(live, projected, billable, same_party),
+        # ready ∪ sent ∪ stale collapses to "billable and not frozen", because
+        # `billable` already excludes payments and the projected/not split falls away.
+        "sendable": and_(live, billable),
+    }.get(state)
 
 
 def _iso_date(value) -> str | None:
@@ -232,9 +340,27 @@ async def _ensure_statement(db: AsyncSession, batch: LccDetailedBatch) -> Ticket
     return stmt
 
 
-async def project_batch(db: AsyncSession, batch: LccDetailedBatch) -> dict:
-    """Sync `uploaded_tickets` to the batch's current resolution. Caller commits."""
+async def project_batch(
+    db: AsyncSession, batch: LccDetailedBatch, *, row_ids: Collection[int] | None = None
+) -> dict:
+    """Sync `uploaded_tickets` to the batch's current resolution. Caller commits.
+
+    Two modes, and the difference is deletion:
+
+      * `row_ids=None` — a full-batch SYNC. Rows that are no longer billable have their
+        projections DELETED, which is how a ticket leaves billing.
+      * a set of ids — an ADDITIVE, SCOPED pass. Rows outside the set are never read,
+        never updated and never deleted; a selected row that has since lost its party is
+        reported in `skipped_no_party` rather than un-billed. Withdrawing a projection
+        stays the job of the whole-upload send, so that "send these five" can never be
+        the thing that quietly removed a sixth.
+
+    The scoping is applied to the row SELECT rather than to the delete branch, so the
+    no-cross-deletion guarantee is structural: unselected rows are not in `should` or
+    `already`, and there is no code path that could reach them.
+    """
     now = datetime.utcnow()
+    scoped = row_ids is not None
     if not batch.billing_batch_id:
         # Allocated once and reused forever, so the statement header is stable across
         # every re-projection instead of a new one appearing per run.
@@ -243,13 +369,23 @@ async def project_batch(db: AsyncSession, batch: LccDetailedBatch) -> dict:
 
     await _ensure_statement(db, batch)
 
-    rows = (await db.execute(
-        select(LccDetailed).where(LccDetailed.batch_id == batch.batch_id)
-    )).scalars().all()
+    q = select(LccDetailed).where(LccDetailed.batch_id == batch.batch_id)
+    if scoped:
+        q = q.where(LccDetailed.id.in_(row_ids))
+    rows = (await db.execute(q)).scalars().all()
 
     should = {r.id: r for r in rows
-              if r.bill_status in BILLABLE_STATUSES and r.bill_kind != "payment"}
+              if r.bill_status in BILLABLE_STATUSES and not _is_payment(r.bill_kind)}
     already = {r.id: r.projected_ticket_id for r in rows if r.projected_ticket_id}
+
+    # Why a selected row did nothing, so the toast can say so instead of reporting a
+    # silent "0 added". In unscoped mode these two overlap with `deleted` — they are
+    # different axes: "had no party" versus "had a projection that has now gone".
+    skipped_not_billable = sum(1 for r in rows if _is_payment(r.bill_kind))
+    skipped_no_party = sum(
+        1 for r in rows
+        if not _is_payment(r.bill_kind) and r.bill_status not in BILLABLE_STATUSES
+    )
 
     tickets = {}
     if already:
@@ -274,6 +410,11 @@ async def project_batch(db: AsyncSession, batch: LccDetailedBatch) -> dict:
             continue
         row = should.pop(lcc_id, None)
         if row is None:
+            if scoped:
+                # ADDITIVE: the user ticked a row that has since lost its party. That is
+                # a request to send it, not to withdraw it — leave the ticket alone and
+                # let `skipped_no_party` explain why nothing happened.
+                continue
             await db.delete(ticket)
             deleted += 1
             continue
@@ -290,19 +431,28 @@ async def project_batch(db: AsyncSession, batch: LccDetailedBatch) -> dict:
         row.projected_ticket_id = ticket.id
         created += 1
 
-    batch.resolution_status = "projected"
     batch.projected_at = now
+    # Always the whole batch, both modes — it is the count the uploads list shows.
     batch.projected_rows = await db.scalar(
         select(func.count()).select_from(LccDetailed)
         .where(LccDetailed.batch_id == batch.batch_id,
                LccDetailed.projected_ticket_id.isnot(None))
     ) or 0
+    # A scoped send that projected nothing must not claim the batch is in billing.
+    if not scoped or batch.projected_rows:
+        batch.resolution_status = "projected"
 
     return {
         "statement_batch_id": batch.billing_batch_id,
+        "scoped": scoped,
+        "requested": len(rows),
         "created": created,
         "updated": updated,
+        # Always 0 when scoped — the delete branch above cannot be reached. The
+        # frontend's "N removed" copy relies on that.
         "deleted": deleted,
         "skipped_billed": skipped_billed,
+        "skipped_no_party": skipped_no_party,
+        "skipped_not_billable": skipped_not_billable,
         "projected_rows": batch.projected_rows,
     }

@@ -23,10 +23,11 @@ from fastapi import (
     APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status,
 )
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
-from sqlalchemy import and_, column, delete, func, literal, select, update
+from pydantic import BaseModel, Field
+from sqlalchemy import and_, column, delete, func, literal, or_, select, update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.config import settings
 from app.database import get_db
@@ -39,6 +40,7 @@ from app.models.tenant_airline import TenantAirline
 from app.models.user import User
 from app.services import customer_resolver as cres
 from app.services import gcs
+from app.services import lcc_billing_projection as proj
 from app.services import lcc_detailed_spec as spec
 from app.services.lcc_airline_selection import resolve_for_upload
 from app.services.lcc_statement import _clean, detect_format
@@ -614,6 +616,13 @@ async def set_batch_airline(
 MAX_GAP_GROUPS = 50          # mirrors api/v1/bsp_commission.py:54
 _BILL_PARTY_TYPES = ("corporate", "direct")
 
+# How many hand-picked rows one call may carry. 500 matches bsp_commission's
+# MAX_INLINE_ROWS; the cap exists because project_batch flushes per inserted row, so a
+# selection is a quick action rather than a full run in disguise. The two are kept EQUAL
+# so a "select all matching" can always be posted back in one call.
+MAX_SEND_ROWS = 500
+MAX_BILLING_SELECT_IDS = 500
+
 
 def _bill_kind(total) -> str:
     """Classify a row from `total`, NOT `base_fare`.
@@ -698,15 +707,46 @@ async def _owned_batch(batch_id: str, db: AsyncSession, current_user: User) -> L
     return batch
 
 
+async def _status_counts(db: AsyncSession, batch_id: str) -> dict[str, int]:
+    """`{bill_status: n}` for one batch — the chips' source, and _recount's."""
+    rows = (await db.execute(
+        select(LccDetailed.bill_status, func.count())
+        .where(LccDetailed.batch_id == batch_id)
+        .group_by(LccDetailed.bill_status)
+    )).all()
+    return {s: n for s, n in rows}
+
+
+async def _billing_state_counts(db: AsyncSession, batch_id: str) -> dict[str, int]:
+    """`{billing_state: n}` for one batch, over the same LEFT JOIN billing-rows uses.
+
+    Every state in one round trip via COUNT(*) FILTER (WHERE …) rather than seven
+    queries. Scoped exactly like _status_counts — on batch_id alone, because the caller
+    has already proved the batch is theirs through _owned_batch.
+
+    Deliberately NOT narrowed by the caller's filters: this drives header counts, which
+    must hold still while you page and search rather than re-describing the filter you
+    just typed.
+    """
+    from app.models.uploaded_ticket import UploadedTicket
+
+    T = aliased(UploadedTicket)
+    row = (await db.execute(
+        select(*[
+            func.count().filter(proj.billing_state_cond(s, T)).label(s)
+            for s in proj.BILLING_STATES
+        ])
+        .select_from(LccDetailed)
+        .outerjoin(T, T.id == LccDetailed.projected_ticket_id)
+        .where(LccDetailed.batch_id == batch_id)
+    )).one()
+    return {s: getattr(row, s) or 0 for s in proj.BILLING_STATES}
+
+
 async def _recount(db: AsyncSession, batch: LccDetailedBatch) -> None:
     """Refresh the batch's billing counters from its rows."""
     billable = (cres.RESOLVED, cres.DEFAULTED, cres.OVERRIDDEN)
-    rows = (await db.execute(
-        select(LccDetailed.bill_status, func.count())
-        .where(LccDetailed.batch_id == batch.batch_id)
-        .group_by(LccDetailed.bill_status)
-    )).all()
-    counts = {s: n for s, n in rows}
+    counts = await _status_counts(db, batch.batch_id)
     batch.resolved_rows = sum(counts.get(s, 0) for s in billable)
     batch.unresolved_rows = sum(
         n for s, n in counts.items() if s not in billable and s != cres.EXCLUDED
@@ -795,45 +835,135 @@ async def resolve_customers(
     await _recount(db, batch)
     await db.commit()
 
+    return await _billing_summary(db, batch, customers_in_scope=len(index), summary=summary)
+
+
+async def _billing_summary(
+    db: AsyncSession, batch: LccDetailedBatch, *,
+    customers_in_scope: int, summary: dict[str, int] | None = None,
+) -> dict:
+    """The worklist's header, in one shape.
+
+    Returned by both `resolve-customers` (which has just recomputed `summary` in memory)
+    and the read-only `billing-summary`, so the frontend has one type and one setter for
+    the chips no matter which call refreshed them.
+    """
     return {
-        "batch_id": batch_id,
-        "customers_in_scope": len(index),
-        "summary": summary,
+        "batch_id": batch.batch_id,
+        "customers_in_scope": customers_in_scope,
+        "summary": summary if summary is not None else await _status_counts(db, batch.batch_id),
+        "state_counts": await _billing_state_counts(db, batch.batch_id),
         "billable_rows": batch.billable_rows,
         "resolved_rows": batch.resolved_rows,
         "unresolved_rows": batch.unresolved_rows,
+        "projected_rows": batch.projected_rows,
+        "resolution_status": batch.resolution_status,
     }
+
+
+@router.get("/batches/{batch_id}/billing-summary")
+async def billing_summary(
+    batch_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """What `resolve-customers` returns, WITHOUT resolving anything.
+
+    The worklist needs these counts every time it opens and after every edit. Getting
+    them from the POST meant that merely looking at the screen re-matched every row —
+    which, on an upload already sent to billing, could silently re-point a row billing
+    already sees. This is the read-only way to ask.
+
+    `customers_in_scope` is a plain count rather than len(CustomerIndex): its one
+    consumer only tests it against zero, to say "your Customer master is empty".
+    """
+    batch = await _owned_batch(batch_id, db, current_user)
+    in_scope = await db.scalar(
+        select(func.count()).select_from(Customer).where(*_scope(Customer, current_user))
+    ) or 0
+    return await _billing_summary(db, batch, customers_in_scope=in_scope)
+
+
+_BILLING_STATE_PATTERN = "^(" + "|".join((*proj.BILLING_STATES, "sendable")) + ")$"
 
 
 @router.get("/batches/{batch_id}/billing-rows")
 async def list_billing_rows(
     batch_id: str,
     status_filter: str | None = Query(None, alias="status"),
+    billing_state: str | None = Query(None, pattern=_BILLING_STATE_PATTERN),
+    q: str | None = Query(None, max_length=100),
     kind: str | None = Query(None),
+    ids_only: bool = Query(False),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """The resolution worklist, paginated like /records."""
+    """The resolution worklist, paginated like /records.
+
+    Two independent filters, because they answer two different questions: `status` is
+    the row's MATCH status (does it have a party?) and `billing_state` is where it has
+    got to on its way into billing. A row can be "Set by you" and "Ready to send" at the
+    same time, so these are never merged into one param.
+
+    `ids_only=true` returns just the matching ids, capped, for the "select all N
+    matching" affordance. It lives on this endpoint rather than a sibling so the ids can
+    only ever come from the same predicate builder as the visible page.
+    """
+    from app.models.uploaded_ticket import UploadedTicket
+
     await _owned_batch(batch_id, db, current_user)
 
-    base = select(LccDetailed).where(
-        LccDetailed.batch_id == batch_id, *_scope(LccDetailed, current_user)
-    )
+    # The join is 1:1 — T.id is a primary key and projected_ticket_id is a FK to it — so
+    # the COUNT over base.subquery() below cannot fan out. Do not "fix" it with DISTINCT.
+    # UploadedTicket needs no _scope of its own: it is reachable only through
+    # projected_ticket_id, which this same scoped pipeline is the only writer of.
+    T = aliased(UploadedTicket)
+    base = (select(LccDetailed, T)
+            .outerjoin(T, T.id == LccDetailed.projected_ticket_id)
+            .where(LccDetailed.batch_id == batch_id, *_scope(LccDetailed, current_user)))
     if status_filter:
         base = base.where(LccDetailed.bill_status == status_filter)
     if kind:
         base = base.where(LccDetailed.bill_kind == kind)
+    if billing_state:
+        base = base.where(proj.billing_state_cond(billing_state, T))
+    if q and q.strip():
+        # One box over both identities a user has to hand. _like escapes the LIKE
+        # wildcards, which matters here: PNRs and payment refs carry underscores.
+        pattern = _like(q.strip())
+        base = base.where(or_(
+            LccDetailed.name1.ilike(pattern, escape="\\"),
+            LccDetailed.record_locator.ilike(pattern, escape="\\"),
+        ))
 
-    total = await db.scalar(select(func.count()).select_from(base.subquery()))
-    rows = (await db.execute(
+    # Narrowed to the id before counting: the subquery would otherwise carry all ~130
+    # columns of both tables for no reason. The join is 1:1 on a PK so the count is
+    # unaffected either way.
+    total = await db.scalar(
+        select(func.count()).select_from(base.with_only_columns(LccDetailed.id).subquery())
+    ) or 0
+
+    if ids_only:
+        ids = (await db.execute(
+            base.with_only_columns(LccDetailed.id)
+            .order_by(LccDetailed.id.asc()).limit(MAX_BILLING_SELECT_IDS)
+        )).scalars().all()
+        return {"total": total, "ids": list(ids), "truncated": total > len(ids)}
+
+    pairs = (await db.execute(
         base.order_by(LccDetailed.id.asc()).limit(limit).offset(offset)
-    )).scalars().all()
+    )).all()
+    rows = [r for r, _t in pairs]
+    tickets = {r.id: t for r, t in pairs}
 
-    # Resolve the party names for display in one query rather than per row.
+    # Resolve the party names for display in one query rather than per row. The id sets
+    # carry the TICKET's party as well as the row's, so a stale row can name both.
     cust_ids = {r.bill_customer_id for r in rows if r.bill_customer_id}
     corp_ids = {r.bill_corporate_id for r in rows if r.bill_corporate_id}
+    cust_ids |= {t.customer_id for t in tickets.values() if t is not None and t.customer_id}
+    corp_ids |= {t.corporate_id for t in tickets.values() if t is not None and t.corporate_id}
     cust_names = dict((await db.execute(
         select(Customer.id, func.concat(Customer.first_name, " ", func.coalesce(Customer.last_name, "")))
         .where(Customer.id.in_(cust_ids or {-1}))
@@ -842,9 +972,15 @@ async def list_billing_rows(
         select(Corporate.id, Corporate.company).where(Corporate.id.in_(corp_ids or {-1}))
     )).all())
 
-    return {
-        "total": total or 0, "limit": limit, "offset": offset,
-        "rows": [{
+    def _party_name(ct: str | None, cust_id: int | None, corp_id: int | None):
+        if ct == "corporate":
+            return corp_names.get(corp_id)
+        return (cust_names.get(cust_id) or "").strip() or None
+
+    def _row(r):
+        t = tickets.get(r.id)
+        state = proj.billing_state(r, t)
+        return {
             "id": r.id,
             "passenger": r.name1,
             "record_locator": r.record_locator,
@@ -857,13 +993,27 @@ async def list_billing_rows(
             "bill_customer_type": r.bill_customer_type,
             "bill_customer_id": r.bill_customer_id,
             "bill_corporate_id": r.bill_corporate_id,
-            "party_name": (corp_names.get(r.bill_corporate_id)
-                           if r.bill_customer_type == "corporate"
-                           else (cust_names.get(r.bill_customer_id) or "").strip() or None),
+            "party_name": _party_name(r.bill_customer_type, r.bill_customer_id, r.bill_corporate_id),
             "customer_name": (cust_names.get(r.bill_customer_id) or "").strip() or None,
             "bill_match_reason": r.bill_match_reason,
             "projected_ticket_id": r.projected_ticket_id,
-        } for r in rows],
+            "billing_state": state,
+            "billing_id": t.billing_id if t is not None else None,
+            # Only for a stale row, and it is the whole point of that state: the screen
+            # can say "sent as X, now billed to Y" instead of an unexplained warning.
+            "billed_party_name": (
+                _party_name(t.customer_type, t.customer_id, t.corporate_id)
+                if state == "stale" else None
+            ),
+            "sendable": state in proj.SENDABLE_STATES,
+        }
+
+    # No state_counts here on purpose: they cover the whole batch, so recomputing them
+    # per page would put a full-batch aggregate behind every search keystroke. The
+    # header gets them from billing-summary, which is called after mutations instead.
+    return {
+        "total": total, "limit": limit, "offset": offset,
+        "rows": [_row(r) for r in rows],
     }
 
 
@@ -1000,9 +1150,120 @@ async def set_row_billing_party(
             "customer_id": cust_id, "corporate_id": corp_id}
 
 
+class BulkBillingPartyPayload(BillingPartyPayload):
+    row_ids: list[int]
+
+
+@router.patch("/batches/{batch_id}/billing-party-bulk")
+async def set_rows_billing_party(
+    batch_id: str,
+    payload: BulkBillingPartyPayload,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """One party for a hand-picked set of rows — the per-row picker, in bulk.
+
+    Stamped as OVERRIDDEN, exactly like the single-row endpoint, so a human's pick
+    survives the next re-match.
+
+    Payment movements in the selection are SKIPPED and counted, not refused. The
+    single-row endpoint 409s on one because there the payment row IS the request; here,
+    failing forty good rows over one payment row would be the wrong trade.
+    """
+    batch = await _owned_batch(batch_id, db, current_user)
+    ids = _checked_ids(payload.row_ids, "use the default party above")
+    await _owned_row_ids(db, batch_id, current_user, ids)
+
+    ct, cust_id, corp_id = await _resolve_bill_party(
+        db, current_user, payload.customer_type, payload.customer_id, payload.corporate_id
+    )
+    if not ct:
+        raise HTTPException(status_code=400, detail="Pick a customer or corporate.")
+
+    result = await db.execute(
+        update(LccDetailed).where(
+            LccDetailed.id.in_(ids),
+            LccDetailed.batch_id == batch_id,
+            *_scope(LccDetailed, current_user),
+            # NULL-safe: `bill_kind != 'payment'` would drop never-resolved rows, whose
+            # kind is still NULL. See lcc_billing_projection's note on the same trap.
+            or_(LccDetailed.bill_kind.is_(None), LccDetailed.bill_kind != "payment"),
+        ).values(
+            bill_status=cres.OVERRIDDEN,
+            bill_customer_type=ct,
+            bill_customer_id=cust_id,
+            bill_corporate_id=corp_id,
+            bill_match_reason=None,
+            resolved_at=datetime.utcnow(),
+            resolved_by_id=current_user.id,
+        )
+    )
+    rows_updated = result.rowcount or 0
+
+    if batch.resolution_status == "none":
+        batch.resolution_status = "resolved"
+    await _recount(db, batch)
+    await db.commit()
+
+    return {"batch_id": batch_id, "customer_type": ct, "customer_id": cust_id,
+            "corporate_id": corp_id, "rows_updated": rows_updated,
+            "skipped_payments": len(ids) - rows_updated,
+            "billable_rows": batch.billable_rows,
+            "resolved_rows": batch.resolved_rows,
+            "unresolved_rows": batch.unresolved_rows}
+
+
+async def _owned_row_ids(
+    db: AsyncSession, batch_id: str, current_user: User, ids: list[int],
+) -> None:
+    """Every id must be a row of THIS batch, owned by this caller, or nothing runs.
+
+    project_batch filters on batch_id alone, so this is where the tenant boundary is
+    enforced for any endpoint that takes hand-picked ids. Refusing the whole call rather
+    than quietly narrowing it also stops the endpoint being used to probe which ids
+    exist.
+    """
+    found = set((await db.execute(
+        select(LccDetailed.id).where(
+            LccDetailed.id.in_(ids),
+            LccDetailed.batch_id == batch_id,
+            *_scope(LccDetailed, current_user),
+        )
+    )).scalars().all())
+    missing = len(ids) - len(found)
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{missing} of the selected rows are not in this upload.",
+        )
+
+
+def _checked_ids(row_ids: list[int] | None, action: str) -> list[int] | None:
+    """Normalise a hand-picked selection. None means "the whole upload"."""
+    if row_ids is None:
+        return None
+    ids = list(dict.fromkeys(row_ids))          # dedupe, keep the caller's order
+    if not ids:
+        # An EXPLICIT empty list is a mistake, not "do everything" — the None/[] split
+        # is what keeps a bug in the caller from silently acting on the whole upload.
+        raise HTTPException(status_code=400, detail=f"Tick at least one row, or {action}.")
+    if len(ids) > MAX_SEND_ROWS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Select at most {MAX_SEND_ROWS} rows at a time, or {action}.",
+        )
+    return ids
+
+
+class SendToBillingPayload(BaseModel):
+    """No body / null → the whole upload, synced. `row_ids` → those rows, added only."""
+    row_ids: list[int] | None = Field(default=None)
+
+
 @router.post("/batches/{batch_id}/send-to-billing")
 async def send_to_billing(
     batch_id: str,
+    payload: SendToBillingPayload | None = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1010,9 +1271,11 @@ async def send_to_billing(
 
     Idempotent: re-running syncs rather than duplicates, and any ticket already on an
     invoice is left exactly as it was.
-    """
-    from app.services.lcc_billing_projection import project_batch
 
+    With `row_ids`, only those rows are touched and nothing is ever removed — see
+    project_batch's docstring for why a selective send is additive. Withdrawing a row
+    from billing stays the whole-upload send's job.
+    """
     batch = await _owned_batch(batch_id, db, current_user)
     if batch.status != "completed":
         raise HTTPException(status_code=409, detail="This upload is still importing.")
@@ -1022,7 +1285,11 @@ async def send_to_billing(
             detail="Resolve this upload's customers first — nothing here has a party to bill yet.",
         )
 
-    result = await project_batch(db, batch)
+    ids = _checked_ids(payload.row_ids if payload else None, "send the whole upload")
+    if ids:
+        await _owned_row_ids(db, batch_id, current_user, ids)
+
+    result = await proj.project_batch(db, batch, row_ids=ids)
     await _recount(db, batch)
     await db.commit()
     return {"batch_id": batch_id, **result}
