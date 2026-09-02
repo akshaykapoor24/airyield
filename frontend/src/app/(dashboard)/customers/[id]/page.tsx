@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { ArrowLeft, Edit2, RefreshCw, Contact, Ticket, FileText, Download, Trash2, Save, X, Eye } from "lucide-react";
@@ -105,6 +105,63 @@ function passengerName(t: SoldTicket): string {
   return t.pax_name || [t.first_name, t.last_name].filter(Boolean).join(" ") || "—";
 }
 
+/**
+ * A ticket's issue date as `YYYY-MM-DD`, or "" if it cannot be read.
+ *
+ * `ticket_date` is a String(50) carried straight from whatever spreadsheet the ticket
+ * arrived on — ticket_extraction normalises what it can and deliberately stores the rest
+ * verbatim — so it is not reliably a date at all. This mirrors
+ * backend/app/services/billing_calc.py::safe_date, which is the function that decides
+ * which tickets a date filter keeps.
+ *
+ * NEVER FALL BACK TO `new Date(s)`. JavaScript reads "03/04/2026" as 4 March, the US
+ * month-first order; the backend reads the same string as 3 April
+ * (`dateutil.parse(..., dayfirst=True)`). A parser that silently disagrees with the
+ * server about the same string is worse than one that admits defeat — this value ends up
+ * as the period printed on an invoice. Hence the explicit day-first branch below, and ""
+ * for anything that does not match it.
+ */
+function ticketDateISO(raw: string | null): string {
+  if (!raw) return "";
+  const s = raw.trim();
+  if (!s) return "";
+
+  // A real calendar date, or "". Date.parse is no use as a validator here: it happily
+  // rolls 2026-02-31 over into 3 March, so the parts are checked back out of the Date.
+  const build = (y: number, mo: number, d: number): string => {
+    if (!(y >= 1900 && y <= 2999) || mo < 1 || mo > 12 || d < 1 || d > 31) return "";
+    const dt = new Date(Date.UTC(y, mo - 1, d));
+    if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) return "";
+    return `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+  };
+
+  // Year-first: the ISO prefix every LCC-projected row carries, and the slash variant.
+  const ymd = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/.exec(s);
+  if (ymd) return build(Number(ymd[1]), Number(ymd[2]), Number(ymd[3]));
+
+  // Day-first d/m/y, matching the backend. Two-digit years are 20xx.
+  const dmy = /^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})$/.exec(s);
+  if (dmy) {
+    const year = dmy[3].length === 2 ? 2000 + Number(dmy[3]) : Number(dmy[3]);
+    return build(year, Number(dmy[2]), Number(dmy[1]));
+  }
+  return "";
+}
+
+/**
+ * The span the selected tickets actually cover — the truest period for their bill.
+ * Plain string comparison is correct because every value is `YYYY-MM-DD`; no Date
+ * objects, so no timezone can shift a boundary.
+ */
+function periodFromTickets(rows: SoldTicket[]): { from: string; to: string; undated: number } {
+  const dates = rows.map((t) => ticketDateISO(t.ticket_date)).filter(Boolean).sort();
+  return {
+    from: dates[0] ?? "",
+    to: dates[dates.length - 1] ?? "",
+    undated: rows.length - dates.length,
+  };
+}
+
 /** Recompute one row with the customer markup + the entered additional (flat) markup. */
 function rowCalc(t: SoldTicket, additionalStr: string, discountStr: string, billingType: Customer["billing_type"]) {
   const base = t.base_amount;
@@ -164,9 +221,13 @@ export default function CustomerDetailPage() {
   const [discounts, setDiscounts] = useState<Record<number, string>>({});
   const [selected, setSelected] = useState<Set<number>>(new Set());
 
-  // Save Billing
+  // Save Billing. The period is its own state, not the filter dates: the filter is now
+  // optional, but `billings.period_from/to` are NOT NULL and get printed on the invoice.
   const [showSaveBilling, setShowSaveBilling] = useState(false);
   const [billingName, setBillingName] = useState("");
+  const [periodFrom, setPeriodFrom] = useState("");
+  const [periodTo, setPeriodTo] = useState("");
+  const [periodUndated, setPeriodUndated] = useState(0);
   const [savingBilling, setSavingBilling] = useState(false);
 
   // Billing Info
@@ -211,21 +272,27 @@ export default function CustomerDetailPage() {
     fetchBillings();
   }, [fetchCustomer, fetchBillings]);
 
+  /**
+   * Load this customer's tickets, matched to their passenger name.
+   * Twin of corporates/[id]/page.tsx — keep the two in step.
+   *
+   * The date range is an optional NARROWING, not a precondition: leave it blank and you
+   * get everything, which is what the API has always done (`if date_from or date_to:`)
+   * and what Agency Billing has always offered. A range also drops tickets whose date
+   * cannot be parsed, so clearing the dates is the only way to see undated tickets.
+   */
   const applyRange = useCallback(async () => {
-    if (!dateFrom || !dateTo) {
-      setTicketsError("Select both From and To dates.");
-      return;
-    }
-    if (dateFrom > dateTo) {
+    if (dateFrom && dateTo && dateFrom > dateTo) {
       setTicketsError("From date must be before To date.");
       return;
     }
     setLoadingTickets(true);
     setTicketsError(null);
     try {
-      const { data } = await api.get<SoldTicketsResponse>(`/customers/${customerId}/sold-tickets`, {
-        params: { date_from: dateFrom, date_to: dateTo, date_field: dateField },
-      });
+      const params: Record<string, string> = { date_field: dateField };
+      if (dateFrom) params.date_from = dateFrom;
+      if (dateTo) params.date_to = dateTo;
+      const { data } = await api.get<SoldTicketsResponse>(`/customers/${customerId}/sold-tickets`, { params });
       setSoldTickets(data.tickets);
       setAdditional({});
       setDiscounts({});
@@ -236,6 +303,23 @@ export default function CustomerDetailPage() {
       setLoadingTickets(false);
     }
   }, [customerId, dateFrom, dateTo, dateField]);
+
+  // Load once, the first time the tab is actually opened — not on mount, because the
+  // page lands on Details and this fetch is unpaginated. A ref guard rather than
+  // depending on `applyRange`, which is memoised on the dates: depending on it would
+  // refire on every keystroke in a date box and wipe the ticks and markups being typed.
+  const ticketsLoaded = useRef(false);
+  useEffect(() => {
+    if (tab !== "Sold Tickets" || ticketsLoaded.current) return;
+    ticketsLoaded.current = true;
+    applyRange();
+  }, [tab, applyRange]);
+
+  /** "" when no range is set, which is now the default and means "everything". */
+  const rangeLabel = dateFrom && dateTo ? `${dateFrom} → ${dateTo}`
+    : dateFrom ? `from ${dateFrom}`
+    : dateTo ? `up to ${dateTo}`
+    : "";
 
   // Live summary over the loaded tickets + entered additional markups.
   const summary = useMemo(() => {
@@ -299,15 +383,32 @@ export default function CustomerDetailPage() {
     return { base, markup, addl, gst, total };
   }, [editBilling, addlEdits]);
 
+  /**
+   * Open the save dialog, seeding the invoice period.
+   *
+   * A filter range, when the user set one — that is what this dialog has always shown.
+   * Otherwise the span the SELECTED tickets actually cover, which is a truer period than
+   * an arbitrary filter window anyway. Either way it stays editable.
+   */
+  const openSaveBilling = () => {
+    const rows = (soldTickets ?? []).filter((t) => selected.has(t.id) && !t.is_billed);
+    const span = periodFromTickets(rows);
+    setPeriodFrom(dateFrom || span.from);
+    setPeriodTo(dateTo || span.to);
+    setPeriodUndated(dateFrom && dateTo ? 0 : span.undated);
+    setShowSaveBilling(true);
+  };
+
   const saveBilling = async () => {
     const rows = (soldTickets ?? []).filter((t) => selected.has(t.id) && !t.is_billed);
     if (!billingName.trim() || rows.length === 0) return;
+    if (!periodFrom || !periodTo || periodFrom > periodTo) return;
     setSavingBilling(true);
     try {
       await api.post(`/customers/${customerId}/billings`, {
         billing_name: billingName.trim(),
-        period_from: dateFrom,
-        period_to: dateTo,
+        period_from: periodFrom,
+        period_to: periodTo,
         items: rows.map((t) => ({
           ticket_id: t.id,
           additional_markup: parseFloat(additional[t.id] ?? "") || 0,
@@ -510,15 +611,29 @@ export default function CustomerDetailPage() {
               />
             </div>
             <button
-              onClick={applyRange}
+              onClick={() => applyRange()}
               disabled={loadingTickets}
               className="bg-[#1e3a5f] hover:bg-[#16304f] text-white rounded-lg px-4 py-2 text-sm font-semibold disabled:opacity-50"
             >
               {loadingTickets ? "Loading…" : "Apply"}
             </button>
+            {(dateFrom || dateTo) && (
+              <button
+                onClick={() => { setDateFrom(""); setDateTo(""); }}
+                disabled={loadingTickets}
+                className="inline-flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-700 pb-2.5 disabled:opacity-50"
+                title="Clear the dates, then press Apply to see every ticket"
+              >
+                <X className="w-3 h-3" /> Clear dates
+              </button>
+            )}
+            <p className="basis-full text-[11px] text-gray-400 -mt-1">
+              Leave the dates blank to see every ticket — a range only narrows the list,
+              and also hides any ticket whose date cannot be read.
+            </p>
             {soldTickets && soldTickets.length > 0 && (
               <button
-                onClick={() => setShowSaveBilling(true)}
+                onClick={() => { openSaveBilling(); }}
                 disabled={selected.size === 0}
                 className="ml-auto flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg px-4 py-2 text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
               >
@@ -538,8 +653,8 @@ export default function CustomerDetailPage() {
               <div className="w-14 h-14 bg-gray-50 rounded-full flex items-center justify-center mb-3">
                 <Ticket className="w-7 h-7 text-gray-300" />
               </div>
-              <p className="text-sm font-medium text-gray-600">Select a date range to view sold tickets</p>
-              <p className="text-xs text-gray-400 mt-1">Pick a From / To issue date and click Apply.</p>
+              <p className="text-sm font-medium text-gray-600">Could not load tickets</p>
+              <p className="text-xs text-gray-400 mt-1">Press Apply to try again.</p>
             </div>
           ) : (
             <>
@@ -563,7 +678,10 @@ export default function CustomerDetailPage() {
               <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
                 <div className="px-4 py-3 border-b border-gray-100">
                   <p className="text-xs font-semibold text-gray-700">
-                    Tickets by {dateField === "travel" ? "travel" : "issue"} date {dateFrom} → {dateTo} for {customer.first_name} {customer.last_name ?? ""}
+                    {rangeLabel
+                      ? `${soldTickets.length} tickets by ${dateField === "travel" ? "travel" : "issue"} date ${rangeLabel} for `
+                      : `All ${soldTickets.length} tickets for `}
+                    {customer.first_name} {customer.last_name ?? ""}
                   </p>
                   <p className="text-[10px] text-gray-400 mt-0.5">
                     Markup: {markupLabel(customer)}
@@ -571,7 +689,9 @@ export default function CustomerDetailPage() {
                     {customer.billing_type
                       ? `${customer.billing_type} — 18% GST on ${customer.billing_type === "reseller" ? "gross + markup" : "markup only"}`
                       : "not set — no GST applied"}
-                    . Edit Additional Markup to recalculate.
+                    . Edit Additional Markup to recalculate. Totals above cover every row
+                    shown, tickets already billed included; Save Billing charges only the
+                    rows you tick.
                   </p>
                 </div>
                 <div className="overflow-x-auto">
@@ -606,13 +726,20 @@ export default function CustomerDetailPage() {
                     <tbody>
                       {soldTickets.length === 0 ? (
                         <tr>
-                          <td colSpan={26} className="px-4 py-16 text-center">
+                          {/* 27 = checkbox + 14 named + 11 incentive + Total Inc. */}
+                          <td colSpan={27} className="px-4 py-16 text-center">
                             <div className="flex flex-col items-center justify-center">
                               <div className="w-14 h-14 bg-gray-50 rounded-full flex items-center justify-center mb-3">
                                 <Ticket className="w-7 h-7 text-gray-300" />
                               </div>
-                              <p className="text-sm font-medium text-gray-600">No tickets in this date range</p>
-                              <p className="text-xs text-gray-400 mt-1">No tickets matched this customer&apos;s name between {dateFrom} and {dateTo}.</p>
+                              <p className="text-sm font-medium text-gray-600">
+                                {rangeLabel ? "No tickets in this date range" : "No tickets for this customer yet"}
+                              </p>
+                              <p className="text-xs text-gray-400 mt-1">
+                                {rangeLabel
+                                  ? `No tickets matched this customer's name ${rangeLabel}. Clear the dates to see every ticket.`
+                                  : "No uploaded ticket is tagged to this customer or matches their passenger name."}
+                              </p>
                             </div>
                           </td>
                         </tr>
@@ -832,8 +959,41 @@ export default function CustomerDetailPage() {
                   className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#1e3a5f]/30 bg-gray-50"
                 />
               </div>
+              <div>
+                <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">
+                  Billing Period *
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="date"
+                    value={periodFrom}
+                    onChange={(e) => setPeriodFrom(e.target.value)}
+                    className="flex-1 min-w-0 border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#1e3a5f]/30 bg-gray-50"
+                  />
+                  <span className="text-gray-400 text-sm">→</span>
+                  <input
+                    type="date"
+                    value={periodTo}
+                    onChange={(e) => setPeriodTo(e.target.value)}
+                    className="flex-1 min-w-0 border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#1e3a5f]/30 bg-gray-50"
+                  />
+                </div>
+                <p className="text-[10px] text-gray-400 mt-1">
+                  {dateFrom && dateTo
+                    ? "From the date range you applied."
+                    : "Taken from the first and last issue date of the tickets you selected. It prints on the invoice — adjust it if this bill covers a different period."}
+                  {periodUndated > 0 && ` ${periodUndated} selected ${periodUndated === 1 ? "ticket has" : "tickets have"} no readable date and were ignored here.`}
+                </p>
+                {!periodFrom && !periodTo && (
+                  <p className="text-[10px] text-amber-600 mt-1">
+                    None of the selected tickets has a readable date — set the period this bill covers.
+                  </p>
+                )}
+                {periodFrom && periodTo && periodFrom > periodTo && (
+                  <p className="text-[10px] text-red-500 mt-1">The From date must not be after the To date.</p>
+                )}
+              </div>
               <div className="bg-gray-50 border border-gray-100 rounded-lg px-3 py-2.5 text-[11px] text-gray-600 space-y-1">
-                <div className="flex justify-between"><span>Period</span><span className="font-semibold">{dateFrom} → {dateTo}</span></div>
                 <div className="flex justify-between"><span>Selected Tickets</span><span className="font-semibold">{selectedSummary.count}</span></div>
                 <div className="flex justify-between"><span>Grand Total</span><span className="font-semibold">{money(selectedSummary.total)}</span></div>
               </div>
@@ -844,7 +1004,10 @@ export default function CustomerDetailPage() {
               </button>
               <button
                 onClick={saveBilling}
-                disabled={savingBilling || !billingName.trim()}
+                disabled={
+                  savingBilling || !billingName.trim()
+                  || !periodFrom || !periodTo || periodFrom > periodTo
+                }
                 className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg py-2 text-sm font-semibold disabled:opacity-50"
               >
                 {savingBilling ? "Saving…" : "Save Billing"}

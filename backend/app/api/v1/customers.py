@@ -3,7 +3,9 @@ from io import BytesIO
 from typing import Optional
 
 import pandas as pd
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
+from fastapi import (
+    APIRouter, Depends, HTTPException, Query, Response, status, UploadFile, File,
+)
 from fastapi.responses import StreamingResponse
 
 from sqlalchemy import select, func, or_, and_, update
@@ -19,10 +21,12 @@ from app.models.user import User
 from app.models.tenant import Tenant
 from app.schemas.customer import (
     CustomerCreate, CustomerUpdate, CustomerRead, CustomerBulkUploadResult,
-    CustomerBulkCreate, SoldTicketRead, SoldTicketsResponse, SoldTicketsSummary,
+    CustomerBulkCreate, CustomerListItem, RelinkRequest, RelinkResult,
+    SoldTicketRead, SoldTicketsResponse, SoldTicketsSummary,
 )
 from app.schemas.billing import BillingCreate, BillingUpdate, BillingRead, BillingListItem
 from app.services.billing_pdf import build_billing_pdf
+from app.services.party_inherit import INHERITED_FIELDS, inherit_from_corporate
 from app.services.billing_calc import (
     to_float as _f,
     compute_markup as _compute_markup,
@@ -48,6 +52,21 @@ def _clean_upper(value) -> Optional[str]:
     if value is None:
         return None
     v = str(value).strip().upper()
+    return v or None
+
+
+def _cell(row, column: str) -> Optional[str]:
+    """One trimmed string out of an uploaded row, or None.
+
+    `pd.read_excel(dtype=str)` gives a BLANK cell as NaN, not "" — and NaN is truthy, so
+    the obvious `str(row.get(c, "") or "")` stores the literal "nan". Copied verbatim
+    from corporates.py, which has had this guard since it was written; this router did
+    not, so a blank COMPANY imported as "nan" and quietly defeated the corporate match.
+    """
+    value = row.get(column)
+    if value is None or value != value:      # NaN != NaN
+        return None
+    v = str(value).strip()
     return v or None
 
 
@@ -90,26 +109,59 @@ async def _resolve_corporate(
     return corporate
 
 
-async def _find_corporate_by_name(
-    name: Optional[str], db: AsyncSession, current_user: User
-) -> Optional[Corporate]:
-    """Match a typed-in company name to a corporate, for the Excel import.
+def _company_key(name: Optional[str]) -> Optional[str]:
+    """The one spelling both sides of a name match are reduced to.
 
-    The template has always had a free-text COMPANY column and people fill it in
-    with the employer's name. When that name IS a corporate on file, the import
-    links to it instead of leaving another unlinked string behind. No match just
-    means the value stays free text.
+    `LOWER(TRIM(...))`, matching corp_link_01's backfill. The matcher this replaced
+    (`_find_corporate_by_name`) lowered the stored side but never trimmed it, so a
+    corporate saved as "Acme Pvt Ltd " could never be matched at all. Trimming both
+    sides fixes that — which does mean MORE employees link than before, on a link that
+    decides whose invoice a ticket lands on. Intended: it aligns the runtime with the
+    migration that first created these links.
     """
-    if not name or not name.strip():
+    if not name:
         return None
-    res = await db.execute(
-        select(Corporate).where(
-            func.lower(Corporate.company) == name.strip().lower(),
+    return " ".join(str(name).split()).lower() or None
+
+
+async def _corporate_name_map(db: AsyncSession, current_user: User) -> dict[str, Corporate]:
+    """`{company key: corporate}` for the whole workspace, in ONE query.
+
+    The import used to run a SELECT per row — 2,000 rows meant 2,000 of them on top of
+    2,000 commits. A workspace's Corporate Master is small enough to hold whole, so it is
+    loaded once and matched in memory.
+
+    Duplicate names resolve to the LOWEST id, which is what corp_link_01 did with
+    MIN(k.id). `corporates.company` has no unique constraint, and the old per-row
+    matcher's `.first()` with no ORDER BY picked non-deterministically between them.
+    """
+    rows = (await db.execute(
+        select(Corporate)
+        .where(
             Corporate.tenant_id == current_user.tenant_id,
             Corporate.created_by_id == current_user.id,
         )
-    )
-    return res.scalars().first()
+        .order_by(Corporate.id.asc())
+    )).scalars().all()
+
+    out: dict[str, Corporate] = {}
+    for c in rows:
+        key = _company_key(c.company)
+        if key and key not in out:          # ordered by id, so the first is the lowest
+            out[key] = c
+    return out
+
+
+def _apply_inheritance(values: dict, corporate) -> dict:
+    """Fill the blank inherited fields from the corporate. See services/party_inherit.
+
+    Call this AFTER the row's own values are normalised, never before: an unrecognised
+    markup type normalises to None, which then reads as blank and picks up the
+    corporate's real setting. The other order leaves the junk in place for _norm_choice
+    to discard, and the employee ends on no markup at all.
+    """
+    values.update(inherit_from_corporate(values, corporate))
+    return values
 
 
 async def _get_owned_customer(customer_id: int, db: AsyncSession, current_user: User) -> Customer:
@@ -137,15 +189,52 @@ async def _get_owned_billing(billing_id: int, customer_id: int, db: AsyncSession
     return obj
 
 
-@router.get("/", response_model=list[CustomerRead])
+@router.get("/", response_model=list[CustomerListItem])
 async def list_customers(
-    skip: int = 0,
-    limit: int = 500,
+    response: Response,
+    skip: int = Query(0, ge=0),
+    # 1000, not 500: PartyModal, OutgoingScopeFields, TicketFilingCard,
+    # CustomerPartyPanel and LccBillingWorklist all ask for a whole master at limit=1000.
+    limit: int = Query(500, ge=1, le=1000),
     search: Optional[str] = None,
+    ticket_state: Optional[str] = Query(None, pattern="^(any|unbilled|has|none)$"),
+    # "" / absent = all, "none" = individual / direct, "<id>" = that corporate's staff.
+    corporate: Optional[str] = Query(None, pattern="^(none|[0-9]+)$"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    q = select(Customer).where(_scope(current_user))
+    """The employee list, filtered and counted server-side.
+
+    Search, filters and paging all happen in SQL so they cover every row rather than
+    whatever the browser happened to have fetched. The row total goes back in
+    `X-Total-Count`; the body stays a bare array because ten call sites read it as one.
+    """
+    # Tickets HARD-LINKED to each customer. Shaped to use the partial index
+    # ix_uploaded_tickets_bill_customer (tenant_id, created_by_id, customer_id).
+    # Scoped by BOTH tenant and creator, exactly like _scope, or the badge would not
+    # agree with the drill-down it links to.
+    tix = (
+        select(
+            UploadedTicket.customer_id.label("party_id"),
+            func.count(UploadedTicket.id).label("total"),
+            func.count().filter(UploadedTicket.is_billed.is_(False)).label("unbilled"),
+        )
+        .where(
+            UploadedTicket.tenant_id == current_user.tenant_id,
+            UploadedTicket.created_by_id == current_user.id,
+            UploadedTicket.customer_id.is_not(None),
+        )
+        .group_by(UploadedTicket.customer_id)
+        .subquery()
+    )
+    total_col = func.coalesce(tix.c.total, 0)
+    unbilled_col = func.coalesce(tix.c.unbilled, 0)
+
+    # Grouped by the FK, so the join is at most 1:1 and offset/limit stay honest.
+    q = (select(Customer, total_col, unbilled_col)
+         .outerjoin(tix, tix.c.party_id == Customer.id)
+         .where(_scope(current_user)))
+
     if search and search.strip():
         term = f"%{search.strip()}%"
         q = q.where(or_(
@@ -153,10 +242,40 @@ async def list_customers(
             Customer.last_name.ilike(term),
             Customer.company.ilike(term),
             Customer.email.ilike(term),
+            # phone was searchable while filtering happened in the browser; without it
+            # here, moving search to the server would quietly stop finding people by
+            # the number they are most often looked up by.
+            Customer.phone.ilike(term),
         ))
-    q = q.order_by(Customer.first_name, Customer.last_name).offset(skip).limit(limit)
-    result = await db.execute(q)
-    return result.scalars().all()
+
+    if ticket_state == "unbilled":
+        q = q.where(unbilled_col > 0)
+    elif ticket_state == "has":
+        q = q.where(total_col > 0)
+    elif ticket_state == "none":
+        q = q.where(total_col == 0)
+
+    if corporate == "none":
+        q = q.where(Customer.corporate_id.is_(None))
+    elif corporate:
+        q = q.where(Customer.corporate_id == int(corporate))
+
+    # Counted through the SAME builder, or the pager and the rows disagree the moment
+    # any filter is on.
+    response.headers["X-Total-Count"] = str(
+        (await db.execute(select(func.count()).select_from(q.order_by(None).subquery()))).scalar_one()
+    )
+
+    rows = (await db.execute(
+        q.order_by(Customer.first_name, Customer.last_name).offset(skip).limit(limit)
+    )).all()
+    return [
+        CustomerListItem(
+            **CustomerRead.model_validate(c).model_dump(),
+            ticket_count=t, unbilled_ticket_count=u,
+        )
+        for c, t, u in rows
+    ]
 
 
 @router.post("/", response_model=CustomerRead, status_code=status.HTTP_201_CREATED)
@@ -249,16 +368,17 @@ async def bulk_upload_customers(
     total = len(df)
     success = 0
     errors: list[str] = []
+    corporates = await _corporate_name_map(db, current_user)
 
     for i, row in df.iterrows():
         row_num = i + used_header_row + 2
         row_prefix = f"Row {row_num}"
-        first_name = str(row.get("FIRST_NAME", "") or "").strip()
+        first_name = _cell(row, "FIRST_NAME")
         if not first_name:
             errors.append(f"{row_prefix}: FIRST_NAME is required.")
             continue
 
-        markup_value_raw = str(row.get("MARKUP_VALUE", "") or "").strip()
+        markup_value_raw = _cell(row, "MARKUP_VALUE")
         markup_value: float | None = None
         if markup_value_raw:
             try:
@@ -267,30 +387,35 @@ async def bulk_upload_customers(
                 errors.append(f"{row_prefix}: MARKUP_VALUE '{markup_value_raw}' is not a number.")
                 continue
 
-        gst_registered = str(row.get("GST_REGISTERED", "") or "").strip().lower() in _TRUTHY
+        gst_registered = (_cell(row, "GST_REGISTERED") or "").lower() in _TRUTHY
 
         # COMPANY names an employer; if that employer is a corporate on file the
-        # row is LINKED to it rather than left as another unlinked string.
-        company_raw = str(row.get("COMPANY", "") or "").strip() or None
-        corporate = await _find_corporate_by_name(company_raw, db, current_user)
+        # row is LINKED to it rather than left as another unlinked string — and it
+        # supplies the terms every blank cell below would otherwise leave unset.
+        company_raw = _cell(row, "COMPANY")
+        corporate = corporates.get(_company_key(company_raw) or "")
+
+        values = _apply_inheritance({
+            "phone": _cell(row, "PHONE"),
+            "email": _cell(row, "EMAIL"),
+            "gst_registered": gst_registered,
+            "gst_no": _clean_upper(_cell(row, "GST_NO")) if gst_registered else None,
+            "pan_no": _clean_upper(_cell(row, "PAN_NO")),
+            "markup_type": _norm_choice(_cell(row, "MARKUP_TYPE"), _MARKUP_TYPES),
+            "markup_value": markup_value,
+            "billing_type": _norm_choice(_cell(row, "BILLING_TYPE"), _BILLING_TYPES),
+        }, corporate)
 
         try:
             customer = Customer(
                 tenant_id=current_user.tenant_id,
                 created_by_id=current_user.id,
                 first_name=first_name,
-                last_name=str(row.get("LAST_NAME", "") or "").strip() or None,
+                last_name=_cell(row, "LAST_NAME"),
                 corporate_id=corporate.id if corporate else None,
                 company=corporate.company if corporate else company_raw,
-                title=str(row.get("TITLE", "") or "").strip() or None,
-                phone=str(row.get("PHONE", "") or "").strip() or None,
-                email=str(row.get("EMAIL", "") or "").strip() or None,
-                gst_registered=gst_registered,
-                gst_no=_clean_upper(row.get("GST_NO")) if gst_registered else None,
-                pan_no=_clean_upper(row.get("PAN_NO")),
-                markup_type=_norm_choice(str(row.get("MARKUP_TYPE", "") or ""), _MARKUP_TYPES),
-                markup_value=markup_value,
-                billing_type=_norm_choice(str(row.get("BILLING_TYPE", "") or ""), _BILLING_TYPES),
+                title=_cell(row, "TITLE"),
+                **values,
             )
             db.add(customer)
             await db.commit()
@@ -329,6 +454,7 @@ async def bulk_create_customers(
     total = len(payload.rows)
     success = 0
     errors: list[str] = []
+    corporates = await _corporate_name_map(db, current_user)
 
     for i, row in enumerate(payload.rows):
         # The wizard sends only the rows it kept, so its sheet-line numbers cannot
@@ -340,8 +466,24 @@ async def bulk_create_customers(
             continue
 
         company_raw = (row.company or "").strip() or None
-        corporate = await _find_corporate_by_name(company_raw, db, current_user)
+        corporate = corporates.get(_company_key(company_raw) or "")
         gst_registered = bool(row.gst_registered)
+
+        # THE FIX. A hand-added employee picks the corporate's terms up from
+        # PartyModal's seedFromCorporate; an imported one used to land on NULL markup
+        # and NULL billing type — correctly linked, on no terms at all, and therefore
+        # billed at zero markup. Whatever the sheet DID say still wins.
+        values = _apply_inheritance({
+            "phone": (row.phone or "").strip() or None,
+            "email": (row.email or "").strip() or None,
+            "gst_registered": gst_registered,
+            "gst_no": _clean_upper(row.gst_no) if gst_registered else None,
+            "pan_no": _clean_upper(row.pan_no),
+            "markup_type": _norm_choice(row.markup_type, _MARKUP_TYPES),
+            "markup_value": row.markup_value,
+            "billing_type": _norm_choice(row.billing_type, _BILLING_TYPES),
+        }, corporate)
+
         try:
             db.add(Customer(
                 tenant_id=current_user.tenant_id,
@@ -351,14 +493,7 @@ async def bulk_create_customers(
                 corporate_id=corporate.id if corporate else None,
                 company=corporate.company if corporate else company_raw,
                 title=(row.title or "").strip() or None,
-                phone=(row.phone or "").strip() or None,
-                email=(row.email or "").strip() or None,
-                gst_registered=gst_registered,
-                gst_no=_clean_upper(row.gst_no) if gst_registered else None,
-                pan_no=_clean_upper(row.pan_no),
-                markup_type=_norm_choice(row.markup_type, _MARKUP_TYPES),
-                markup_value=row.markup_value,
-                billing_type=_norm_choice(row.billing_type, _BILLING_TYPES),
+                **values,
             ))
             await db.commit()
             success += 1
@@ -367,6 +502,116 @@ async def bulk_create_customers(
             errors.append(f"{row_prefix}: {e}")
 
     return CustomerBulkUploadResult(total=total, success=success, failed=total - success, errors=errors)
+
+
+_MAX_UNMATCHED_REPORTED = 25
+
+
+@router.post("/relink-corporates", response_model=RelinkResult)
+async def relink_corporates(
+    payload: RelinkRequest | None = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Link employees to their corporate by company name, then fill their blank terms.
+
+    Two passes over the caller's whole Employee Master:
+
+      1. Every employee with no `corporate_id` whose `company` text names a corporate is
+         linked to it, and the name is re-spelled the corporate's way.
+      2. Every LINKED employee — including ones linked long ago — has its BLANK
+         inherited fields filled from that corporate. This is the pass that repairs rows
+         imported before the import learned to inherit, which are linked but on no terms.
+
+    NOTHING ALREADY SET IS EVER CHANGED. That is what makes this safe to press twice, and
+    running it again reports zero work.
+
+    THE MATCHING RULE IS THE MIGRATION'S, deliberately unimproved: LOWER(TRIM()) on both
+    sides, same tenant and creator, lowest id on a tie — see alembic corp_link_01, whose
+    reasoning applies here word for word. A wrong link "would silently move someone's
+    tickets onto another company's invoice, which is worse than an unlinked row a human
+    can fix in the form."
+
+    Filling a blank markup CHANGES WHAT FUTURE INVOICES CHARGE: an employee who was
+    silently billing at zero markup starts billing at their corporate's rate. That is the
+    repair, not a side effect, but the caller is told before it runs — hence `dry_run`.
+    """
+    payload = payload or RelinkRequest()
+
+    index = await _corporate_name_map(db, current_user)
+    # A second view by id, so an employee already linked to a duplicate-named corporate
+    # still resolves — `index` only keeps the lowest id per name.
+    by_id = {c.id: c for c in (await db.execute(
+        select(Corporate).where(
+            Corporate.tenant_id == current_user.tenant_id,
+            Corporate.created_by_id == current_user.id,
+        )
+    )).scalars().all()}
+
+    employees = (await db.execute(select(Customer).where(_scope(current_user)))).scalars().all()
+
+    scanned = len(employees)
+    linked = already_linked = unmatched = company_synced = employees_filled = 0
+    fields_filled: dict[str, int] = {}
+    unmatched_companies: list[str] = []
+    seen_unmatched: set[str] = set()
+
+    for emp in employees:
+        corporate = None
+        newly_linked = False
+
+        if emp.corporate_id is not None:
+            corporate = by_id.get(emp.corporate_id)
+            already_linked += 1
+        elif emp.company and emp.company.strip():
+            corporate = index.get(_company_key(emp.company) or "")
+            if corporate is not None:
+                newly_linked = True
+                linked += 1
+            else:
+                unmatched += 1
+                name = emp.company.strip()
+                if name.lower() not in seen_unmatched:
+                    seen_unmatched.add(name.lower())
+                    if len(unmatched_companies) < _MAX_UNMATCHED_REPORTED:
+                        unmatched_companies.append(name)
+        # No company at all is not a gap — individual / direct is a real answer.
+
+        if corporate is None:
+            continue
+
+        # The corporate's spelling wins; `company` is a mirror, not free text.
+        resync = emp.company != corporate.company
+
+        patch = inherit_from_corporate(
+            {f: getattr(emp, f) for f in INHERITED_FIELDS}, corporate
+        )
+        if patch:
+            employees_filled += 1
+            for key in patch:
+                fields_filled[key] = fields_filled.get(key, 0) + 1
+        if resync:
+            company_synced += 1
+
+        if not payload.dry_run:
+            if newly_linked:
+                emp.corporate_id = corporate.id
+            if resync:
+                emp.company = corporate.company
+            for key, value in patch.items():
+                setattr(emp, key, value)
+
+    if not payload.dry_run:
+        # One commit: this is a single administrative action, and a half-applied one
+        # would be unexplainable to whoever pressed the button.
+        await db.commit()
+
+    return RelinkResult(
+        scanned=scanned, linked=linked, already_linked=already_linked,
+        unmatched=unmatched, company_synced=company_synced,
+        employees_filled=employees_filled, fields_filled=fields_filled,
+        unmatched_companies=unmatched_companies, dry_run=payload.dry_run,
+    )
 
 
 @router.get("/template")

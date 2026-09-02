@@ -72,6 +72,23 @@ class CorporateRead(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class CorporateListItem(CorporateRead):
+    """A row of the Corporate Master / Corporate Billing list.
+
+    The counts are of tickets HARD-LINKED to this corporate
+    (`uploaded_tickets.corporate_id`). The billing screen additionally claims untagged
+    tickets whose passenger name matches one of the corporate's employees, and that half
+    cannot be a grouped aggregate — see `services/billing_calc.py::corporate_ticket_scope`.
+    So this can read LOWER than the drill-down; it is exact for LCC-sourced tickets.
+
+    These do not sum with Employee Master's counts either way round: an LCC ticket for an
+    employee carries both ids and is counted on both screens, while a manually filed
+    corporate ticket carries only this one.
+    """
+    ticket_count: int = 0
+    unbilled_ticket_count: int = 0
+
+
 class CorporateBulkCreateRow(BaseModel):
     """One row of the import wizard, after the user mapped and reviewed it.
 

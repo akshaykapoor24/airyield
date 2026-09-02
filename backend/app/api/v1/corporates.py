@@ -11,7 +11,9 @@ from io import BytesIO
 from typing import Optional
 
 import pandas as pd
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
+from fastapi import (
+    APIRouter, Depends, HTTPException, Query, Response, status, UploadFile, File,
+)
 from fastapi.responses import StreamingResponse
 
 from sqlalchemy import select, func, or_, and_, update
@@ -28,7 +30,7 @@ from app.models.user import User
 from app.models.tenant import Tenant
 from app.schemas.corporate import (
     CorporateCreate, CorporateUpdate, CorporateRead, CorporateBulkUploadResult,
-    CorporateBulkCreate, CorporateSoldTicketsResponse,
+    CorporateBulkCreate, CorporateListItem, CorporateSoldTicketsResponse,
 )
 from app.schemas.customer import SoldTicketRead, SoldTicketsSummary
 from app.schemas.billing import BillingCreate, BillingUpdate, BillingRead, BillingListItem
@@ -152,28 +154,78 @@ async def _get_owned_billing(billing_id: int, corporate_id: int, db: AsyncSessio
     return obj
 
 
-@router.get("/", response_model=list[CorporateRead])
+@router.get("/", response_model=list[CorporateListItem])
 async def list_corporates(
-    skip: int = 0,
-    limit: int = 500,
+    response: Response,
+    skip: int = Query(0, ge=0),
+    # See the same note in customers.py: several screens fetch a whole master at 1000.
+    limit: int = Query(500, ge=1, le=1000),
     search: Optional[str] = None,
+    ticket_state: Optional[str] = Query(None, pattern="^(any|unbilled|has|none)$"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    q = select(Corporate).where(_scope(current_user))
+    """The corporate list, filtered and counted server-side. Twin of list_customers."""
+    # Tickets HARD-LINKED to each corporate — the partial index for this is
+    # ix_uploaded_tickets_bill_corporate. Note an LCC ticket for an employee carries
+    # BOTH ids, so it is counted once here and once on Employee Master; the two screens
+    # deliberately do not sum.
+    tix = (
+        select(
+            UploadedTicket.corporate_id.label("party_id"),
+            func.count(UploadedTicket.id).label("total"),
+            func.count().filter(UploadedTicket.is_billed.is_(False)).label("unbilled"),
+        )
+        .where(
+            UploadedTicket.tenant_id == current_user.tenant_id,
+            UploadedTicket.created_by_id == current_user.id,
+            UploadedTicket.corporate_id.is_not(None),
+        )
+        .group_by(UploadedTicket.corporate_id)
+        .subquery()
+    )
+    total_col = func.coalesce(tix.c.total, 0)
+    unbilled_col = func.coalesce(tix.c.unbilled, 0)
+
+    q = (select(Corporate, total_col, unbilled_col)
+         .outerjoin(tix, tix.c.party_id == Corporate.id)
+         .where(_scope(current_user)))
+
     if search and search.strip():
         term = f"%{search.strip()}%"
         q = q.where(or_(
             Corporate.company.ilike(term),
             Corporate.email.ilike(term),
             Corporate.city.ilike(term),
+            # phone and state were searchable while the browser did the filtering.
+            Corporate.phone.ilike(term),
+            Corporate.state.ilike(term),
             # Pre-split rows may still carry the contact's name and no company.
             Corporate.first_name.ilike(term),
             Corporate.last_name.ilike(term),
         ))
-    q = q.order_by(Corporate.company, Corporate.first_name).offset(skip).limit(limit)
-    result = await db.execute(q)
-    return result.scalars().all()
+
+    if ticket_state == "unbilled":
+        q = q.where(unbilled_col > 0)
+    elif ticket_state == "has":
+        q = q.where(total_col > 0)
+    elif ticket_state == "none":
+        q = q.where(total_col == 0)
+
+    response.headers["X-Total-Count"] = str(
+        (await db.execute(select(func.count()).select_from(q.order_by(None).subquery()))).scalar_one()
+    )
+
+    rows = (await db.execute(
+        q.order_by(Corporate.company, Corporate.first_name).offset(skip).limit(limit)
+    )).all()
+    return [
+        CorporateListItem(
+            **CorporateRead.model_validate(c).model_dump(),
+            ticket_count=t, unbilled_ticket_count=u,
+        )
+        for c, t, u in rows
+    ]
 
 
 @router.post("/", response_model=CorporateRead, status_code=status.HTTP_201_CREATED)

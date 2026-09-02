@@ -93,6 +93,41 @@ class CustomerBulkUploadResult(BaseModel):
     errors: list[str]
 
 
+class CustomerListItem(CustomerRead):
+    """A row of the Employee Master / Customer Billing list.
+
+    The counts are of tickets HARD-LINKED to this customer
+    (`uploaded_tickets.customer_id`). A customer's billing screen additionally claims
+    untagged tickets whose passenger name matches, and that half cannot be expressed as
+    a grouped aggregate — see `services/billing_calc.py::customer_ticket_scope`. So this
+    can read LOWER than the drill-down. It is exact for LCC-sourced tickets, which
+    always carry the link.
+
+    A subclass rather than two defaulted fields on CustomerRead, because the four
+    endpoints that return a single customer count nothing — reporting a hard `0` there
+    would be a lie rather than a default.
+    """
+    ticket_count: int = 0
+    unbilled_ticket_count: int = 0
+
+
+class RelinkRequest(BaseModel):
+    """`dry_run` previews the real numbers so the confirmation can state them."""
+    dry_run: bool = False
+
+
+class RelinkResult(BaseModel):
+    scanned: int                        # owned employees examined
+    linked: int                         # corporate_id newly set
+    already_linked: int
+    unmatched: int                      # company text matched no corporate
+    company_synced: int                 # spelling rewritten to the corporate's
+    employees_filled: int               # gained at least one term
+    fields_filled: dict[str, int]       # {"markup_type": 12, "billing_type": 12, …}
+    unmatched_companies: list[str]      # distinct, capped — the human's to-do list
+    dry_run: bool
+
+
 class SoldTicketRead(BaseModel):
     """A ticket sold to a customer, with markup applied."""
     id: int

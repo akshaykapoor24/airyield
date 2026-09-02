@@ -6,7 +6,7 @@ import {
   Info, RefreshCw, Save, Upload, X,
 } from "lucide-react";
 import api from "@/lib/api";
-import { PARTY, type PartyKind } from "@/lib/party";
+import { INHERITED_FIELDS, PARTY, isBlankInherited, type PartyKind } from "@/lib/party";
 import {
   IMPORT_FIELDS, applyMapping, autoMap, parseWorkbook, toPayload, validateRow,
   type ImportField, type ParsedSheet, type ReviewRow,
@@ -241,6 +241,7 @@ export default function PartyUploadModal({
               savableCount={savableCount}
               badCount={badIdx.length}
               excludedCount={rows.length - includedIdx.length}
+              kind={kind}
             />
           )}
 
@@ -457,7 +458,7 @@ function MappingStep({
 }
 
 function ReviewStep({
-  fields, rows, rowErrors, onEdit, onToggle, savableCount, badCount, excludedCount,
+  fields, rows, rowErrors, onEdit, onToggle, savableCount, badCount, excludedCount, kind,
 }: {
   fields: ImportField[];
   rows: ReviewRow[];
@@ -467,7 +468,17 @@ function ReviewStep({
   savableCount: number;
   badCount: number;
   excludedCount: number;
+  kind: PartyKind;
 }) {
+  // Rows that name a company and leave at least one term blank. The server fills those
+  // from the matching corporate on save — invisible in this grid, so say it here.
+  const inheritCount = kind !== "customer" ? 0 : rows.filter((r, i) =>
+    r.included
+    && Object.keys(rowErrors[i]).length === 0
+    && (r.values.company ?? "").trim()
+    && INHERITED_FIELDS.some((k) => isBlankInherited(k, r.values[k] ?? ""))
+  ).length;
+
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
@@ -482,6 +493,13 @@ function ReviewStep({
         {excludedCount > 0 && (
           <span className="text-[11px] font-semibold text-gray-500 bg-gray-50 border border-gray-200 rounded-lg px-2.5 py-1.5">
             {excludedCount} excluded
+          </span>
+        )}
+        {inheritCount > 0 && (
+          <span className="text-[11px] font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded-lg px-2.5 py-1.5 flex items-center gap-1.5">
+            <Info className="w-3.5 h-3.5 shrink-0" />
+            {inheritCount} {inheritCount === 1 ? "row leaves" : "rows leave"} terms blank — where the
+            company matches a corporate, those blanks are filled in from it on save. What you type here is kept.
           </span>
         )}
       </div>
