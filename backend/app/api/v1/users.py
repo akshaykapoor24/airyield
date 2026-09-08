@@ -1,7 +1,12 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+import logging
+from io import BytesIO
+from uuid import uuid4
+
+from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import delete, select
 
+from app.config import settings
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models.tenant import Tenant, TenantType
@@ -12,6 +17,8 @@ from app.schemas.user import (
     UserRead, UserUpdate, UserCreate, UserRoleUpdate, UserEntitiesUpdate,
     ProfileRead, ProfileUpdate,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -139,6 +146,17 @@ def _profile_read(user: User) -> ProfileRead:
         company_name=tenant.name if tenant else None,
         pan_number=tenant.pan_number if tenant else None,
         gst_number=tenant.gst_number if tenant else None,
+        gst_scheme=tenant.gst_scheme if tenant else None,
+        address=tenant.address if tenant else None,
+        city=tenant.city if tenant else None,
+        state=tenant.state if tenant else None,
+        pincode=tenant.pincode if tenant else None,
+        country=tenant.country if tenant else None,
+        phone=tenant.phone if tenant else None,
+        has_logo=bool(tenant and tenant.logo_path),
+        logo_name=tenant.logo_name if tenant else None,
+        logo_mime=tenant.logo_mime if tenant else None,
+        logo_size=tenant.logo_size if tenant else None,
     )
 
 
@@ -170,8 +188,164 @@ async def update_my_profile(
             tenant.pan_number = data["pan_number"]   # already normalised/validated by schema
         if "gst_number" in data:
             tenant.gst_number = data["gst_number"]
+        if "gst_scheme" in data:
+            # Already lowercased and checked against GST_SCHEMES by the schema;
+            # None here means the workspace cleared its election, not a no-op.
+            tenant.gst_scheme = data["gst_scheme"]
+        # Address fields arrive already trimmed, with blanks turned into None.
+        for field in ("address", "city", "state", "pincode", "country", "phone"):
+            if field in data:
+                setattr(tenant, field, data[field])
 
     await db.commit()   # expire_on_commit=False keeps user + eager-loaded tenant in memory
+    return _profile_read(current_user)
+
+
+# ── Company logo (the letterhead a printed invoice carries) ────────────────
+# The formats reportlab can place in a PDF and every browser can preview. SVG is
+# excluded on both counts: reportlab cannot draw it, and serving user-supplied
+# SVG is serving user-supplied script.
+_LOGO_MIME_BY_FORMAT = {"PNG": "image/png", "JPEG": "image/jpeg", "WEBP": "image/webp"}
+_LOGO_EXT_BY_MIME = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
+# A letterhead logo, not a photograph. Generous for a 300-dpi print asset while
+# far below MAX_UPLOAD_SIZE_MB, which is sized for thousand-page statements.
+MAX_LOGO_BYTES = 2 * 1024 * 1024
+
+
+def _logo_tenant(current_user: User) -> Tenant:
+    """The workspace whose letterhead this is.
+
+    The logo belongs to the tenant, not the user: an invoice is issued by the
+    company, so one upload has to serve everyone who prints one.
+    """
+    tenant = current_user.tenant
+    if tenant is None:
+        raise HTTPException(status_code=400, detail="Your account is not attached to a workspace.")
+    return tenant
+
+
+def _sniff_logo(content: bytes) -> str:
+    """The real image type of these bytes, as one of the accepted MIME types.
+
+    Decided by decoding, not by the browser's Content-Type header — that is
+    caller-supplied text, and a .exe renamed to .png announces itself as an image.
+    """
+    from PIL import Image, UnidentifiedImageError
+
+    try:
+        with Image.open(BytesIO(content)) as img:
+            fmt = (img.format or "").upper()
+            img.verify()        # invalidates the object, so read .format first
+    except UnidentifiedImageError:
+        raise HTTPException(status_code=400, detail="That file is not a readable image.")
+    except Exception:           # noqa: BLE001 — truncated/corrupt file, same answer
+        raise HTTPException(status_code=400, detail="That image could not be read. It may be corrupt.")
+
+    mime = _LOGO_MIME_BY_FORMAT.get(fmt)
+    if not mime:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{fmt or 'That format'} is not supported. Upload a PNG, JPG or WEBP image.",
+        )
+    return mime
+
+
+@router.post("/me/profile/logo", response_model=ProfileRead)
+async def upload_my_logo(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Replace the workspace's logo. Returns the profile, so the caller need not re-fetch."""
+    from app.services import file_store
+
+    tenant = _logo_tenant(current_user)
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="That file is empty.")
+    if len(content) > MAX_LOGO_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Logo is too large ({len(content) / 1024 / 1024:.1f} MB). The limit is 2 MB.",
+        )
+
+    mime = _sniff_logo(content)
+    ext = _LOGO_EXT_BY_MIME[mime]
+    # A fresh blob name per upload, never a fixed one per tenant: overwriting in
+    # place would leave a cached CDN/browser copy of the previous logo answering
+    # for the new one.
+    blob = f"logos/{tenant.id}/{uuid4().hex}{ext}"
+    locator, _remote = await file_store.store(content, blob, mime, settings.GCS_LOGOS_BUCKET_NAME)
+
+    previous = tenant.logo_path
+    tenant.logo_path = locator
+    tenant.logo_name = (file.filename or "").strip()[:255] or f"logo{ext}"
+    tenant.logo_mime = mime
+    tenant.logo_size = len(content)
+    await db.commit()
+
+    # Only once the new logo is committed — a delete before this point would
+    # trade a failed upload for no logo at all.
+    if previous and previous != locator:
+        try:
+            await file_store.delete(previous, settings.GCS_LOGOS_BUCKET_NAME)
+        except Exception as exc:   # noqa: BLE001 — an orphaned file must not fail the upload
+            logger.warning("[logo] Could not delete replaced logo | %s | %s", previous, exc)
+
+    return _profile_read(current_user)
+
+
+@router.get("/me/profile/logo")
+async def get_my_logo(current_user: User = Depends(get_current_user)):
+    """The logo bytes.
+
+    Streamed by the API rather than handed out as a signed URL, because the file
+    may equally be on local disk (file_store's fallback) and because a letterhead
+    is workspace-private — the bearer token is what authorises it, which is also
+    why the browser has to fetch it as a blob rather than point an <img> at it.
+    """
+    from app.services import file_store
+
+    tenant = _logo_tenant(current_user)
+    if not tenant.logo_path:
+        raise HTTPException(status_code=404, detail="No logo has been uploaded.")
+    try:
+        content = await file_store.load(tenant.logo_path, settings.GCS_LOGOS_BUCKET_NAME)
+    except FileNotFoundError:
+        # The row survived its file (a wiped local uploads/ dir, a deleted blob).
+        # Saying so beats a 500 that reads like an outage.
+        raise HTTPException(status_code=404, detail="The stored logo file is missing. Upload it again.")
+
+    return Response(
+        content=content,
+        media_type=tenant.logo_mime or "application/octet-stream",
+        headers={
+            "Content-Disposition": f'inline; filename="{file_store.file_name(tenant.logo_path)}"',
+            # Private to this workspace: never let a shared cache keep a copy.
+            "Cache-Control": "private, no-store",
+        },
+    )
+
+
+@router.delete("/me/profile/logo", response_model=ProfileRead)
+async def delete_my_logo(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.services import file_store
+
+    tenant = _logo_tenant(current_user)
+    previous = tenant.logo_path
+    tenant.logo_path = tenant.logo_name = tenant.logo_mime = None
+    tenant.logo_size = None
+    await db.commit()
+
+    if previous:
+        try:
+            await file_store.delete(previous, settings.GCS_LOGOS_BUCKET_NAME)
+        except Exception as exc:   # noqa: BLE001 — the row is already clear; the file is housekeeping
+            logger.warning("[logo] Could not delete removed logo | %s | %s", previous, exc)
+
     return _profile_read(current_user)
 
 

@@ -62,12 +62,14 @@ def _clean_str(v: Any) -> str | None:
 class BspExtractionService:
     @staticmethod
     async def extract(file_bytes: bytes, file_name: str) -> dict:
-        name = (file_name or "").lower()
+        from app.services import spreadsheet
         try:
-            if name.endswith(".csv"):
-                df = pd.read_csv(io.BytesIO(file_bytes), dtype=str)
-            else:
-                df = pd.read_excel(io.BytesIO(file_bytes), dtype=str)
+            # Format decided from the bytes, not the extension — a BSP export
+            # arrives as .csv, .xls or .xlsx and the name is not reliable evidence
+            # of which. This also detects the header row rather than assuming row 1.
+            df = spreadsheet.read_table(file_bytes, file_name).df
+        except spreadsheet.SpreadsheetError as exc:
+            raise ValueError(str(exc)) from exc
         except Exception as exc:  # noqa: BLE001 — surface as a 422 upstream
             raise ValueError(f"Could not read file: {exc}")
 

@@ -19,23 +19,27 @@ from app.models.billing import Billing
 from app.models.uploaded_ticket import UploadedTicket
 from app.models.user import User
 from app.models.tenant import Tenant
+from app.core.india_tax import canonical_state
 from app.schemas.customer import (
     CustomerCreate, CustomerUpdate, CustomerRead, CustomerBulkUploadResult,
-    CustomerBulkCreate, CustomerListItem, RelinkRequest, RelinkResult,
+    CustomerBulkCreate, CustomerListItem, PlaceOfSupplyRead, RelinkRequest, RelinkResult,
     SoldTicketRead, SoldTicketsResponse, SoldTicketsSummary,
 )
 from app.schemas.billing import BillingCreate, BillingUpdate, BillingRead, BillingListItem
-from app.services.billing_pdf import build_billing_pdf
+from app.services.billing_pdf import build_billing_pdf, load_logo, supplier_block
 from app.services.party_inherit import INHERITED_FIELDS, inherit_from_corporate
 from app.services.billing_calc import (
     to_float as _f,
     compute_markup as _compute_markup,
-    compute_gst as _compute_gst,
+    split_gst as _split_gst,
+    interstate_from_treatment as _interstate_from_treatment,
     safe_date as _safe_date,
     passenger_name as _passenger_name,
     customer_ticket_scope as _customer_ticket_scope,
     ticket_matched_by as _ticket_matched_by,
 )
+from app.services.place_of_supply import as_payload as _pos_payload, place_of_supply
+from app.services import spreadsheet
 
 router = APIRouter()
 
@@ -53,6 +57,19 @@ def _clean_upper(value) -> Optional[str]:
         return None
     v = str(value).strip().upper()
     return v or None
+
+
+def _clean_state(value) -> Optional[str]:
+    """A state name filed under its canonical spelling, or None.
+
+    Place of supply reads a state by matching it to a GSTIN state code, so a
+    spelling india_tax does not recognise is as good as no state at all. An
+    unrecognised value is kept verbatim rather than dropped — refusing it would
+    lose what the user typed, and the resolver treats it as undecidable and says
+    so on screen, which is the honest outcome.
+    """
+    raw = (str(value).strip() if value is not None else "") or None
+    return canonical_state(raw) or raw
 
 
 def _cell(row, column: str) -> Optional[str]:
@@ -301,6 +318,11 @@ async def create_customer(
         title=(payload.title or "").strip() or None,
         phone=(payload.phone or "").strip() or None,
         email=(payload.email or "").strip() or None,
+        # Where they are, for place of supply on a DIRECT bill. Canonicalised so
+        # "delhi", "New Delhi" and "NCT of Delhi" all store as one spelling that
+        # india_tax can read a state code back out of — a free-text state that
+        # cannot be canonicalised is a state place of supply cannot use.
+        state=_clean_state(payload.state),
         gst_registered=gst_registered,
         gst_no=_clean_upper(payload.gst_no) if gst_registered else None,
         pan_no=_clean_upper(payload.pan_no),
@@ -339,10 +361,10 @@ async def bulk_upload_customers(
 
         for header_row in (0, 1, 2):
             try:
-                if filename.endswith(".xls"):
-                    df_try = pd.read_excel(BytesIO(content), dtype=str, header=header_row)
-                else:
-                    df_try = pd.read_excel(BytesIO(content), dtype=str, engine="openpyxl", header=header_row)
+                # Format from the bytes, not the extension: a supplier's ".xls"
+                # is as often an xlsx or a CSV, and a real one needs an engine
+                # pandas will not pick on its own.
+                df_try = spreadsheet.read_df(content, filename, header_row)
                 df_try = _normalize_columns(df_try)
                 missing = required - set(df_try.columns)
                 last_missing = missing
@@ -676,6 +698,8 @@ async def update_customer(
         data["markup_type"] = _norm_choice(data["markup_type"], _MARKUP_TYPES)
     if "billing_type" in data:
         data["billing_type"] = _norm_choice(data["billing_type"], _BILLING_TYPES)
+    if "state" in data:
+        data["state"] = _clean_state(data["state"])
     if "gst_no" in data:
         data["gst_no"] = _clean_upper(data["gst_no"])
     if "pan_no" in data:
@@ -761,16 +785,26 @@ async def get_customer_sold_tickets(
             in_range.append(t)
         tickets = in_range
 
+    # WHICH GST these rows carry. A customer billing is always a DIRECT sale —
+    # customer_ticket_scope excludes any ticket naming a corporate — so the
+    # recipient is this person, and it is their own GSTIN or state that decides.
+    pos = place_of_supply(current_user.tenant, customer)
+
     rows: list[SoldTicketRead] = []
     total_base = total_markup = total_gst = total_with_markup = 0.0
+    total_cgst = total_sgst = total_igst = 0.0
     for t in tickets:
         base = _f(t.total_amt) if t.total_amt is not None else _f(t.sell_fare)
         markup_amount = _compute_markup(base, customer.markup_type, customer.markup_value)
-        gst_amount = _compute_gst(base, markup_amount, customer.billing_type)
+        gst = _split_gst(base, markup_amount, customer.billing_type, interstate=pos.interstate)
+        gst_amount = gst["gst_amount"]
         total = base + markup_amount + gst_amount
         total_base += base
         total_markup += markup_amount
         total_gst += gst_amount
+        total_cgst += gst["cgst"]
+        total_sgst += gst["sgst"]
+        total_igst += gst["igst"]
         total_with_markup += total
         rows.append(SoldTicketRead(
             id=t.id,
@@ -790,12 +824,20 @@ async def get_customer_sold_tickets(
             incentive_breakdown=t.incentive_breakdown,
             is_billed=bool(t.is_billed),
             billing_id=t.billing_id,
+            # As stored, so the screen can show whether this ticket is on the
+            # passenger's bill or their employer's, and offer to move it.
+            customer_id=t.customer_id,
+            corporate_id=t.corporate_id,
             matched_by=_ticket_matched_by(
                 t, customer=customer, names=[(customer.first_name, customer.last_name)]
             ),
             base_amount=round(base, 2),
             markup_amount=round(markup_amount, 2),
             gst_amount=round(gst_amount, 2),
+            cgst_amount=gst["cgst"],
+            sgst_amount=gst["sgst"],
+            igst_amount=gst["igst"],
+            gst_treatment=gst["gst_treatment"],
             total_with_markup=round(total, 2),
         ))
 
@@ -807,8 +849,12 @@ async def get_customer_sold_tickets(
             total_base=round(total_base, 2),
             total_markup=round(total_markup, 2),
             total_gst=round(total_gst, 2),
+            total_cgst=round(total_cgst, 2),
+            total_sgst=round(total_sgst, 2),
+            total_igst=round(total_igst, 2),
             total_with_markup=round(total_with_markup, 2),
         ),
+        place_of_supply=PlaceOfSupplyRead(**_pos_payload(pos)),
     )
 
 
@@ -869,8 +915,14 @@ async def create_billing(
     if already:
         raise HTTPException(status_code=400, detail=f"Already billed: {', '.join(already)}. Refresh and try again.")
 
+    # Decided once, here, and stored on the billing below. A later edit re-applies
+    # the stored answer rather than asking again, so an issued invoice cannot move
+    # between CGST + SGST and IGST because the customer's address changed after it.
+    pos = place_of_supply(current_user.tenant, customer)
+
     line_items: list[dict] = []
     total_base = total_markup = total_addl = total_gst = grand = 0.0
+    total_cgst = total_sgst = total_igst = 0.0
     for t in tickets:
         base = _f(t.total_amt) if t.total_amt is not None else _f(t.sell_fare)
         cust_markup = _compute_markup(base, customer.markup_type, customer.markup_value)
@@ -878,12 +930,16 @@ async def create_billing(
         disc = disc_map.get(t.id, 0.0)
         total_mk = cust_markup + addl
         # Discount reduces the taxable value first, then GST applies on the reduced amount.
-        gst = _compute_gst(base, total_mk, customer.billing_type, disc)
+        split = _split_gst(base, total_mk, customer.billing_type, disc, interstate=pos.interstate)
+        gst = split["gst_amount"]
         line_total = base + total_mk - disc + gst
         total_base += base
         total_markup += cust_markup
         total_addl += addl
         total_gst += gst
+        total_cgst += split["cgst"]
+        total_sgst += split["sgst"]
+        total_igst += split["igst"]
         grand += line_total
         line_items.append({
             "ticket_id": t.id,
@@ -898,6 +954,9 @@ async def create_billing(
             "additional_markup": round(addl, 2),
             "discount": round(disc, 2),
             "gst_amount": round(gst, 2),
+            "cgst": split["cgst"],
+            "sgst": split["sgst"],
+            "igst": split["igst"],
             "total": round(line_total, 2),
         })
 
@@ -913,6 +972,12 @@ async def create_billing(
         total_markup=round(total_markup, 2),
         total_additional_markup=round(total_addl, 2),
         total_gst=round(total_gst, 2),
+        total_cgst=round(total_cgst, 2),
+        total_sgst=round(total_sgst, 2),
+        total_igst=round(total_igst, 2),
+        gst_treatment=pos.treatment,
+        supplier_state_code=pos.supplier_code,
+        place_of_supply_code=pos.recipient_code,
         grand_total=round(grand, 2),
         line_items=line_items,
     )
@@ -954,6 +1019,10 @@ async def list_billings(
             total_markup=_f(b.total_markup),
             total_additional_markup=_f(b.total_additional_markup),
             total_gst=_f(b.total_gst),
+            total_cgst=_f(b.total_cgst),
+            total_sgst=_f(b.total_sgst),
+            total_igst=_f(b.total_igst),
+            gst_treatment=b.gst_treatment,
             grand_total=_f(b.grand_total),
             item_count=len(b.line_items or []),
             created_at=b.created_at,
@@ -986,25 +1055,40 @@ async def update_billing(
 
     addl_map = {it.ticket_id: _f(it.additional_markup) for it in payload.items}
 
+    # The heads this bill was RAISED under, not what the customer's address says
+    # today. Re-deciding here would move an issued invoice between CGST + SGST and
+    # IGST the moment the customer's GSTIN or state was edited, silently changing
+    # a figure that may already have been filed. NULL (raised before the split
+    # existed) reads back as undecided, so those bills keep their single total.
+    interstate = _interstate_from_treatment(billing.gst_treatment)
+
     new_items: list[dict] = []
     total_base = total_markup = total_addl = total_gst = grand = 0.0
+    total_cgst = total_sgst = total_igst = 0.0
     for it in (billing.line_items or []):
         base = _f(it.get("base_amount"))
         markup = _f(it.get("markup_amount"))
         addl = addl_map.get(it.get("ticket_id"), _f(it.get("additional_markup")))
         disc = _f(it.get("discount"))   # preserved from creation (not edited in the popup)
-        gst = _compute_gst(base, markup + addl, billing.billing_type, disc)
+        split = _split_gst(base, markup + addl, billing.billing_type, disc, interstate=interstate)
+        gst = split["gst_amount"]
         line_total = base + markup + addl - disc + gst
         total_base += base
         total_markup += markup
         total_addl += addl
         total_gst += gst
+        total_cgst += split["cgst"]
+        total_sgst += split["sgst"]
+        total_igst += split["igst"]
         grand += line_total
         new_items.append({
             **it,
             "additional_markup": round(addl, 2),
             "discount": round(disc, 2),
             "gst_amount": round(gst, 2),
+            "cgst": split["cgst"],
+            "sgst": split["sgst"],
+            "igst": split["igst"],
             "total": round(line_total, 2),
         })
 
@@ -1013,6 +1097,9 @@ async def update_billing(
     billing.total_markup = round(total_markup, 2)
     billing.total_additional_markup = round(total_addl, 2)
     billing.total_gst = round(total_gst, 2)
+    billing.total_cgst = round(total_cgst, 2)
+    billing.total_sgst = round(total_sgst, 2)
+    billing.total_igst = round(total_igst, 2)
     billing.grand_total = round(grand, 2)
     await db.commit()
     await db.refresh(billing)
@@ -1053,11 +1140,12 @@ async def download_billing_pdf(
     if current_user.tenant_id:
         tres = await db.execute(select(Tenant).where(Tenant.id == current_user.tenant_id))
         tenant = tres.scalar_one_or_none()
-    agency = {
-        "name": (tenant.name if tenant and tenant.name else (tenant.domain if tenant else "")) or current_user.full_name,
-        "domain": tenant.domain if tenant else "",
-        "email": current_user.email,
-    }
+    # Includes the workspace's GSTIN and PAN — an invoice that does not say who
+    # is charging the tax is not one the recipient can claim credit against.
+    agency = supplier_block(tenant, current_user)
+    # The letterhead image. Loaded here because it lives in a blob store and the
+    # builder is synchronous; a missing one prints an invoice without a logo.
+    agency["logo"] = await load_logo(tenant)
     buf = build_billing_pdf(billing, customer, agency)
     safe = "".join(c for c in (billing.billing_name or "") if c.isalnum() or c in (" ", "-", "_")).strip().replace(" ", "_") or "billing"
     filename = f"billing-{billing.id}-{safe}.pdf"

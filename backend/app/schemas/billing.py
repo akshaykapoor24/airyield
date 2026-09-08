@@ -2,7 +2,7 @@ from pydantic import BaseModel
 from typing import Optional
 from datetime import date, datetime
 
-from app.schemas.customer import SoldTicketRead, SoldTicketsSummary
+from app.schemas.customer import PlaceOfSupplyRead, SoldTicketRead, SoldTicketsSummary
 
 
 class BillingItemInput(BaseModel):
@@ -42,6 +42,11 @@ class BillingLineItem(BaseModel):
     additional_markup: float
     discount: float = 0
     gst_amount: float
+    # Defaulted, because line_items is JSONB: bills raised before the split have
+    # no such keys and must still deserialise.
+    cgst: float = 0
+    sgst: float = 0
+    igst: float = 0
     total: float
 
 
@@ -59,6 +64,14 @@ class BillingRead(BaseModel):
     total_markup: float
     total_additional_markup: float
     total_gst: float
+    total_cgst: float = 0
+    total_sgst: float = 0
+    total_igst: float = 0
+    # NULL on billings raised before billing_gst_split_01 — for those `total_gst`
+    # is the whole story and the screens fall back to showing just it.
+    gst_treatment: Optional[str] = None
+    supplier_state_code: Optional[str] = None
+    place_of_supply_code: Optional[str] = None
     grand_total: float
     line_items: list[BillingLineItem]
     created_at: datetime
@@ -76,6 +89,10 @@ class BillingListItem(BaseModel):
     total_markup: float
     total_additional_markup: float
     total_gst: float
+    total_cgst: float = 0
+    total_sgst: float = 0
+    total_igst: float = 0
+    gst_treatment: Optional[str] = None
     grand_total: float
     item_count: int
     created_at: datetime
@@ -105,3 +122,4 @@ class AgencyTicketsResponse(BaseModel):
     agency: AgencyLite
     tickets: list[SoldTicketRead]
     summary: SoldTicketsSummary
+    place_of_supply: Optional[PlaceOfSupplyRead] = None

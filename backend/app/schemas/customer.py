@@ -12,6 +12,9 @@ class CustomerCreate(BaseModel):
     title: Optional[str] = None
     phone: Optional[str] = None
     email: Optional[str] = None
+    # Where they are, for place of supply. Only consulted when they have no
+    # GSTIN — a GSTIN already says which state it is registered in.
+    state: Optional[str] = None
     gst_registered: Optional[bool] = None
     gst_no: Optional[str] = None
     pan_no: Optional[str] = None
@@ -28,6 +31,7 @@ class CustomerUpdate(BaseModel):
     title: Optional[str] = None
     phone: Optional[str] = None
     email: Optional[str] = None
+    state: Optional[str] = None
     gst_registered: Optional[bool] = None
     gst_no: Optional[str] = None
     pan_no: Optional[str] = None
@@ -46,6 +50,7 @@ class CustomerRead(BaseModel):
     title: Optional[str] = None
     phone: Optional[str] = None
     email: Optional[str] = None
+    state: Optional[str] = None
     gst_registered: bool = False
     gst_no: Optional[str] = None
     pan_no: Optional[str] = None
@@ -151,10 +156,25 @@ class SoldTicketRead(BaseModel):
     # 'name' = nobody claimed it and the passenger's name matched. Computed per row,
     # not a column — see services/billing_calc.py::ticket_matched_by.
     matched_by: Optional[str] = None
+    # WHO FLEW and WHO PAYS, as stored. Both are needed on the row because the
+    # screen offers to move the ticket between them: `corporate_id` set means the
+    # employer is billed, cleared means the passenger is. Without these the
+    # Corporate column could not show which of the two a ticket is on.
+    customer_id: Optional[int] = None
+    corporate_id: Optional[int] = None
     # computed
     base_amount: float
     markup_amount: float
     gst_amount: float
+    # The same tax as `gst_amount`, in the heads it is charged under. Exactly one
+    # side is non-zero: CGST + SGST for a supply inside one state, IGST across
+    # states. All three are zero when the place of supply could not be decided,
+    # and `gst_treatment` says which of those three cases this row is — a zero in
+    # the CGST column never has to be guessed at.
+    cgst_amount: float = 0.0
+    sgst_amount: float = 0.0
+    igst_amount: float = 0.0
+    gst_treatment: Optional[str] = None   # 'cgst_sgst' | 'igst' | 'unsplit'
     total_with_markup: float
 
 
@@ -163,10 +183,31 @@ class SoldTicketsSummary(BaseModel):
     total_base: float
     total_markup: float
     total_gst: float
+    total_cgst: float = 0.0
+    total_sgst: float = 0.0
+    total_igst: float = 0.0
     total_with_markup: float
+
+
+class PlaceOfSupplyRead(BaseModel):
+    """Why these rows carry the heads they do — shown, not just applied.
+
+    A user whose CGST/SGST/IGST columns are empty needs to be told what is
+    missing and where to fix it, or the screen just looks broken.
+    """
+    #: 'cgst_sgst' | 'igst' | 'unsplit'
+    treatment: str
+    decided: bool
+    supplier_state: Optional[str] = None
+    recipient_state: Optional[str] = None
+    #: Which rung of the ladder answered — 'gstin_gstin', 'gstin_state', …
+    source: str
+    #: One sentence a human can act on.
+    note: str
 
 
 class SoldTicketsResponse(BaseModel):
     customer: CustomerRead
     tickets: list[SoldTicketRead]
     summary: SoldTicketsSummary
+    place_of_supply: Optional[PlaceOfSupplyRead] = None

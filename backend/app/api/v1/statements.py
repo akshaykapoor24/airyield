@@ -10,7 +10,9 @@ original spreadsheet is stored in GCS for preview/download. Scoped per user/tena
 """
 from __future__ import annotations
 
+import hashlib
 import io
+import json
 import math
 import re
 import uuid
@@ -27,11 +29,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database import get_db
 from app.dependencies import get_current_user
+from app.models.commission_calculation import CommissionCalculation
+from app.models.commission_run import CommissionRun
+from app.models.statement_batch_supplier import StatementBatchSupplier
 from app.models.statement_batch_airline_id import StatementBatchAirlineId
 from app.models.statement_row import STATEMENT_MODELS
 from app.models.tenant_airline import TenantAirline
 from app.models.user import User
-from app.services import sector_split, statement_spec as spec
+from app.services import flat_statement as _flat
+from app.services import sector_split, spec_mapping, spreadsheet, statement_spec as spec
+from app.services import statement_supplier_selection as supplier_selection
+from app.services import tp_airline_resolution as tp_airline
 from app.services.lcc_airline_selection import resolve_for_upload
 
 router = APIRouter()
@@ -136,18 +144,38 @@ def _clean(value) -> str | None:
     return s
 
 
+# Delimited text. `sep=None` with the python engine sniffs the separator, so tab- and
+# semicolon-separated exports need no extra branch — only their extensions do. Before
+# these were listed, a .tsv or .txt fell through to `read_excel` and simply threw, and a
+# consolidator's "spreadsheet" is routinely a tab-separated .txt.
+_DELIMITED_EXT = (".csv", ".tsv", ".tab", ".txt")
+
+
 def _read_df(content: bytes, filename: str, header_row: int) -> pd.DataFrame:
-    name = (filename or "").lower()
-    if name.endswith(".csv"):
-        return pd.read_csv(io.BytesIO(content), dtype=str, sep=None, engine="python", header=header_row)
-    if name.endswith(".xls"):
-        return pd.read_excel(io.BytesIO(content), dtype=str, header=header_row)
-    return pd.read_excel(io.BytesIO(content), dtype=str, engine="openpyxl", header=header_row)
+    """One line, because services/spreadsheet.py now owns the format question.
+
+    This used to branch on the extension, which was wrong twice over: a legacy .xls
+    reached pandas with no engine and raised ImportError, and a consolidator's
+    "xls" is as often an xlsx or an HTML table as it is a real BIFF workbook. The
+    reader decides from the bytes.
+    """
+    return spreadsheet.read_df(content, filename, header_row)
 
 
 def _parse(content: bytes, filename: str, slug: str):
-    """(df, {col->field}, {col->normalized}) for the header row that recognises the most columns."""
+    """(df, {col->field}, {col->normalized}) for the header row that recognises the most columns.
+
+    Aliases count as recognition where the spec declares them, so a direct `/upload` of an
+    airline's own export sees the same columns the mapping wizard would propose — the two
+    entry points disagreeing about what a file contains would be worse than either rule.
+    `normmap` stays the raw normalized header regardless: tax folding matches on
+    `Tax_TypeN`/`TaxN`, which are not fields and have no aliases.
+    """
     field_set = set(spec.fields(slug))
+    alias_map: dict[str, str] = {}
+    for field, names in spec.aliases(slug).items():
+        for a in names:
+            alias_map.setdefault(spec.norm(a), field)
     best = None
     last_err: Exception | None = None
     for header_row in (0, 1, 2):
@@ -162,15 +190,16 @@ def _parse(content: bytes, filename: str, slug: str):
         for col in df.columns:
             key = spec.norm(col)
             normmap[col] = key
-            if key in field_set and key not in colmap.values():
-                colmap[col] = key
+            field = key if key in field_set else alias_map.get(key)
+            if field and field not in colmap.values():
+                colmap[col] = field
         if best is None or len(colmap) > best[0]:
             best = (len(colmap), df, colmap, normmap)
     if best is None:
         raise HTTPException(status_code=400, detail=f"Could not read the file: {last_err}. Upload a valid .xlsx, .xls or .csv.")
     matched, df, colmap, normmap = best
     if matched < _MIN_MATCHED_COLUMNS:
-        sample = ", ".join(spec.headers(slug)[:5])
+        sample = ", ".join(c["header"] for c in spec.columns(slug)[:5])
         raise HTTPException(
             status_code=400,
             detail=f"This doesn't look like a {spec.spec_for(slug)['label']} file — only {matched} known "
@@ -302,6 +331,57 @@ def _build_rows(model, slug: str, prov: dict, data: dict, taxes: list[dict], seq
     return out
 
 
+async def _clear_commission(db: AsyncSession, slug: str, user: User,
+                            batch_id: str | None = None, row_ids: list[int] | None = None) -> int:
+    """Drop commission figures derived from rows that are about to change or disappear.
+
+    `commission_calculations.source_row_id` points at a statement row by id with NO foreign
+    key — it names a different table per source, so there is nothing for a constraint to
+    reference. Nothing removes these for us, and a stale one is worse than a missing one:
+    a reprocess re-inserts its rows with NEW ids, so the old figures would sit there
+    describing rows that no longer exist while the grid showed the new rows as unpriced.
+
+    Returns how many were cleared, so the caller can tell the user to re-run.
+    """
+    conds = [CommissionCalculation.tenant_id == user.tenant_id,
+             CommissionCalculation.created_by_id == user.id,
+             CommissionCalculation.source == slug]
+    if batch_id:
+        conds.append(CommissionCalculation.batch_id == batch_id)
+    if row_ids is not None:
+        conds.append(CommissionCalculation.source_row_id.in_(row_ids))
+    res = await db.execute(delete(CommissionCalculation).where(*conds))
+    if batch_id and row_ids is None:
+        await db.execute(delete(CommissionRun).where(
+            CommissionRun.tenant_id == user.tenant_id,
+            CommissionRun.created_by_id == user.id,
+            CommissionRun.source == slug,
+            CommissionRun.batch_id == batch_id,
+        ))
+    return res.rowcount or 0
+
+
+async def _airline_stamper(db: AsyncSession, slug: str):
+    """`(data) -> bool` that resolves and stamps a row's carrier, or None for types that
+    don't need it.
+
+    Built ONCE per upload/reprocess — the airline master is one query, not one per row.
+    Returns None (rather than a no-op) so the caller can skip the loop entirely and so a
+    type that never opted in cannot accidentally acquire an `airline_code`.
+    """
+    if not spec.resolves_airline(slug):
+        return None
+    index = await tp_airline.build_index(db)
+
+    def stamp(data: dict) -> bool:
+        match = tp_airline.resolve_tp_airline(
+            data.get("ticket_prefix"), data.get("airline_code"), data.get("airline_name"), index,
+        )
+        return tp_airline.stamp(data, match)
+
+    return stamp
+
+
 def _get_builder(parser_name: str):
     """Resolve a custom-parser module exposing build_col_map(cols) + build_row(row, cols)."""
     if parser_name == "lcc":
@@ -353,23 +433,362 @@ async def _airline_selection(
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+def _supplier_link(tenant_id: int, slug: str, batch_id: str, supplier) -> StatementBatchSupplier:
+    """The batch → consolidator row, with its name/code/branch SNAPSHOTTED.
+
+    Snapshotted rather than joined so a renamed vendor cannot rewrite what a past statement
+    says about itself, and so the uploads list renders without a join. `code` is the unique
+    one — 141 names in the master repeat across branches.
+    """
+    return StatementBatchSupplier(
+        tenant_id=tenant_id, slug=slug, batch_id=batch_id,
+        supplier_id=supplier.id, supplier_name=supplier.name,
+        supplier_code=supplier.code,
+        supplier_branch=supplier.branch or supplier.city,
+    )
+
+
+def _supplier_fields(supplier) -> dict:
+    """The consolidator keys every upload/extract/confirm response carries."""
+    return {
+        "supplier_id": supplier.id if supplier else None,
+        "supplier_name": supplier.name if supplier else None,
+        "supplier_code": supplier.code if supplier else None,
+        "supplier_branch": (supplier.branch or supplier.city) if supplier else None,
+    }
+
+
+async def _supplier_selection(db: AsyncSession, slug: str, supplier_id: int | None):
+    """The Supplier master row this upload is attributed to, or None for types that don't
+    need one.
+
+    Required only for the third-party types, whose statements are issued BY a consolidator
+    the file never names — see `requires_supplier` in services/statement_spec.py, which is
+    what confines the requirement. An id sent for any other type is ignored rather than
+    rejected, mirroring `_airline_selection`.
+
+    No user or tenant scope: `suppliers` is global platform-admin master data, unlike
+    `agencies`, which every user keeps their own copy of.
+    """
+    if not spec.requires_supplier(slug):
+        return None
+    try:
+        return await supplier_selection.resolve(db, supplier_id)
+    except ValueError as exc:
+        # UnknownSupplier / InactiveSupplier are both ValueErrors and both carry a message
+        # written for the user.
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+async def _store_original(content: bytes, file, slug: str, batch_id: str, user: User) -> str | None:
+    """Keep the uploaded file in GCS. Best-effort on purpose: losing the ability to
+    re-download the original is worth far less than losing a successful import, so a
+    storage failure returns None instead of raising."""
+    try:
+        from app.services import gcs
+        blob_name = f"statements/{user.tenant_id}/{slug}/{batch_id}/{file.filename}"
+        await gcs.upload_bytes(content, blob_name,
+                               file.content_type or "application/octet-stream", _bucket())
+        return blob_name
+    except Exception:  # noqa: BLE001
+        return None
+
+
+# ── Map · review · confirm ──────────────────────────────────────────────────
+# A consolidator writes whatever spreadsheet it likes. `/upload` handles the shapes the
+# alias map already knows — including our own template — and these three handle the ones it
+# does not, by letting the uploader say which of their columns is which.
+#
+# THE FILE IS SENT TWICE, deliberately, and there is no staging table. `/extract` reads it
+# to propose a mapping; `/confirm` reads it again to write the rows. The alternative — hold
+# the parsed file server-side between the two — needs somewhere to put it, a way to expire
+# it, and a batch header row that these types do not have (models/statement_batch_supplier.py
+# explains why). A consolidator statement is a weekly file of a few hundred lines, so the
+# second read costs nothing, and `file_digest` is what stops the second file being a
+# different one from the first.
+_PREVIEW_ROWS = 1000
+
+
+def _mapping_capable(slug: str):
+    """The mapper for a type that supports the wizard, or 400.
+
+    Two kinds answer to the same three methods. A `parser` type (third-party) gets its
+    normalizing builder; a spec-driven type (NDC) gets a mapper built from its own ordered
+    columns and aliases — see services/spec_mapping.py for why they are not the same
+    object. Everything between here and the row-writing branch in `/confirm` is shared.
+    """
+    if not spec.supports_mapping(slug):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{spec.spec_for(slug)['label']} statements come from a system with a fixed "
+                   f"export format, so there is nothing to map. Upload the file directly.",
+        )
+    parser_name = spec.parser(slug)
+    if not parser_name:
+        return spec_mapping.mapper_for(slug)
+    builder = _get_builder(parser_name)
+    if not hasattr(builder, "build_row_mapped"):
+        raise HTTPException(status_code=500, detail="This type's parser cannot take a column map.")
+    return builder
+
+
+def _digest(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def _read_for_mapping(content: bytes, filename: str, builder, header_row: int | None):
+    """(df, columns, header_row).
+
+    The header row is DETECTED at extract and PINNED at confirm. Re-detecting it on the
+    second read is the trap: a mapping is a list of column NAMES, so a different header row
+    would silently rename every column and drop the whole mapping on the floor.
+
+    Detection is by recognised-column count, like `_detect_df`, but it returns the INDEX as
+    well as the frame — which is the only reason this exists rather than calling that.
+    """
+    if header_row is None:
+        best = None
+        last_err: Exception | None = None
+        for hr in (0, 1, 2):
+            try:
+                df = _read_df(content, filename, hr)
+            except Exception as e:  # noqa: BLE001 — unreadable at this offset, try the next
+                last_err = e
+                continue
+            df.dropna(how="all", inplace=True)
+            score = len(builder.build_col_map([str(c) for c in df.columns]))
+            if best is None or score > best[0]:
+                best = (score, df, hr)
+        if best is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Could not read the file: {last_err}. Upload a valid .xlsx, .xls or .csv.")
+        _score, df, header_row = best
+    else:
+        try:
+            df = _read_df(content, filename, header_row)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=f"Could not re-read the file: {exc}")
+        df.dropna(how="all", inplace=True)
+    return df, [str(c) for c in df.columns], header_row
+
+
+@router.get("/{slug}/standard-columns")
+async def standard_columns(slug: str, current_user: User = Depends(get_current_user)):
+    """The fields a file can be mapped ONTO, grouped for the mapping screen.
+
+    `required` is what the API will refuse without; `advisory` is what it will accept but
+    warn about — see flat_statement.REQUIRED_GROUPS for why those two lists differ.
+    """
+    slug, _model = _resolve(slug)
+    _mapping_capable(slug)
+    parser_name = spec.parser(slug)
+    return {
+        "groups": _flat.column_groups(parser_name) if parser_name else spec_mapping.column_groups(slug),
+        "required": spec.required_groups(slug),
+        "advisory": spec.advisory_groups(slug),
+        "total": len(spec.columns(slug)),
+    }
+
+
+@router.post("/{slug}/extract")
+async def extract_statement(
+    slug: str,
+    file: UploadFile = File(...),
+    supplier_id: int | None = Form(default=None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Read the file, propose a mapping, and hand back rows to review. Writes nothing.
+
+    The supplier is validated HERE as well as at confirm, so a wrong consolidator is caught
+    before the user spends time on a mapping they cannot save.
+    """
+    slug, _model = _resolve(slug)
+    builder = _mapping_capable(slug)
+    supplier = await _supplier_selection(db, slug, supplier_id)
+
+    content = await file.read()
+    max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    if len(content) > max_bytes:
+        raise HTTPException(status_code=413, detail=f"File exceeds {settings.MAX_UPLOAD_SIZE_MB} MB limit.")
+    if not content:
+        raise HTTPException(status_code=400, detail="The uploaded file is empty.")
+
+    df, columns, header_row = _read_for_mapping(content, file.filename or "", builder, None)
+    if not columns:
+        raise HTTPException(status_code=400, detail="No columns were found in the file.")
+
+    suggested = builder.suggest_mapping(columns)
+    # Rows are returned by POSITION, and confirm enumerates identically, so an edit made
+    # against row 7 here lands on row 7 there.
+    sample = []
+    for i, (_, row) in enumerate(df.iterrows()):
+        if i >= _PREVIEW_ROWS:
+            break
+        sample.append({"__index__": i,
+                       **{c: _clean(row[c]) for c in columns}})
+
+    return {
+        "file_name": file.filename,
+        "file_digest": _digest(content),
+        "header_row": header_row,
+        "total_rows": int(len(df)),
+        "preview_rows": len(sample),
+        "preview_limit": _PREVIEW_ROWS,
+        "columns": columns,
+        "suggested_mapping": suggested,
+        "matched_columns": len(suggested),
+        "standard_total": len(spec.columns(slug)),
+        # A file built from our own Template comes back fully mapped; the wizard says so
+        # rather than making the user check 56 dropdowns to find out.
+        "is_template_match": len(suggested) >= len(spec.columns(slug)) - 2,
+        "sample_rows": sample,
+        **_supplier_fields(supplier),
+    }
+
+
+@router.post("/{slug}/confirm")
+async def confirm_statement(
+    slug: str,
+    file: UploadFile = File(...),
+    column_map: str = Form(...),
+    supplier_id: int | None = Form(default=None),
+    header_row: int = Form(...),
+    file_digest: str = Form(...),
+    edits: str = Form(default="{}"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Apply the reviewed mapping and edits, and write the batch.
+
+    `file_digest` must match the file `/extract` read. Without it a mapping built against
+    one spreadsheet could be applied to another — same column count, different columns —
+    and every value would land in the wrong field with nothing to show for it.
+    """
+    slug, model = _resolve(slug)
+    builder = _mapping_capable(slug)
+    supplier = await _supplier_selection(db, slug, supplier_id)
+
+    try:
+        colmap = json.loads(column_map or "{}")
+        row_edits = {int(k): v for k, v in json.loads(edits or "{}").items()}
+    except (ValueError, TypeError, AttributeError):
+        raise HTTPException(status_code=400, detail="The column map or edits were not readable.")
+    if not isinstance(colmap, dict) or not colmap:
+        raise HTTPException(status_code=400, detail="Map at least one column before saving.")
+
+    missing = [g for g in spec.required_groups(slug) if not any(colmap.get(f) for f in g["fields"])]
+    if missing:
+        detail = " and ".join(f"{g['label']} ({g['headers']})" for g in missing)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Map {detail} before saving — without it these rows cannot be found or "
+                   f"reconciled, so importing them would be a mis-mapping rather than a choice.",
+        )
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="The uploaded file is empty.")
+    if _digest(content) != file_digest:
+        raise HTTPException(
+            status_code=400,
+            detail="This is not the file the mapping was built against. Start the upload again "
+                   "so the columns are read from the file you are saving.",
+        )
+
+    df, columns, _hr = _read_for_mapping(content, file.filename or "", builder, header_row)
+
+    batch_id = str(uuid.uuid4())
+    uploaded_at = datetime.utcnow()
+    file_url = await _store_original(content, file, slug, batch_id, current_user)
+
+    stamp_airline = await _airline_stamper(db, slug)
+    prov = dict(
+        tenant_id=current_user.tenant_id, created_by_id=current_user.id,
+        batch_id=batch_id, source_file=file.filename, file_url=file_url,
+        uploaded_at=uploaded_at,
+    )
+    # The two row shapes this router writes. A `parser` type is normalized and carries
+    # segments/ssr/raw_data/source_format; a spec-driven type is a verbatim copy of the
+    # vendor's columns and its table has none of those. Everything before this point —
+    # the mapping, the digest guard, the edits — is identical for both.
+    normalized = spec.parser(slug) is not None
+    fold = spec.fold_taxes(slug)
+    normmap = {} if normalized else {c: spec.norm(c) for c in columns}
+
+    objs, airline_rows, edited_rows, source_rows = [], 0, 0, 0
+    for i, (_, row) in enumerate(df.iterrows()):
+        overrides = row_edits.get(i)
+        b = builder.build_row_mapped(row, columns, colmap, overrides)
+        data = b["data"]
+        # Taxes are folded from the WHOLE row, not from the mapping: a Tax_TypeN/TaxN pair
+        # is not a mappable field, and folding here keeps the mapped path and the verbatim
+        # `/upload` path producing the same `taxes` array.
+        taxes = b["taxes"] if normalized else (_fold_taxes(row, normmap) if fold else [])
+        if not data and not taxes:
+            continue    # every mapped column empty on this line
+        source_rows += 1
+        if overrides:
+            edited_rows += 1
+        if stamp_airline is not None and stamp_airline(data):
+            airline_rows += 1
+        if normalized:
+            objs.append(model(
+                **prov, data=data, taxes=taxes, segments=b["segments"], ssr=b["ssr"],
+                raw_data=b["raw_data"], source_format=b["source_format"],
+            ))
+        else:
+            # Shared with `/upload`, so a mapped import and a direct one produce identical
+            # rows — including the leg/total flags for the types that split.
+            objs.extend(_build_rows(model, slug, prov, data, taxes, source_rows))
+
+    if not objs:
+        raise HTTPException(
+            status_code=400,
+            detail="Every row came out empty under this mapping. Check that the mapped columns "
+                   "are the ones holding the data.")
+
+    db.add_all(objs)
+    if supplier is not None:
+        db.add(_supplier_link(current_user.tenant_id, slug, batch_id, supplier))
+    await db.commit()
+    return {
+        "batch_id": batch_id,
+        "type": slug,
+        "file_name": file.filename,
+        "inserted": len(objs),
+        "matched_columns": len(colmap),
+        "source_rows": source_rows,
+        "edited_rows": edited_rows,
+        "leg_rows": sum(1 for o in objs if not getattr(o, "is_total", False)),
+        "airline_resolved_rows": airline_rows if stamp_airline is not None else None,
+        **_supplier_fields(supplier),
+    }
+
+
 @router.post("/{slug}/upload")
 async def upload_statement(
     slug: str,
     file: UploadFile = File(...),
     tenant_airline_ids: list[int] = Form(default=[]),
+    supplier_id: int | None = Form(default=None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Parse a statement export → verbatim fixed columns + folded taxes, under one batch.
 
     For the LCC types the uploader must also declare which of their Airline Master ids
-    the file covers — the export names no carrier, so nothing else identifies it. That
-    is resolved BEFORE the file is parsed or stored, so a rejected selection cannot
-    leave a half-imported batch behind.
+    the file covers — the export names no carrier, so nothing else identifies it. For the
+    third-party types they must declare the consolidator from the Supplier master, for the
+    same reason: the file does not name its sender, and the B2B deal is matched against it.
+
+    Both are resolved BEFORE the file is read, stored or parsed, so a rejected selection
+    cannot leave a half-imported batch or an orphaned file behind.
     """
     slug, model = _resolve(slug)
     airlines = await _airline_selection(db, slug, current_user, tenant_airline_ids)
+    supplier = await _supplier_selection(db, slug, supplier_id)
 
     content = await file.read()
     max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
@@ -382,18 +801,12 @@ async def upload_statement(
     batch_id = str(uuid.uuid4())
     uploaded_at = datetime.utcnow()
 
-    # Store the original file in GCS (best-effort — never lose a successful import).
-    file_url = None
-    try:
-        from app.services import gcs
-        blob_name = f"statements/{current_user.tenant_id}/{slug}/{batch_id}/{file.filename}"
-        await gcs.upload_bytes(content, blob_name, file.content_type or "application/octet-stream", _bucket())
-        file_url = blob_name
-    except Exception:  # noqa: BLE001
-        file_url = None
+    file_url = await _store_original(content, file, slug, batch_id, current_user)
 
     objs = []
     source_rows = 0
+    airline_rows = 0
+    stamp_airline = await _airline_stamper(db, slug)
     if parser_name:
         # Multi-format normalizer (LCC / DI): alias-map → canonical fields (+ fold taxes/segments/ssr for LCC).
         builder = _get_builder(parser_name)
@@ -405,6 +818,8 @@ async def upload_statement(
             if not (b["data"] or b["taxes"] or b["segments"] or b["ssr"]):
                 continue  # blank row
             source_rows += 1
+            if stamp_airline is not None and stamp_airline(b["data"]):
+                airline_rows += 1
             objs.append(model(
                 tenant_id=current_user.tenant_id, created_by_id=current_user.id,
                 batch_id=batch_id, source_file=file.filename, file_url=file_url, uploaded_at=uploaded_at,
@@ -438,6 +853,8 @@ async def upload_statement(
             tenant_id=current_user.tenant_id, slug=slug,
             batch_id=batch_id, tenant_airline_id=ta.id,
         ))
+    if supplier is not None:
+        db.add(_supplier_link(current_user.tenant_id, slug, batch_id, supplier))
     await db.commit()
     return {
         "batch_id": batch_id,
@@ -450,6 +867,12 @@ async def upload_statement(
         "airline_name": airlines[0].airline_name if airlines else None,
         "airline_code": airlines[0].airline_code if airlines else None,
         "airline_ref_ids": [ta.ref_id for ta in airlines],
+        # How many rows found their carrier in the airline master. Only meaningful for the
+        # types that resolve one; None elsewhere so the shared view shows nothing. A low
+        # count is worth saying out loud — an unresolved row matches no deal and is absent
+        # from PLB accrual, and neither failure is visible in the rows themselves.
+        "airline_resolved_rows": airline_rows if stamp_airline is not None else None,
+        **_supplier_fields(supplier),
     }
 
 
@@ -543,6 +966,22 @@ async def list_records(
                 model.sector_count.is_(None),
             )
         ))
+    # Was this batch parsed by an OLDER alias map than the one running now? `source_format`
+    # is the schema version, so a mismatch means fields the current parser extracts are
+    # simply absent from `data` — which renders as blank cells rather than as an error.
+    # Batch-scoped for the same reason as above.
+    current_fmt = _flat.CURRENT_SOURCE_FORMATS.get(slug)
+    if current_fmt and batch_id:
+        stale = await db.scalar(
+            select(func.count()).select_from(model).where(
+                model.batch_id == batch_id, *_scope(model, current_user),
+                func.coalesce(model.source_format, "") != current_fmt,
+            )
+        )
+        if stale:
+            payload["needs_reprocess"] = True
+            payload["reprocess_reason"] = "stale_format"
+            payload["stale_rows"] = stale
     return payload
 
 
@@ -681,6 +1120,86 @@ async def resplit_batch(
     }
 
 
+@router.post("/{slug}/batches/{batch_id}/reprocess")
+async def reprocess_batch(
+    slug: str,
+    batch_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Re-run the current parser over this upload's stored source rows — no re-upload needed.
+
+    `raw_data` holds every original cell keyed by its original header (models/statement_row
+    ._NormalizedBase), so a batch ingested under an older alias map can be brought up to the
+    current one without the file. That is the whole reason this is possible: the third-party
+    GDS schema was written before any real export existed and missed every money column, and
+    those batches are recoverable rather than lost.
+
+    Idempotent — re-running reproduces the same set. All-or-nothing: the delete and the
+    re-insert share one transaction, so a failure cannot leave a half-parsed batch.
+
+    Deliberately NOT the same endpoint as `resplit`: that one re-derives per-sector legs from
+    `orig_data` for the ticket-shaped tables, and re-running it is about an allocation rule,
+    not about a schema version. Both exist; neither applies to the other's types.
+    """
+    slug, model = _resolve(slug)
+    parser_name = spec.parser(slug)
+    builder = _get_builder(parser_name) if parser_name else None
+    if builder is None or not hasattr(builder, "build_row"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{spec.spec_for(slug)['label']} statements are stored verbatim and have nothing to re-parse.",
+        )
+
+    rows = (await db.execute(
+        select(model).where(model.batch_id == batch_id, *_scope(model, current_user))
+        .order_by(model.id.asc())
+    )).scalars().all()
+    if not rows:
+        raise HTTPException(status_code=404, detail="Upload not found.")
+
+    stamp_airline = await _airline_stamper(db, slug)
+    objs, skipped, airline_rows = [], 0, 0
+    for r in rows:
+        raw = dict(r.raw_data or {})
+        if not raw:
+            # Ingested before raw_data was kept, or a genuinely empty line. Carried through
+            # UNCHANGED rather than dropped — re-parsing nothing would delete the row.
+            skipped += 1
+            objs.append(model(
+                tenant_id=r.tenant_id, created_by_id=r.created_by_id, batch_id=r.batch_id,
+                source_file=r.source_file, file_url=r.file_url, uploaded_at=r.uploaded_at,
+                data=r.data, taxes=r.taxes, segments=r.segments, ssr=r.ssr,
+                raw_data=r.raw_data, source_format=r.source_format,
+            ))
+            continue
+        cols = list(raw.keys())
+        b = builder.build_row(raw, cols)
+        if stamp_airline is not None and stamp_airline(b["data"]):
+            airline_rows += 1
+        objs.append(model(
+            tenant_id=r.tenant_id, created_by_id=r.created_by_id, batch_id=r.batch_id,
+            source_file=r.source_file, file_url=r.file_url, uploaded_at=r.uploaded_at,
+            data=b["data"], taxes=b["taxes"], segments=b["segments"], ssr=b["ssr"],
+            raw_data=b["raw_data"], source_format=b["source_format"],
+        ))
+
+    # Before the delete: the new rows get new ids, so every figure keyed on an old one
+    # would be orphaned. Cleared, not migrated — the inputs may have changed too.
+    cleared = await _clear_commission(db, slug, current_user, batch_id=batch_id)
+    await db.execute(delete(model).where(model.batch_id == batch_id, *_scope(model, current_user)))
+    db.add_all(objs)
+    await db.commit()
+    return {
+        "rows": len(objs),
+        "reparsed": len(objs) - skipped,
+        "skipped_no_raw": skipped,
+        "commission_cleared": cleared,
+        "airline_resolved_rows": airline_rows if stamp_airline is not None else None,
+        "source_format": _flat.CURRENT_SOURCE_FORMATS.get(slug),
+    }
+
+
 @router.get("/{slug}/batches")
 async def list_batches(slug: str, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     """One row per upload — file name, when, how many rows, whether the file is stored."""
@@ -719,6 +1238,21 @@ async def list_batches(slug: str, db: AsyncSession = Depends(get_db), current_us
         )).all():
             links.setdefault(batch_id, []).append(ta)
 
+    # The declared consolidator, for the types that have one. ONE query for the whole list,
+    # and read off the snapshot columns so a renamed vendor doesn't rewrite history. Absent
+    # for every other type, and for third-party uploads made before the supplier was
+    # captured — those show "—" rather than a guess.
+    suppliers: dict[str, StatementBatchSupplier] = {}
+    if spec.requires_supplier(slug) and rows:
+        for link in (await db.execute(
+            select(StatementBatchSupplier).where(
+                StatementBatchSupplier.slug == slug,
+                StatementBatchSupplier.tenant_id == current_user.tenant_id,
+                StatementBatchSupplier.batch_id.in_([r.batch_id for r in rows]),
+            )
+        )).scalars().all():
+            suppliers[link.batch_id] = link
+
     return [
         {
             "batch_id": r.batch_id,
@@ -733,6 +1267,10 @@ async def list_batches(slug: str, db: AsyncSession = Depends(get_db), current_us
             "airline_code": links[r.batch_id][0].airline_code if links.get(r.batch_id) else None,
             "airline_ref_ids": [ta.ref_id for ta in links.get(r.batch_id, [])],
             "tenant_airline_ids": [ta.id for ta in links.get(r.batch_id, [])],
+            "supplier_id": suppliers[r.batch_id].supplier_id if r.batch_id in suppliers else None,
+            "supplier_name": suppliers[r.batch_id].supplier_name if r.batch_id in suppliers else None,
+            "supplier_branch": suppliers[r.batch_id].supplier_branch if r.batch_id in suppliers else None,
+            "supplier_code": suppliers[r.batch_id].supplier_code if r.batch_id in suppliers else None,
         }
         for r in rows
     ]
@@ -774,10 +1312,18 @@ async def delete_record(slug: str, record_id: int, db: AsyncSession = Depends(ge
         raise HTTPException(status_code=404, detail="Record not found.")
 
     if _splits(model) and (obj.sector_count or 1) > 1 and obj.row_seq is not None:
+        sibling_ids = list((await db.execute(
+            select(model.id).where(model.batch_id == obj.batch_id, model.row_seq == obj.row_seq,
+                                   *_scope(model, current_user))
+        )).scalars().all())
+        await _clear_commission(db, slug, current_user, row_ids=sibling_ids)
         await db.execute(delete(model).where(
             model.batch_id == obj.batch_id, model.row_seq == obj.row_seq, *_scope(model, current_user)
         ))
     else:
+        # Its commission figure goes with it — nothing else points at this row id, and a
+        # figure describing a row that no longer exists would still be summed.
+        await _clear_commission(db, slug, current_user, row_ids=[obj.id])
         await db.delete(obj)
     await db.commit()
 
@@ -797,6 +1343,16 @@ async def delete_batch(slug: str, batch_id: str, db: AsyncSession = Depends(get_
             StatementBatchAirlineId.tenant_id == current_user.tenant_id,
         )
     )
+    await _clear_commission(db, slug, current_user, batch_id=batch_id)
+    # Same story for the consolidator link — no FK on batch_id, so nothing removes it for
+    # us, and left behind it would keep the supplier looking in-use.
+    await db.execute(
+        delete(StatementBatchSupplier).where(
+            StatementBatchSupplier.slug == slug,
+            StatementBatchSupplier.batch_id == batch_id,
+            StatementBatchSupplier.tenant_id == current_user.tenant_id,
+        )
+    )
     await db.commit()
     if not res.rowcount:
         raise HTTPException(status_code=404, detail="Upload not found.")
@@ -805,14 +1361,36 @@ async def delete_batch(slug: str, batch_id: str, db: AsyncSession = Depends(get_
 
 @router.get("/{slug}/template")
 async def download_template(slug: str, current_user: User = Depends(get_current_user)):
-    """Blank .xlsx with the exact headers (fixed columns + Tax_Type1/Tax1 … pairs)."""
+    """Blank .xlsx with the exact headers (fixed columns + Tax_Type1/Tax1 … pairs).
+
+    A file built from this maps itself: every header is the canonical one, so the wizard's
+    auto-map fills in and reports a template match. The formatting is not decoration — NDC
+    is 69 columns, and a frozen, bold header row is what makes the far end of that legible
+    enough to fill in by hand.
+    """
     slug, _ = _resolve(slug)
     from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
 
+    headers = spec.template_headers(slug)
     wb = Workbook()
     ws = wb.active
     ws.title = f"{spec.spec_for(slug)['label']} Template"[:31]
-    ws.append(spec.template_headers(slug))
+    ws.append(headers)
+
+    head = Font(bold=True, color="FFFFFF")
+    fill = PatternFill("solid", fgColor="1E40AF")
+    for i, header in enumerate(headers, start=1):
+        cell = ws.cell(row=1, column=i)
+        cell.font = head
+        cell.fill = fill
+        cell.alignment = Alignment(vertical="center")
+        # Wide enough to read the header, capped so one long name can't push the rest of
+        # a 69-column sheet off screen.
+        ws.column_dimensions[get_column_letter(i)].width = min(max(len(header) + 3, 12), 32)
+    ws.freeze_panes = "A2"
+    ws.row_dimensions[1].height = 20
 
     bio = io.BytesIO()
     wb.save(bio)

@@ -302,6 +302,12 @@ def _build_merged_header(row_a: list[str], row_b: list[str]) -> list[str]:
 
 def _extract_excel(content: bytes, filename: str) -> dict:
     import openpyxl
+    from app.services import spreadsheet
+    # openpyxl reads OOXML only. A legacy .xls (and a deal sheet saved as an HTML
+    # table, which happens) cannot be opened here at all, so hand those straight to
+    # the pandas fallback rather than raising out of a supplier's file.
+    if spreadsheet.sniff(content, filename) != spreadsheet.XLSX:
+        return _extract_excel_pandas(content, filename)
     wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
     ws = wb.active
 
@@ -472,9 +478,15 @@ def _extract_excel(content: bytes, filename: str) -> dict:
 
 
 def _extract_excel_pandas(content: bytes, filename: str) -> dict:
-    """Fallback Excel extraction via pandas when openpyxl header detection fails."""
-    import pandas as pd
-    df = pd.read_excel(io.BytesIO(content), header=None)
+    """Fallback Excel extraction when openpyxl header detection fails.
+
+    Reads through services/spreadsheet.py, which also makes this the path that
+    handles a legacy .xls: `openpyxl.load_workbook` above cannot open one at all,
+    so a BIFF deal sheet reaches here and now gets read rather than raising.
+    """
+    from app.services import spreadsheet
+    grid, _sheets, _sheet, _kind = spreadsheet.read_grid(content, filename)
+    df = grid
     rows = []
     order = 0
     for _, row in df.iterrows():

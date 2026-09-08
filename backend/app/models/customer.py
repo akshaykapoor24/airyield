@@ -39,6 +39,12 @@ class Customer(Base):
     email:         Mapped[str | None] = mapped_column(String(255), nullable=True)
     # Note: customer-local naming (gst_no / pan_no). The User/tenant/supplier models
     # use gst_number / pan_number — intentionally NOT unified; only the frontend regexes are shared.
+    # The only geographic field this table carries, and it exists for one reason:
+    # place of supply. A direct customer with no GSTIN has no other way to say
+    # which state they are in, and that decides CGST+SGST versus IGST. Named and
+    # sized to match corporates.state, the other side of the same comparison.
+    state:         Mapped[str | None] = mapped_column(String(100), nullable=True)
+
     gst_registered: Mapped[bool]      = mapped_column(Boolean, nullable=False, server_default="false", default=False)
     gst_no:        Mapped[str | None] = mapped_column(String(30),  nullable=True)   # only set when gst_registered
     pan_no:        Mapped[str | None] = mapped_column(String(20),  nullable=True)   # optional

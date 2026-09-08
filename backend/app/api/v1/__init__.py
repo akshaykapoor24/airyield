@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.v1 import auth, users, subscriptions, airlines, suppliers, airports, routes, deals, tickets, income, documents, reports, classes, approval_workflows, dashboard, customers, corporates, entities, login_ids, tenant_airlines, iata_commissions, user_entities, user_login_ids, agencies, agency_account, agency_entities, agency_login_ids, agency_billing, adjustments, airline_adjustments, statements, bsp, bsp_summary, bsp_reconciliation, bsp_commission, customer_statements, lcc_detailed, ticket_details, series_contracts
+from app.api.v1 import auth, users, subscriptions, airlines, suppliers, airports, routes, deals, tickets, income, documents, reports, classes, approval_workflows, dashboard, customers, corporates, entities, login_ids, tenant_airlines, iata_commissions, gst_configurations, user_entities, user_login_ids, agencies, agency_account, agency_entities, agency_login_ids, agency_billing, adjustments, airline_adjustments, statements, bsp, bsp_summary, bsp_reconciliation, bsp_commission, commission, customer_statements, lcc_detailed, ticket_details, series_contracts
 
 router = APIRouter()
 
@@ -25,6 +25,7 @@ router.include_router(entities.router, prefix="/entities", tags=["User Master - 
 router.include_router(login_ids.router, prefix="/login-ids", tags=["User Master - Login IDs"])
 router.include_router(tenant_airlines.router, prefix="/tenant-airlines", tags=["User Master - Airline Master"])
 router.include_router(iata_commissions.router, prefix="/iata-commissions", tags=["Master Governance - IATA Commission"])
+router.include_router(gst_configurations.router, prefix="/gst-configurations", tags=["Master Governance - GST Configuration"])
 router.include_router(user_entities.router, prefix="/user-entities", tags=["My Profile - Entities"])
 router.include_router(user_login_ids.router, prefix="/user-login-ids", tags=["My Profile - Login IDs"])
 router.include_router(agencies.router, prefix="/agencies", tags=["Agency Profile - Agencies"])
@@ -41,5 +42,9 @@ router.include_router(bsp.router, prefix="/bsp", tags=["Tickets - BSP Statements
 router.include_router(bsp_summary.router, prefix="/bsp", tags=["Tickets - BSP Summary"])
 router.include_router(bsp_reconciliation.router, prefix="/bsp-reconciliation", tags=["Tickets - BSP Reconciliation"])
 router.include_router(bsp_commission.router, prefix="/bsp-commission", tags=["Vendors - Commission Income"])
+# The non-BSP sources. /bsp-commission is deliberately NOT aliased onto this: BSP
+# keeps its own router and storage, so the flagship screen does not depend on this
+# one being right. The frontend picks a base URL per source tab.
+router.include_router(commission.router, prefix="/commission/vendor", tags=["Vendors - Commission Income"])
 router.include_router(customer_statements.router, prefix="/customer-statements", tags=["Customer Statements"])
 router.include_router(series_contracts.router, prefix="/series-contracts", tags=["Vendors - Series/SIT/MICE Contracts"])

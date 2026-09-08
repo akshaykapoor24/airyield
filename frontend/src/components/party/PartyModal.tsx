@@ -9,6 +9,7 @@ import {
   corporateLabel, seedFromCorporate, type InheritedField, type Party, type PartyKind,
 } from "@/lib/party";
 import { PARTY_ICON } from "@/components/party/icons";
+import { STATE_NAMES } from "@/lib/indiaTax";
 
 const LABEL = "block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1";
 const INPUT =
@@ -94,7 +95,13 @@ export default function PartyModal({
     pan_no: party?.pan_no ?? "",
     markup_type: party?.markup_type ?? "",
     markup_value: party?.markup_value != null ? String(party.markup_value) : "",
-    billing_type: party?.billing_type ?? "",
+    // Agency on a NEW party, the way `country` defaults to India above. Blank is
+    // not a neutral starting point here: billing_calc.compute_gst applies NO GST
+    // at all to an unset billing type, so a party onboarded without touching this
+    // field would be invoiced tax-free and nothing on the screen would say so.
+    // An existing party keeps whatever it has, including blank — this fixes the
+    // default, it does not retag anyone.
+    billing_type: party?.billing_type ?? (isEdit ? "" : "agency"),
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -168,9 +175,18 @@ export default function PartyModal({
       setError("Markup value must be a number.");
       return;
     }
-    const registered = form.gst_registered === "true";
+    // A corporate is always registered — the choice is not offered, so it cannot
+    // be read off the form. See the GST block below for why.
+    const registered = isCorporate || form.gst_registered === "true";
     const gstNo = form.gst_no.trim().toUpperCase();
     const panNo = form.pan_no.trim().toUpperCase();
+    if (isCorporate && !gstNo) {
+      setError(
+        "GST No is required for a corporate. It decides whether the invoice carries " +
+        "CGST + SGST or IGST, and the corporate cannot claim input credit without it."
+      );
+      return;
+    }
     if (registered && !GSTIN_RE.test(gstNo)) {
       setError(
         `A valid 15-character GST No is required for registered ${cfg.masterPlural.toLowerCase()} (e.g. 27ABCDE1234F1Z5).`
@@ -212,6 +228,10 @@ export default function PartyModal({
           first_name: form.first_name.trim(),
           last_name: form.last_name.trim() || null,
           title: form.title.trim() || null,
+          // The only geographic field `customers` has, and it exists for place
+          // of supply on a direct bill. Cleared when they have a GSTIN, which
+          // already says which state they are registered in.
+          state: registered ? null : (form.state.trim() || null),
           // The backend derives `company` from corporate_id whenever one is set,
           // so the only company text worth sending is a kept legacy value.
           corporate_id: employer.startsWith("corp:") ? Number(employer.slice(5)) : null,
@@ -419,28 +439,45 @@ export default function PartyModal({
           <div>
             <FieldLabel text="Billing Type" from={inheritedFrom("billing_type")} />
             <select value={form.billing_type} onChange={(e) => set("billing_type", e.target.value)} className={INPUT}>
-              <option value="">— Select —</option>
-              <option value="reseller">Reseller</option>
+              {/* Only offered while it IS blank — an existing party may predate the
+                  Agency default, and hiding its current value would silently change
+                  it on the next save. New parties never see it. */}
+              {!form.billing_type && <option value="">— Select —</option>}
               <option value="agency">Agency</option>
+              <option value="reseller">Reseller</option>
             </select>
+            <p className="text-[10px] text-gray-400 mt-1">
+              {form.billing_type === "reseller"
+                ? "GST on the whole sale — fare, taxes and service charge."
+                : form.billing_type === "agency"
+                  ? "GST on your service charge only. The fare and taxes are not taxed again."
+                  : "No billing type means no GST is charged. Pick one."}
+            </p>
           </div>
 
+          {/* A CORPORATE MUST HAVE A GSTIN, so it is not offered the choice —
+              the registration decides whether its invoices carry CGST + SGST or
+              IGST, and it cannot claim input credit on a bill without one. A
+              customer keeps the Registered / Unregistered choice: an individual
+              traveller genuinely may not be registered. */}
           <div className="grid grid-cols-2 gap-3">
-            <div>
-              <FieldLabel text="GST Registration" from={inheritedFrom("gst_registered")} />
-              <select
-                value={form.gst_registered}
-                onChange={(e) => {
-                  set("gst_registered", e.target.value);
-                  if (e.target.value === "false") set("gst_no", "");
-                }}
-                className={INPUT}
-              >
-                <option value="false">Unregistered</option>
-                <option value="true">Registered</option>
-              </select>
-            </div>
-            {form.gst_registered === "true" && (
+            {!isCorporate && (
+              <div>
+                <FieldLabel text="GST Registration" from={inheritedFrom("gst_registered")} />
+                <select
+                  value={form.gst_registered}
+                  onChange={(e) => {
+                    set("gst_registered", e.target.value);
+                    if (e.target.value === "false") set("gst_no", "");
+                  }}
+                  className={INPUT}
+                >
+                  <option value="false">Unregistered</option>
+                  <option value="true">Registered</option>
+                </select>
+              </div>
+            )}
+            {(isCorporate || form.gst_registered === "true") && (
               <div>
                 <FieldLabel text="GST No *" from={inheritedFrom("gst_no")} />
                 <input
@@ -450,9 +487,43 @@ export default function PartyModal({
                   maxLength={15}
                   className={`${INPUT} uppercase`}
                 />
+                {isCorporate && (
+                  <p className="text-[10px] text-gray-400 mt-1">
+                    Required. It decides whether this corporate&apos;s invoices carry
+                    CGST + SGST or IGST.
+                  </p>
+                )}
               </div>
             )}
           </div>
+
+          {/* A DIRECT customer's place of supply. Only consulted when they have
+              no GSTIN — a GSTIN already names the state it is registered in —
+              and only for a bill raised to the person rather than to their
+              employer, whose own registration decides that case.
+              A picker, not free text: place of supply matches a state to a GSTIN
+              state code, so a spelling it cannot read is as good as no state. */}
+          {!isCorporate && form.gst_registered !== "true" && (
+            <div>
+              {/* Not an INHERITED_FIELD, deliberately: a direct customer is billed
+                  as themselves, so their employer's state is not theirs. */}
+              <label className={LABEL}>State</label>
+              <select value={form.state} onChange={(e) => set("state", e.target.value)} className={INPUT}>
+                <option value="">— Select state —</option>
+                {/* A spelling stored before this was a picker would otherwise
+                    vanish on the next save. Keep it visible. */}
+                {form.state && !STATE_NAMES.includes(form.state) && (
+                  <option value={form.state}>{form.state}</option>
+                )}
+                {STATE_NAMES.map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>
+              <p className="text-[10px] text-gray-400 mt-1">
+                Where they are, for billing them directly. Same state as yours means
+                CGST + SGST; a different one means IGST. Without it the GST on their
+                tickets is charged but cannot be split.
+              </p>
+            </div>
+          )}
 
           <div>
             <FieldLabel text="PAN No" from={inheritedFrom("pan_no")} />

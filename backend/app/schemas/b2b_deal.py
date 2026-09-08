@@ -18,6 +18,13 @@ class B2BDealCreate(DealScopeFields):
     # login IDs the form offers — but left Optional here so existing rows and any
     # caller mid-migration are not broken. The form enforces it.
     supplier_name: Optional[str] = None
+    # WHICH SUPPLIER BRANCH, for an INCOMING B2B deal — the row in the platform-admin
+    # Supplier master, the same list `supplier_name` is picked from. The name alone is not
+    # enough: 141 of the master's 2,340 names repeat across branches, and each branch is
+    # its own commercial relationship. Optional — existing clients don't send it and the
+    # matcher falls back to the name. Ignored on an outgoing deal, where the counterparty
+    # is the scope block instead.
+    supplier_id: Optional[int] = None
     remark: Optional[str] = None
     # See AirlineDealCreate — bare `str` accepted "" and stored NULL.
     airline_type: RequiredStr
@@ -49,6 +56,10 @@ class B2BDealResponse(BaseModel):
     source_agent: str
     deal_maker_name: Optional[str]
     supplier_name: Optional[str]
+    # Echoed back so the caller can confirm the deal really is linked to the branch it
+    # picked — a response_model silently drops anything it does not declare, and "the name
+    # was saved but the link was not" is exactly the failure this column exists to prevent.
+    supplier_id: Optional[int] = None
     remark: Optional[str]
     airline_type: Optional[str]
     airline_name: Optional[str]

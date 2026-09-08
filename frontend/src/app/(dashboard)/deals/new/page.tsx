@@ -272,6 +272,10 @@ export default function NewDealPage() {
   const [airlines, setAirlines]                       = useState<{airline_name:string;airline_type:string}[]>([]);
   const [loadingAirlines, setLoadingAirlines]         = useState(false);
   const [supplierOptions, setSupplierOptions]         = useState<string[]>([]);
+  // The full rows behind those names — the picker stores a name, but the deal stores the
+  // BRANCH's id, so both are needed.
+  const [supplierRows, setSupplierRows]               = useState<{ id: number; name: string; code?: string | null; branch?: string | null; city?: string | null }[]>([]);
+  const [supplierBranch, setSupplierBranch]           = useState<number | null>(null);
   const [entityOptions, setEntityOptions]             = useState<string[]>([]);
   const [allLoginIds, setAllLoginIds]                 = useState<LoginIdMaster[]>([]);
   const [continentOptions, setContinentOptions]       = useState<string[]>(CONTINENTS);
@@ -314,18 +318,32 @@ export default function NewDealPage() {
   // would quietly change the incentive form for outgoing adhoc deals. This one
   // only governs which party fields render and where entity/logins come from.
   const outboundScoped = direction === "outbound";
-  // Every onboarded branch of the chosen Supplier, by name.
+  // Every onboarded branch of the chosen Supplier, by name — used for the B2B Standard
+  // entity and login-ID lists, which come from Agency Onboarding.
+  const isInboundB2b = !outboundScoped && dealType === "b2b";
   const agencyMatches = isB2bStandard
     ? agencies.filter(a => (a.name ?? "").trim().toLowerCase() === supplierName.trim().toLowerCase())
     : [];
+
+  // Every SUPPLIER MASTER row bearing the chosen name. This is what the deal is MATCHED
+  // by: `deals.supplier_id` is compared against the supplier a third-party statement was
+  // uploaded against, and 141 of the master's names cover more than one branch — "Riya
+  // Travel & Tours" is fourteen rows, each its own contract. One match resolves itself;
+  // several need the Branch field below.
+  const supplierMatches = isInboundB2b
+    ? supplierRows.filter(s => (s.name ?? "").trim().toLowerCase() === supplierName.trim().toLowerCase())
+    : [];
+  const resolvedSupplierId = supplierMatches.length === 1
+    ? supplierMatches[0].id
+    : (supplierBranch != null && supplierMatches.some(s => s.id === supplierBranch) ? supplierBranch : null);
   // One match resolves itself; several need the Branch field below.
   const agencyId = agencyMatches.length === 1
     ? agencyMatches[0].id
     : (agencyBranch != null && agencyMatches.some(a => a.id === agencyBranch) ? agencyBranch : null);
 
   useEffect(() => {
-    api.get<{ id: number; name: string }[]>("/suppliers/?limit=5000")
-      .then(r => setSupplierOptions(r.data.map(s => s.name)))
+    api.get<{ id: number; name: string; code?: string | null; branch?: string | null; city?: string | null }[]>("/suppliers/?limit=5000")
+      .then(r => { setSupplierRows(r.data); setSupplierOptions(r.data.map(s => s.name)); })
       .catch(() => {});
   }, []);
 
@@ -337,8 +355,16 @@ export default function NewDealPage() {
       .catch(() => {});
   }, []);
 
-  // A different Supplier means a different set of branches — drop the old pick.
-  useEffect(() => { setAgencyBranch(null); }, [supplierName]);
+  // A different Supplier means a different set of branches — drop the old pick. Skipped
+  // while an edit is prefilling, exactly like the entity/login resets below: the prefill
+  // sets supplierName and the saved branch together, and without this the branch (which is
+  // now what the deal is MATCHED by) would be cleared on every edit and silently unlinked
+  // on save.
+  useEffect(() => {
+    if (suppressAgencyResetRef.current) return;
+    setAgencyBranch(null);
+    setSupplierBranch(null);
+  }, [supplierName]);
 
   // Edit mode — read ?editId once and pre-fill the whole form from the deal.
   useEffect(() => {
@@ -376,6 +402,9 @@ export default function NewDealPage() {
         const savedLoginIds = Array.isArray(data.login_ids) ? (data.login_ids as string[]) : [];
         setLoginIds(savedLoginIds);
         setSupplierName((data.supplier_name as string) ?? "");
+        // The Supplier master branch this incoming B2B deal was signed with, so re-saving
+        // an edited deal keeps its link instead of dropping to name-only matching.
+        setSupplierBranch((data.supplier_id as number) ?? null);
         // Outgoing scope. Without this the form re-opened on the Incoming branch
         // with no party, and saving would have re-scoped the deal to whatever the
         // default happened to be.
@@ -677,6 +706,10 @@ export default function NewDealPage() {
       // Outgoing derives supplier_name server-side from the scope, so the label
       // reads "All Agencies" rather than blank on a common deal.
       payload.supplier_name = outboundScoped ? null : (supplierName || null);
+      // The Supplier master branch this deal was signed with. Sent unconditionally (as
+      // null when there is none) so an edit that clears the supplier also clears the link —
+      // the backend keys on whether the field was present, not on truthiness.
+      payload.supplier_id = isInboundB2b ? resolvedSupplierId : null;
     }
     if (outboundScoped) {
       // buildScopePayload mirrors the server's own re-derivation, so a stale id
@@ -843,29 +876,28 @@ export default function NewDealPage() {
                   form would load one branch's and attach them to the other's deal.
                   Outgoing never needs it: the agency picker already names the exact
                   branch + channel row. */}
-              {!outboundScoped && isB2bStandard && agencyMatches.length > 1 && (
+              {isInboundB2b && supplierMatches.length > 1 && (
                 <div>
                   <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">
                     Branch <span className="text-red-500">*</span>
                   </label>
                   <select
-                    value={agencyBranch ?? ""}
-                    onChange={e => { suppressAgencyResetRef.current = false; setAgencyBranch(e.target.value ? Number(e.target.value) : null); }}
+                    value={supplierBranch ?? ""}
+                    onChange={e => { suppressAgencyResetRef.current = false; setSupplierBranch(e.target.value ? Number(e.target.value) : null); }}
                     className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-400 bg-gray-50"
                   >
                     <option value="">— Select branch —</option>
-                    {/* Channel as well as branch: one branch working both channels
-                        is onboarded twice, and the two rows carry different
-                        entities and credentials under the same branch name. */}
-                    {agencyMatches.map(a => (
-                      <option key={a.id} value={a.id}>
-                        {a.branch_name || a.branch_code} · {a.channels}
+                    {/* The code as well as the branch: it is the unique one, and two
+                        branches of a vendor can share a city. */}
+                    {supplierMatches.map(s => (
+                      <option key={s.id} value={s.id}>
+                        {s.branch || s.city || "—"} · {s.code}
                       </option>
                     ))}
                   </select>
                   <p className="text-[10px] text-gray-400 mt-1">
-                    This agency is onboarded {agencyMatches.length} times — per branch and per channel — and each
-                    has its own entities and login IDs.
+                    This vendor has {supplierMatches.length} branches in the Supplier master and each is its own
+                    contract. Picking one is what lets a third-party statement from that branch find this deal.
                   </p>
                 </div>
               )}

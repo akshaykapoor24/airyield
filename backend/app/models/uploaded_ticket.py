@@ -67,6 +67,25 @@ class UploadedTicket(Base):
     customer_name:       Mapped[str | None]   = mapped_column(String(300), nullable=True)
     tour_code:           Mapped[str | None]   = mapped_column(String(100), nullable=True)
 
+    # ── Consolidator statement columns ────────────────────────────────────────
+    # What an Indian consolidator's own statement prints that neither our template
+    # nor a BSP export does. Recorded and reportable, never calculated on: the
+    # incentive bases are sell_fare / sell_tax_yq / sale_yr and the named
+    # ancillaries, and deal_matching reads none of the four amounts below.
+    oc_tax:              Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    raf:                 Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)   # refund administration fee
+    serv_charge:         Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)   # the agency's own service fee
+    # GST as one figure. Distinct from sale_k3 (GST on the air fare) and from the
+    # cgst/sgst/igst triple — this is the tax on the service charge beside it.
+    gst_sell:            Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    # The consolidator's own voucher, e.g. "IS26/ 1067" dated 08-Aug-26. Not
+    # invoice_no / ticket_date: those belong to the airline's document, and on a
+    # credit note the consolidator's date is the credit date, not the issue date.
+    doc_no:              Mapped[str | None]   = mapped_column(String(100), nullable=True)
+    doc_date:            Mapped[str | None]   = mapped_column(String(50),  nullable=True)
+    reference:           Mapped[str | None]   = mapped_column(String(200), nullable=True)
+    narration:           Mapped[str | None]   = mapped_column(String(500), nullable=True)
+
     # ── Airline: passenger ────────────────────────────────────────────────────
     pax_name:              Mapped[str | None]   = mapped_column(String(300), nullable=True)
     air_pnr:               Mapped[str | None]   = mapped_column(String(50),  nullable=True)
@@ -157,4 +176,15 @@ class UploadedTicket(Base):
     is_billed:             Mapped[bool]         = mapped_column(Boolean, nullable=False, server_default="false", default=False)
     billing_id:            Mapped[int | None]   = mapped_column(Integer, ForeignKey("billings.id", ondelete="SET NULL"), nullable=True, index=True)
 
-    created_by: Mapped["User"] = relationship("User")  # noqa: F821
+    # ── Re-tagging audit ──────────────────────────────────────────────────────
+    # Set only when someone moved this ticket between billing parties from Sold
+    # Tickets. NULL means never re-tagged — this is not a general "last touched"
+    # stamp. Mirrors lcc_detailed.resolved_at / resolved_by_id, which the LCC
+    # worklist writes for the same action on the statement side.
+    retagged_at:           Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    retagged_by_id:        Mapped[int | None]      = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+
+    # `foreign_keys` is required, not decorative: retagged_by_id is a second FK to
+    # users, so without naming the column this relationship is ambiguous and every
+    # mapper in the registry fails to initialise.
+    created_by: Mapped["User"] = relationship("User", foreign_keys=[created_by_id])  # noqa: F821

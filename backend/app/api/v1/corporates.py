@@ -32,18 +32,22 @@ from app.schemas.corporate import (
     CorporateCreate, CorporateUpdate, CorporateRead, CorporateBulkUploadResult,
     CorporateBulkCreate, CorporateListItem, CorporateSoldTicketsResponse,
 )
-from app.schemas.customer import SoldTicketRead, SoldTicketsSummary
+from app.core.india_tax import tax_id_error
+from app.schemas.customer import PlaceOfSupplyRead, SoldTicketRead, SoldTicketsSummary
 from app.schemas.billing import BillingCreate, BillingUpdate, BillingRead, BillingListItem
-from app.services.billing_pdf import build_billing_pdf
+from app.services.billing_pdf import build_billing_pdf, load_logo, supplier_block
 from app.services.billing_calc import (
     to_float as _f,
     compute_markup as _compute_markup,
-    compute_gst as _compute_gst,
+    split_gst as _split_gst,
+    interstate_from_treatment as _interstate_from_treatment,
     safe_date as _safe_date,
     passenger_name as _passenger_name,
     corporate_ticket_scope as _corporate_ticket_scope,
     ticket_matched_by as _ticket_matched_by,
 )
+from app.services.place_of_supply import as_payload as _pos_payload, place_of_supply
+from app.services import spreadsheet
 
 router = APIRouter()
 
@@ -112,6 +116,43 @@ def _clean_upper(value) -> Optional[str]:
         return None
     v = str(value).strip().upper()
     return v or None
+
+
+# ── A corporate must carry a GSTIN ──────────────────────────────────────────
+# The business rule, stated as "always required, no exceptions". A corporate is
+# a registered business being invoiced, and its GSTIN is what decides the place
+# of supply — which is what decides whether the invoice carries CGST + SGST or
+# IGST. Without it the tax cannot be attributed, and the corporate cannot claim
+# input credit on a bill it has paid.
+#
+# This is why `gst_registered` is no longer a meaningful choice for a corporate:
+# it is forced True wherever a GSTIN is written, so the two can never disagree.
+_GSTIN_REQUIRED = (
+    "GST No is required for a corporate. It decides whether the invoice carries "
+    "CGST + SGST or IGST, and the corporate cannot claim input credit without it."
+)
+
+
+def _gstin_problem(gst_no, pan_no=None, state=None) -> Optional[str]:
+    """Why this GSTIN is not acceptable for a corporate, or None.
+
+    Non-raising, because the bulk import paths attribute a problem to one row
+    and still save the others — see bulk_upload_corporates.
+    """
+    value = _clean_upper(gst_no)
+    if not value:
+        return _GSTIN_REQUIRED
+    # Checks it against itself (format, mod-36 check digit) and against the rest
+    # of the row (the state it claims, the PAN it embeds).
+    return tax_id_error(value, _clean_upper(pan_no), state)
+
+
+def _require_gstin(gst_no, pan_no=None, state=None) -> str:
+    """The validated GSTIN, or a 400 naming exactly what is wrong with it."""
+    problem = _gstin_problem(gst_no, pan_no, state)
+    if problem:
+        raise HTTPException(status_code=400, detail=problem)
+    return _clean_upper(gst_no)
 
 
 def _scope(current_user: User):
@@ -237,7 +278,9 @@ async def create_corporate(
     company = (payload.company or "").strip()
     if not company:
         raise HTTPException(status_code=400, detail="Corporate name is required.")
-    gst_registered = bool(payload.gst_registered)
+    state = (payload.state or "").strip() or None
+    # Required, with no unregistered option — see _GSTIN_REQUIRED above.
+    gst_no = _require_gstin(payload.gst_no, payload.pan_no, state)
     corporate = Corporate(
         tenant_id=current_user.tenant_id,
         created_by_id=current_user.id,
@@ -247,11 +290,13 @@ async def create_corporate(
         email=(payload.email or "").strip() or None,
         address=(payload.address or "").strip() or None,
         city=(payload.city or "").strip() or None,
-        state=(payload.state or "").strip() or None,
+        state=state,
         pincode=(payload.pincode or "").strip() or None,
         country=(payload.country or "").strip() or None,
-        gst_registered=gst_registered,
-        gst_no=_clean_upper(payload.gst_no) if gst_registered else None,
+        # Always True: a corporate now always has a GSTIN, so a stored False
+        # would contradict the column beside it.
+        gst_registered=True,
+        gst_no=gst_no,
         pan_no=_clean_upper(payload.pan_no),
         markup_type=_norm_choice(payload.markup_type, _MARKUP_TYPES),
         markup_value=payload.markup_value,
@@ -288,10 +333,10 @@ async def bulk_upload_corporates(
 
         for header_row in (0, 1, 2):
             try:
-                if filename.endswith(".xls"):
-                    df_try = pd.read_excel(BytesIO(content), dtype=str, header=header_row)
-                else:
-                    df_try = pd.read_excel(BytesIO(content), dtype=str, engine="openpyxl", header=header_row)
+                # Format from the bytes, not the extension: a supplier's ".xls"
+                # is as often an xlsx or a CSV, and a real one needs an engine
+                # pandas will not pick on its own.
+                df_try = spreadsheet.read_df(content, filename, header_row)
                 df_try = _normalize_columns(df_try)
                 missing = required - set(df_try.columns)
                 last_missing = missing
@@ -335,7 +380,14 @@ async def bulk_upload_corporates(
                 errors.append(f"{row_prefix}: MARKUP_VALUE '{markup_value_raw}' is not a number.")
                 continue
 
-        gst_registered = (_cell(row, "GST_REGISTERED") or "").lower() in _TRUTHY
+        # GST_REGISTERED is no longer read: a corporate always has a GSTIN, so
+        # the column cannot say otherwise. A row without a valid one is reported
+        # against its own row number and the rest of the sheet still imports.
+        state = _cell(row, "STATE")
+        gst_problem = _gstin_problem(_cell(row, "GST_NO"), _cell(row, "PAN_NO"), state)
+        if gst_problem:
+            errors.append(f"{row_prefix}: {gst_problem}")
+            continue
 
         try:
             corporate = Corporate(
@@ -347,11 +399,11 @@ async def bulk_upload_corporates(
                 email=_cell(row, "EMAIL"),
                 address=_cell(row, "ADDRESS"),
                 city=_cell(row, "CITY"),
-                state=_cell(row, "STATE"),
+                state=state,
                 pincode=_cell(row, "PINCODE"),
                 country=_cell(row, "COUNTRY"),
-                gst_registered=gst_registered,
-                gst_no=_clean_upper(_cell(row, "GST_NO")) if gst_registered else None,
+                gst_registered=True,
+                gst_no=_clean_upper(_cell(row, "GST_NO")),
                 pan_no=_clean_upper(_cell(row, "PAN_NO")),
                 markup_type=_norm_choice(_cell(row, "MARKUP_TYPE"), _MARKUP_TYPES),
                 markup_value=markup_value,
@@ -404,7 +456,14 @@ async def bulk_create_corporates(
             errors.append(f"{row_prefix}: Corporate name is required.")
             continue
 
-        gst_registered = bool(row.gst_registered)
+        # A corporate always has a GSTIN; a row without a valid one is reported
+        # against its own row number and the rest of the batch still saves.
+        state = (row.state or "").strip() or None
+        gst_problem = _gstin_problem(row.gst_no, row.pan_no, state)
+        if gst_problem:
+            errors.append(f"{row_prefix}: {gst_problem}")
+            continue
+
         try:
             db.add(Corporate(
                 tenant_id=current_user.tenant_id,
@@ -415,11 +474,11 @@ async def bulk_create_corporates(
                 email=(row.email or "").strip() or None,
                 address=(row.address or "").strip() or None,
                 city=(row.city or "").strip() or None,
-                state=(row.state or "").strip() or None,
+                state=state,
                 pincode=(row.pincode or "").strip() or None,
                 country=(row.country or "").strip() or None,
-                gst_registered=gst_registered,
-                gst_no=_clean_upper(row.gst_no) if gst_registered else None,
+                gst_registered=True,
+                gst_no=_clean_upper(row.gst_no),
                 pan_no=_clean_upper(row.pan_no),
                 markup_type=_norm_choice(row.markup_type, _MARKUP_TYPES),
                 markup_value=row.markup_value,
@@ -496,13 +555,21 @@ async def update_corporate(
         data["markup_type"] = _norm_choice(data["markup_type"], _MARKUP_TYPES)
     if "billing_type" in data:
         data["billing_type"] = _norm_choice(data["billing_type"], _BILLING_TYPES)
-    if "gst_no" in data:
-        data["gst_no"] = _clean_upper(data["gst_no"])
     if "pan_no" in data:
         data["pan_no"] = _clean_upper(data["pan_no"])
-    registered = data.get("gst_registered", obj.gst_registered)
-    if not registered:
-        data["gst_no"] = None
+    # The GSTIN is required, so it is validated against whatever the row will
+    # HOLD after this edit, not just against what the request sent. Clearing it,
+    # or saving a corporate that never had one, is refused.
+    #
+    # This does block editing a pre-existing corporate that has no GSTIN until
+    # one is supplied — which is the rule as stated ("always required, no
+    # exceptions"), and the error says exactly what to add.
+    data["gst_no"] = _require_gstin(
+        data.get("gst_no", obj.gst_no),
+        data.get("pan_no", obj.pan_no),
+        data.get("state", obj.state),
+    )
+    data["gst_registered"] = True
     renamed_to = data["company"] if data.get("company") and data["company"] != obj.company else None
     for field, value in data.items():
         setattr(obj, field, value)
@@ -633,16 +700,28 @@ async def get_corporate_sold_tickets(
             in_range.append(t)
         tickets = in_range
 
+    # WHICH GST these rows carry. The corporate IS the recipient here — an
+    # employee's ticket billed to the company they work for is a supply to the
+    # company — so the corporate's own GSTIN decides, and its address is the
+    # fallback only when it has none. This is the GSTIN match the business asked
+    # for: same state as ours means CGST + SGST, a different one means IGST.
+    pos = place_of_supply(current_user.tenant, corporate)
+
     rows: list[SoldTicketRead] = []
     total_base = total_markup = total_gst = total_with_markup = 0.0
+    total_cgst = total_sgst = total_igst = 0.0
     for t in tickets:
         base = _f(t.total_amt) if t.total_amt is not None else _f(t.sell_fare)
         markup_amount = _compute_markup(base, corporate.markup_type, corporate.markup_value)
-        gst_amount = _compute_gst(base, markup_amount, corporate.billing_type)
+        gst = _split_gst(base, markup_amount, corporate.billing_type, interstate=pos.interstate)
+        gst_amount = gst["gst_amount"]
         total = base + markup_amount + gst_amount
         total_base += base
         total_markup += markup_amount
         total_gst += gst_amount
+        total_cgst += gst["cgst"]
+        total_sgst += gst["sgst"]
+        total_igst += gst["igst"]
         total_with_markup += total
         rows.append(SoldTicketRead(
             id=t.id,
@@ -662,10 +741,18 @@ async def get_corporate_sold_tickets(
             incentive_breakdown=t.incentive_breakdown,
             is_billed=bool(t.is_billed),
             billing_id=t.billing_id,
+            # As stored, so the screen can show whether this ticket is on the
+            # passenger's bill or their employer's, and offer to move it.
+            customer_id=t.customer_id,
+            corporate_id=t.corporate_id,
             matched_by=_ticket_matched_by(t, corporate=corporate, names=names),
             base_amount=round(base, 2),
             markup_amount=round(markup_amount, 2),
             gst_amount=round(gst_amount, 2),
+            cgst_amount=gst["cgst"],
+            sgst_amount=gst["sgst"],
+            igst_amount=gst["igst"],
+            gst_treatment=gst["gst_treatment"],
             total_with_markup=round(total, 2),
         ))
 
@@ -677,8 +764,12 @@ async def get_corporate_sold_tickets(
             total_base=round(total_base, 2),
             total_markup=round(total_markup, 2),
             total_gst=round(total_gst, 2),
+            total_cgst=round(total_cgst, 2),
+            total_sgst=round(total_sgst, 2),
+            total_igst=round(total_igst, 2),
             total_with_markup=round(total_with_markup, 2),
         ),
+        place_of_supply=PlaceOfSupplyRead(**_pos_payload(pos)),
     )
 
 
@@ -745,20 +836,29 @@ async def create_billing(
     if already:
         raise HTTPException(status_code=400, detail=f"Already billed: {', '.join(already)}. Refresh and try again.")
 
+    # Decided once, here, and snapshotted on the billing below — see the same
+    # note in api/v1/customers.py::create_billing.
+    pos = place_of_supply(current_user.tenant, corporate)
+
     line_items: list[dict] = []
     total_base = total_markup = total_addl = total_gst = grand = 0.0
+    total_cgst = total_sgst = total_igst = 0.0
     for t in tickets:
         base = _f(t.total_amt) if t.total_amt is not None else _f(t.sell_fare)
         corp_markup = _compute_markup(base, corporate.markup_type, corporate.markup_value)
         addl = addl_map.get(t.id, 0.0)
         disc = disc_map.get(t.id, 0.0)
         total_mk = corp_markup + addl
-        gst = _compute_gst(base, total_mk, corporate.billing_type, disc)
+        split = _split_gst(base, total_mk, corporate.billing_type, disc, interstate=pos.interstate)
+        gst = split["gst_amount"]
         line_total = base + total_mk - disc + gst
         total_base += base
         total_markup += corp_markup
         total_addl += addl
         total_gst += gst
+        total_cgst += split["cgst"]
+        total_sgst += split["sgst"]
+        total_igst += split["igst"]
         grand += line_total
         line_items.append({
             "ticket_id": t.id,
@@ -773,6 +873,9 @@ async def create_billing(
             "additional_markup": round(addl, 2),
             "discount": round(disc, 2),
             "gst_amount": round(gst, 2),
+            "cgst": split["cgst"],
+            "sgst": split["sgst"],
+            "igst": split["igst"],
             "total": round(line_total, 2),
         })
 
@@ -788,6 +891,12 @@ async def create_billing(
         total_markup=round(total_markup, 2),
         total_additional_markup=round(total_addl, 2),
         total_gst=round(total_gst, 2),
+        total_cgst=round(total_cgst, 2),
+        total_sgst=round(total_sgst, 2),
+        total_igst=round(total_igst, 2),
+        gst_treatment=pos.treatment,
+        supplier_state_code=pos.supplier_code,
+        place_of_supply_code=pos.recipient_code,
         grand_total=round(grand, 2),
         line_items=line_items,
     )
@@ -828,6 +937,10 @@ async def list_billings(
             total_markup=_f(b.total_markup),
             total_additional_markup=_f(b.total_additional_markup),
             total_gst=_f(b.total_gst),
+            total_cgst=_f(b.total_cgst),
+            total_sgst=_f(b.total_sgst),
+            total_igst=_f(b.total_igst),
+            gst_treatment=b.gst_treatment,
             grand_total=_f(b.grand_total),
             item_count=len(b.line_items or []),
             created_at=b.created_at,
@@ -860,25 +973,36 @@ async def update_billing(
 
     addl_map = {it.ticket_id: _f(it.additional_markup) for it in payload.items}
 
+    # The heads this bill was RAISED under — see api/v1/customers.py::update_billing.
+    interstate = _interstate_from_treatment(billing.gst_treatment)
+
     new_items: list[dict] = []
     total_base = total_markup = total_addl = total_gst = grand = 0.0
+    total_cgst = total_sgst = total_igst = 0.0
     for it in (billing.line_items or []):
         base = _f(it.get("base_amount"))
         markup = _f(it.get("markup_amount"))
         addl = addl_map.get(it.get("ticket_id"), _f(it.get("additional_markup")))
         disc = _f(it.get("discount"))   # preserved from creation (not edited in the popup)
-        gst = _compute_gst(base, markup + addl, billing.billing_type, disc)
+        split = _split_gst(base, markup + addl, billing.billing_type, disc, interstate=interstate)
+        gst = split["gst_amount"]
         line_total = base + markup + addl - disc + gst
         total_base += base
         total_markup += markup
         total_addl += addl
         total_gst += gst
+        total_cgst += split["cgst"]
+        total_sgst += split["sgst"]
+        total_igst += split["igst"]
         grand += line_total
         new_items.append({
             **it,
             "additional_markup": round(addl, 2),
             "discount": round(disc, 2),
             "gst_amount": round(gst, 2),
+            "cgst": split["cgst"],
+            "sgst": split["sgst"],
+            "igst": split["igst"],
             "total": round(line_total, 2),
         })
 
@@ -887,6 +1011,9 @@ async def update_billing(
     billing.total_markup = round(total_markup, 2)
     billing.total_additional_markup = round(total_addl, 2)
     billing.total_gst = round(total_gst, 2)
+    billing.total_cgst = round(total_cgst, 2)
+    billing.total_sgst = round(total_sgst, 2)
+    billing.total_igst = round(total_igst, 2)
     billing.grand_total = round(grand, 2)
     await db.commit()
     await db.refresh(billing)
@@ -926,11 +1053,9 @@ async def download_billing_pdf(
     if current_user.tenant_id:
         tres = await db.execute(select(Tenant).where(Tenant.id == current_user.tenant_id))
         tenant = tres.scalar_one_or_none()
-    agency = {
-        "name": (tenant.name if tenant and tenant.name else (tenant.domain if tenant else "")) or current_user.full_name,
-        "domain": tenant.domain if tenant else "",
-        "email": current_user.email,
-    }
+    # Includes the workspace's GSTIN and PAN — see billing_pdf.supplier_block.
+    agency = supplier_block(tenant, current_user)
+    agency["logo"] = await load_logo(tenant)
     # Corporate shares the customer field shape (company/first_name/.../gst_no/pan_no),
     # so it can be passed straight through as the BILL TO party.
     buf = build_billing_pdf(billing, corporate, agency)

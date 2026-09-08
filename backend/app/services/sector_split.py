@@ -35,6 +35,9 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 _PAIR_RE = re.compile(r"^[A-Z]{3}/[A-Z]{3}$")
 # "DEL/BOM/MAA" — the B2B slash-chain grammar (see api/v1/tickets._SECTOR_B2B_RE).
 _CHAIN_RE = re.compile(r"^[A-Z]{3}(/[A-Z]{3})+$")
+# One airport code. Used by the hyphen-chain grammar below to insist that every
+# filled slot is an airport and nothing else — "08-08-2026" must not become a route.
+_APT_RE = re.compile(r"^[A-Z]{3}$")
 _NUMERIC_RE = re.compile(r"^-?\d+(\.\d+)?$")
 
 # split_status values
@@ -66,6 +69,24 @@ def leg_sectors(sectors: str | None) -> tuple[list[str], str]:
         airports = tokens[0].split("/")
         pairs = [f"{airports[i]}/{airports[i + 1]}" for i in range(len(airports) - 1)]
         return (pairs, SINGLE if len(pairs) == 1 else SPLIT)
+
+    # Consolidator grammar: a hyphen chain printed to a fixed number of slots, with
+    # the unflown ones left blank -- "IST-AUH-DEL-   -   ". Worked on the raw string
+    # rather than `tokens`, because splitting on whitespace first yields
+    # ['IST-AUH-DEL-', '-'] and hides the shape entirely.
+    #
+    # Accepted only when every filled slot is a bare 3-letter airport AND all the
+    # blanks are TRAILING. A blank in the middle means we cannot tell which leg is
+    # missing, and the whole point of this module is to refuse to divide money
+    # across a leg count we are not sure of.
+    if "-" in s and "/" not in s:
+        slots = [p.strip() for p in s.split("-")]
+        filled = [p for p in slots if p]
+        if (len(filled) >= 2
+                and all(_APT_RE.match(p) for p in filled)
+                and slots[:len(filled)] == filled):
+            pairs = [f"{filled[i]}/{filled[i + 1]}" for i in range(len(filled) - 1)]
+            return (pairs, SINGLE if len(pairs) == 1 else SPLIT)
 
     # Fare-construction markers ("X/SIN"), mixed grammars, junk — do not guess.
     return [], UNPARSED

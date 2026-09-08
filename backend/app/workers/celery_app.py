@@ -9,6 +9,7 @@ celery_app = Celery(
         "app.workers.deal_tasks",
         "app.workers.bsp_tasks",
         "app.workers.bsp_commission_tasks",
+        "app.workers.commission_tasks",
         "app.workers.lcc_tasks",
     ],
 )

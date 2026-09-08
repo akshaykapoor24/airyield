@@ -139,9 +139,24 @@ class BillingStateTests(unittest.TestCase):
         self.assertEqual(produced, set(BILLING_STATES))
 
     def test_sendable_is_exactly_the_states_a_send_would_act_on(self):
-        self.assertEqual(set(SENDABLE_STATES), {"ready", "sent", "stale"})
+        self.assertEqual(set(SENDABLE_STATES), {"ready", "stale"})
         for state in SENDABLE_STATES:
             self.assertIn(state, BILLING_STATES)
+
+    def test_a_row_already_in_billing_cannot_be_sent_again(self):
+        """`sent` is not sendable, and that is the whole rule.
+
+        Re-sending it was a no-op that still reported "1 updated", so the screen
+        let a user send the same row for ever and told them something had
+        happened each time. Once a row is in billing the ticket is what exists,
+        and its party is changed from Billing (Sold Tickets) instead.
+        """
+        self.assertNotIn("sent", SENDABLE_STATES)
+
+    def test_stale_stays_sendable_so_a_divergence_can_be_reconciled(self):
+        """`stale` is NOT "already sent" — it is billing and the row disagreeing
+        about the party, and sending is the only thing that reconciles them."""
+        self.assertIn("stale", SENDABLE_STATES)
 
 
 if __name__ == "__main__":

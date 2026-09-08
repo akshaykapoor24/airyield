@@ -1,7 +1,7 @@
 from pydantic import BaseModel
 from typing import Optional
 
-from app.schemas.customer import SoldTicketRead, SoldTicketsSummary
+from app.schemas.customer import PlaceOfSupplyRead, SoldTicketRead, SoldTicketsSummary
 
 
 class CorporateCreate(BaseModel):
@@ -129,3 +129,4 @@ class CorporateSoldTicketsResponse(BaseModel):
     corporate: CorporateRead
     tickets: list[SoldTicketRead]
     summary: SoldTicketsSummary
+    place_of_supply: Optional[PlaceOfSupplyRead] = None

@@ -24,6 +24,23 @@ export type StatementType = {
    *  spec (services/statement_spec.py), which is what actually enforces it; opt-in per
    *  type because every spec-repo type shares one view and one upload endpoint. */
   requiresAirlineId?: boolean;
+  /** Upload demands a consolidator from the platform-admin SUPPLIER master — a
+   *  third-party statement is issued by one and the file never names them, so the uploader
+   *  is the only source of it, and the B2B deal is matched against it. Mirrors
+   *  `requires_supplier` in services/statement_spec.py, which is what actually enforces it.
+   *
+   *  The Supplier master, not Agency Master: it is the same list a B2B deal picks its
+   *  supplier from, so both sides of the match name the same thing. (Agency Master splits
+   *  one vendor into a GDS row and an LCC row, which could never line up with a deal.) */
+  requiresSupplier?: boolean;
+  /** Upload goes through the map → review & edit → confirm wizard instead of the one-shot
+   *  modal, because this type has no single fixed export: a consolidator writes whatever
+   *  spreadsheet it likes, and every airline runs its own NDC portal with its own header
+   *  names. Mirrors `supports_mapping` in services/statement_spec.py, which is what
+   *  actually decides whether /extract and /confirm answer for the type. */
+  supportsMapping?: boolean;
+  /** One line on the wizard's success screen telling the user where the rows went. */
+  doneHint?: string;
 };
 
 export type StatementCategory = {
@@ -57,7 +74,15 @@ export const STATEMENT_NAV: StatementCategory[] = [
         ],
       },
       { slug: "tgq-hmpr", label: "TGQ HMPR", kind: "spec-repo", status: "ready", apiBase: "/statements/tgq-hmpr", blurb: "TGQ / HMPR statements — one row per ticket, unlimited taxes." },
-      { slug: "ndc",      label: "NDC",      kind: "spec-repo", status: "ready", apiBase: "/statements/ndc", blurb: "NDC statements — one row per ticket, unlimited taxes." },
+      // supportsMapping, unlike TGQ HMPR above: an NDC export is the airline's own, and
+      // every airline's portal names the same field differently, so the mapping is put in
+      // front of the uploader rather than guessed at.
+      {
+        slug: "ndc", label: "NDC", kind: "spec-repo", status: "ready",
+        apiBase: "/statements/ndc", supportsMapping: true,
+        blurb: "NDC statements — the airline's own sales export, one row per transaction.",
+        doneHint: "Find them under this upload, or price them in Commission income.",
+      },
     ],
   },
   {
@@ -76,8 +101,8 @@ export const STATEMENT_NAV: StatementCategory[] = [
     slug: "third-party",
     label: "Third Party",
     types: [
-      { slug: "gds", label: "GDS", kind: "spec-repo", status: "ready", apiBase: "/statements/tp-gds", blurb: "Third-party GDS statement from your consolidator, normalized." },
-      { slug: "lcc", label: "LCC", kind: "spec-repo", status: "ready", apiBase: "/statements/tp-lcc", blurb: "Third-party LCC statement from your consolidator, normalized." },
+      { slug: "gds", label: "GDS", kind: "spec-repo", status: "ready", apiBase: "/statements/tp-gds", requiresSupplier: true, supportsMapping: true, blurb: "Third-party GDS statement from your consolidator, normalized.", doneHint: "Price it under Vendors data → Commission income → Third Party." },
+      { slug: "lcc", label: "LCC", kind: "spec-repo", status: "ready", apiBase: "/statements/tp-lcc", requiresSupplier: true, supportsMapping: true, blurb: "Third-party LCC statement from your consolidator, normalized.", doneHint: "Price it under Vendors data → Commission income → Third Party." },
     ],
   },
 ];

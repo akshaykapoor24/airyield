@@ -33,16 +33,9 @@ from typing import Iterable
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.models.airline import Airline
 from app.models.bsp_statement import BspStatement, BspStatementRow, BspTaxBreakup
-from app.models.deal import (
-    Deal as UnifiedDeal,
-    DealIncentiveConfig,
-    DealRule,
-    build_rule_dict,
-)
 from app.services.bsp_reconciliation import INCENTIVE_TYPE_KEYS, norm_tn
 from app.services.bsp_tgq_enrichment import SOURCE_TGQ, TgqIndex, load_tgq_index
 from app.services.deal_matching import (
@@ -52,9 +45,12 @@ from app.services.deal_matching import (
     _calc_base,
     _flight_type_matches,
 )
-from app.services.exclusion_evaluator import (
-    evaluate_exclusion_for_payout_values,
-    evaluate_inclusion_for_payout_values,
+from app.services.commission_core import (
+    SECTOR_RULE_FIELDS,
+    TRAVEL_RULE_FIELDS,
+    RowCalcResult,
+    apply_payout_rules,
+    needs_data_reason,
 )
 
 __all__ = [
@@ -170,24 +166,6 @@ class BspRowContext:
         if not self.travel_date:
             out.append("travel_date")
         return out
-
-
-@dataclass
-class RowCalcResult:
-    row_id:  int
-    # calculated | needs_data | excluded | reversed | skipped | unmatched
-    #
-    # needs_data: a deal matched, but it restricts by a criterion this settlement
-    # row does not carry (no TGQ counterpart), so the figure could not be verified.
-    # `incentive` is None there — not 0 — see calculate_row.
-    status:  str
-    incentive: float | None = None
-    iata_commission: float = 0.0
-    deal_id:   int | None = None
-    deal_type: str | None = None
-    deal_name: str | None = None
-    breakdown: dict[str, float] = field(default_factory=dict)
-    reason:    str | None = None
 
 
 def _f(v) -> float | None:
@@ -495,116 +473,16 @@ async def build_original_index(
     return index
 
 
-# Rule condition fields that can only be answered from a SECTOR, and from a
-# TRAVEL DATE. A BSP row prints neither, so a rule built on one of these is not
-# evaluated at all — exclusion_evaluator self-skips a field it cannot resolve.
-# Silently passing such a rule is how an unenriched row gets paid on terms nobody
-# checked, so the caller is told which ones went unchecked instead.
-_SECTOR_RULE_FIELDS = {
-    "continent", "originAirport", "destAirport", "originCountry", "destCountry",
-    "domesticCountry", "city", "soto", "route", "sector",
-}
-_TRAVEL_RULE_FIELDS = {"departure", "departureFrom", "departureTo", "travelDate"}
-
-
-async def _apply_payout_rules(
-    db: AsyncSession,
-    deal_id: int,
-    breakdown: dict[str, float],
-    ctx: BspRowContext,
-) -> tuple[bool, bool, str | None, set[str]]:
-    """Run the matched deal's payout inclusion/exclusion rules.
-
-    Returns (blocked, had_inclusion_rule, reason, unconfirmed).
-
-    `unconfirmed` names the criteria a rule DEPENDS ON that this row could not
-    supply. A rule keyed on route cannot be judged against a settlement row with
-    no sector; reporting that is the difference between "these terms were met"
-    and "these terms were never looked at".
-    """
-    res = await db.execute(
-        select(UnifiedDeal)
-        .options(
-            selectinload(UnifiedDeal.incentives)
-            .selectinload(DealIncentiveConfig.rules)
-            .selectinload(DealRule.conditions)
-        )
-        .where(UnifiedDeal.id == deal_id)
-    )
-    deal = res.scalar_one_or_none()
-    if deal is None:
-        return False, False, None
-
-    issue_raw = ctx.issue_date.isoformat() if ctx.issue_date else None
-    # ISO, never the bare '14MAY' — exclusion_evaluator parses with dayfirst=True, which is
-    # inert on YYYY-MM-DD, and a year-less token would silently assume the current year.
-    travel_raw = ctx.travel_date.isoformat() if ctx.travel_date else None
-    skip_fields = ctx.skip_rule_fields
-    had_inclusion = False
-    unconfirmed: set[str] = set()
-
-    for config in deal.incentives:
-        if config.incentive_type not in breakdown:
-            continue
-        for rule in config.rules:
-            rule_dict = build_rule_dict(rule.conditions)
-            if not rule_dict:
-                continue
-            # Note what this rule needed and the row could not give it, before
-            # running it — the evaluator answers "not blocked" either way.
-            fields = set(rule_dict)
-            if ctx.sector is None and (fields & _SECTOR_RULE_FIELDS):
-                unconfirmed.add("sector")
-            if ctx.travel_date is None and (fields & _TRAVEL_RULE_FIELDS):
-                unconfirmed.add(SKIP_TRAVEL_DATE)
-            if ctx.booking_class is None and "class" in fields:
-                unconfirmed.add(SKIP_CLASS)
-
-            if rule.rule_category == "payout_inclusion":
-                had_inclusion = True
-                ok, reason = await evaluate_inclusion_for_payout_values(
-                    db, rule_dict,
-                    sector=ctx.sector, booking_class=ctx.booking_class,
-                    ticket_date_raw=issue_raw, departure_raw=travel_raw,
-                    airline_name=ctx.airline_name, tour_code=ctx.tour_code,
-                    skip_fields=skip_fields,
-                )
-                if not ok:
-                    return True, had_inclusion, reason, unconfirmed
-            elif rule.rule_category == "payout_exclusion":
-                excluded, reason = await evaluate_exclusion_for_payout_values(
-                    db, rule_dict,
-                    sector=ctx.sector, booking_class=ctx.booking_class,
-                    ticket_date_raw=issue_raw, departure_raw=travel_raw,
-                    airline_name=ctx.airline_name, tour_code=ctx.tour_code,
-                    skip_fields=skip_fields,
-                )
-                if excluded:
-                    return True, had_inclusion, reason, unconfirmed
-    return False, had_inclusion, None, unconfirmed
-
-
-_NEEDS_DATA_LABEL = {
-    SKIP_CLASS: "cabin class",
-    SKIP_TRAVEL_DATE: "travel date",
-    "sector": "sector",
-}
-
-
-def _needs_data_reason(deal_no: str, unconfirmed: list[str]) -> str:
-    """Say what is missing, why it matters, and what to do about it.
-
-    DELIBERATELY IDENTICAL FOR EVERY ROW WITH THE SAME GAP. The "Unmatched &
-    skipped" tab groups rows by (status, reason), so naming the ticket here — as
-    an earlier version did — gave 9,021 rows 9,021 distinct reasons and turned one
-    actionable bucket into 12,088 groups and a 959 KB response. The tab already
-    carries sample document numbers per bucket; that is where the specifics live.
-    """
-    missing = ", ".join(_NEEDS_DATA_LABEL.get(c, c) for c in unconfirmed)
-    return (
-        f"{missing.capitalize()} not known — deal {deal_no} pays only on specific "
-        f"{missing}. Upload the TGQ HMPR covering this period and re-run."
-    )[:500]
+# ── Moved to services/commission_core ───────────────────────────────────────
+# `_apply_payout_rules`, `_needs_data_reason` and the rule-field sets are source-agnostic:
+# they read an airline, some dates, a class, a sector and a tour code, and nothing about
+# BSP. They now live in commission_core so the third-party and LCC runners use the SAME
+# pass rather than a near-copy that drifts. Re-bound here under their old private names so
+# every call site in this file — and its behaviour — is unchanged.
+_SECTOR_RULE_FIELDS = SECTOR_RULE_FIELDS
+_TRAVEL_RULE_FIELDS = TRAVEL_RULE_FIELDS
+_apply_payout_rules = apply_payout_rules
+_needs_data_reason = needs_data_reason
 
 
 async def calculate_row(

@@ -39,5 +39,21 @@ class Billing(Base):
     total_gst:               Mapped[float] = mapped_column(Numeric(14, 2), nullable=False, default=0)
     grand_total:             Mapped[float] = mapped_column(Numeric(14, 2), nullable=False, default=0)
 
+    # WHICH GST, not just how much. Exactly one side of this is ever non-zero:
+    # an intra-state supply carries CGST + SGST, an inter-state one carries IGST,
+    # and `total_gst` stays their sum so every existing reader keeps working.
+    total_cgst:              Mapped[float] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    total_sgst:              Mapped[float] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    total_igst:              Mapped[float] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+
+    # The place-of-supply decision, snapshotted with the rest of the bill.
+    # 'cgst_sgst' | 'igst' | 'unsplit' (raised, but the states were unknown);
+    # NULL means raised before billing_gst_split_01, when only a total existed.
+    # Editing a billing re-applies THIS rather than re-deciding from the party's
+    # current address — see billing_calc.interstate_from_treatment.
+    gst_treatment:           Mapped[str | None] = mapped_column(String(16), nullable=True)
+    supplier_state_code:     Mapped[str | None] = mapped_column(String(2), nullable=True)
+    place_of_supply_code:    Mapped[str | None] = mapped_column(String(2), nullable=True)
+
     line_items:    Mapped[list | None] = mapped_column(JSONB, nullable=True)
     created_at:    Mapped[datetime]    = mapped_column(DateTime, default=datetime.utcnow)

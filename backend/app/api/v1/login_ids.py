@@ -15,6 +15,7 @@ from app.models.login_id import LoginId
 from app.models.supplier import Supplier
 from app.models.user import User
 from app.schemas.login_id import LoginIdCreate, LoginIdUpdate, LoginIdRead, BulkUploadResult
+from app.services import spreadsheet
 
 router = APIRouter()
 
@@ -131,10 +132,10 @@ async def bulk_upload_login_ids(
         last_missing = None
         for header_row in (0, 1, 2):
             try:
-                if filename.endswith(".xls"):
-                    df_try = pd.read_excel(BytesIO(content), dtype=str, header=header_row)
-                else:
-                    df_try = pd.read_excel(BytesIO(content), dtype=str, engine="openpyxl", header=header_row)
+                # Format from the bytes, not the extension: a supplier's ".xls"
+                # is as often an xlsx or a CSV, and a real one needs an engine
+                # pandas will not pick on its own.
+                df_try = spreadsheet.read_df(content, filename, header_row)
                 df_try = _normalize_columns(df_try)
                 missing = required - set(df_try.columns)
                 last_missing = missing

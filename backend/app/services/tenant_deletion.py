@@ -89,6 +89,15 @@ DELETION_GROUPS: tuple[DeletionGroup, ...] = (
         ("uploaded_tickets", "ticket_calculations", "ticket_reconciliation", "ticket_adjustments"),
     ),
     DeletionGroup(
+        # Ordered BEFORE the statement groups: a calculation points at a statement row by
+        # id with no FK, so deleting statements first would leave figures referring to
+        # rows that no longer exist.
+        "commission", "Commission income",
+        "Every commission run and the per-row figures it produced.",
+        GroupCategory.RECORDS,
+        ("commission_calculations", "commission_runs"),
+    ),
+    DeletionGroup(
         "bsp", "BSP statements", "BSP settlement and summary uploads with every row and tax breakup.",
         GroupCategory.RECORDS,
         ("bsp_statements", "bsp_statement_rows", "bsp_tax_breakups", "bsp_parse_errors",
@@ -106,7 +115,7 @@ DELETION_GROUPS: tuple[DeletionGroup, ...] = (
         ("tgq_hmpr", "ndc", "lcc_di", "lcc_divided_pnr", "lcc_flown_report",
          "lcc_cta_bta", "third_party_gds", "third_party_lcc",
          "lcc_detailed", "lcc_detailed_batch", "lcc_batch_airline_ids",
-         "statement_batch_airline_ids"),
+         "statement_batch_airline_ids", "statement_batch_suppliers"),
     ),
     DeletionGroup(
         "internal_statements", "Internal statements", "The workspace's own ticket statements.",
@@ -161,6 +170,16 @@ DELETION_GROUPS: tuple[DeletionGroup, ...] = (
         "Rows this workspace created before IATA Commission became a global master. "
         "The global master is untouched.",
         GroupCategory.SETUP, ("iata_commissions",),
+    ),
+    DeletionGroup(
+        "gst_configurations", "GST configuration overrides",
+        "GST rules this workspace set for itself. The platform's global rules — "
+        "abatement, and the normal agency / reseller split — are untouched.",
+        # The table carries a nullable tenant_id purely as an escape hatch for a
+        # per-tenant override; every seeded rule is global (tenant_id NULL) and
+        # `tenant_predicate` therefore matches none of them. The group exists so
+        # a future override cannot outlive the workspace that created it.
+        GroupCategory.SETUP, ("gst_configurations",),
     ),
     DeletionGroup(
         "workflows", "Approval workflows", "Approval workflow definitions, their steps and approvers.",

@@ -136,11 +136,14 @@ EXCLUDED_TABLES: frozenset[str] = frozenset({
     # upload-session parents whose rows are counted instead
     "bsp_statements", "bsp_summary_statements", "deal_statements", "deal_batches",
     "lcc_detailed_batch",
-    # which of the workspace's airline ids an LCC upload covers — a link between two
-    # already-classified tables, not a record the workspace produced
-    "lcc_batch_airline_ids", "statement_batch_airline_ids",
-    # derived caches, not user data
+    # which of the workspace's airline ids an LCC upload covers, and which agency sent a
+    # third-party upload — links between two already-classified tables, not records the
+    # workspace produced
+    "lcc_batch_airline_ids", "statement_batch_airline_ids", "statement_batch_suppliers",
+    # derived caches, not user data — a commission figure is recomputed from a statement
+    # row and a deal, so counting it would count the same work twice
     "ticket_calculations", "ticket_reconciliation",
+    "commission_runs", "commission_calculations",
     # config / master data owned by the workspace
     "users", "customers", "corporates", "entities", "user_entities",
     "user_login_ids", "login_ids", "agencies", "agency_entities",
