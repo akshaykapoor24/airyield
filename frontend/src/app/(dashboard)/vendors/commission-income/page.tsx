@@ -1,5 +1,5 @@
-import CommissionIncomeView from "@/components/commission/CommissionIncomeView";
+import CommissionIncomeTabs from "@/components/commission/CommissionIncomeTabs";
 
 export default function CommissionIncomePage() {
-  return <CommissionIncomeView />;
+  return <CommissionIncomeTabs />;
 }

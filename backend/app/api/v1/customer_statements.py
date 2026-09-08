@@ -65,10 +65,16 @@ async def download_customer_template(
 async def extract_customer_file(
     file: UploadFile = File(...),
     column_mapping: Optional[str] = Form(None),
+    sheet_name: Optional[str] = Form(None),
+    header_row: Optional[int] = Form(None),
     current_user: User = Depends(get_current_user),
 ):
-    """Parse an XLS/XLSX and return a preview for review. B2B only. No DB write.
-    Reuses the internal-statement extraction service (table-agnostic)."""
+    """Parse a spreadsheet and return a preview for review. B2B only. No DB write.
+    Reuses the internal-statement extraction service (table-agnostic).
+
+    sheet_name / header_row are detected on the first call and echoed back on the
+    second, so the read that carries the mapping sees exactly the columns the
+    mapping was built against. Same contract as /tickets/upload/extract."""
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file provided.")
 
@@ -87,6 +93,7 @@ async def extract_customer_file(
     try:
         result = await TicketExtractionService.extract(
             chunk, file.filename, column_mapping=mapping_dict, statement_type="B2B",
+            sheet_name=sheet_name, header_row=header_row,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
@@ -100,6 +107,15 @@ async def extract_customer_file(
         suggested_mapping=result.get("suggested_mapping", {}),
         is_template_match=result.get("is_template_match", True),
         sample_row=result.get("sample_row", {}),
+        sheet_name=result.get("sheet_name"),
+        sheet_names=result.get("sheet_names", []),
+        header_row=result.get("header_row", 0),
+        preamble=result.get("preamble", []),
+        detected_from=result.get("detected_from"),
+        detected_to=result.get("detected_to"),
+        sample_rows=result.get("sample_rows", {}),
+        unmapped_columns=result.get("unmapped_columns", []),
+        fuzzy_suggestions=result.get("fuzzy_suggestions", {}),
     )
 
 

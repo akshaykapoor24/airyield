@@ -40,6 +40,9 @@ pyasn1==0.6.3
 pycparser==3.0
 pydantic==2.12.5
 pydantic-settings==2.13.1
+# Reads legacy .xls (BIFF), which openpyxl cannot and which pandas otherwise routes
+# to xlrd. One dependency covering .xls/.xlsx/.xlsm/.xlsb; see services/spreadsheet.py.
+python-calamine==0.8.2
 pydantic_core==2.41.5
 PyMuPDF==1.27.2.2
 python-dateutil==2.9.0.post0

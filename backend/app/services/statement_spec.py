@@ -16,6 +16,7 @@ from app.services import divided_pnr as _dp
 from app.services import flown_report as _fr
 from app.services import cta_bta_report as _cb
 from app.services import flat_statement as _flat
+from app.services import ndc_spec as _ndc
 
 # ── TGQ HMPR ─────────────────────────────────────────────────────────────────
 # The user's column list MINUS the Tax_TypeN/TaxN pairs (those fold into `taxes`).
@@ -111,6 +112,40 @@ _TGQ_TOTAL_ROW = {
     "require_blank": ["ticket_no", "pax_name", "sectors"],
 }
 
+# ── Third Party ──────────────────────────────────────────────────────────────
+# `summary` does double duty: it is the totals slab AND the only way these columns get
+# money formatting, because `money_fields()` is (split divide_fields ∪ summary fields) and
+# the third-party tables do not split. The declared-total block stays empty for them —
+# `_summary` gates it on `_splits(model)` — which is right: the export has no total line.
+_TP_SUMMARY = [
+    {"field": "base_fare",         "label": "Basic Fare"},
+    {"field": "yq",                "label": "YQ"},
+    {"field": "other_taxes",       "label": "Other Taxes"},
+    {"field": "commission_amount", "label": "Agent Commission"},
+    {"field": "incentive_amount",  "label": "Incentive"},
+    {"field": "net_amount",        "label": "Net Amount"},
+]
+
+# Filtering on `airline_master_name`, not the file's `airline_name`: the master spelling is
+# what the deal was written against, so it is also the grouping a user reasons about.
+_TP_GDS_FILTERS = [
+    {"field": "airline_master_name", "label": "Airline",   "type": "select"},
+    {"field": "segment_type",        "label": "Category",  "type": "select"},
+    {"field": "ticket_status",       "label": "Status",    "type": "select"},
+    {"field": "customer_name",       "label": "Customer",  "type": "select"},
+    {"field": "ticket_number",       "label": "Ticket No", "type": "text"},
+    {"field": "pnr",                 "label": "PNR",       "type": "text"},
+    {"field": "passenger_name",      "label": "Passenger", "type": "text"},
+]
+_TP_LCC_FILTERS = [
+    {"field": "airline_master_name", "label": "Airline",   "type": "select"},
+    {"field": "ticket_status",       "label": "Status",    "type": "select"},
+    {"field": "customer_name",       "label": "Customer",  "type": "select"},
+    {"field": "pnr",                 "label": "PNR",       "type": "text"},
+    {"field": "passenger_name",      "label": "Passenger", "type": "text"},
+]
+
+
 STATEMENT_SPECS: dict[str, dict] = {
     "tgq-hmpr": {
         "label": "TGQ HMPR",
@@ -124,16 +159,27 @@ STATEMENT_SPECS: dict[str, dict] = {
         "summary": _TGQ_SUMMARY,
         "total_row": _TGQ_TOTAL_ROW,
     },
+    # NDC — the airline's own (New Distribution Capability) sales export. See
+    # services/ndc_spec.py for the columns and for why this one is mapped rather than read
+    # verbatim like TGQ HMPR: every airline runs its own NDC portal and names the same
+    # field differently, so `supports_mapping` puts the mapping in front of the uploader
+    # instead of guessing. `fold_taxes` is off — an NDC export names its taxes as columns
+    # (`YQ Tax`, `K3 Tax`, …) rather than as generic Tax_TypeN/TaxN pairs.
+    #
+    # The `ndc` table carries the per-sector leg columns (they were added alongside TGQ
+    # HMPR's) but splitting stays off: `Sectors` on an NDC line is a single leg.
     "ndc": {
         "label": "NDC",
-        "headers": _TGQ_HMPR_HEADERS,   # same airline-ticket shape as TGQ HMPR for now
-        "fold_taxes": True,
-        "tax_after": _TGQ_HMPR_TAX_AFTER,
-        "template_tax_pairs": 20,
-        # NDC shares the TGQ HMPR column shape, so per-sector splitting, filters and the
-        # summary slab work here too — the `ndc` table already carries the leg columns.
-        # Add "split_sectors": _TGQ_SPLIT, "filters": _TGQ_FILTERS, "summary": _TGQ_SUMMARY,
-        # "total_row": _TGQ_TOTAL_ROW to switch it on (then re-upload or re-process batches).
+        "columns": _ndc.COLUMNS,
+        "aliases": _ndc.ALIASES,
+        "group_order": _ndc.GROUP_ORDER,
+        "fold_taxes": False,
+        "supports_mapping": True,
+        "required_groups": _ndc.REQUIRED_GROUPS,
+        "advisory_groups": _ndc.ADVISORY_GROUPS,
+        "filters": _ndc.FILTERS,
+        "summary": _ndc.SUMMARY,
+        "money": _ndc.MONEY_FIELDS,
     },
     # LCC Detailed Statement now has its OWN dedicated batch+rows schema, wizard router
     # (api/v1/lcc_detailed.py) and spec (services/lcc_detailed_spec.py) — it is no longer
@@ -176,17 +222,40 @@ STATEMENT_SPECS: dict[str, dict] = {
     },
     # Third Party — a consolidator/big agency sends the sub-agency a GDS/LCC statement of
     # the bookings it made through them (see services/flat_statement.py).
+    #
+    # `resolve_airline` — unlike the LCC types, these files DO name their carrier, but they
+    # name it as free text ("TURKISH AIRLINES") and as a ticket prefix ("235"), neither of
+    # which any downstream join can use. So the airline master is consulted at ingest and
+    # the row is stamped with the canonical name and the 2-letter code. Opt-in per type
+    # because TGQ HMPR and NDC share this router and already carry a usable code.
+    #
+    # `requires_supplier` — the uploader must name the consolidator from the
+    # platform-admin Supplier master. A third-party statement is issued BY one and nothing
+    # in the file names them, so the uploader is the only source of that fact, and without
+    # it the B2B deal has nothing to match against. The Supplier master, not Agency Master:
+    # it is the same list `deals.supplier_name` is picked from, so both sides of the match
+    # name the same thing. Same opt-in discipline as `requires_airline_id`.
     "tp-gds": {
         "label": "GDS",
         "parser": "tp-gds",
         "columns": _flat.TP_GDS_DISPLAY,
         "fold_taxes": False,
+        "resolve_airline": True,
+        "requires_supplier": True,
+        "supports_mapping": True,
+        "filters": _TP_GDS_FILTERS,
+        "summary": _TP_SUMMARY,
     },
     "tp-lcc": {
         "label": "LCC",
         "parser": "tp-lcc",
         "columns": _flat.TP_LCC_DISPLAY,
         "fold_taxes": False,
+        "resolve_airline": True,
+        "requires_supplier": True,
+        "supports_mapping": True,
+        "filters": _TP_LCC_FILTERS,
+        "summary": _TP_SUMMARY,
     },
 }
 
@@ -247,6 +316,82 @@ def requires_airline_id(slug: str) -> bool:
     return bool(s and s.get("requires_airline_id"))
 
 
+def requires_supplier(slug: str) -> bool:
+    """Must the uploader name the consolidator from the Supplier master?
+
+    True for the third-party types. Their statements are issued BY a vendor the file never
+    names, so the uploader is the only source of it — and it is what the B2B deal is
+    matched against (services/deal_matching.py's supplier guard).
+
+    A plain bool, unlike the channel this used to return: `suppliers` has one row per
+    branch with a unique code and no channel, so the id alone identifies the counterparty
+    and there is nothing left to validate it against.
+
+    Opt-in per type, exactly like `requires_airline_id`: BSP, TGQ HMPR, NDC and the LCC
+    ledger types share this router and must not grow the requirement.
+    """
+    s = spec_for(slug)
+    return bool(s and s.get("requires_supplier"))
+
+
+def supports_mapping(slug: str) -> bool:
+    """Can this type be uploaded through the map-review-confirm wizard?
+
+    True for the third-party types and for NDC. A consolidator writes whatever spreadsheet
+    it likes, and every airline's NDC portal names the same field differently — the alias
+    map covers the shapes we have seen, and the wizard covers the ones we have not, by
+    letting the uploader say which of their columns is which. The remaining types on this
+    router come out of one system with one fixed export (BSPlink, a GDS), so a mapping step
+    there would be a question with one possible answer.
+    """
+    s = spec_for(slug)
+    return bool(s and s.get("supports_mapping"))
+
+
+def aliases(slug: str) -> dict[str, list[str]]:
+    """{field: [source header, …]} used to auto-map an arbitrary file onto this spec.
+
+    Only the spec-driven mapped types declare this; the `parser` types keep their alias map
+    inside their own builder (services/flat_statement.py), which is also where their
+    mapping comes from. Empty here means "match on the canonical header only".
+    """
+    s = spec_for(slug)
+    return dict(s.get("aliases") or {}) if s else {}
+
+
+def group_order(slug: str) -> list[str]:
+    """Section order for the mapping screen; unlisted groups fall to the end in spec order."""
+    s = spec_for(slug)
+    return list(s.get("group_order") or []) if s else []
+
+
+def required_groups(slug: str) -> list[dict]:
+    """Field groups the confirm step REFUSES a mapping without ("at least one of these").
+
+    Falls back to the flat-statement rule, which is what the `parser` types are checked
+    against — so a type that declares neither keeps exactly the behaviour it had.
+    """
+    s = spec_for(slug)
+    return list((s or {}).get("required_groups") or _flat.REQUIRED_GROUPS)
+
+
+def advisory_groups(slug: str) -> list[dict]:
+    """Field groups the confirm step ACCEPTS but warns about. See `required_groups`."""
+    s = spec_for(slug)
+    return list((s or {}).get("advisory_groups") or _flat.ADVISORY_GROUPS)
+
+
+def resolves_airline(slug: str) -> bool:
+    """Should ingest look this type's carrier up in the airline master?
+
+    True for the third-party types, whose files name the carrier only as free text and a
+    ticket prefix — neither of which the deal matcher or PLB accrual can join on. See
+    services/tp_airline_resolution.py.
+    """
+    s = spec_for(slug)
+    return bool(s and s.get("resolve_airline"))
+
+
 # ── Optional, opt-in behaviours ──────────────────────────────────────────────
 # Every accessor below returns None/[] for a slug that doesn't declare the key, so the
 # router and the shared frontend view short-circuit and behave exactly as before.
@@ -282,12 +427,19 @@ def total_row_config(slug: str) -> dict | None:
 
 
 def money_fields(slug: str) -> set[str]:
-    """Fields the UI should right-align and thousands-format (divided ∪ summarised)."""
+    """Fields the UI should right-align and thousands-format.
+
+    Divided ∪ summarised ∪ an explicit `money` list. The first two are inferred because a
+    field that is allocated across legs or totalled in the slab is necessarily an amount;
+    the explicit list is for the amounts that are neither — NDC has 25 money columns and
+    only six of them are worth a total.
+    """
     s = spec_for(slug)
     if not s:
         return set()
     out = set((s.get("split_sectors") or {}).get("divide_fields") or [])
     out |= {f["field"] for f in (s.get("summary") or [])}
+    out |= set(s.get("money") or ())
     return out
 
 

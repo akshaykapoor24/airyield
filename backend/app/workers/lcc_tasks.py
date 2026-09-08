@@ -57,17 +57,14 @@ def _bucket() -> str:
 
 
 def _read_df(content: bytes, filename: str, header_row: int):
-    import pandas as pd
-    name = (filename or "").lower()
-    if name.endswith(".csv"):
-        # index_col=False keeps columns positionally aligned even when data rows end with a
-        # trailing delimiter (otherwise pandas steals the first column as an index and every
-        # value shifts left). MUST match the extract-time reader in api/v1/lcc_detailed.py.
-        return pd.read_csv(io.BytesIO(content), dtype=str, sep=None, engine="python",
-                           header=header_row, index_col=False)
-    if name.endswith(".xls"):
-        return pd.read_excel(io.BytesIO(content), dtype=str, header=header_row)
-    return pd.read_excel(io.BytesIO(content), dtype=str, engine="openpyxl", header=header_row)
+    """The worker's reader, which MUST agree with the extract-time one in
+    api/v1/lcc_detailed.py — it re-reads the same file at the pinned header row.
+
+    Both now call the same function, so they cannot drift apart. That is a stronger
+    guarantee than the comment that used to say they must not.
+    """
+    from app.services import spreadsheet
+    return spreadsheet.read_df(content, filename, header_row)
 
 
 async def _mark_failed(batch_id: str, tenant_id: int, message: str):

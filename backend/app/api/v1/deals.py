@@ -59,6 +59,7 @@ from app.models.deal import (
     DealDirection, DealScopeType, SlabTypeEnum, SlabValueTypeEnum, RuleOperatorEnum,
 )
 from app.models.agency import Agency
+from app.models.supplier import Supplier
 from app.models.agency_entity import AgencyEntity
 from app.models.corporate import Corporate
 
@@ -166,6 +167,39 @@ async def _resolve_scope(
         scope_type=DealScopeType.ALL,
         party_name="All Customers", supplier_label="All Customers",
     )
+
+
+async def _resolve_supplier(
+    db: AsyncSession,
+    direction: DealDirection,
+    deal_type: str,
+    supplier_id: Optional[int],
+) -> Optional[int]:
+    """Check the Supplier master branch an INCOMING B2B deal was signed with.
+
+    `suppliers` is GLOBAL platform-admin master data, so unlike `_resolve_scope` there is
+    no ownership to authorise — the id either names a real vendor or it does not. What is
+    checked is that it exists, because a stale id would silently store a link to nothing
+    and the matcher would fall back to the name without saying so.
+
+    Silently None for anything that is not an incoming B2B deal, rather than a 400 —
+    `ck_deals_supplier` forbids the column there, and a client that sends it on an airline
+    deal is confused, not malicious. Returning None keeps the row legal.
+    """
+    if supplier_id is None:
+        return None
+    if direction != DealDirection.INBOUND or deal_type != "b2b":
+        return None
+    supplier = (await db.execute(
+        select(Supplier).where(Supplier.id == supplier_id)
+    )).scalar_one_or_none()
+    if not supplier:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Supplier id {supplier_id} is not in the Supplier master. Pick the "
+                   f"consolidator from the list, or ask your platform admin to add them.",
+        )
+    return supplier.id
 
 
 class UploadConfirmResult(BaseModel):
@@ -1423,6 +1457,7 @@ async def create_b2b_deal(
         scope.supplier_label if direction == DealDirection.OUTBOUND
         else (payload.supplier_name or None)
     )
+    supplier_id = await _resolve_supplier(db, direction, "b2b", payload.supplier_id)
 
     batch = DealBatch(
         batch_id=batch_id,
@@ -1467,6 +1502,7 @@ async def create_b2b_deal(
         source_agent=payload.source_agent or "manual",
         deal_maker_name=payload.deal_maker_name or None,
         supplier_name=supplier_name,
+        supplier_id=supplier_id,
         remark=payload.remark or None,
         airline_type=payload.airline_type or None,
         airline_name=payload.airline_name or None,
@@ -1508,6 +1544,7 @@ async def create_b2b_deal(
         "source_agent": deal.source_agent,
         "deal_maker_name": deal.deal_maker_name,
         "supplier_name": deal.supplier_name,
+        "supplier_id": deal.supplier_id,
         "remark": deal.remark,
         "airline_type": deal.airline_type,
         "airline_name": deal.airline_name,
@@ -1661,6 +1698,8 @@ async def get_deal_form(
         "iata_number": deal.iata_number,
         "iata_commission": deal.iata_commission,
         "supplier_name": deal.supplier_name,
+        # Read back so the edit form can pre-select the Branch it was signed with.
+        "supplier_id": deal.supplier_id,
         "remark": deal.remark,
         "deal_maker_name": deal.deal_maker_name,
         "incentive_types": inc_types,
@@ -1954,6 +1993,15 @@ async def _update_unified_deal(
         deal.scope_party_name = scope.party_name
         if deal.direction == DealDirection.OUTBOUND:
             deal.supplier_name = scope.supplier_label
+
+    # 1b. The supplier BRANCH on an incoming B2B deal. Keyed on model_fields_set, not on
+    #     truthiness: an edit that omits it must leave the link alone, while sending it as
+    #     null is the deliberate way to clear it. The helper returns None for any deal the
+    #     CHECK forbids it on rather than 400ing.
+    if "supplier_id" in payload.model_fields_set:
+        deal.supplier_id = await _resolve_supplier(
+            db, deal.direction, deal.deal_type.value, payload.supplier_id,
+        )
 
     # 2. Rebuild incentive/slab/rule rows only when the edit touched them.
     touches_relations = (

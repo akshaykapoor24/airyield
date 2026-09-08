@@ -59,8 +59,19 @@ BILLING_STATES = (
     "sent",          # in billing, and billing agrees with the row
 )
 
-# Filter-only aggregate: exactly the rows a "send these" would act on.
-SENDABLE_STATES = ("ready", "sent", "stale")
+# Exactly the rows a "send these" would act on.
+#
+# `sent` is DELIBERATELY ABSENT. A row already in billing has nothing left to send
+# — re-sending it was a no-op update that still let a user tick it, hit Send, and
+# be told "1 updated", which reads as though something happened. Once a row is in
+# billing the ticket is the thing that exists, and its party is changed in Billing
+# (Sold Tickets), not by pushing this row through again.
+#
+# `stale` stays: that is not "already sent", it is billing and this row DISAGREEING
+# about the party, and sending is the only way to reconcile them. It can no longer
+# arise from this screen — the pickers lock once a row is projected — so it only
+# covers divergences created before that rule existed.
+SENDABLE_STATES = ("ready", "stale")
 
 _STATEMENT_TYPE = "LCC"          # `statement_type` is String(10); no CHECK on it.
 _MAX_SECTOR = 200                # UploadedTicket.sector / .flight_no are String(200)

@@ -1,6 +1,7 @@
 "use client";
 
-// Pick ONE customer or corporate, by id.
+// Pick ONE party by id — a customer, a corporate, or (for a third-party statement's
+// consolidator) an agency.
 //
 // Neither existing control fits. `ui/SearchSelect.tsx` stores a STRING, and its own
 // comment warns that two master rows sharing a name become indistinguishable once
@@ -13,23 +14,40 @@
 // name are still distinguishable in the list.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Building, ChevronDown, Search, User } from "lucide-react";
+import { Building, ChevronDown, Search, Store, User } from "lucide-react";
 
-export type PartyOption = {
+export type PartyKind = "customer" | "corporate" | "agency";
+
+/** Generic over `kind` so the picker hands back exactly the kinds it was given: the LCC
+ *  billing worklist offers only customers and corporates and keeps its narrow state type,
+ *  while the third-party upload modal offers only agencies. Widening one shared union
+ *  instead would have forced every caller to handle kinds it can't. */
+export type PartyOption<K extends PartyKind = PartyKind> = {
   value: number;
   label: string;
   sublabel?: string;
-  kind: "customer" | "corporate";
+  kind: K;
 };
 
-export default function LccPartyPicker({
-  options, value, onChange, placeholder = "Select a customer or corporate…",
+export default function LccPartyPicker<K extends PartyKind = PartyKind>({
+  options, value, valueKind, onChange, placeholder = "Select a customer or corporate…",
   disabled, allowClear = true, size = "md",
+  searchPlaceholder = "Search customers and corporates…",
+  emptyLabel = "No customers or corporates yet — add them under User master.",
 }: {
-  options: PartyOption[];
+  options: PartyOption<K>[];
   value: number | null;
-  onChange: (opt: PartyOption | null) => void;
+  /** Which list `value` indexes into. Ids are only unique WITHIN a kind, so
+   *  customer #7 and corporate #7 both answer to `value === 7`; without this the
+   *  first match wins and the picker names the wrong party. Optional so existing
+   *  single-kind callers are unaffected, but pass it whenever the options mix kinds. */
+  valueKind?: K;
+  onChange: (opt: PartyOption<K> | null) => void;
   placeholder?: string;
+  /** Copy for whatever this instance is picking. Defaults keep the customer/corporate
+   *  wording so the LCC billing worklist is unchanged. */
+  searchPlaceholder?: string;
+  emptyLabel?: string;
   disabled?: boolean;
   allowClear?: boolean;
   /** "sm" for the per-row control inside the worklist table. */
@@ -47,7 +65,10 @@ export default function LccPartyPicker({
     return () => document.removeEventListener("mousedown", h);
   }, []);
 
-  const selected = useMemo(() => options.find((o) => o.value === value) ?? null, [options, value]);
+  const selected = useMemo(
+    () => options.find((o) => o.value === value && (valueKind === undefined || o.kind === valueKind)) ?? null,
+    [options, value, valueKind],
+  );
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -70,6 +91,7 @@ export default function LccPartyPicker({
       >
         <span className={`truncate flex items-center gap-1.5 ${selected ? "text-slate-800" : "text-slate-400"}`}>
           {selected?.kind === "corporate" && <Building className="w-3 h-3 shrink-0 text-slate-400" />}
+          {selected?.kind === "agency" && <Store className="w-3 h-3 shrink-0 text-slate-400" />}
           {selected?.kind === "customer" && <User className="w-3 h-3 shrink-0 text-slate-400" />}
           {selected ? selected.label : placeholder}
           {selected?.sublabel && <span className="text-slate-400">· {selected.sublabel}</span>}
@@ -86,7 +108,7 @@ export default function LccPartyPicker({
                 autoFocus
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search customers and corporates…"
+                placeholder={searchPlaceholder}
                 className="w-full pl-8 pr-3 py-1.5 text-xs border border-slate-200 rounded-md bg-slate-50 focus:outline-none focus:ring-1 focus:ring-blue-400"
               />
             </div>
@@ -94,9 +116,7 @@ export default function LccPartyPicker({
           <ul className="max-h-56 overflow-y-auto py-1">
             {filtered.length === 0 ? (
               <li className="px-3 py-2 text-xs text-slate-400 italic">
-                {options.length === 0
-                  ? "No customers or corporates yet — add them under User master."
-                  : "No matches"}
+                {options.length === 0 ? emptyLabel : "No matches"}
               </li>
             ) : filtered.map((o) => (
               <li key={`${o.kind}-${o.value}`}>
@@ -107,8 +127,8 @@ export default function LccPartyPicker({
                     o.value === value && o.kind === selected?.kind ? "text-blue-700 font-semibold" : "text-slate-700"
                   }`}
                 >
-                  {o.kind === "corporate"
-                    ? <Building className="w-3 h-3 shrink-0 text-slate-400" />
+                  {o.kind === "corporate" ? <Building className="w-3 h-3 shrink-0 text-slate-400" />
+                    : o.kind === "agency" ? <Store className="w-3 h-3 shrink-0 text-slate-400" />
                     : <User className="w-3 h-3 shrink-0 text-slate-400" />}
                   <span className="truncate">{o.label}</span>
                   {o.sublabel && <span className="text-slate-400 truncate">· {o.sublabel}</span>}

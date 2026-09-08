@@ -26,7 +26,11 @@ async def _process_ticket_upload(file_path: str, batch_id: str, user_id: int):
     from app.services.income_calculator import IncomeCalculatorService
     from datetime import date
 
-    df = pd.read_excel(file_path) if file_path.endswith((".xls", ".xlsx")) else pd.read_csv(file_path)
+    # Read through the shared reader: it decides the format from the file's bytes,
+    # so a legacy .xls works and an xlsx named .csv is not sent to read_csv.
+    from app.services import spreadsheet
+    with open(file_path, "rb") as fh:
+        df = spreadsheet.read_table(fh.read(), file_path).df
 
     async with AsyncSessionLocal() as db:
         for _, row in df.iterrows():

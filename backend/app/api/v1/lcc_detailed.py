@@ -41,7 +41,9 @@ from app.models.user import User
 from app.services import customer_resolver as cres
 from app.services import gcs
 from app.services import lcc_billing_projection as proj
+from app.services import ticket_retag as retag
 from app.services import lcc_detailed_spec as spec
+from app.services import spreadsheet
 from app.services.lcc_airline_selection import resolve_for_upload
 from app.services.lcc_statement import _clean, detect_format
 
@@ -255,16 +257,13 @@ def _progress_pct(b: LccDetailedBatch) -> int:
 
 
 def _read_df(content: bytes, filename: str, header_row: int, nrows: int | None = None) -> pd.DataFrame:
-    name = (filename or "").lower()
-    if name.endswith(".csv"):
-        # index_col=False: these exports end each data row with a trailing delimiter, so
-        # pandas would otherwise treat the first column as a row index and shift every
-        # value left (garbage in every typed column). Force positional column alignment.
-        return pd.read_csv(io.BytesIO(content), dtype=str, sep=None, engine="python",
-                           header=header_row, index_col=False, nrows=nrows)
-    if name.endswith(".xls"):
-        return pd.read_excel(io.BytesIO(content), dtype=str, header=header_row, nrows=nrows)
-    return pd.read_excel(io.BytesIO(content), dtype=str, engine="openpyxl", header=header_row, nrows=nrows)
+    """Delegates to services/spreadsheet.py, which decides the format from the bytes.
+
+    The CSV trailing-delimiter fix that used to live here (index_col=False, or pandas
+    steals the first column as an index and shifts every value left) moved there with
+    it, so the worker's copy of this reader cannot drift away from it.
+    """
+    return spreadsheet.read_df(content, filename, header_row, nrows=nrows)
 
 
 def _detect_df(content: bytes, filename: str) -> tuple[pd.DataFrame, int, int]:
@@ -641,6 +640,7 @@ def _bill_kind(total) -> str:
 async def _resolve_bill_party(
     db: AsyncSession, user: User,
     customer_type: str | None, customer_id: int | None, corporate_id: int | None,
+    *, upgrade_employee: bool = True,
 ) -> tuple[str | None, int | None, int | None]:
     """Authorise a party against the master rather than trusting the ids sent.
 
@@ -648,6 +648,13 @@ async def _resolve_bill_party(
     the ids that do not belong to the chosen type nulled — the same discipline as
     frontend lib/customerType.ts::buildTagPayload, enforced server-side so a stale id
     from a previously chosen type can never travel attached to the wrong one.
+
+    `upgrade_employee` (default True, the LCC resolver's behaviour) turns a picked
+    customer who belongs to a corporate into a 'corporate' tag carrying BOTH ids, so
+    the employer can bill their employee's ticket. Pass False when the caller means
+    the party literally — re-tagging a ticket to bill an employee DIRECTLY has to
+    leave the corporate out, or the ticket stays claimable by the employer and the
+    correction the user asked for silently does nothing.
     """
     ct = (customer_type or "").strip().lower() or None
     if ct is None:
@@ -670,6 +677,7 @@ async def _resolve_bill_party(
         if not row:
             raise HTTPException(status_code=400, detail=f"Corporate id {corporate_id} is not in your corporates.")
         # A customer may also be named, when the row resolved to an employee.
+        # Validated here; whether it is CARRIED is retag.derive_party's call.
         cust_id = None
         if customer_id:
             cust = (await db.execute(select(Customer).where(
@@ -680,7 +688,9 @@ async def _resolve_bill_party(
             if not cust:
                 raise HTTPException(status_code=400, detail=f"Customer id {customer_id} is not in your customers.")
             cust_id = cust.id
-        return "corporate", cust_id, row.id
+        return retag.derive_party(
+            "corporate", cust_id, row.id, upgrade_employee=upgrade_employee,
+        )
 
     if not customer_id:
         raise HTTPException(status_code=400, detail="Pick a customer.")
@@ -691,9 +701,14 @@ async def _resolve_bill_party(
     ))).scalar_one_or_none()
     if not cust:
         raise HTTPException(status_code=400, detail=f"Customer id {customer_id} is not in your customers.")
-    # A customer who belongs to a corporate is an employee — carry the corporate too,
-    # because corporates.py defines a corporate's tickets as its employees' tickets.
-    return ("corporate" if cust.corporate_id else "direct"), cust.id, cust.corporate_id
+    # A customer who belongs to a corporate is an employee — services/ticket_retag
+    # decides whether to carry the employer, since that is the same rule the
+    # re-tag endpoint needs and it must not exist in two places.
+    return retag.derive_party(
+        "direct", cust.id, None,
+        employee_corporate_id=cust.corporate_id,
+        upgrade_employee=upgrade_employee,
+    )
 
 
 async def _owned_batch(batch_id: str, db: AsyncSession, current_user: User) -> LccDetailedBatch:
@@ -1075,7 +1090,13 @@ async def set_billing_default(
     """
     batch = await _owned_batch(batch_id, db, current_user)
     ct, cust_id, corp_id = await _resolve_bill_party(
-        db, current_user, payload.customer_type, payload.customer_id, payload.corporate_id
+        db, current_user, payload.customer_type, payload.customer_id, payload.corporate_id,
+        # A HUMAN picked this party, so store the one they picked. The employee
+        # upgrade belongs to the automatic resolver, which is guessing from a
+        # passenger name and should leave the employer able to bill. Here it would
+        # silently overrule the choice: pick an employee and the row comes back
+        # reading as their corporate, with no way to bill them directly.
+        upgrade_employee=False,
     )
     batch.default_customer_type = ct
     batch.default_customer_id = cust_id
@@ -1130,9 +1151,26 @@ async def set_row_billing_party(
             status_code=409,
             detail="This row is a payment movement — it carries no fare, so there is nothing to bill.",
         )
+    # Once a row is in billing, the TICKET is the thing that exists and its party
+    # is what billing reads; this row is only the record of how it got there.
+    # Editing it here would change nothing anyone bills and would leave the two
+    # permanently disagreeing, so it is refused and the correction is pointed at
+    # the screen that actually owns it.
+    if row.projected_ticket_id is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=("This row is already in billing. Change who it is billed to from "
+                    "Billing → Sold Tickets, not here."),
+        )
 
     ct, cust_id, corp_id = await _resolve_bill_party(
-        db, current_user, payload.customer_type, payload.customer_id, payload.corporate_id
+        db, current_user, payload.customer_type, payload.customer_id, payload.corporate_id,
+        # A HUMAN picked this party, so store the one they picked. The employee
+        # upgrade belongs to the automatic resolver, which is guessing from a
+        # passenger name and should leave the employer able to bill. Here it would
+        # silently overrule the choice: pick an employee and the row comes back
+        # reading as their corporate, with no way to bill them directly.
+        upgrade_employee=False,
     )
     row.bill_customer_type = ct
     row.bill_customer_id = cust_id
@@ -1169,13 +1207,24 @@ async def set_rows_billing_party(
     Payment movements in the selection are SKIPPED and counted, not refused. The
     single-row endpoint 409s on one because there the payment row IS the request; here,
     failing forty good rows over one payment row would be the wrong trade.
+
+    Rows already in billing are skipped the same way and for the same reason as the
+    single-row 409: the ticket is what billing reads, so re-stamping this row would
+    change nothing and leave the two disagreeing. They are corrected from
+    Billing → Sold Tickets.
     """
     batch = await _owned_batch(batch_id, db, current_user)
     ids = _checked_ids(payload.row_ids, "use the default party above")
     await _owned_row_ids(db, batch_id, current_user, ids)
 
     ct, cust_id, corp_id = await _resolve_bill_party(
-        db, current_user, payload.customer_type, payload.customer_id, payload.corporate_id
+        db, current_user, payload.customer_type, payload.customer_id, payload.corporate_id,
+        # A HUMAN picked this party, so store the one they picked. The employee
+        # upgrade belongs to the automatic resolver, which is guessing from a
+        # passenger name and should leave the employer able to bill. Here it would
+        # silently overrule the choice: pick an employee and the row comes back
+        # reading as their corporate, with no way to bill them directly.
+        upgrade_employee=False,
     )
     if not ct:
         raise HTTPException(status_code=400, detail="Pick a customer or corporate.")
@@ -1188,6 +1237,7 @@ async def set_rows_billing_party(
             # NULL-safe: `bill_kind != 'payment'` would drop never-resolved rows, whose
             # kind is still NULL. See lcc_billing_projection's note on the same trap.
             or_(LccDetailed.bill_kind.is_(None), LccDetailed.bill_kind != "payment"),
+            LccDetailed.projected_ticket_id.is_(None),
         ).values(
             bill_status=cres.OVERRIDDEN,
             bill_customer_type=ct,
@@ -1200,6 +1250,18 @@ async def set_rows_billing_party(
     )
     rows_updated = result.rowcount or 0
 
+    # Counted separately, not lumped into one "skipped" number: the two reasons
+    # need different things from the user. A payment movement can never be billed;
+    # a row in billing is billed already and is edited from Billing instead.
+    skipped_in_billing = await db.scalar(
+        select(func.count()).select_from(LccDetailed).where(
+            LccDetailed.id.in_(ids),
+            LccDetailed.batch_id == batch_id,
+            *_scope(LccDetailed, current_user),
+            LccDetailed.projected_ticket_id.isnot(None),
+        )
+    ) or 0
+
     if batch.resolution_status == "none":
         batch.resolution_status = "resolved"
     await _recount(db, batch)
@@ -1207,7 +1269,8 @@ async def set_rows_billing_party(
 
     return {"batch_id": batch_id, "customer_type": ct, "customer_id": cust_id,
             "corporate_id": corp_id, "rows_updated": rows_updated,
-            "skipped_payments": len(ids) - rows_updated,
+            "skipped_in_billing": skipped_in_billing,
+            "skipped_payments": len(ids) - rows_updated - skipped_in_billing,
             "billable_rows": batch.billable_rows,
             "resolved_rows": batch.resolved_rows,
             "unresolved_rows": batch.unresolved_rows}

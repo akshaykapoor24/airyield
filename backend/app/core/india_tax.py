@@ -222,6 +222,57 @@ def gstin_error(
     return None
 
 
+# ── place of supply ────────────────────────────────────────────────────────
+# Which taxes a sale carries. Intra-state is CGST + SGST at half the rate each;
+# inter-state is IGST at the full rate. Never both — see services/gst_calc.
+#
+# The GSTIN decides when there is one. It is the legal registration, and its
+# first two characters ARE the state of that registration; a postal address is
+# letterhead and can disagree with it (live data here has a workspace filed under
+# code 33 with 'Delhi' typed in the address). Only when a party has no GSTIN at
+# all does the address get a say.
+
+
+def gstin_state_code(gstin: Optional[str]) -> Optional[str]:
+    """The state a GSTIN is registered in, as a two-digit code.
+
+    Reads the code even from a GSTIN that would fail `gstin_error` — a wrong
+    check digit or a mismatched PAN says the number is mistyped somewhere, not
+    that the first two characters are meaningless. A code that is not an Indian
+    state is None, and legacy codes resolve to the state they became.
+    """
+    text = normalise(gstin)
+    if not text or len(text) < 2 or not text[:2].isdigit():
+        return None
+    code = LEGACY_STATE_CODE_SUCCESSOR.get(text[:2], text[:2])
+    return code if code in GST_STATE_CODES else None
+
+
+def place_of_supply_code(gstin: Optional[str], state: Optional[str] = None) -> Optional[str]:
+    """Where a party is, as a state code. The GSTIN wins; the address is the fallback."""
+    return gstin_state_code(gstin) or state_code(state)
+
+
+def is_interstate(
+    supplier_gstin: Optional[str],
+    supplier_state: Optional[str],
+    party_gstin: Optional[str],
+    party_state: Optional[str],
+) -> Optional[bool]:
+    """True when the two sit in different states, False when the same.
+
+    None means UNDECIDABLE — one side gave nothing usable. It is deliberately not
+    False: defaulting an unknown to intra-state would quietly bill CGST + SGST on
+    what may be an inter-state supply, and the caller must choose that fallback
+    knowingly rather than inherit it from a missing value.
+    """
+    ours = place_of_supply_code(supplier_gstin, supplier_state)
+    theirs = place_of_supply_code(party_gstin, party_state)
+    if ours is None or theirs is None:
+        return None
+    return ours != theirs
+
+
 def tax_id_error(
     gst: Optional[str],
     pan: Optional[str],

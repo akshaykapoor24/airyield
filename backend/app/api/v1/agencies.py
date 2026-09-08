@@ -36,6 +36,7 @@ from app.schemas.agency import (
 from app.services.supplier_master_request import (
     can_submit_master_request, create_or_request_supplier, supplier_values_from_agency,
 )
+from app.services import spreadsheet
 
 router = APIRouter()
 
@@ -848,10 +849,10 @@ async def bulk_upload_agencies(
         last_missing = None
         for header_row in (0, 1, 2):
             try:
-                if filename.endswith(".xls"):
-                    df_try = pd.read_excel(BytesIO(content), dtype=str, header=header_row)
-                else:
-                    df_try = pd.read_excel(BytesIO(content), dtype=str, engine="openpyxl", header=header_row)
+                # Format from the bytes, not the extension: a supplier's ".xls"
+                # is as often an xlsx or a CSV, and a real one needs an engine
+                # pandas will not pick on its own.
+                df_try = spreadsheet.read_df(content, filename, header_row)
                 df_try = _normalize_columns(df_try)
                 missing = required - set(df_try.columns)
                 last_missing = missing
@@ -1156,6 +1157,11 @@ async def delete_agency(
             detail=f"This agency is named on {deals_named} outgoing deal(s) and cannot be deleted. "
                    "Close or re-scope those deals first, or mark the agency inactive.",
         )
+
+    # NOTE: a third-party statement's consolidator and an incoming B2B deal's supplier are
+    # BOTH rows in the platform-admin `suppliers` master, not here — see
+    # models/statement_batch_supplier.py. Deleting an agency therefore cannot orphan either
+    # of them, and no guard for those belongs on this endpoint.
 
     await db.delete(obj)
     await db.commit()

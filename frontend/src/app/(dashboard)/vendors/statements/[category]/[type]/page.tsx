@@ -84,6 +84,9 @@ export default function StatementTypePage() {
       title={type.label}
       blurb={type.blurb ?? ""}
       requiresAirlineId={type.requiresAirlineId}
+      requiresSupplier={type.requiresSupplier}
+      supportsMapping={type.supportsMapping}
+      doneHint={type.doneHint}
     />
   );
 }

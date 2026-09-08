@@ -170,6 +170,10 @@ class DealUpdatePayload(DealScopeFields):
     iata_number:     Optional[str] = None
     iata_commission: Optional[str] = None
     supplier_name:   Optional[str] = None
+    # The Supplier master branch an INCOMING B2B deal was signed with. Applied only when
+    # the client actually sends the key (model_fields_set), so an edit that omits it
+    # cannot silently unlink a deal — sending it as null IS how you clear it.
+    supplier_id: Optional[int] = None
     incentive_types: Optional[list] = None
     incentive_data:  Optional[dict] = None
     incl_excl_types: Optional[list] = None

@@ -3,6 +3,7 @@ from pydantic.functional_validators import AfterValidator
 from typing import Annotated, Optional, Literal
 from datetime import datetime
 from app.models.user import UserRole
+from app.models.gst_configuration import GST_SCHEMES
 from app.core.email_domains import is_public_domain
 from app.core.india_tax import PAN_RE, GSTIN_RE
 from app.core.password_policy import validate_password
@@ -200,6 +201,28 @@ class ProfileRead(BaseModel):
     company_name: Optional[str] = None   # tenant.name
     pan_number: Optional[str] = None     # tenant.pan_number
     gst_number: Optional[str] = None     # tenant.gst_number
+    # Which GST scheme the workspace bills under — see GST_SCHEMES. Distinct from
+    # gst_number beside it: that is WHO the business is, this is HOW it taxes.
+    # None means not elected; the screen must say so rather than pick a default.
+    gst_scheme: Optional[str] = None     # tenant.gst_scheme
+
+    # Registered address — the FROM block of a printed invoice.
+    address: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    pincode: Optional[str] = None
+    country: Optional[str] = None
+    # The business's line, printed in the invoice letterhead. Not the user's own
+    # contact detail: it belongs to the workspace, like the address beside it.
+    phone: Optional[str] = None
+
+    # The logo is described here but never carried here: the bytes come from
+    # GET /users/me/profile/logo. `has_logo` is what the UI branches on, the
+    # other three are what it prints beside the preview.
+    has_logo: bool = False
+    logo_name: Optional[str] = None
+    logo_mime: Optional[str] = None
+    logo_size: Optional[int] = None
 
 
 class ProfileUpdate(BaseModel):
@@ -207,6 +230,14 @@ class ProfileUpdate(BaseModel):
     company_name: Optional[str] = None
     pan_number: Optional[str] = None
     gst_number: Optional[str] = None
+    gst_scheme: Optional[str] = None
+    # The logo is not here — it is a file, uploaded to the /logo endpoints.
+    address: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    pincode: Optional[str] = None
+    country: Optional[str] = None
+    phone: Optional[str] = None
 
     @model_validator(mode="after")
     def _validate(self) -> "ProfileUpdate":
@@ -218,4 +249,20 @@ class ProfileUpdate(BaseModel):
             self.gst_number = self.gst_number.strip().upper() or None
             if self.gst_number and not GSTIN_RE.match(self.gst_number):
                 raise ValueError("Invalid GSTIN format. Expected 15 characters, e.g. 22ABCDE1234F1Z5.")
+        if self.gst_scheme is not None:
+            # A closed set, so an unrecognised value is a 422 rather than a row
+            # that silently matches no rule later. Clearing the dropdown sends ""
+            # and must land as NULL — "not elected" has one representation.
+            self.gst_scheme = self.gst_scheme.strip().lower() or None
+            if self.gst_scheme and self.gst_scheme not in GST_SCHEMES:
+                raise ValueError(
+                    f"gst_scheme must be one of: {', '.join(GST_SCHEMES)}."
+                )
+        # An address is free text — the only rule is that a field cleared in the
+        # browser is stored as NULL rather than as an empty string, so "unset"
+        # has one representation and the PDF's `if agency.get("city")` holds.
+        for field in ("address", "city", "state", "pincode", "country", "phone"):
+            value = getattr(self, field)
+            if value is not None:
+                setattr(self, field, value.strip() or None)
         return self

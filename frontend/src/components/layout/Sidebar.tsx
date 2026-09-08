@@ -10,7 +10,7 @@ import {
   Calculator, CheckSquare,
   Edit3, Users, Shield, GitMerge, Search,
   History, LayoutGrid, Contact, Layers,
-  CreditCard, TrendingUp,
+  CreditCard, TrendingUp, Receipt,
 } from "lucide-react";
 import { USER_MASTER_NAV, userMasterHref } from "@/lib/userMasterNav";
 import { cn } from "@/lib/utils";
@@ -153,6 +153,10 @@ const PLATFORM_NAV: NavItem[] = [
       // Moved out of the tenant's "User master" — per-airline IATA commission
       // is one global master, so the platform admin owns it.
       { label: "IATA Commission", href: "/masters/iata-commission", icon: Percent },
+      // What GST is charged on and at what rates — abatement, and the normal
+      // agency / reseller split. One global master for the same reason IATA
+      // Commission is one: a tenant cannot set its own tax rate.
+      { label: "GST Configuration", href: "/masters/gst-configuration", icon: Receipt },
       // { label: "Income Heads", href: "/masters/income-heads", icon: DollarSign },
       // { label: "Calculation Rules", href: "/masters/calculation-rules", icon: Calculator },
     ],

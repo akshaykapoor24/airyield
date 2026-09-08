@@ -161,6 +161,15 @@ class Deal(Base):
             "agency_entity_id IS NULL OR scope_type = 'agency'",
             name="ck_deals_scope_entity",
         ),
+        # Mirrored from migration deal_supplier_agency_01. The supplier branch is a
+        # property of a deal we RECEIVE from another agency; on an outgoing deal the
+        # counterparty is the scope block above, and on an airline deal there is no
+        # agency at all. Both enum columns are native_enum=False with values_callable,
+        # so the stored values really are these lowercase strings.
+        CheckConstraint(
+            "supplier_id IS NULL OR (deal_type = 'b2b' AND direction = 'inbound')",
+            name="ck_deals_supplier",
+        ),
     )
 
     id           : Mapped[int]       = mapped_column(BigInteger, primary_key=True)
@@ -215,6 +224,29 @@ class Deal(Base):
 
     # ── B2B-only fields ──────────────────────────────────────────────────────
     supplier_name : Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # WHICH SUPPLIER BRANCH an inbound B2B deal was signed with — the row in the
+    # platform-admin `suppliers` master, which is the same list the form picks
+    # `supplier_name` from.
+    #
+    # WHY THE ID AND NOT JUST THE NAME. `supplier_name` is a name, and 141 of the master's
+    # 2,340 names repeat across branches — "Riya Travel & Tours" is fourteen rows. A
+    # third-party statement is attributed to one of those rows, so matching on the name
+    # alone could price it against a different branch's contract. `suppliers.code` is the
+    # unique one; the id is its key.
+    #
+    # NOT `agency_id` above: that is the OUTGOING scope ("we sell to them"), pinned to
+    # scope_type='agency' by ck_deals_scope_agency, and api/v1/deals.py::_resolve_scope
+    # forces every inbound deal to scope_type=ALL. This is the opposite direction.
+    #
+    # NULLABLE on purpose: deals written before this exist, and the matcher falls back to
+    # the name compare for them (services/deal_matching.py::_supplier_guard) rather than
+    # refusing to pay on a contract that was fine yesterday.
+    #
+    # RESTRICT: `suppliers` is global master data with no delete endpoint, so this is a
+    # backstop against direct SQL. SET NULL would quietly unlink a live contract.
+    supplier_id : Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("suppliers.id", ondelete="RESTRICT"), nullable=True, index=True,
+    )
 
     # ── LCC fields (airline or B2B can be LCC) ───────────────────────────────
     business_type  : Mapped[str | None] = mapped_column(String(50), nullable=True)

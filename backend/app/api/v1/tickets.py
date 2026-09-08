@@ -29,6 +29,7 @@ from app.models.user import User
 from app.models.agency import Agency
 from app.models.corporate import Corporate
 from app.models.customer import Customer
+from app.models.lcc_detailed import LccDetailed
 from app.schemas.uploaded_ticket import (
     TicketExtractionPreview,
     TicketRow,
@@ -47,9 +48,14 @@ from app.schemas.uploaded_ticket import (
     TicketStatementRead,
     IncomeSummaryCreate,
     IncomeSummaryRead,
+    RetagPartyPayload,
+    RetagPartyResult,
 )
 from pydantic import BaseModel
 from app.models.deal import DealDirection
+from app.api.v1.lcc_detailed import _resolve_bill_party
+from app.services import customer_resolver as cres
+from app.services import sector_split
 from app.services.deal_matching import CustomerScope, DealMatchingService, SCOPE_SPECIFIC
 from app.services.exclusion_evaluator import evaluate_exclusion_for_payout, evaluate_inclusion_for_payout
 from app.services.ticket_extraction import (
@@ -58,6 +64,10 @@ from app.services.ticket_extraction import (
 )
 
 router = APIRouter()
+
+# Mirrors MAX_SEND_ROWS / MAX_SELECTION in the LCC worklist, so the two bulk
+# controls in this product refuse at the same size.
+MAX_RETAG_TICKETS = 500
 
 _CREDIT_TYPES = {"credit note", "refund"}
 
@@ -70,15 +80,24 @@ MANUAL_ENTRY_FILE_NAME = "Manual Entry"
 def _classify_ticket(ticket_number: str | None, invoice_type: str | None) -> tuple[str | None, str | None]:
     """Classify ticket by number prefix. Returns (adm_acm_ra, invoice_type_override).
     invoice_type_override is None when no change is needed (already Credit Note / Refund).
-    Rules:
+    Rules, applied to the DOCUMENT SERIAL:
       starts with 400              → RA
       stripped leading-zeros → 6   → ADM
       stripped leading-zeros → 8   → ACM
+
+    The serial, never the whole cell. A statement prints a ticket as
+    "607 5808583279" — the airline's 3-digit IATA accounting code, then the
+    document serial — and these rules read the leading digit as a document-type
+    marker. Applied to the cell as printed, every 6xx- and 8xx-plated carrier
+    (607 Etihad, 618 Singapore) became an ADM or ACM credit note, and
+    _build_uploaded_tickets zeroes commission on a credit note.
     """
     if not ticket_number:
         return None, None
-    tn_norm = ticket_number.lstrip("0") or "0"
-    if ticket_number.startswith("400"):
+    _code, serial = sector_split.split_ticket_no(ticket_number)
+    tn = serial or ticket_number
+    tn_norm = tn.lstrip("0") or "0"
+    if tn.startswith("400"):
         category = "RA"
     elif tn_norm.startswith("6"):
         category = "ADM"
@@ -145,12 +164,20 @@ async def extract_ticket_file(
     file: UploadFile = File(...),
     column_mapping: Optional[str] = Form(None),
     statement_type: str = Form("B2B"),
+    sheet_name: Optional[str] = Form(None),
+    header_row: Optional[int] = Form(None),
     current_user: User = Depends(get_current_user),
 ):
-    """Step 1 — Upload an XLS/XLSX file, parse it and return a preview for user review.
+    """Step 1 — Upload a spreadsheet, parse it and return a preview for user review.
 
     column_mapping (optional form field): JSON string of {canonical: xls_col} pairs
     provided by the user after reviewing the mapping UI.
+
+    sheet_name / header_row are detected on the first call and echoed back by the
+    client on the second. Passing them PINS the read: a mapping names columns, so
+    re-detecting a header one row out would rename every column and drop the
+    mapping. They are also what the sheet and header-row pickers post when the
+    user overrides a detection that got it wrong.
     """
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file provided.")
@@ -172,6 +199,8 @@ async def extract_ticket_file(
             chunk, file.filename,
             column_mapping=mapping_dict,
             statement_type=statement_type,
+            sheet_name=sheet_name,
+            header_row=header_row,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
@@ -185,6 +214,15 @@ async def extract_ticket_file(
         suggested_mapping=result.get("suggested_mapping", {}),
         is_template_match=result.get("is_template_match", True),
         sample_row=result.get("sample_row", {}),
+        sheet_name=result.get("sheet_name"),
+        sheet_names=result.get("sheet_names", []),
+        header_row=result.get("header_row", 0),
+        preamble=result.get("preamble", []),
+        detected_from=result.get("detected_from"),
+        detected_to=result.get("detected_to"),
+        sample_rows=result.get("sample_rows", {}),
+        unmapped_columns=result.get("unmapped_columns", []),
+        fuzzy_suggestions=result.get("fuzzy_suggestions", {}),
     )
 
 
@@ -199,6 +237,7 @@ async def _resolve_airlines(
     # ── Bidirectional airline resolution ─────────────────────────────────────
     # Collect all codes (with numeric zero-padding + uppercase variants) and names
     all_codes: set[str] = set()
+    numeric_codes: set[str] = set()
     for r in rows:
         if r.airlines_code:
             raw = r.airlines_code.strip()
@@ -206,21 +245,26 @@ async def _resolve_airlines(
             all_codes.add(raw.upper())    # handle "ai" → "AI"
             if raw.isdigit():
                 all_codes.add(raw.zfill(3))
+                numeric_codes.add(raw.zfill(3))
+        # The 3-digit accounting code split off a "607 5808583279" ticket number.
+        # A consolidator statement identifies the carrier this way and may carry no
+        # airline column at all.
+        if getattr(r, "ticket_prefix", None):
+            numeric_codes.add(r.ticket_prefix.strip().zfill(3))
 
     all_names = {r.airline_name.strip().lower() for r in rows if r.airline_name}
 
-    # code (IATA or ICAO, uppercased) → Airline
+    # code (IATA, ICAO or IATA numeric, uppercased) → Airline
     code_to_airline: dict[str, Airline] = {}
-    if all_codes:
+    if all_codes or numeric_codes:
         upper_codes = [c.upper() for c in all_codes]
-        res = await db.execute(
-            select(Airline).where(
-                or_(
-                    func.upper(Airline.iata_code).in_(upper_codes),
-                    func.upper(Airline.icao_code).in_(upper_codes),
-                )
-            )
-        )
+        conditions = [
+            func.upper(Airline.iata_code).in_(upper_codes),
+            func.upper(Airline.icao_code).in_(upper_codes),
+        ]
+        if numeric_codes:
+            conditions.append(Airline.iata_numeric_code.in_(sorted(numeric_codes)))
+        res = await db.execute(select(Airline).where(or_(*conditions)))
         for a in res.scalars():
             if a.iata_code:
                 code_to_airline[a.iata_code] = a
@@ -228,6 +272,8 @@ async def _resolve_airlines(
             if a.icao_code:
                 code_to_airline[a.icao_code] = a
                 code_to_airline[a.icao_code.upper()] = a
+            if a.iata_numeric_code:
+                code_to_airline[a.iata_numeric_code] = a
 
     # name (lower) → Airline
     name_to_airline: dict[str, Airline] = {}
@@ -335,9 +381,14 @@ async def _build_uploaded_tickets(
 ) -> list[UploadedTicket]:
     """Build UploadedTicket rows from preview rows. Not added to the session.
 
-    Left unset on purpose: ticket_status (server default 'draft'), raw_data,
+    Left unset on purpose: ticket_status (server default 'draft'),
     is_billed/billing_id, and the whole matched_deal_* / incentive block — those
     belong to run-calculation.
+
+    `raw_data` IS written, unlike everything above. It holds every source cell
+    keyed by its original header, so a column the canonical mapping had no home
+    for survives the import instead of being discarded — the same provenance the
+    vendor-statement tables keep, and what a later re-map would read.
     """
     code_to_airline, name_to_airline = await _resolve_airlines(rows, db)
     built: list[UploadedTicket] = []
@@ -348,6 +399,11 @@ async def _build_uploaded_tickets(
         code_variants = [raw_code, raw_code.upper()]
         if raw_code.isdigit():
             code_variants.append(raw_code.zfill(3))
+        # Last: the accounting code off the ticket number, for a statement whose
+        # carrier column is blank. Tried after the real code and only ever as a
+        # fallback, so no ticket that resolves today resolves differently.
+        if getattr(row, "ticket_prefix", None):
+            code_variants.append(row.ticket_prefix.strip().zfill(3))
         airline_by_code = next((code_to_airline[c] for c in code_variants if c in code_to_airline), None)
 
         # Try name lookup
@@ -357,6 +413,11 @@ async def _build_uploaded_tickets(
         matched = airline_by_code or airline_by_name
         resolved_airline_name = row.airline_name or (matched.name if matched else None)
         resolved_airline_code = row.airlines_code or (matched.iata_code if matched else None)
+        # A numeric accounting code is not something anything downstream can join
+        # on — deal_matching and the incentive board both key on the 2-letter code —
+        # so once it has identified the carrier, store what the carrier is called.
+        if matched and (resolved_airline_code or "").strip().isdigit():
+            resolved_airline_code = matched.iata_code or resolved_airline_code
 
         adm_acm_ra, invoice_override = _classify_ticket(row.ticket_number, row.invoice_type)
 
@@ -409,6 +470,20 @@ async def _build_uploaded_tickets(
             sold_to=row.sold_to,
             customer_name=row.customer_name,
             tour_code=row.tour_code,
+            # ── consolidator statement columns ─────────────────────────────
+            oc_tax=row.oc_tax,
+            raf=row.raf,
+            serv_charge=row.serv_charge,
+            gst_sell=row.gst_sell,
+            doc_no=row.doc_no,
+            doc_date=row.doc_date,
+            reference=row.reference,
+            narration=row.narration,
+            # Every source cell, keyed by its original header. A column the
+            # mapping had no home for is preserved here rather than dropped, so
+            # "import any statement" does not quietly mean "import the parts of
+            # it we already understood".
+            raw_data=row.raw_data or None,
             # The statement's tag copied onto every ticket. The commission run
             # reads the TICKET, never the statement — one file can hold rows sold
             # to different customers, and Create Tickets files them one at a time.
@@ -1688,6 +1763,145 @@ async def run_all_calculation(
         cancelled=cancelled,
         reversed=reversed_count,
     )
+
+
+# ── Move tickets between billing parties ──────────────────────────────────
+#
+# The bill-to party used to be decided once — at upload from the customer picker,
+# or by the LCC resolver — and nothing could change it. This is the correction
+# path, driven from the Sold Tickets tab.
+#
+# NOT part of PATCH /uploads/{id}: that is a generic field editor with no
+# is_billed guard, and `UploadedTicketUpdate` deliberately omits the party
+# columns (extra="ignore", so sending them is a silent no-op). Moving money
+# between parties needs its own guards, so it gets its own route.
+
+
+@router.patch("/billing-party", response_model=RetagPartyResult)
+async def retag_billing_party(
+    payload:      RetagPartyPayload,
+    db:           AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Re-point one or more tickets at a different customer or corporate.
+
+    ALL-OR-NOTHING. A partial move across a ticked batch leaves the user with no
+    idea which half went, so anything that disqualifies one ticket refuses them
+    all and says which.
+
+    Agency is not offered: an agency claims tickets through its STATEMENT
+    (agency_account.agency_statement_scope reads ticket_statements.agency_id and
+    never the ticket's customer_agency_id), so tagging a ticket to one would make
+    it vanish from every screen rather than move.
+    """
+    ids = list(dict.fromkeys(payload.ticket_ids))   # dedupe, keep order
+    if not ids:
+        raise HTTPException(status_code=400, detail="Select at least one ticket.")
+    if len(ids) > MAX_RETAG_TICKETS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many tickets at once — {MAX_RETAG_TICKETS} is the limit.",
+        )
+
+    # Scoped exactly like the sold-tickets lists that feed this screen
+    # (tenant + creator). A wider scope here would let someone re-tag rows they
+    # cannot see.
+    tickets = (await db.execute(
+        select(UploadedTicket).where(
+            UploadedTicket.id.in_(ids),
+            UploadedTicket.tenant_id == current_user.tenant_id,
+            UploadedTicket.created_by_id == current_user.id,
+        )
+    )).scalars().all()
+
+    found = {t.id for t in tickets}
+    missing = [str(i) for i in ids if i not in found]
+    if missing:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Not your tickets, or no longer there: {', '.join(missing[:5])}"
+                   f"{'…' if len(missing) > 5 else ''}.",
+        )
+
+    # An invoice already raised against a party, with GST possibly filed, must not
+    # silently lose a line. Same wording as the create-billing guard.
+    already = [t.ticket_number or t.pax_name or str(t.id) for t in tickets if t.is_billed]
+    if already:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Already billed, so they cannot be moved: {', '.join(already[:5])}"
+                   f"{'…' if len(already) > 5 else ''}. Delete that billing first.",
+        )
+
+    ct, cust_id, corp_id = await _resolve_bill_party(
+        db, current_user,
+        payload.customer_type, payload.customer_id, payload.corporate_id,
+        # The user pointed at a party and meant it. Upgrading a chosen employee to
+        # their employer is exactly the correction they are trying to undo.
+        upgrade_employee=False,
+    )
+
+    now = datetime.utcnow()
+
+    # An LCC-projected ticket has a second party record on the lcc_detailed row it
+    # came from, and project_batch overwrites the ticket from that row on every
+    # send. Writing only the ticket would silently revert on the next "Send to
+    # billing", so write the source too and mark it overridden — which also stops
+    # a later Re-match from clobbering it.
+    lcc_rows = (await db.execute(
+        select(LccDetailed).where(LccDetailed.projected_ticket_id.in_(found))
+    )).scalars().all()
+    by_ticket = {r.projected_ticket_id: r for r in lcc_rows}
+
+    for t in tickets:
+        t.customer_type = ct
+        t.customer_id = cust_id
+        t.corporate_id = corp_id
+        # Cleared unconditionally: this endpoint never sets an agency, so leaving a
+        # stale one would keep the ticket looking tagged after a clear.
+        t.customer_agency_id = None
+        t.retagged_at = now
+        t.retagged_by_id = current_user.id
+
+        row = by_ticket.get(t.id)
+        if row is not None:
+            row.bill_customer_type = ct
+            row.bill_customer_id = cust_id
+            row.bill_corporate_id = corp_id
+            row.bill_status = cres.OVERRIDDEN if ct else cres.UNRESOLVED
+            row.bill_match_reason = None if ct else cres.REASON[cres.UNRESOLVED]
+            row.resolved_at = now
+            row.resolved_by_id = current_user.id
+
+    await db.commit()
+
+    return RetagPartyResult(
+        updated=len(tickets),
+        lcc_rows_updated=len(by_ticket),
+        customer_type=ct,
+        customer_id=cust_id,
+        corporate_id=corp_id,
+        party_name=await _retag_party_name(db, ct, cust_id, corp_id),
+        untagged=ct is None,
+    )
+
+
+async def _retag_party_name(
+    db: AsyncSession, ct: Optional[str], cust_id: Optional[int], corp_id: Optional[int]
+) -> Optional[str]:
+    """The party's display name, so the screen can say where the tickets went.
+
+    A row vanishing from the list you are looking at reads as data loss unless
+    something names its new home.
+    """
+    if ct == "corporate" and corp_id:
+        row = (await db.execute(select(Corporate).where(Corporate.id == corp_id))).scalar_one_or_none()
+        return (row.company if row else None) or None
+    if cust_id:
+        row = (await db.execute(select(Customer).where(Customer.id == cust_id))).scalar_one_or_none()
+        if row:
+            return f"{row.first_name or ''} {row.last_name or ''}".strip() or None
+    return None
 
 
 # ── Update ticket fields ──────────────────────────────────────────────────

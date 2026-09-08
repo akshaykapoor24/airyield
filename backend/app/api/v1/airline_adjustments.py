@@ -24,6 +24,7 @@ from app.dependencies import get_current_user
 from app.models.airline_adjustment import ADJUSTMENT_MODELS
 from app.models.user import User
 from app.services import airline_adjustment_spec as spec
+from app.services import spreadsheet
 
 router = APIRouter()
 
@@ -76,13 +77,12 @@ def _row_to_dict(obj, adj_type: str) -> dict:
 
 
 def _read_df(content: bytes, filename: str, header_row: int) -> pd.DataFrame:
-    name = (filename or "").lower()
-    if name.endswith(".csv"):
-        # sep=None + python engine sniffs the delimiter (IATA exports are ';'-separated).
-        return pd.read_csv(io.BytesIO(content), dtype=str, sep=None, engine="python", header=header_row)
-    if name.endswith(".xls"):
-        return pd.read_excel(io.BytesIO(content), dtype=str, header=header_row)
-    return pd.read_excel(io.BytesIO(content), dtype=str, engine="openpyxl", header=header_row)
+    """Delegates to services/spreadsheet.py — the format comes from the bytes.
+
+    The delimiter sniffing this used for ';'-separated IATA exports moved there
+    unchanged.
+    """
+    return spreadsheet.read_df(content, filename, header_row)
 
 
 def _parse(content: bytes, filename: str, adj_type: str) -> tuple[pd.DataFrame, dict[str, str]]:

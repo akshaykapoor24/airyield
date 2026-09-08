@@ -63,8 +63,16 @@ function StepIcon({ step }: { step: Step }) {
 }
 
 export default function CommissionDiagnosisModal({
-  rowId, document, onClose,
-}: { rowId: number; document: string | null; onClose: () => void }) {
+  rowId, document, onClose, apiBase = "/bsp-commission",
+}: {
+  rowId: number;
+  document: string | null;
+  onClose: () => void;
+  /** Which source's API to ask. Defaults to BSP, whose router is separate and unchanged.
+   *  Every source answers the same shape (schemas/commission.py is a superset of
+   *  schemas/bsp_commission.py), which is what lets one modal serve all of them. */
+  apiBase?: string;
+}) {
   const [data, setData] = useState<Diagnosis | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -74,7 +82,7 @@ export default function CommissionDiagnosisModal({
     let alive = true;
     (async () => {
       try {
-        const { data } = await api.get<Diagnosis>(`/bsp-commission/rows/${rowId}/match-diagnosis`);
+        const { data } = await api.get<Diagnosis>(`${apiBase}/rows/${rowId}/match-diagnosis`);
         if (alive) setData(data);
       } catch {
         if (alive) setError("Could not load the match diagnosis.");
@@ -83,7 +91,7 @@ export default function CommissionDiagnosisModal({
       }
     })();
     return () => { alive = false; };
-  }, [rowId]);
+  }, [rowId, apiBase]);
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 p-4 overflow-y-auto">

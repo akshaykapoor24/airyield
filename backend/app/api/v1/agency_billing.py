@@ -27,18 +27,20 @@ from app.models.ticket_statement import TicketStatement
 from app.models.uploaded_ticket import UploadedTicket
 from app.models.user import User
 from app.models.tenant import Tenant
-from app.schemas.customer import SoldTicketRead, SoldTicketsSummary
+from app.schemas.customer import PlaceOfSupplyRead, SoldTicketRead, SoldTicketsSummary
 from app.schemas.billing import (
     BillingCreate, BillingUpdate, BillingRead, BillingListItem,
     AgencyLite, AgencyTicketsResponse,
 )
 from app.services.billing_calc import (
     to_float as _f,
-    compute_gst as _compute_gst,
+    split_gst as _split_gst,
+    interstate_from_treatment as _interstate_from_treatment,
     safe_date as _safe_date,
     passenger_name as _passenger_name,
 )
-from app.services.billing_pdf import build_billing_pdf
+from app.services.place_of_supply import as_payload as _pos_payload, place_of_supply
+from app.services.billing_pdf import build_billing_pdf, load_logo, supplier_block
 from app.services.agency_account import agency_statement_scope, current_terms
 
 router = APIRouter()
@@ -154,16 +156,27 @@ async def get_agency_tickets(
             in_range.append(t)
         tickets = in_range
 
+    # WHICH GST these rows carry. An agency is the recipient of this supply, and
+    # unlike a customer it already carries both a GSTIN and a state of its own —
+    # see AgencyLite. `recipient_side` reads `gst_number` here, the agency master's
+    # spelling of the column.
+    pos = place_of_supply(current_user.tenant, agency)
+
     rows: list[SoldTicketRead] = []
     total_base = total_markup = total_gst = total_with_markup = 0.0
+    total_cgst = total_sgst = total_igst = 0.0
     for t in tickets:
         base = _f(t.total_amt) if t.total_amt is not None else _f(t.sell_fare)
         markup_amount = 0.0  # no per-agency default markup
-        gst_amount = _compute_gst(base, markup_amount, _AGENCY_BILLING_TYPE)
+        gst = _split_gst(base, markup_amount, _AGENCY_BILLING_TYPE, interstate=pos.interstate)
+        gst_amount = gst["gst_amount"]
         total = base + markup_amount + gst_amount
         total_base += base
         total_markup += markup_amount
         total_gst += gst_amount
+        total_cgst += gst["cgst"]
+        total_sgst += gst["sgst"]
+        total_igst += gst["igst"]
         total_with_markup += total
         rows.append(SoldTicketRead(
             id=t.id,
@@ -186,6 +199,10 @@ async def get_agency_tickets(
             base_amount=round(base, 2),
             markup_amount=round(markup_amount, 2),
             gst_amount=round(gst_amount, 2),
+            cgst_amount=gst["cgst"],
+            sgst_amount=gst["sgst"],
+            igst_amount=gst["igst"],
+            gst_treatment=gst["gst_treatment"],
             total_with_markup=round(total, 2),
         ))
 
@@ -197,8 +214,12 @@ async def get_agency_tickets(
             total_base=round(total_base, 2),
             total_markup=round(total_markup, 2),
             total_gst=round(total_gst, 2),
+            total_cgst=round(total_cgst, 2),
+            total_sgst=round(total_sgst, 2),
+            total_igst=round(total_igst, 2),
             total_with_markup=round(total_with_markup, 2),
         ),
+        place_of_supply=PlaceOfSupplyRead(**_pos_payload(pos)),
     )
 
 
@@ -268,8 +289,13 @@ async def create_agency_billing(
     if already:
         raise HTTPException(status_code=400, detail=f"Already billed: {', '.join(already)}. Refresh and try again.")
 
+    # Decided once, here, and snapshotted on the billing below — see the same
+    # note in api/v1/customers.py::create_billing.
+    pos = place_of_supply(current_user.tenant, agency)
+
     line_items: list[dict] = []
     total_base = total_markup = total_addl = total_gst = grand = 0.0
+    total_cgst = total_sgst = total_igst = 0.0
     for t in tickets:
         base = _f(t.total_amt) if t.total_amt is not None else _f(t.sell_fare)
         agency_markup = 0.0  # no per-agency default markup
@@ -277,12 +303,16 @@ async def create_agency_billing(
         disc = disc_map.get(t.id, 0.0)
         total_mk = agency_markup + addl
         # Discount reduces the taxable value first, then GST applies on the reduced amount.
-        gst = _compute_gst(base, total_mk, _AGENCY_BILLING_TYPE, disc)
+        split = _split_gst(base, total_mk, _AGENCY_BILLING_TYPE, disc, interstate=pos.interstate)
+        gst = split["gst_amount"]
         line_total = base + total_mk - disc + gst
         total_base += base
         total_markup += agency_markup
         total_addl += addl
         total_gst += gst
+        total_cgst += split["cgst"]
+        total_sgst += split["sgst"]
+        total_igst += split["igst"]
         grand += line_total
         line_items.append({
             "ticket_id": t.id,
@@ -297,6 +327,9 @@ async def create_agency_billing(
             "additional_markup": round(addl, 2),
             "discount": round(disc, 2),
             "gst_amount": round(gst, 2),
+            "cgst": split["cgst"],
+            "sgst": split["sgst"],
+            "igst": split["igst"],
             "total": round(line_total, 2),
         })
 
@@ -313,6 +346,12 @@ async def create_agency_billing(
         total_markup=round(total_markup, 2),
         total_additional_markup=round(total_addl, 2),
         total_gst=round(total_gst, 2),
+        total_cgst=round(total_cgst, 2),
+        total_sgst=round(total_sgst, 2),
+        total_igst=round(total_igst, 2),
+        gst_treatment=pos.treatment,
+        supplier_state_code=pos.supplier_code,
+        place_of_supply_code=pos.recipient_code,
         grand_total=round(grand, 2),
         line_items=line_items,
     )
@@ -371,6 +410,10 @@ async def list_agency_billings(
             total_markup=_f(b.total_markup),
             total_additional_markup=_f(b.total_additional_markup),
             total_gst=_f(b.total_gst),
+            total_cgst=_f(b.total_cgst),
+            total_sgst=_f(b.total_sgst),
+            total_igst=_f(b.total_igst),
+            gst_treatment=b.gst_treatment,
             grand_total=_f(b.grand_total),
             item_count=len(b.line_items or []),
             created_at=b.created_at,
@@ -403,25 +446,36 @@ async def update_agency_billing(
 
     addl_map = {it.ticket_id: _f(it.additional_markup) for it in payload.items}
 
+    # The heads this bill was RAISED under — see api/v1/customers.py::update_billing.
+    interstate = _interstate_from_treatment(billing.gst_treatment)
+
     new_items: list[dict] = []
     total_base = total_markup = total_addl = total_gst = grand = 0.0
+    total_cgst = total_sgst = total_igst = 0.0
     for it in (billing.line_items or []):
         base = _f(it.get("base_amount"))
         markup = _f(it.get("markup_amount"))
         addl = addl_map.get(it.get("ticket_id"), _f(it.get("additional_markup")))
         disc = _f(it.get("discount"))   # preserved from creation (not edited in the popup)
-        gst = _compute_gst(base, markup + addl, billing.billing_type, disc)
+        split = _split_gst(base, markup + addl, billing.billing_type, disc, interstate=interstate)
+        gst = split["gst_amount"]
         line_total = base + markup + addl - disc + gst
         total_base += base
         total_markup += markup
         total_addl += addl
         total_gst += gst
+        total_cgst += split["cgst"]
+        total_sgst += split["sgst"]
+        total_igst += split["igst"]
         grand += line_total
         new_items.append({
             **it,
             "additional_markup": round(addl, 2),
             "discount": round(disc, 2),
             "gst_amount": round(gst, 2),
+            "cgst": split["cgst"],
+            "sgst": split["sgst"],
+            "igst": split["igst"],
             "total": round(line_total, 2),
         })
 
@@ -430,6 +484,9 @@ async def update_agency_billing(
     billing.total_markup = round(total_markup, 2)
     billing.total_additional_markup = round(total_addl, 2)
     billing.total_gst = round(total_gst, 2)
+    billing.total_cgst = round(total_cgst, 2)
+    billing.total_sgst = round(total_sgst, 2)
+    billing.total_igst = round(total_igst, 2)
     billing.grand_total = round(grand, 2)
     await db.commit()
     await db.refresh(billing)
@@ -493,11 +550,9 @@ async def download_agency_billing_pdf(
     if current_user.tenant_id:
         tres = await db.execute(select(Tenant).where(Tenant.id == current_user.tenant_id))
         tenant = tres.scalar_one_or_none()
-    agency_from = {
-        "name": (tenant.name if tenant and tenant.name else (tenant.domain if tenant else "")) or current_user.full_name,
-        "domain": tenant.domain if tenant else "",
-        "email": current_user.email,
-    }
+    # Includes the workspace's GSTIN and PAN — see billing_pdf.supplier_block.
+    agency_from = supplier_block(tenant, current_user)
+    agency_from["logo"] = await load_logo(tenant)
     # The PDF builder reads customer.<attr>; pass an agency-shaped shim as the BILL TO party.
     bill_to = SimpleNamespace(
         company=agency.name,

@@ -274,20 +274,45 @@ export default function UploadTicketsPage({ mode = "internal" }: { mode?: "inter
   };
 
   // ── Step 1: drag-drop → extract ──────────────────────────────────────────
+  // `sheet` and `headerRow` are what the server DETECTED on this file. They are
+  // echoed back on every later read of it so the second parse sees exactly the
+  // columns the mapping was built against — a mapping is a list of column names,
+  // so a header detected one row out would rename all of them and discard it.
+  const [sheet,     setSheet]     = useState<string | null>(null);
+  const [headerRow, setHeaderRow] = useState<number | null>(null);
+
+  const runExtract = useCallback(async (
+    file: File,
+    opts: { mapping?: Record<string, string>; sheet?: string | null; headerRow?: number | null } = {},
+  ) => {
+    const form = new FormData();
+    form.append("file", file);
+    form.append("statement_type", statementType);
+    if (opts.mapping) form.append("column_mapping", JSON.stringify(opts.mapping));
+    if (opts.sheet) form.append("sheet_name", opts.sheet);
+    if (opts.headerRow !== null && opts.headerRow !== undefined) {
+      form.append("header_row", String(opts.headerRow));
+    }
+    const { data } = await api.post<ExtractionPreview>("/tickets/upload/extract", form);
+    return data;
+  }, [statementType]);
+
   const onDrop = useCallback(async (files: File[]) => {
     if (!files[0]) return;
     setError(null);
     setParsing(true);
     setStoredFile(files[0]);
     try {
-      const form = new FormData();
-      form.append("file", files[0]);
-      form.append("statement_type", statementType);
-      const { data } = await api.post<ExtractionPreview>("/tickets/upload/extract", form, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
+      const data = await runExtract(files[0]);
       setPreview(data);
       setMapping(data.suggested_mapping ?? {});
+      setSheet(data.sheet_name ?? null);
+      setHeaderRow(data.header_row ?? 0);
+      // The statement's own period line, e.g. "For The Period 8 August 2026 To
+      // 15 August 2026". Only ever fills a blank — a date the user already typed
+      // is their answer, not ours.
+      if (data.detected_from && !validFrom) setValidFrom(data.detected_from);
+      if (data.detected_to && !validTo) setValidTo(data.detected_to);
       setStep("mapping");
     } catch (e: unknown) {
       const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
@@ -296,13 +321,29 @@ export default function UploadTicketsPage({ mode = "internal" }: { mode?: "inter
     } finally {
       setParsing(false);
     }
-  }, []);
+  }, [runExtract, validFrom, validTo]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
+    // Matched by EXTENSION as well as MIME. The extension arrays used to be empty,
+    // so acceptance depended entirely on what the OS reported — and Windows reports
+    // plenty of .xls files as application/octet-stream. With no onDropRejected
+    // either, such a file was silently ignored: the user dropped it and nothing
+    // happened at all.
     accept: {
-      "application/vnd.ms-excel": [],
-      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [],
+      "application/vnd.ms-excel": [".xls"],
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx", ".xlsm"],
+      "text/csv": [".csv"],
+      "text/plain": [".tsv", ".txt"],
+      "application/octet-stream": [".xls", ".xlsx", ".xlsm", ".csv"],
+    },
+    onDropRejected: (rejections) => {
+      const name = rejections[0]?.file?.name ?? "That file";
+      setError(
+        rejections.length > 1
+          ? "Upload one file at a time."
+          : `${name} is not a spreadsheet this importer reads. Upload an .xls, .xlsx or .csv file.`,
+      );
     },
     maxFiles: 1,
     disabled: parsing,
@@ -314,13 +355,7 @@ export default function UploadTicketsPage({ mode = "internal" }: { mode?: "inter
     setApplyingMap(true);
     setError(null);
     try {
-      const form = new FormData();
-      form.append("file", storedFile);
-      form.append("column_mapping", JSON.stringify(mapping));
-      form.append("statement_type", statementType);
-      const { data } = await api.post<ExtractionPreview>("/tickets/upload/extract", form, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
+      const data = await runExtract(storedFile, { mapping, sheet, headerRow });
       setPreview(data);
       setRows(data.rows);
       resetFilter();
@@ -328,6 +363,32 @@ export default function UploadTicketsPage({ mode = "internal" }: { mode?: "inter
     } catch (e: unknown) {
       const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
       setError(msg ?? "Failed to apply mapping.");
+    } finally {
+      setApplyingMap(false);
+    }
+  };
+
+  /** Re-read the file at a different sheet or header row, and re-propose a mapping.
+   *
+   *  This is the control that makes an arbitrary statement workable: when detection
+   *  picks the wrong row — a second title line, a sheet of notes in front of the
+   *  data — the person holding the file can point at the right one. The mapping is
+   *  discarded deliberately, because it names columns that no longer exist. */
+  const reread = async (next: { sheet?: string; headerRow?: number }) => {
+    if (!storedFile) return;
+    setApplyingMap(true);
+    setError(null);
+    const nextSheet = next.sheet ?? sheet;
+    const nextHeader = next.headerRow ?? (next.sheet ? null : headerRow);
+    try {
+      const data = await runExtract(storedFile, { sheet: nextSheet, headerRow: nextHeader });
+      setPreview(data);
+      setMapping(data.suggested_mapping ?? {});
+      setSheet(data.sheet_name ?? null);
+      setHeaderRow(data.header_row ?? 0);
+    } catch (e: unknown) {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setError(msg ?? "Failed to re-read the file.");
     } finally {
       setApplyingMap(false);
     }
@@ -630,6 +691,68 @@ export default function UploadTicketsPage({ mode = "internal" }: { mode?: "inter
             </div>
           )}
 
+          {/* Where in the file we are reading from. Shown always, not only on
+              failure: if the header was detected one row out, this is the only
+              place the user can see that and say so. */}
+          <div className="bg-white border border-gray-200 rounded-xl px-5 py-3.5 space-y-3">
+            <div className="flex flex-wrap items-end gap-4">
+              {preview.sheet_names.length > 1 && (
+                <label className="block">
+                  <span className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Sheet</span>
+                  <select
+                    value={sheet ?? ""}
+                    disabled={applyingMap}
+                    onChange={e => reread({ sheet: e.target.value })}
+                    className="border border-gray-200 rounded-lg px-3 py-1.5 text-xs bg-gray-50 disabled:opacity-50"
+                  >
+                    {preview.sheet_names.map(s => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                </label>
+              )}
+              <label className="block">
+                <span className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Header row</span>
+                <select
+                  value={preview.header_row}
+                  disabled={applyingMap}
+                  onChange={e => reread({ headerRow: Number(e.target.value) })}
+                  className="border border-gray-200 rounded-lg px-3 py-1.5 text-xs bg-gray-50 disabled:opacity-50"
+                >
+                  {Array.from({ length: 12 }, (_, i) => i).map(i => (
+                    <option key={i} value={i}>
+                      Row {i + 1}{i === preview.header_row ? " — detected" : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <p className="text-[11px] text-gray-400 pb-1.5">
+                Changing either re-reads the file and proposes a new mapping.
+              </p>
+            </div>
+
+            {preview.preamble.length > 0 && (
+              <p className="text-[11px] text-gray-500">
+                <span className="font-semibold text-gray-600">Above the header:</span>{" "}
+                {preview.preamble.slice(0, 4).join(" · ")}
+                {preview.detected_from && preview.detected_to && (
+                  <span className="ml-2 text-green-700">
+                    → period read as {preview.detected_from} to {preview.detected_to}
+                  </span>
+                )}
+              </p>
+            )}
+
+            {preview.unmapped_columns.length > 0 && (
+              <p className="text-[11px] text-amber-700">
+                <span className="font-semibold">
+                  {preview.unmapped_columns.length} column{preview.unmapped_columns.length === 1 ? "" : "s"} in
+                  your file {preview.unmapped_columns.length === 1 ? "is" : "are"} not mapped:
+                </span>{" "}
+                {preview.unmapped_columns.join(", ")}. Their values are still saved with the
+                ticket, but nothing reports on them until they are mapped below.
+              </p>
+            )}
+          </div>
+
           <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
             <div className="px-5 py-3 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
               <p className="text-xs font-semibold text-gray-600 uppercase tracking-wider">Column Mapping</p>
@@ -668,17 +791,41 @@ export default function UploadTicketsPage({ mode = "internal" }: { mode?: "inter
                     <div className="w-36 shrink-0">
                       {!isSkipped ? (
                         (() => {
-                          const sample = preview.sample_row?.[mapped!];
-                          if (!sample) return <span className="text-[10px] text-gray-300 italic">empty</span>;
-                          const display = sample.length > 20 ? sample.slice(0, 18) + "…" : sample;
+                          // Up to three values, not one. When the first row of a
+                          // column happens to be blank a single sample says
+                          // "empty", which is exactly when the user most needs to
+                          // see what is in there.
+                          const samples = preview.sample_rows?.[mapped!]
+                            ?? (preview.sample_row?.[mapped!] ? [preview.sample_row[mapped!]] : []);
+                          if (!samples.length) return <span className="text-[10px] text-gray-300 italic">empty</span>;
                           return (
-                            <span title={sample} className="inline-block px-2 py-0.5 rounded bg-blue-50 border border-blue-100 text-[10px] font-mono text-blue-700 truncate max-w-full">
-                              {display}
-                            </span>
+                            <div title={samples.join("\n")} className="space-y-0.5">
+                              {samples.map((s, i) => (
+                                <span key={i} className="block px-2 py-0.5 rounded bg-blue-50 border border-blue-100 text-[10px] font-mono text-blue-700 truncate">
+                                  {s.length > 20 ? s.slice(0, 18) + "…" : s}
+                                </span>
+                              ))}
+                            </div>
                           );
                         })()
                       ) : (
-                        <span className="text-[10px] text-gray-200">—</span>
+                        (() => {
+                          // Nothing claimed this field, but a column looks close.
+                          // Offered, never applied: a 0.82 name match on a money
+                          // column is a good guess, not a fact.
+                          const hint = preview.fuzzy_suggestions?.[field.key]?.[0];
+                          if (!hint) return <span className="text-[10px] text-gray-200">—</span>;
+                          return (
+                            <button
+                              type="button"
+                              onClick={() => setMapping(prev => ({ ...prev, [field.key]: hint.column }))}
+                              className="px-2 py-0.5 rounded bg-amber-50 border border-amber-200 text-[10px] text-amber-800 hover:bg-amber-100 truncate max-w-full"
+                              title={`Use "${hint.column}" for this field`}
+                            >
+                              Use “{hint.column}”?
+                            </button>
+                          );
+                        })()
                       )}
                     </div>
                     <div className="w-20 shrink-0 text-right">
@@ -696,31 +843,26 @@ export default function UploadTicketsPage({ mode = "internal" }: { mode?: "inter
 
           <div className="flex items-center justify-between">
             <div className="text-xs text-gray-500">
-              {missingRequired.length > 0 && !preview.is_template_match && (
+              {missingRequired.length > 0 && (
                 <span className="text-red-500">
-                  Required fields not mapped: {missingRequired.map(k => activeFields.find(f => f.key === k)?.mapLabel).join(", ")}
+                  Required fields not mapped: {missingRequired.map(k => activeFields.find(f => f.key === k)?.mapLabel ?? k).join(", ")}
                 </span>
               )}
             </div>
             <div className="flex items-center gap-2">
-              {preview.is_template_match ? (
-                <button
-                  onClick={() => { setRows(preview.rows); resetFilter(); setStep("preview"); }}
-                  className="flex items-center gap-1.5 px-5 py-2 bg-[#1e3a5f] text-white rounded-lg text-sm font-semibold hover:bg-[#16304f]"
-                >
-                  Proceed to Preview <ArrowRight className="w-3.5 h-3.5" />
-                </button>
-              ) : (
-                <button
-                  onClick={applyMapping}
-                  disabled={applyingMap || missingRequired.length > 0}
-                  className="flex items-center gap-1.5 px-5 py-2 bg-[#1e3a5f] text-white rounded-lg text-sm font-semibold hover:bg-[#16304f] disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {applyingMap
-                    ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Applying…</>
-                    : <>Apply Mapping <ArrowRight className="w-3.5 h-3.5" /></>}
-                </button>
-              )}
+              {/* One button, both branches. There used to be a second one for a
+                  template match that jumped straight to the preview using the rows
+                  the AUTO mapping produced — so every dropdown the user had just
+                  corrected on a template-matched file was silently discarded. */}
+              <button
+                onClick={applyMapping}
+                disabled={applyingMap || missingRequired.length > 0}
+                className="flex items-center gap-1.5 px-5 py-2 bg-[#1e3a5f] text-white rounded-lg text-sm font-semibold hover:bg-[#16304f] disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {applyingMap
+                  ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Applying…</>
+                  : <>Apply Mapping <ArrowRight className="w-3.5 h-3.5" /></>}
+              </button>
             </div>
           </div>
         </div>

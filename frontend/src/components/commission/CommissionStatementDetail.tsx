@@ -8,11 +8,13 @@ import toast from "react-hot-toast";
 import api from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { INCENTIVE_TYPE_COLS } from "@/lib/incentives";
+import type { CommissionSource } from "@/lib/commissionSources";
 import Pagination from "@/components/ui/Pagination";
 import CommissionDiagnosisModal from "./CommissionDiagnosisModal";
 import {
   CommissionGap, CommissionRow, CommissionRowsPage, CommissionStatement,
-  CommissionSummary, Facets, RunResponse, inr, SKIPPED_LABEL, STAT_LABEL, STATUS_STYLE,
+  CommissionSummary, Facets, RunResponse, VarianceReport, facetValues, inr,
+  SKIPPED_LABEL, STAT_LABEL, STATUS_STYLE,
 } from "./types";
 
 const PAGE = 50;
@@ -20,14 +22,22 @@ const RUNNING = ["queued", "processing"];
 const MAX_SELECTION = 500;   // matches MAX_INLINE_ROWS on the API
 // Non-incentive <th> in the results grid: checkbox, Document #, Ticket #, TRNC, Airline,
 // Issue date, STAT, Sector, Class, Travel date, Fare, YQ, YR, Matched deal, IATA comm,
-// Estimated, Status, Actions. Keep in step with the header row below — the placeholder
-// colSpans read it, and they had already drifted once.
-const STATIC_COLS = 18;
+// Estimated, Status, Actions. Computed rather than a literal — the placeholder colSpans
+// read it and it had already drifted once before the variance columns existed.
+const BASE_STATIC_COLS = 18;
+const VARIANCE_COLS = 3;     // Declared · Computed · Variance
 
-type Tab = "results" | "summary" | "gaps";
+type Tab = "results" | "summary" | "gaps" | "variance";
 
-/** Tooltip explaining where a row's sector/class/travel date came from. */
-function enrichTitle(r: CommissionRow): string {
+/** Tooltip explaining where a row's sector/class/travel date came from.
+ *
+ *  On BSP these three are recovered from a TGQ HMPR counterpart during the run, so a blank
+ *  can mean "no TGQ" or "not run yet" and the difference matters. Every other source
+ *  prints them in the file itself, where a blank simply means the vendor left it blank. */
+function enrichTitle(r: CommissionRow, source: CommissionSource): string {
+  if (source.sectorFromSource) {
+    return "From the statement itself";
+  }
   // These three columns are written by the commission run, not by the parse, so
   // an unrun row shows blanks even when TGQ HMPR does cover its ticket. Saying so
   // is the difference between "we have no TGQ data" and "we have not looked yet".
@@ -39,9 +49,25 @@ function enrichTitle(r: CommissionRow): string {
   return `From TGQ HMPR · ${legs} ${legs === 1 ? "sector" : "sectors"}`;
 }
 
+/** The three enrichment-shaped columns, read from wherever this source keeps them. */
+const rowSector = (r: CommissionRow, src: CommissionSource) =>
+  src.sectorFromSource ? r.sector : r.enriched_sector;
+const rowClass = (r: CommissionRow, src: CommissionSource) =>
+  src.sectorFromSource ? r.booking_class : r.enriched_booking_class;
+const rowTravelDate = (r: CommissionRow, src: CommissionSource) =>
+  src.sectorFromSource ? r.travel_date : r.enriched_travel_date;
+
+/** A signed money cell: amber when they owe you, slate when they overpaid. */
+function Variance({ v }: { v: number | null | undefined }) {
+  if (v == null) return <span className="text-slate-300">—</span>;
+  if (v > 0) return <span className="text-amber-700 font-semibold">₹{inr(v)}</span>;
+  if (v < 0) return <span className="text-slate-500">−₹{inr(Math.abs(v))}</span>;
+  return <span className="text-slate-400">₹0.00</span>;
+}
+
 export default function CommissionStatementDetail({
-  statement, onBack,
-}: { statement: CommissionStatement; onBack: () => void }) {
+  source, statement, onBack,
+}: { source: CommissionSource; statement: CommissionStatement; onBack: () => void }) {
   const [stmt, setStmt] = useState(statement);
   const [tab, setTab] = useState<Tab>("results");
   const [starting, setStarting] = useState(false);
@@ -56,6 +82,8 @@ export default function CommissionStatementDetail({
   const [air, setAir] = useState("");
   const [status, setStatus] = useState("");
   const [enrichment, setEnrichment] = useState("");   // "" | enriched | not_enriched
+  // "" | short | over | matched | unverified — the four questions worth asking of a gap.
+  const [variance, setVariance] = useState("");
   const [facets, setFacets] = useState<Facets>({ txn_types: [], airlines: [], statuses: [], enrichment: [] });
   const [diagnoseRow, setDiagnoseRow] = useState<CommissionRow | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -64,6 +92,9 @@ export default function CommissionStatementDetail({
   // other tabs
   const [summary, setSummary] = useState<CommissionSummary | null>(null);
   const [gaps, setGaps] = useState<CommissionGap[] | null>(null);
+  const [varianceReport, setVarianceReport] = useState<VarianceReport | null>(null);
+
+  const STATIC_COLS = BASE_STATIC_COLS + (source.showsVariance ? VARIANCE_COLS : 0);
 
   // A run whose worker went quiet is not "running" as far as the UI is concerned —
   // otherwise the button would sit on "Calculating…" forever with nothing behind it.
@@ -74,11 +105,11 @@ export default function CommissionStatementDetail({
 
   const refreshStatement = useCallback(async () => {
     try {
-      const { data } = await api.get<CommissionStatement>(`/bsp-commission/statements/${stmt.batch_id}`);
+      const { data } = await api.get<CommissionStatement>(`${source.apiBase}/statements/${stmt.batch_id}`);
       setStmt(data);
       return data;
     } catch { return null; }
-  }, [stmt.batch_id]);
+  }, [stmt.batch_id, source]);
 
   // Poll while the worker is calculating; reload the open tab when it lands.
   useEffect(() => {
@@ -88,7 +119,7 @@ export default function CommissionStatementDetail({
       if (next && !RUNNING.includes(next.status)) {
         if (next.status === "failed") toast.error(next.error || "Calculation failed.");
         else toast.success("Commission calculated.");
-        setRows([]); setSummary(null); setGaps(null); setOffset(0);
+        setRows([]); setSummary(null); setGaps(null); setVarianceReport(null); setOffset(0);
       }
     }, 3000);
     return () => clearInterval(t);
@@ -98,18 +129,19 @@ export default function CommissionStatementDetail({
     setLoadingRows(true);
     try {
       const { data } = await api.get<CommissionRowsPage>(
-        `/bsp-commission/statements/${stmt.batch_id}/rows`,
+        `${source.apiBase}/statements/${stmt.batch_id}/rows`,
         { params: {
           offset: off, limit: PAGE,
           search: search || undefined, txn_type: txn || undefined,
           air: air || undefined, comm_status: status || undefined,
           enrichment: enrichment || undefined,
+          variance: variance || undefined,
         } },
       );
       setRows(data.rows); setTotal(data.total); setOffset(off);
     } catch { setRows([]); }
     finally { setLoadingRows(false); }
-  }, [stmt.batch_id, search, txn, air, status, enrichment]);
+  }, [stmt.batch_id, source, search, txn, air, status, enrichment, variance]);
 
   // Selection is scoped to what is on screen: changing page or filters drops it so
   // a later "Run selected" can never act on rows the user can no longer see.
@@ -120,21 +152,27 @@ export default function CommissionStatementDetail({
   useEffect(() => { if (tab === "results") loadRows(0); }, [tab, loadRows]);
 
   useEffect(() => {
-    api.get<Facets>(`/bsp-commission/statements/${stmt.batch_id}/rows/facets`)
+    api.get<Facets>(`${source.apiBase}/statements/${stmt.batch_id}/rows/facets`)
       .then(({ data }) => setFacets(data)).catch(() => {});
-  }, [stmt.batch_id]);
+  }, [stmt.batch_id, source]);
 
   useEffect(() => {
     if (tab !== "summary" || summary) return;
-    api.get<CommissionSummary>(`/bsp-commission/statements/${stmt.batch_id}/summary`)
+    api.get<CommissionSummary>(`${source.apiBase}/statements/${stmt.batch_id}/summary`)
       .then(({ data }) => setSummary(data)).catch(() => setSummary(null));
-  }, [tab, summary, stmt.batch_id]);
+  }, [tab, summary, stmt.batch_id, source]);
 
   useEffect(() => {
     if (tab !== "gaps" || gaps) return;
-    api.get<CommissionGap[]>(`/bsp-commission/statements/${stmt.batch_id}/gaps`)
+    api.get<CommissionGap[]>(`${source.apiBase}/statements/${stmt.batch_id}/gaps`)
       .then(({ data }) => setGaps(data)).catch(() => setGaps([]));
-  }, [tab, gaps, stmt.batch_id]);
+  }, [tab, gaps, stmt.batch_id, source]);
+
+  useEffect(() => {
+    if (tab !== "variance" || varianceReport || !source.showsVariance) return;
+    api.get<VarianceReport>(`${source.apiBase}/statements/${stmt.batch_id}/variance`)
+      .then(({ data }) => setVarianceReport(data)).catch(() => setVarianceReport(null));
+  }, [tab, varianceReport, stmt.batch_id, source]);
 
   const errText = (e: unknown, fallback: string) =>
     (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail || fallback;
@@ -143,7 +181,7 @@ export default function CommissionStatementDetail({
   const runAll = async () => {
     setStarting(true);
     try {
-      await api.post(`/bsp-commission/statements/${stmt.batch_id}/run`, {});
+      await api.post(`${source.apiBase}/statements/${stmt.batch_id}/run`, {});
       toast.success("Calculating — large statements take a few minutes.");
       await refreshStatement();
     } catch (e: unknown) {
@@ -158,7 +196,7 @@ export default function CommissionStatementDetail({
     setBusyRows((prev) => new Set([...prev, ...ids]));
     try {
       const { data } = await api.post<RunResponse>(
-        `/bsp-commission/statements/${stmt.batch_id}/run`, { row_ids: ids },
+        `${source.apiBase}/statements/${stmt.batch_id}/run`, { row_ids: ids },
       );
       const bits = [
         data.calculated && `${data.calculated} calculated`,
@@ -187,7 +225,7 @@ export default function CommissionStatementDetail({
   /** Release a run that lost its worker, so it can be started again. */
   const resetRun = async () => {
     try {
-      const { data } = await api.post<CommissionStatement>(`/bsp-commission/statements/${stmt.batch_id}/reset`);
+      const { data } = await api.post<CommissionStatement>(`${source.apiBase}/statements/${stmt.batch_id}/reset`);
       setStmt(data);
       toast.success("Run released — you can start it again.");
     } catch (e: unknown) { toast.error(errText(e, "Could not reset the run.")); }
@@ -210,7 +248,7 @@ export default function CommissionStatementDetail({
 
   const downloadXlsx = async () => {
     try {
-      const res = await api.get(`/bsp-commission/statements/${stmt.batch_id}/xlsx`, { responseType: "blob" });
+      const res = await api.get(`${source.apiBase}/statements/${stmt.batch_id}/xlsx`, { responseType: "blob" });
       const url = URL.createObjectURL(res.data as Blob);
       const a = window.document.createElement("a");
       a.href = url;
@@ -328,18 +366,20 @@ export default function CommissionStatementDetail({
           accent="text-orange-600"
           hint={
             stmt.needs_data_rows > 0
-              ? `${stmt.needs_data_rows.toLocaleString("en-IN")} of these matched a deal that pays only on a cabin class, travel window or route this statement does not print — uploading the TGQ HMPR and re-running settles them. The other ${stmt.unmatched_rows.toLocaleString("en-IN")} have no deal at all.`
-              : "No approved airline deal covers these rows."
+              ? `${stmt.needs_data_rows.toLocaleString("en-IN")} of these matched a deal that pays only on a cabin class, travel window or route this statement does not print${source.showsEnrichment ? " — uploading the TGQ HMPR and re-running settles them" : ""}. The other ${stmt.unmatched_rows.toLocaleString("en-IN")} have no deal at all.`
+              : `No approved ${source.dealKindLabel === "B2B" ? "B2B" : "airline"} deal covers these rows.`
           }
         />
         {/* Broken out because it is a different job: one file to upload, versus
             writing a deal that does not exist yet. */}
-        <Stat
-          label="Of which need TGQ"
-          value={stmt.needs_data_rows.toLocaleString("en-IN")}
-          accent={stmt.needs_data_rows > 0 ? "text-amber-700" : undefined}
-          hint="Unmatched only because the cabin class, travel window or route the deal pays on is not printed on a BSP statement. Upload the matching TGQ HMPR and re-run."
-        />
+        {source.showsEnrichment && (
+          <Stat
+            label="Of which need TGQ"
+            value={stmt.needs_data_rows.toLocaleString("en-IN")}
+            accent={stmt.needs_data_rows > 0 ? "text-amber-700" : undefined}
+            hint="Unmatched only because the cabin class, travel window or route the deal pays on is not printed on a BSP statement. Upload the matching TGQ HMPR and re-run."
+          />
+        )}
         <Stat
           label="Excluded / skipped"
           value={(stmt.excluded_rows + stmt.skipped_rows).toLocaleString("en-IN")}
@@ -349,12 +389,32 @@ export default function CommissionStatementDetail({
             already printed in the subtitle. It used to divide by
             commission_total_rows, which only a queued whole-statement run ever
             set, so a statement touched only by the per-row ▶ read "5 of 0". */}
-        <Stat
-          label="Enriched from TGQ"
-          value={`${stmt.enriched_rows.toLocaleString("en-IN")} of ${stmt.row_count.toLocaleString("en-IN")}`}
-          accent={stmt.enriched_rows === 0 ? "text-amber-600" : "text-sky-700"}
-          hint="Rows where a TGQ HMPR statement supplied the cabin class, sector or travel date that BSP does not print."
-        />
+        {source.showsEnrichment && (
+          <Stat
+            label="Enriched from TGQ"
+            value={`${(stmt.enriched_rows ?? 0).toLocaleString("en-IN")} of ${stmt.row_count.toLocaleString("en-IN")}`}
+            accent={(stmt.enriched_rows ?? 0) === 0 ? "text-amber-600" : "text-sky-700"}
+            hint="Rows where a TGQ HMPR statement supplied the cabin class, sector or travel date that BSP does not print."
+          />
+        )}
+        {/* The number this whole screen exists to produce for a consolidator
+            statement: what your deals say you earned, minus what they actually paid. */}
+        {source.showsVariance && (
+          <>
+            <Stat
+              label="Under-recovery"
+              value={`₹${inr(Math.max(0, stmt.variance_total ?? 0))}`}
+              accent="text-amber-700"
+              hint="Your deals say you should have earned this much more than the consolidator's statement shows it paid. Open the Variance tab for the breakdown to send them."
+            />
+            <Stat
+              label="They declared"
+              value={`₹${inr((stmt.declared_commission_total ?? 0) + (stmt.declared_incentive_total ?? 0))}`}
+              accent="text-slate-600"
+              hint="Commission plus incentive as printed on the consolidator's own statement, gross of TDS."
+            />
+          </>
+        )}
       </div>
 
       {/* Nothing has been calculated. Previously invisible: rows still at
@@ -378,7 +438,7 @@ export default function CommissionStatementDetail({
           re-run — enrichment happens inside the run. Without this the user
           uploads exactly the data that was missing, sees no change, and
           reasonably concludes the feature is broken. */}
-      {stmt.tgq_stale && (
+      {source.showsEnrichment && stmt.tgq_stale && (
         <div className="flex items-start gap-2 px-3 py-2.5 mb-4 rounded-xl border border-sky-200 bg-sky-50 text-xs text-sky-800">
           <AlertTriangle className="w-4 h-4 shrink-0 mt-px" />
           <span>
@@ -393,7 +453,7 @@ export default function CommissionStatementDetail({
       )}
 
       {/* The difference between "no deal applies" and "the other half of the data is missing". */}
-      {hasResults && stmt.enriched_rows === 0 && (
+      {source.showsEnrichment && hasResults && (stmt.enriched_rows ?? 0) === 0 && (
         <div className="flex items-start gap-2 px-3 py-2.5 mb-4 rounded-xl border border-amber-200 bg-amber-50 text-xs text-amber-800">
           <AlertTriangle className="w-4 h-4 shrink-0 mt-px" />
           <span>
@@ -407,7 +467,12 @@ export default function CommissionStatementDetail({
 
       {/* Tabs */}
       <div className="flex items-center gap-1.5 mb-4">
-        {([["results", "Results"], ["summary", "Summary"], ["gaps", "Unmatched & skipped"]] as [Tab, string][])
+        {([
+          ["results", "Results"],
+          ["summary", "Summary"],
+          ...(source.showsVariance ? [["variance", "Variance"] as [Tab, string]] : []),
+          ["gaps", "Unmatched & skipped"],
+        ] as [Tab, string][])
           .map(([k, label]) => (
             <button key={k} onClick={() => setTab(k)}
               className={cn(
@@ -435,16 +500,23 @@ export default function CommissionStatementDetail({
                 className="pl-8 pr-3 py-1.5 text-xs border border-slate-200 rounded-lg w-56 focus:outline-none focus:ring-1 focus:ring-blue-400"
               />
             </div>
-            <Select value={txn} onChange={setTxn} options={facets.txn_types} placeholder="All TRNC" />
-            <Select value={air} onChange={setAir} options={facets.airlines} placeholder="All airlines" />
-            <Select value={status} onChange={setStatus} options={facets.statuses} placeholder="All statuses" />
-            <Select value={enrichment} onChange={setEnrichment}
-                    options={["enriched", "not_enriched"]} placeholder="All rows" />
+            <Select value={txn} onChange={setTxn} options={facetValues(facets, "txn")}
+                    placeholder={source.showsAgency ? "All statuses (file)" : "All TRNC"} />
+            <Select value={air} onChange={setAir} options={facetValues(facets, "air")} placeholder="All airlines" />
+            <Select value={status} onChange={setStatus} options={facetValues(facets, "status")} placeholder="All results" />
+            {source.showsEnrichment && (
+              <Select value={enrichment} onChange={setEnrichment}
+                      options={["enriched", "not_enriched"]} placeholder="All rows" />
+            )}
+            {source.showsVariance && (
+              <Select value={variance} onChange={setVariance}
+                      options={["short", "over", "matched", "unverified"]} placeholder="Any variance" />
+            )}
             <button onClick={applyFilters} className="px-3 py-1.5 text-xs font-medium text-blue-600 border border-blue-200 rounded-lg hover:bg-blue-50">
               Apply
             </button>
             {hasFilters && (
-              <button onClick={() => { clearFilters(); }} className="flex items-center gap-1 px-2 py-1.5 text-xs text-slate-400 hover:text-slate-700">
+              <button onClick={() => { setVariance(""); clearFilters(); }} className="flex items-center gap-1 px-2 py-1.5 text-xs text-slate-400 hover:text-slate-700">
                 <X className="w-3 h-3" /> Clear
               </button>
             )}
@@ -483,6 +555,24 @@ export default function CommissionStatementDetail({
                     ))}
                     <th className="text-right px-3 py-2.5 font-semibold text-teal-600">IATA comm</th>
                     <th className="text-right px-3 py-2.5 font-semibold text-emerald-700">Estimated</th>
+                    {/* The comparison the whole feature exists for: what they paid, what
+                        your deal says, and the gap. Grouped so the eye reads across. */}
+                    {source.showsVariance && (
+                      <>
+                        <th className="text-right px-3 py-2.5 font-semibold text-slate-500"
+                            title="Commission plus incentive as printed on the consolidator's own statement, gross of TDS.">
+                          Declared
+                        </th>
+                        <th className="text-right px-3 py-2.5 font-semibold text-slate-500"
+                            title="What your deal says you should have earned: estimated incentive plus IATA commission.">
+                          Computed
+                        </th>
+                        <th className="text-right px-3 py-2.5 font-semibold text-amber-700"
+                            title="Computed minus declared. Positive means the consolidator owes you.">
+                          Variance
+                        </th>
+                      </>
+                    )}
                     <th className="text-center px-3 py-2.5 font-semibold">Status</th>
                     <th className="text-center px-3 py-2.5 font-semibold">Actions</th>
                   </tr>
@@ -526,19 +616,25 @@ export default function CommissionStatementDetail({
                         </td>
                         <td className="px-3 py-2 text-xs text-slate-500">{r.issue_date || "—"}</td>
                         <td className="px-3 py-2 text-xs text-slate-500" title={r.stat ? STAT_LABEL[r.stat] : ""}>{r.stat || "—"}</td>
-                        <td className="px-3 py-2 text-xs font-mono text-slate-600" title={enrichTitle(r)}>
-                          {r.enriched_sector || <span className="text-slate-300">—</span>}
+                        <td className="px-3 py-2 text-xs font-mono text-slate-600" title={enrichTitle(r, source)}>
+                          {rowSector(r, source) || <span className="text-slate-300">—</span>}
                         </td>
-                        <td className="px-3 py-2 text-xs font-mono text-slate-600" title={enrichTitle(r)}>
-                          {r.enriched_booking_class || <span className="text-slate-300">—</span>}
+                        <td className="px-3 py-2 text-xs font-mono text-slate-600" title={
+                          rowClass(r, source)
+                            ? enrichTitle(r, source)
+                            : source.sectorFromSource
+                              ? "This statement leaves the class blank, so class-restricted deals were not evaluated for this row"
+                              : enrichTitle(r, source)
+                        }>
+                          {rowClass(r, source) || <span className="text-slate-300">—</span>}
                         </td>
                         <td className="px-3 py-2 text-xs text-slate-600" title={
                           r.enriched_travel_date_source === "inferred"
                             ? "Year inferred from the issue date — TGQ HMPR prints the day and month only"
-                            : enrichTitle(r)
+                            : enrichTitle(r, source)
                         }>
-                          {r.enriched_travel_date
-                            ? <>{r.enriched_travel_date}{r.enriched_travel_date_source === "inferred" && <span className="text-amber-500 ml-0.5">~</span>}</>
+                          {rowTravelDate(r, source)
+                            ? <>{rowTravelDate(r, source)}{r.enriched_travel_date_source === "inferred" && <span className="text-amber-500 ml-0.5">~</span>}</>
                             : <span className="text-slate-300">—</span>}
                         </td>
                         <td className="px-3 py-2 text-right tabular-nums text-slate-700">{inr(r.fare_amount)}</td>
@@ -546,8 +642,21 @@ export default function CommissionStatementDetail({
                         <td className="px-3 py-2 text-right tabular-nums text-slate-500">{inr(r.yr)}</td>
                         <td className="px-3 py-2 text-xs">
                           {r.matched_deal_name ? (
-                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold border bg-sky-50 text-sky-700 border-sky-200">
-                              AIR · {r.matched_deal_name}
+                            <span className="inline-flex items-center gap-1">
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold border bg-sky-50 text-sky-700 border-sky-200">
+                                {r.matched_deal_type === "b2b" ? "B2B" : source.dealKindLabel} · {r.matched_deal_name}
+                              </span>
+                              {/* A name match is real but unverified: it cannot tell two
+                                  channels of one vendor apart. Saying so beats presenting
+                                  it like a certain match. */}
+                              {r.supplier_match_by === "name" && (
+                                <span
+                                  className="text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded px-1"
+                                  title="Matched by supplier NAME only — this deal is not linked to an Agency Master branch, so a vendor onboarded on both GDS and LCC cannot be told apart. Open the deal and pick its Branch."
+                                >
+                                  name only
+                                </span>
+                              )}
                             </span>
                           ) : <span className="text-slate-300">—</span>}
                         </td>
@@ -563,6 +672,33 @@ export default function CommissionStatementDetail({
                         )}>
                           {r.calculated_incentive != null ? `₹${inr(r.calculated_incentive)}` : <span className="text-slate-300">—</span>}
                         </td>
+                        {source.showsVariance && (
+                          <>
+                            <td className="px-3 py-2 text-right tabular-nums text-slate-600">
+                              ₹{inr((r.declared_commission ?? 0) + (r.declared_incentive ?? 0))}
+                              {/* The vendor's own components did not add up to its own Net
+                                  Amount, so the variance beside it means little. */}
+                              {r.declared_net_ok === false && (
+                                <span className="text-amber-600 ml-1"
+                                      title="This row's own figures do not add up to its Net Amount, so it is left out of the variance total.">
+                                  ⚠
+                                </span>
+                              )}
+                              {r.declared_net_ok == null && r.declared_net != null && (
+                                <span className="text-slate-400 ml-1"
+                                      title="Could not check this row's arithmetic — it uses a charge whose sign we have not seen in a real statement.">
+                                  ?
+                                </span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2 text-right tabular-nums text-slate-600">
+                              ₹{inr((r.calculated_incentive ?? 0) + (r.iata_commission ?? 0))}
+                            </td>
+                            <td className="px-3 py-2 text-right tabular-nums">
+                              <Variance v={r.variance_total} />
+                            </td>
+                          </>
+                        )}
                         <td className="px-3 py-2 text-center">
                           <span title={r.commission_reason || ""}
                             className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold border ${st.cls}`}>
@@ -581,6 +717,15 @@ export default function CommissionStatementDetail({
                           <button onClick={() => setDiagnoseRow(r)} className="p-1 text-slate-400 hover:text-blue-600" title="Why this result?">
                             <Info className="w-3.5 h-3.5" />
                           </button>
+                          {/* Things the run decided not to claim and why — a missing YR
+                              column, an ancillary it could not split, a carrier resolved
+                              against a disagreeing name. Hidden in a tooltip rather than a
+                              column, but never dropped. */}
+                          {(r.notes?.length ?? 0) > 0 && (
+                            <span className="p-1 text-amber-500 cursor-help" title={(r.notes ?? []).join("\n\n")}>
+                              <AlertTriangle className="w-3.5 h-3.5 inline" />
+                            </span>
+                          )}
                         </td>
                       </tr>
                     );
@@ -600,26 +745,109 @@ export default function CommissionStatementDetail({
 
           {rows.length > 0 && (() => {
             // Per row, not "the first row speaks for all": a statement holds a mix.
-            const enriched = rows.filter((r) => r.enrichment_source).length;
             const missing = [...new Set(rows.flatMap((r) => r.skipped_criteria ?? []))];
             if (!missing.length) {
               return (
                 <p className="text-[11px] text-slate-400 mt-2">
-                  All {rows.length} rows on this page were enriched from a TGQ HMPR statement —
-                  cabin class, sector and travel date were all evaluated.
+                  Every criterion these {rows.length} rows{" "}
+                  {source.showsEnrichment ? "were enriched with" : "carry"} was evaluated —
+                  cabin class, sector and travel date were all known.
                 </p>
               );
             }
+            const missingText = missing.map((c) => SKIPPED_LABEL[c] ?? c).join(", ");
+            if (!source.showsEnrichment) {
+              return (
+                <p className="text-[11px] text-slate-400 mt-2">
+                  This statement leaves {missingText} blank on some rows, so deal criteria that
+                  depend on them were skipped rather than guessed — a deal that pays only on a
+                  specific {missingText} is reported as unmatched rather than paid unverified.
+                </p>
+              );
+            }
+            const enriched = rows.filter((r) => r.enrichment_source).length;
             return (
               <p className="text-[11px] text-slate-400 mt-2">
                 {enriched} of {rows.length} rows on this page were enriched from a TGQ HMPR
                 statement. For the other {rows.length - enriched}, the BSP statement prints no{" "}
-                {missing.map((c) => SKIPPED_LABEL[c] ?? c).join(", ")}, so deal criteria that
-                depend on them were skipped rather than guessed.
+                {missingText}, so deal criteria that depend on them were skipped rather than guessed.
               </p>
             );
           })()}
         </>
+      )}
+
+      {/* Variance — what the consolidator paid against what your deals say, grouped by
+          airline and deal and sorted by the biggest gap. This is the tab you print and
+          send back to them. */}
+      {tab === "variance" && (
+        <div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+            <Stat label="Under-recovery"
+                  value={`₹${inr(varianceReport?.under_recovery ?? 0)}`}
+                  accent="text-amber-700"
+                  hint="Rows where your deal earns more than the consolidator paid. This is what they owe you." />
+            <Stat label="Over-paid"
+                  value={`₹${inr(Math.abs(varianceReport?.over_paid ?? 0))}`}
+                  accent="text-slate-500"
+                  hint="Rows where the consolidator paid more than your deal earns — worth knowing before you query the rest." />
+            <Stat label="Net"
+                  value={`₹${inr(varianceReport?.net_variance ?? 0)}`}
+                  accent={(varianceReport?.net_variance ?? 0) > 0 ? "text-amber-700" : "text-slate-600"} />
+            <Stat label="Not comparable"
+                  value={(varianceReport?.unverified_rows ?? 0).toLocaleString("en-IN")}
+                  accent={(varianceReport?.unverified_rows ?? 0) > 0 ? "text-amber-600" : undefined}
+                  hint="Rows whose own figures do not add up to their Net Amount. A variance against arithmetic that does not close would be meaningless, so they are excluded from the totals." />
+          </div>
+
+          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-slate-50 border-b border-slate-200 text-[11px] uppercase tracking-wide text-slate-400 whitespace-nowrap">
+                    <th className="text-left px-3 py-2.5 font-semibold">Airline</th>
+                    <th className="text-left px-3 py-2.5 font-semibold">Deal</th>
+                    <th className="text-right px-3 py-2.5 font-semibold">Rows</th>
+                    <th className="text-right px-3 py-2.5 font-semibold text-slate-500">Declared comm</th>
+                    <th className="text-right px-3 py-2.5 font-semibold text-teal-600">Computed comm</th>
+                    <th className="text-right px-3 py-2.5 font-semibold text-slate-500">Declared incentive</th>
+                    <th className="text-right px-3 py-2.5 font-semibold text-amber-600">Computed incentive</th>
+                    <th className="text-right px-3 py-2.5 font-semibold text-amber-700">Variance</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {!varianceReport ? (
+                    <tr><td colSpan={8} className="px-3 py-10 text-center text-sm text-slate-400">Loading…</td></tr>
+                  ) : varianceReport.groups.length === 0 ? (
+                    <tr><td colSpan={8} className="px-3 py-12 text-center text-sm text-slate-400">
+                      Nothing to compare yet — run the statement first.
+                    </td></tr>
+                  ) : varianceReport.groups.map((g, i) => (
+                    <tr key={`${g.airline}-${g.deal_no ?? i}`} className="border-b border-slate-100 whitespace-nowrap">
+                      <td className="px-3 py-2 font-medium text-slate-700">{g.airline}</td>
+                      <td className="px-3 py-2 text-xs text-slate-600">
+                        {g.deal_no
+                          ? <>{g.deal_no}{g.deal_name ? ` · ${g.deal_name}` : ""}</>
+                          : <span className="text-orange-500">No deal matched</span>}
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums text-slate-500">{g.rows.toLocaleString("en-IN")}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-slate-600">₹{inr(g.declared_commission)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-teal-700">₹{inr(g.computed_commission)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-slate-600">₹{inr(g.declared_incentive)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-amber-700">₹{inr(g.computed_incentive)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums"><Variance v={g.variance_total} /></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <p className="text-[11px] text-slate-400 mt-2">
+            Declared figures are gross of TDS, exactly as the statement prints them, and the
+            computed side is gross too — netting one and not the other would show a shortfall
+            on every commission-bearing row that is not really there.
+          </p>
+        </div>
       )}
 
       {tab === "summary" && (
@@ -714,6 +942,7 @@ export default function CommissionStatementDetail({
 
       {diagnoseRow && (
         <CommissionDiagnosisModal
+          apiBase={source.apiBase}
           rowId={diagnoseRow.id}
           document={diagnoseRow.document_number}
           onClose={() => setDiagnoseRow(null)}

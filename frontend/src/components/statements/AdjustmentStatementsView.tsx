@@ -10,6 +10,18 @@ import toast from "react-hot-toast";
 import { notifyRequired } from "@/lib/requiredFields";
 import MultiSelectDropdown from "@/components/ui/MultiSelectDropdown";
 import { type TenantAirlineOpt, sameAirlineOnly, toOptions } from "@/lib/tenantAirlineOptions";
+import LccPartyPicker, { type PartyOption } from "@/components/statements/lcc/LccPartyPicker";
+import StatementUploadWizard from "@/components/statements/StatementUploadWizard";
+
+/** One row of GET /suppliers/ — only the fields the picker renders.
+ *  `code` is the unique one: 141 of the master's 2,340 names repeat across branches. */
+type SupplierOpt = {
+  id: number;
+  name: string;
+  code?: string | null;
+  branch?: string | null;
+  city?: string | null;
+};
 
 const PAGE = 50;
 // The API rejects anything below 3 recognised columns (_MIN_MATCHED_COLUMNS in
@@ -31,6 +43,13 @@ type Batch = {
   airline_name?: string | null;
   airline_code?: string | null;
   airline_ref_ids?: string[];
+  // Declared at upload, for the third-party types only (requiresSupplier). Read off the
+  // link row's SNAPSHOT, so a renamed vendor doesn't rewrite history. Empty for uploads
+  // made before the consolidator was captured.
+  supplier_id?: number | null;
+  supplier_name?: string | null;
+  supplier_branch?: string | null;
+  supplier_code?: string | null;
 };
 // `kind: "money"` is set by the backend for amount columns so they right-align and format.
 type Column = { header: string; field: string; kind?: string };
@@ -51,6 +70,11 @@ type Summary = {
 type RecordsResponse = {
   total: number; columns: Column[]; rows: Row[];
   filters?: FilterSpec[]; summary?: Summary; needs_reprocess?: boolean;
+  /** Why re-processing is offered. Absent = the original per-sector-split reason;
+   *  "stale_format" = the batch was parsed by an older column spec than the one running
+   *  now, so fields the current parser extracts are missing from its rows. */
+  reprocess_reason?: "stale_format";
+  stale_rows?: number;
 };
 
 function fmtDate(s: string): string {
@@ -69,11 +93,15 @@ function fmtMoney(v: string | number | null | undefined): string {
 }
 
 /** XLS/CSV upload modal for one adjustment type. */
-function UploadModal({ apiBase, title, requiresAirlineId, onClose, onDone }: {
+function UploadModal({ apiBase, title, requiresAirlineId, requiresSupplier, onClose, onDone }: {
   apiBase: string;
   title: string;
   /** LCC types only — their exports name no carrier, so the ID is mandatory here. */
   requiresAirlineId?: boolean;
+  /** Third-party types only — the uploader must name the consolidator from the Supplier
+   *  master. A consolidator statement doesn't say who sent it, and the B2B deal is matched
+   *  against the answer. */
+  requiresSupplier?: boolean;
   onClose: () => void;
   onDone: () => void;
 }) {
@@ -82,6 +110,8 @@ function UploadModal({ apiBase, title, requiresAirlineId, onClose, onDone }: {
   const [uploading, setUploading] = useState(false);
   const [airlines, setAirlines] = useState<TenantAirlineOpt[]>([]);
   const [tenantAirlineIds, setTenantAirlineIds] = useState<number[]>([]);
+  const [suppliers, setSuppliers] = useState<SupplierOpt[]>([]);
+  const [supplierId, setSupplierId] = useState<number | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Only fetched for the types that ask for it — the other statement types share this
@@ -92,6 +122,25 @@ function UploadModal({ apiBase, title, requiresAirlineId, onClose, onDone }: {
       .then((r) => setAirlines(r.data))
       .catch(() => toast.error("Failed to load your Airline Master."));
   }, [requiresAirlineId]);
+
+  // Same opt-in discipline. The full master is ~2,500 rows and the picker searches
+  // in-place, which is what the B2B deal form does with the same list.
+  useEffect(() => {
+    if (!requiresSupplier) return;
+    api.get<SupplierOpt[]>("/suppliers/", { params: { limit: 5000 } })
+      .then((r) => setSuppliers(r.data))
+      .catch(() => toast.error("Failed to load the Supplier master."));
+  }, [requiresSupplier]);
+
+  // Label = name, sublabel = branch/city · code. 141 of the master's names repeat across
+  // branches ("Riya Travel & Tours" is fourteen rows), so a label stopping at the name
+  // would render identical options and the pick would be a coin toss. `code` is unique.
+  const supplierOptions: PartyOption<"agency">[] = suppliers.map((s) => ({
+    value: s.id,
+    label: s.name,
+    sublabel: [s.branch || s.city, s.code].filter(Boolean).join(" · "),
+    kind: "agency" as const,
+  }));
 
   // Narrowed to the carrier already picked — the server refuses a mixed selection.
   const airlineChoices = sameAirlineOnly(airlines, tenantAirlineIds);
@@ -106,11 +155,16 @@ function UploadModal({ apiBase, title, requiresAirlineId, onClose, onDone }: {
       notifyRequired("Select the airline ID(s) this statement belongs to — the file itself doesn't say.");
       return;
     }
+    if (requiresSupplier && supplierId == null) {
+      notifyRequired("Select the agency this statement came from — the file itself doesn't name your consolidator.");
+      return;
+    }
     setUploading(true);
     try {
       const fd = new FormData(); fd.append("file", file);
       // Repeated field, one per id — how FastAPI reads a list from form data.
       for (const id of tenantAirlineIds) fd.append("tenant_airline_ids", String(id));
+      if (supplierId != null) fd.append("supplier_id", String(supplierId));
       const { data } = await api.post<{ inserted: number; matched_columns: number; source_rows?: number; leg_rows?: number }>(`${apiBase}/upload`, fd);
       // Sector-split types insert more rows than the file has lines — say so, or "imported
       // 518" against a 223-line file reads like a bug.
@@ -200,6 +254,35 @@ function UploadModal({ apiBase, title, requiresAirlineId, onClose, onDone }: {
             </div>
           )}
 
+          {/* Agency — REQUIRED for the third-party types. A consolidator statement never
+              names its sender (the file's own "Customer Name" column is YOU), so this is
+              the only source of it — and it is what the incoming B2B deal is matched
+              against, so the wrong pick would price the statement against the wrong deal.
+              Labelled "Agency" because that is what the trade calls it; the values are
+              rows in the platform-admin Supplier master. */}
+          {requiresSupplier && (
+            <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50/60 px-3.5 py-3">
+              <label className="text-xs font-semibold text-slate-700 block mb-1.5">
+                Agency <span className="text-red-500">*</span>
+              </label>
+              <LccPartyPicker
+                options={supplierOptions}
+                value={supplierId}
+                onChange={(o) => setSupplierId(o?.value ?? null)}
+                disabled={suppliers.length === 0}
+                placeholder={suppliers.length ? "Select the consolidator who sent this…" : "Supplier master is empty"}
+                searchPlaceholder="Search the Supplier master…"
+                emptyLabel="No suppliers yet — ask your platform admin to add them."
+              />
+              <p className="text-[11px] text-slate-400 mt-1.5">
+                Who sent you this statement. The file doesn&apos;t say, and Commission income
+                needs it to find the right B2B deal. Names come from the Supplier master, the
+                same list a B2B deal picks its supplier from — pick the right branch, since
+                each one is its own contract.
+              </p>
+            </div>
+          )}
+
           <p className="text-[11px] text-slate-400 mt-3">The original file is stored so you can download it later. Columns are matched by header name.</p>
         </div>
         <div className="flex justify-end gap-2 px-5 py-3.5 border-t border-slate-100">
@@ -271,11 +354,22 @@ function SummarySlab({ summary }: { summary: Summary }) {
   );
 }
 
-export default function AdjustmentStatementsView({ apiBase, slug, title, requiresAirlineId }: {
+export default function AdjustmentStatementsView({
+  apiBase, slug, title, requiresAirlineId, requiresSupplier, supportsMapping, doneHint,
+}: {
   apiBase: string; slug: string; title: string; blurb?: string;
   /** LCC types only — see lib/statements.ts. Drives the mandatory Airline picker in
    *  the upload modal and the AIRLINE column below; every other type is unaffected. */
   requiresAirlineId?: boolean;
+  /** Third-party types only — see lib/statements.ts. Drives the mandatory consolidator
+   *  picker in the upload wizard and the AGENCY column below. */
+  requiresSupplier?: boolean;
+  /** Upload goes through the map → review & edit → confirm wizard rather than the one-shot
+   *  modal. Mirrors `supports_mapping` in the backend spec, which is what actually decides
+   *  whether /extract and /confirm answer for this type. */
+  supportsMapping?: boolean;
+  /** One line on the wizard's success screen saying where the imported rows went. */
+  doneHint?: string;
 }) {
   const [batches, setBatches] = useState<Batch[]>([]);
   const [loading, setLoading] = useState(true);
@@ -297,12 +391,18 @@ export default function AdjustmentStatementsView({ apiBase, slug, title, require
   const [facets, setFacets] = useState<Record<string, string[]>>({});
   const [summary, setSummary] = useState<Summary | null>(null);
   const [needsReprocess, setNeedsReprocess] = useState(false);
+  // Which of the two re-process paths this batch needs. `null` = the per-sector split;
+  // "stale_format" = re-run the current column spec over the stored source rows.
+  const [reprocessReason, setReprocessReason] = useState<"stale_format" | null>(null);
   const [reprocessing, setReprocessing] = useState(false);
   // Opening a batch should feel instant; only filter edits are worth debouncing.
   const skipDebounce = useRef(true);
 
   const hasFilters = Object.values(fvals).some(Boolean);
   const hasSelects = filters.some((f) => f.type === "select");
+  // File · [Airline] · [Agency] · Uploaded · Entries · Uploaded by · Actions. Computed
+  // rather than a literal, so adding a column can't leave the empty-state row short.
+  const batchCols = 5 + (requiresAirlineId ? 1 : 0) + (requiresSupplier ? 1 : 0);
 
   const fetchBatches = useCallback(async () => {
     setLoading(true);
@@ -325,6 +425,7 @@ export default function AdjustmentStatementsView({ apiBase, slug, title, require
       setColumns(data.columns); setRows(data.rows); setRtotal(data.total); setRoffset(offset);
       setFilters(data.filters ?? []); setSummary(data.summary ?? null);
       setNeedsReprocess(!!data.needs_reprocess);
+      setReprocessReason(data.reprocess_reason ?? null);
     } catch { toast.error("Failed to load rows."); }
     finally { setRloading(false); }
   }, [apiBase, fvals]);
@@ -351,13 +452,25 @@ export default function AdjustmentStatementsView({ apiBase, slug, title, require
   const closeBatch = () => { setSelected(null); setFvals({}); setFilters([]); setSummary(null); };
   const clearFilters = () => setFvals({});
 
+  // Two different repairs behind one button, because to the user they are the same act:
+  // "this upload was read by an older version of the code — read it again". `resplit`
+  // re-derives per-sector legs; `reprocess` re-runs the current column spec over the
+  // stored source rows. Which one applies is the backend's call, not a prop.
   const reprocess = async () => {
     if (!selected) return;
     setReprocessing(true);
     try {
-      const { data } = await api.post<{ source_rows: number; leg_rows: number }>(
-        `${apiBase}/batches/${selected.batch_id}/resplit`);
-      toast.success(`Split ${data.source_rows} ticket line${data.source_rows === 1 ? "" : "s"} into ${data.leg_rows} sector rows.`);
+      if (reprocessReason === "stale_format") {
+        const { data } = await api.post<{ rows: number; reparsed: number; skipped_no_raw: number }>(
+          `${apiBase}/batches/${selected.batch_id}/reprocess`);
+        toast.success(
+          `Re-read ${data.reparsed} row${data.reparsed === 1 ? "" : "s"} with the current column spec.`
+          + (data.skipped_no_raw ? ` ${data.skipped_no_raw} had no stored source row and were left as they were.` : ""));
+      } else {
+        const { data } = await api.post<{ source_rows: number; leg_rows: number }>(
+          `${apiBase}/batches/${selected.batch_id}/resplit`);
+        toast.success(`Split ${data.source_rows} ticket line${data.source_rows === 1 ? "" : "s"} into ${data.leg_rows} sector rows.`);
+      }
       await fetchBatches();
       await loadRecords(selected.batch_id, 0);
     } catch (e) { toast.error(errMsg(e, "Failed to re-process this upload.")); }
@@ -432,7 +545,9 @@ export default function AdjustmentStatementsView({ apiBase, slug, title, require
         {needsReprocess && (
           <div className="flex items-center gap-2 mb-3 px-3 py-2.5 rounded-xl border border-amber-200 bg-amber-50 text-xs text-amber-800">
             <Split className="w-4 h-4 shrink-0" />
-            <span>This upload predates per-sector splitting. Re-process it to show one row per flown sector, with the fare and taxes divided across the legs, and to lift the file&apos;s Total line out of the table.</span>
+            <span>{reprocessReason === "stale_format"
+              ? "This upload was read by an earlier version of the column spec, so columns the current one understands are blank below. Re-process it to read the stored file again — nothing is re-uploaded and the original rows are kept."
+              : "This upload predates per-sector splitting. Re-process it to show one row per flown sector, with the fare and taxes divided across the legs, and to lift the file's Total line out of the table."}</span>
             <button onClick={reprocess} disabled={reprocessing}
               className="ml-auto shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-amber-600 rounded-lg hover:bg-amber-700 disabled:opacity-50">
               {reprocessing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Split className="w-3.5 h-3.5" />}
@@ -542,6 +657,7 @@ export default function AdjustmentStatementsView({ apiBase, slug, title, require
             <tr className="bg-slate-50 border-b border-slate-200 text-[11px] uppercase tracking-wide text-slate-400">
               <th className="text-left px-3 py-2.5 font-semibold">File</th>
               {requiresAirlineId && <th className="text-left px-3 py-2.5 font-semibold">Airline</th>}
+              {requiresSupplier && <th className="text-left px-3 py-2.5 font-semibold">Agency</th>}
               <th className="text-left px-3 py-2.5 font-semibold">Uploaded</th>
               <th className="text-right px-3 py-2.5 font-semibold">Entries</th>
               <th className="text-left px-3 py-2.5 font-semibold">Uploaded by</th>
@@ -550,9 +666,9 @@ export default function AdjustmentStatementsView({ apiBase, slug, title, require
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={requiresAirlineId ? 6 : 5} className="px-3 py-10 text-center text-slate-400">Loading…</td></tr>
+              <tr><td colSpan={batchCols} className="px-3 py-10 text-center text-slate-400">Loading…</td></tr>
             ) : batches.length === 0 ? (
-              <tr><td colSpan={requiresAirlineId ? 6 : 5} className="px-3 py-12 text-center text-slate-400">No {title} uploads yet. <button onClick={() => setUploadOpen(true)} className="text-blue-600 hover:underline">Upload an XLS</button>.</td></tr>
+              <tr><td colSpan={batchCols} className="px-3 py-12 text-center text-slate-400">No {title} uploads yet. <button onClick={() => setUploadOpen(true)} className="text-blue-600 hover:underline">Upload an XLS</button>.</td></tr>
             ) : batches.map((b) => (
               <tr key={b.batch_id} className="border-b border-slate-100 hover:bg-slate-50/60">
                 <td className="px-3 py-2">
@@ -585,6 +701,26 @@ export default function AdjustmentStatementsView({ apiBase, slug, title, require
                     )}
                   </td>
                 )}
+                {requiresSupplier && (
+                  <td className="px-3 py-2 whitespace-nowrap">
+                    {b.supplier_name ? (
+                      <span className="text-xs text-slate-700">
+                        {b.supplier_name}
+                        {/* Branch and code are what tell two rows of one vendor apart, so
+                            they are shown, not just stored. */}
+                        {(b.supplier_branch || b.supplier_code) && (
+                          <span className="text-slate-400">
+                            {" · "}{[b.supplier_branch, b.supplier_code].filter(Boolean).join(" · ")}
+                          </span>
+                        )}
+                      </span>
+                    ) : (
+                      // Uploaded before the consolidator was captured. The file names no
+                      // sender, so there is nothing to backfill — re-upload to attribute it.
+                      <span className="text-xs text-slate-300" title="Uploaded before the consolidator was captured">—</span>
+                    )}
+                  </td>
+                )}
                 <td className="px-3 py-2 text-xs text-slate-500 whitespace-nowrap">{fmtDate(b.uploaded_at)}</td>
                 <td className="px-3 py-2 text-right tabular-nums text-slate-700">{b.row_count.toLocaleString()}</td>
                 <td className="px-3 py-2 text-xs text-slate-500">{b.created_by_name || "—"}</td>
@@ -600,7 +736,19 @@ export default function AdjustmentStatementsView({ apiBase, slug, title, require
         </table>
       </div>
 
-      {uploadOpen && <UploadModal apiBase={apiBase} title={title} requiresAirlineId={requiresAirlineId} onClose={() => setUploadOpen(false)} onDone={() => { setUploadOpen(false); fetchBatches(); }} />}
+      {/* The types with no single fixed export get the map -> review -> confirm wizard: a
+          consolidator writes whatever spreadsheet it likes, and every airline runs its own
+          NDC portal with its own header names. The rest come out of one system with one
+          export (BSPlink, a GDS), where a mapping step would be a question with one
+          possible answer — those keep the one-shot modal. `supportsMapping` mirrors the
+          backend spec, which is what actually decides whether /extract and /confirm exist. */}
+      {uploadOpen && (supportsMapping
+        ? <StatementUploadWizard
+            apiBase={apiBase} title={title} requireSupplier={requiresSupplier}
+            doneHint={doneHint}
+            onClose={() => setUploadOpen(false)}
+            onDone={() => { setUploadOpen(false); fetchBatches(); }} />
+        : <UploadModal apiBase={apiBase} title={title} requiresAirlineId={requiresAirlineId} requiresSupplier={requiresSupplier} onClose={() => setUploadOpen(false)} onDone={() => { setUploadOpen(false); fetchBatches(); }} />)}
 
       {deleteTarget && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">

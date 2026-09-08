@@ -54,6 +54,25 @@ class TicketRow(BaseModel):
     split_type:          Optional[str]   = None
     adm_acm_ra:          Optional[str]   = None
 
+    # ── Consolidator statement columns ────────────────────────────────────
+    # Recorded, never calculated on — see models/uploaded_ticket.py.
+    oc_tax:              Optional[float] = None
+    raf:                 Optional[float] = None
+    serv_charge:         Optional[float] = None
+    gst_sell:            Optional[float] = None
+    doc_no:              Optional[str]   = None
+    doc_date:            Optional[str]   = None
+    reference:           Optional[str]   = None
+    narration:           Optional[str]   = None
+    # The 3-digit IATA accounting code split off the ticket number. Carried to
+    # confirm so the airline can be resolved from it when the statement has no
+    # carrier column; not a stored column.
+    ticket_prefix:       Optional[str]   = None
+    # Every source cell keyed by its original header. Written to
+    # uploaded_tickets.raw_data so a column with no canonical home survives the
+    # import and the batch can be re-mapped later without the file.
+    raw_data:            Optional[dict]  = None
+
     # ── Airline-specific columns ──────────────────────────────────────────
     statement_type:       Optional[str]   = None
     pax_name:             Optional[str]   = None
@@ -113,7 +132,11 @@ class TicketRow(BaseModel):
 
 
 class TicketExtractionPreview(BaseModel):
-    """Returned by POST /tickets/upload/extract."""
+    """Returned by POST /tickets/upload/extract.
+
+    Everything below `sample_row` is additive and defaulted, so a client that has
+    not been updated keeps working.
+    """
     file_name:         str
     total_rows:        int
     rows:              list[TicketRow]
@@ -122,6 +145,33 @@ class TicketExtractionPreview(BaseModel):
     suggested_mapping: dict[str, str]  = {}
     is_template_match: bool            = True
     sample_row:        dict[str, str]  = {}
+
+    # ── What the reader decided, and what the client must send back ───────
+    # A column map is a list of column NAMES. If the second read of the same file
+    # detected a different header row, every one of those names would change and
+    # the whole mapping would be silently discarded — so the client echoes these
+    # two on the call that carries the mapping, and the server obeys rather than
+    # re-detects.
+    sheet_name:        Optional[str]   = None
+    sheet_names:       list[str]       = []
+    header_row:        int             = 0
+    # The lines above the header — a statement's title, period and issuer.
+    preamble:          list[str]       = []
+    # Read out of that preamble, to prefill Valid From / Valid To. Suggestions:
+    # the form stays editable.
+    detected_from:     Optional[str]   = None
+    detected_to:       Optional[str]   = None
+
+    # Up to three values per source column, so a mapping decision can be made by
+    # looking at the data rather than guessing from the header.
+    sample_rows:       dict[str, list[str]] = {}
+    # Source columns nothing claimed. Shown to the user, because "your RAF column
+    # was not imported" is only answerable if we say which columns those were.
+    unmapped_columns:  list[str]       = []
+    # {canonical field: [{column, score}]} — near matches offered for confirmation
+    # and NEVER applied on their own. A 0.82 string match on a money column is a
+    # good guess, not a fact.
+    fuzzy_suggestions: dict[str, list[dict]] = {}
 
 
 class ConfirmTicketUploadPayload(BaseModel):
@@ -387,6 +437,39 @@ class UploadedTicketUpdate(BaseModel):
 
 
 # ── Match Diagnosis schemas ────────────────────────────────────────────────
+
+# ── Re-tagging a ticket's billing party ────────────────────────────────────
+
+class RetagPartyPayload(BaseModel):
+    """Move tickets to a different customer or corporate.
+
+    Deliberately NOT part of UploadedTicketUpdate: that schema drops unknown keys
+    silently (extra="ignore"), so party fields added there would PATCH as a no-op
+    and return 200. Moving money between parties has to be its own explicit call.
+
+    `customer_type` of None clears the tag, returning the tickets to untagged —
+    which re-arms passenger-name matching, so they may then show under several
+    parties at once. The screen warns before sending that.
+    """
+    ticket_ids:    list[int]
+    customer_type: Optional[str] = None   # 'corporate' | 'direct' | None to clear
+    customer_id:   Optional[int] = None
+    corporate_id:  Optional[int] = None
+
+
+class RetagPartyResult(BaseModel):
+    updated:          int
+    # How many of those also had an lcc_detailed source row rewritten. Without
+    # that second write the next "Send to billing" would revert the move.
+    lcc_rows_updated: int
+    customer_type:    Optional[str] = None
+    customer_id:      Optional[int] = None
+    corporate_id:     Optional[int] = None
+    # So the screen can say where the tickets went — they leave the list the user
+    # is looking at, and a row that just vanishes reads as data loss.
+    party_name:       Optional[str] = None
+    untagged:         bool = False
+
 
 class MatchStepResult(BaseModel):
     step:         str

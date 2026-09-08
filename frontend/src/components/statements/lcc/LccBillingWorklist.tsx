@@ -27,6 +27,19 @@ import api from "@/lib/api";
 import toast from "react-hot-toast";
 import LccPartyPicker, { PartyOption } from "./LccPartyPicker";
 
+// This screen bills to a customer or a corporate only — never to an agency, which is a
+// VENDOR here. Naming the two kinds explicitly keeps the picker's generic narrow, so the
+// compiler enforces that rather than leaving it to a cast.
+type BillingParty = PartyOption<"customer" | "corporate">;
+
+/** The corporate a person in Employee Master works for.
+ *
+ *  Held per customer id so the Corporate column can be answered from the person
+ *  alone. `customers.corporate_id` already records this, so a row that names an
+ *  employee already implies who normally pays — the column makes that visible and
+ *  overridable rather than leaving it to be inferred server-side. */
+type Employer = { id: number; name: string };
+
 const PAGE = 50;
 const MAX_SELECTION = 500;      // matches MAX_SEND_ROWS on the API
 
@@ -116,8 +129,20 @@ function whyNotSendable(r: Row): string | null {
   if (r.sendable) return null;
   if (r.billing_state === "not_billable") return "Payment movement — there is no fare to bill.";
   if (r.billing_state === "invoiced") return "Already on an invoice — locked, and re-sending cannot change it.";
+  if (r.billing_state === "sent")
+    return "Already in billing. Change who it is billed to from Billing → Sold Tickets.";
+  if (r.billing_state === "withdrawn")
+    return "In billing but no longer has a party. Send the whole upload to take it back out.";
   return "No party yet — pick one first.";
 }
+
+/** In billing, so this screen no longer owns its party.
+ *
+ *  The ticket is the thing that exists once a row is projected, and billing reads
+ *  the TICKET. Editing the row afterwards would change nothing anyone bills and
+ *  would leave the two disagreeing, so the pickers lock and the correction moves
+ *  to Billing → Sold Tickets. The server refuses it too. */
+const inBilling = (r: Row) => r.projected_ticket_id != null;
 
 function billingHint(r: Row): string | undefined {
   switch (r.billing_state) {
@@ -130,7 +155,8 @@ function billingHint(r: Row): string | undefined {
       return "This row is in billing but no longer has a party. Give it one and send again, "
         + "or send the whole upload to take it back out.";
     case "sent":
-      return "In billing, and billing agrees with this row.";
+      return "In billing. It cannot be sent again — change who it is billed to "
+        + "from Billing → Sold Tickets.";
     case "ready":
       return "Has a party and is waiting to be sent.";
     default:
@@ -179,32 +205,46 @@ export default function LccBillingWorklist({
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [selectAllMode, setSelectAllMode] = useState(false);
 
-  const [parties, setParties] = useState<PartyOption[]>([]);
+  const [parties, setParties] = useState<BillingParty[]>([]);
   const [defaultPick, setDefaultPick] = useState<number | null>(null);
   const [defaultKind, setDefaultKind] = useState<"customer" | "corporate" | null>(null);
   const [bulkPick, setBulkPick] = useState<number | null>(null);
   const [bulkKind, setBulkKind] = useState<"customer" | "corporate" | null>(null);
+  const [employerOf, setEmployerOf] = useState<Map<number, Employer>>(new Map());
 
   // Both masters, loaded whole and filtered in the browser — the same thing every
   // other party picker in the app does (CustomerPartyPanel, TicketFilingCard).
   useEffect(() => {
     Promise.allSettled([
-      api.get<{ id: number; first_name: string; last_name: string | null; company: string | null }[]>("/customers/", { params: { limit: 1000 } }),
+      api.get<{ id: number; first_name: string; last_name: string | null; company: string | null; corporate_id: number | null }[]>("/customers/", { params: { limit: 1000 } }),
       api.get<{ id: number; company: string | null }[]>("/corporates/", { params: { limit: 1000 } }),
     ]).then(([cu, co]) => {
-      const out: PartyOption[] = [];
+      const out: BillingParty[] = [];
+      const corpName = new Map<number, string>();
       if (co.status === "fulfilled") {
         for (const x of co.value.data) {
-          if (x.company) out.push({ value: x.id, label: x.company, kind: "corporate", sublabel: "Corporate" });
+          if (x.company) {
+            corpName.set(x.id, x.company);
+            out.push({ value: x.id, label: x.company, kind: "corporate", sublabel: "Corporate" });
+          }
         }
       }
+      // Who each person works for, so the Corporate column can be filled in from
+      // the person alone — Employee Master already holds that link, and asking
+      // the user to re-state it would be asking twice.
+      const employers = new Map<number, Employer>();
       if (cu.status === "fulfilled") {
         for (const x of cu.value.data) {
           const name = `${x.first_name} ${x.last_name ?? ""}`.trim();
-          if (name) out.push({ value: x.id, label: name, kind: "customer", sublabel: x.company ?? undefined });
+          if (!name) continue;
+          out.push({ value: x.id, label: name, kind: "customer", sublabel: x.company ?? undefined });
+          if (x.corporate_id) {
+            employers.set(x.id, { id: x.corporate_id, name: corpName.get(x.corporate_id) ?? x.company ?? "their corporate" });
+          }
         }
       }
       setParties(out);
+      setEmployerOf(employers);
     });
   }, []);
 
@@ -300,9 +340,9 @@ export default function LccBillingWorklist({
     try {
       const { data } = await api.patch<{ rows_updated: number }>(
         `${apiBase}/batches/${batchId}/billing-default`,
-        defaultKind === "corporate"
-          ? { customer_type: "corporate", corporate_id: defaultPick }
-          : { customer_type: "direct", customer_id: defaultPick },
+        // Same rule as a per-row pick: a person with an employer bills that
+        // employer by default, and still names the person.
+        partyBody(defaultKind ? { value: defaultPick, kind: defaultKind, label: "" } : null),
       );
       toast.success(`${data.rows_updated.toLocaleString()} rows billed to this party.`);
       // No re-resolve: the endpoint has already stamped DEFAULTED onto exactly the rows
@@ -314,16 +354,39 @@ export default function LccBillingWorklist({
     finally { setBusy(null); }
   };
 
-  const setRowParty = async (row: Row, opt: PartyOption | null) => {
+  /** The party payload for a picked option.
+   *
+   *  WHO FLEW and WHO PAYS are separate answers, and the server stores whatever
+   *  pair it is given rather than inferring one from the other. Picking a person
+   *  who has an employer therefore defaults to billing that employer — which is
+   *  what Employee Master's link means — while still naming the person, so the row
+   *  records who travelled. Naming the company is what makes it the PAYER: the
+   *  ticket then belongs to Corporate Billing and leaves the employee's bill. The
+   *  Corporate column is how you drop the employer and bill the person alone. */
+  const partyBody = useCallback((opt: BillingParty | null, direct = false) => {
+    if (!opt) return {};
+    if (opt.kind === "corporate") return { customer_type: "corporate", corporate_id: opt.value };
+    const employer = employerOf.get(opt.value);
+    return employer && !direct
+      ? { customer_type: "corporate", customer_id: opt.value, corporate_id: employer.id }
+      : { customer_type: "direct", customer_id: opt.value };
+  }, [employerOf]);
+
+  const setRowParty = async (row: Row, opt: BillingParty | null, direct = false) => {
     try {
-      await api.patch(`${apiBase}/rows/${row.id}/billing-party`, opt
-        ? (opt.kind === "corporate"
-            ? { customer_type: "corporate", corporate_id: opt.value }
-            : { customer_type: "direct", customer_id: opt.value })
-        : {});
+      await api.patch(`${apiBase}/rows/${row.id}/billing-party`, partyBody(opt, direct));
       await Promise.all([load(offset), refreshSummary()]);
       onChanged();
     } catch (e) { toast.error(errText(e, "Could not set the party for this row.")); }
+  };
+
+  /** Switch a row that already names a person between billing their employer and
+   *  billing them directly. Leaves WHO FLEW alone; only the payer changes. */
+  const setRowPayer = async (row: Row, mode: "corporate" | "direct") => {
+    if (!row.bill_customer_id) return;
+    const opt = parties.find(p => p.kind === "customer" && p.value === row.bill_customer_id) ?? null;
+    if (!opt) return;
+    await setRowParty(row, opt, mode === "direct");
   };
 
   const applyBulkParty = async () => {
@@ -334,9 +397,7 @@ export default function LccBillingWorklist({
         `${apiBase}/batches/${batchId}/billing-party-bulk`,
         {
           row_ids: [...selected],
-          ...(bulkKind === "corporate"
-            ? { customer_type: "corporate", corporate_id: bulkPick }
-            : { customer_type: "direct", customer_id: bulkPick }),
+          ...partyBody({ value: bulkPick, kind: bulkKind, label: "" }),
         },
       );
       toast.success(
@@ -617,15 +678,16 @@ export default function LccBillingWorklist({
                 <th className="text-right px-3 py-2.5 font-semibold">Amount</th>
                 <th className="text-left px-3 py-2.5 font-semibold">Match</th>
                 <th className="text-left px-3 py-2.5 font-semibold">Billing</th>
-                <th className="text-left px-3 py-2.5 font-semibold w-[260px]">Bill to</th>
+                <th className="text-left px-3 py-2.5 font-semibold w-[230px]">Bill to</th>
+                <th className="text-left px-3 py-2.5 font-semibold w-[210px]">Corporate</th>
               </tr>
             </thead>
             {/* Dim rather than blank, so typing in the search box does not strobe. */}
             <tbody className={`divide-y divide-slate-100 ${loading && rows.length > 0 ? "opacity-50 transition-opacity" : ""}`}>
               {loading && rows.length === 0 ? (
-                <tr><td colSpan={9} className="px-3 py-10 text-center text-slate-400">Loading…</td></tr>
+                <tr><td colSpan={10} className="px-3 py-10 text-center text-slate-400">Loading…</td></tr>
               ) : rows.length === 0 ? (
-                <tr><td colSpan={9} className="px-3 py-10 text-center text-slate-400">
+                <tr><td colSpan={10} className="px-3 py-10 text-center text-slate-400">
                   {hasFilters ? "No rows match what you are looking for." : "No rows in this bucket."}
                 </td></tr>
               ) : rows.map((r) => {
@@ -665,10 +727,61 @@ export default function LccBillingWorklist({
                       <LccPartyPicker
                         size="sm"
                         options={parties}
-                        value={r.bill_customer_type === "corporate" ? r.bill_corporate_id : r.bill_customer_id}
+                        disabled={inBilling(r)}
+                        // WHO FLEW, whenever the row names anyone — a row billed to
+                        // an employer still knows its passenger, and showing the
+                        // company here would hide the very thing this column is for.
+                        // Falls back to the corporate for a row billed to a company
+                        // with nobody named.
+                        value={r.bill_customer_id ?? r.bill_corporate_id}
+                        // Ids repeat across the two masters, so name the list this
+                        // id belongs to or corporate #7 answers for customer #7.
+                        valueKind={r.bill_customer_id ? "customer" : "corporate"}
                         onChange={(opt) => setRowParty(r, opt)}
                         placeholder="Pick a party…"
                       />
+                    )}
+                  </td>
+
+                  {/* WHO PAYS. Separate from who flew because they are separate
+                      answers: an employee's ticket is normally billed to their
+                      employer, but the same person can be billed directly, and the
+                      row has to be able to say which. Both ids stored together is
+                      what puts the ticket on Customer Billing AND Corporate
+                      Billing; dropping the employer leaves it on Customer Billing
+                      alone. */}
+                  <td className="px-3 py-2">
+                    {r.bill_kind === "payment" ? (
+                      <span className="text-[11px] text-slate-400">—</span>
+                    ) : !r.bill_customer_id ? (
+                      // A company billed with nobody named, or nothing picked yet.
+                      // Neither has an employer question to answer.
+                      <span className="text-[11px] text-slate-400">
+                        {r.bill_corporate_id ? "Billed to the company" : "—"}
+                      </span>
+                    ) : employerOf.has(r.bill_customer_id) ? (
+                      <select
+                        className={SELECT_CLS + " w-full disabled:bg-slate-50 disabled:text-slate-400"}
+                        value={r.bill_corporate_id ? "corporate" : "direct"}
+                        disabled={inBilling(r)}
+                        onChange={(e) => setRowPayer(r, e.target.value as "corporate" | "direct")}
+                        title={inBilling(r)
+                          ? "Already in billing — change this from Billing → Sold Tickets."
+                          : r.bill_corporate_id
+                            ? "The company pays — this ticket shows in Corporate Billing"
+                            : "The passenger pays — this ticket shows in Customer Billing"}
+                      >
+                        <option value="corporate">
+                          {employerOf.get(r.bill_customer_id)?.name ?? "Their corporate"}
+                        </option>
+                        <option value="direct">Direct</option>
+                      </select>
+                    ) : (
+                      // Not linked to anyone in Employee Master, so there is no
+                      // employer to bill and nothing to choose.
+                      <span className="text-[11px] text-slate-400" title="This person has no corporate in Employee Master">
+                        Direct
+                      </span>
                     )}
                   </td>
                 </tr>

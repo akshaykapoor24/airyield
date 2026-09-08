@@ -86,7 +86,11 @@ export default function OnboardingWizard({ onComplete }: { onComplete: () => voi
         {/* body */}
         <div className="px-6 py-5 overflow-y-auto flex-1 bg-gray-50">
           <p className="text-xs text-gray-500 mb-3">{STEPS[step].hint}</p>
-          {step === 0 && <ProfileInfoSection ref={profileRef} hideSaveButton />}
+          {/* The GST scheme dropdown stays — it is workspace setup like the PAN
+              and GSTIN beside it — but its worked calculation does not: a tax
+              calculator is a lot to meet before you have typed your company
+              name, in a modal that already scrolls. It is there on My Profile. */}
+          {step === 0 && <ProfileInfoSection ref={profileRef} hideSaveButton showGstCalculator={false} />}
           {step === 1 && <EntitiesSection />}
           {step === 2 && <LoginIdsSection />}
           {error && <p className="text-[11px] text-red-500 mt-3">{error}</p>}

@@ -41,6 +41,7 @@ from app.schemas.tenant_airline import (
     TenantAirlineUpdate,
 )
 from app.services.tenant_airline_catalog import build_catalog
+from app.services import spreadsheet
 
 router = APIRouter()
 
@@ -367,10 +368,10 @@ async def bulk_upload_tenant_airline_ids(
         used_header_row = 0
         for header_row in (0, 1, 2):
             try:
-                if filename.endswith(".xls"):
-                    df_try = pd.read_excel(BytesIO(content), dtype=str, header=header_row)
-                else:
-                    df_try = pd.read_excel(BytesIO(content), dtype=str, engine="openpyxl", header=header_row)
+                # Format from the bytes, not the extension: a supplier's ".xls"
+                # is as often an xlsx or a CSV, and a real one needs an engine
+                # pandas will not pick on its own.
+                df_try = spreadsheet.read_df(content, filename, header_row)
                 df_try = _normalize_columns(df_try)
                 cols = set(df_try.columns)
                 if cols & set(_ID_COLS) and cols & set(_CODE_COLS):

@@ -1,6 +1,6 @@
 import enum
 from datetime import datetime
-from sqlalchemy import String, DateTime, Enum as SAEnum
+from sqlalchemy import String, DateTime, Integer, Text, Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
@@ -47,6 +47,43 @@ class Tenant(Base):
     name:        Mapped[str|None] = mapped_column(String(255), nullable=True)
     pan_number:  Mapped[str|None] = mapped_column(String(20), nullable=True)
     gst_number:  Mapped[str|None] = mapped_column(String(20), nullable=True)
+    # Which GST BASIS this workspace bills on — 'abatement' | 'normal', see
+    # GST_SCHEMES in models/gst_configuration.py. An election, not a rate: the
+    # rates live in the global master, so a platform-side revision reaches every
+    # workspace without touching this column.
+    # It does not name a single rule. Each scheme spans two, and what picks
+    # between them is not stored here: a ticket's SECTOR for abatement, and the
+    # customer's own billing_type ('agency' | 'reseller') for normal.
+    # NULL means "not elected yet" and must never be read as a scheme.
+    # A plain String, matching corporates.billing_type rather than the SAEnum
+    # used by tenant_type/plan_status — adding a fourth scheme stays a code change.
+    gst_scheme:  Mapped[str|None] = mapped_column(String(20), nullable=True)
+
+    # ── Letterhead: what a printed document says about the workspace ─────────
+    # The workspace's own registered address — the FROM block of an invoice, as
+    # opposed to the BILL TO block that comes from the customer/corporate row.
+    # Named to match corporates.address / city / state / pincode / country so
+    # the two sides of an invoice are read the same way.
+    address:     Mapped[str|None] = mapped_column(Text, nullable=True)
+    city:        Mapped[str|None] = mapped_column(String(120), nullable=True)
+    state:       Mapped[str|None] = mapped_column(String(100), nullable=True)
+    pincode:     Mapped[str|None] = mapped_column(String(20), nullable=True)
+    country:     Mapped[str|None] = mapped_column(String(100), nullable=True)
+    # The business's line, printed at the head of an invoice. Free text and wide
+    # enough for two numbers, which is how a letterhead usually carries them —
+    # distinct from users.email, which identifies a person rather than the firm.
+    phone:       Mapped[str|None] = mapped_column(String(100), nullable=True)
+
+    # The logo IMAGE is not in this row — only a locator for it. get_current_user
+    # selectinloads User.tenant on every authenticated request, so an inline
+    # base64 column would ride along with all of them. `logo_path` is a
+    # services/file_store locator (a GCS blob name, or "local://…" when GCS is
+    # unavailable); the other three are what the UI needs to describe the file
+    # and what the download endpoint replies with, without fetching the bytes.
+    logo_path:   Mapped[str|None] = mapped_column(String(500), nullable=True)
+    logo_name:   Mapped[str|None] = mapped_column(String(255), nullable=True)
+    logo_mime:   Mapped[str|None] = mapped_column(String(100), nullable=True)
+    logo_size:   Mapped[int|None] = mapped_column(Integer, nullable=True)
 
     # ── Subscription ─────────────────────────────────────────────────────────
     # The tenant is the sellable unit: one agency signs up as super_admin and

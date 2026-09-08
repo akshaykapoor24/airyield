@@ -75,6 +75,22 @@ export type TicketRow = {
   tour_code?:           string | null;
   split_type?:          string | null;
   adm_acm_ra?:          string | null;
+  // Consolidator statement columns. Recorded and reportable; none of them is an
+  // incentive base — see backend/app/models/uploaded_ticket.py.
+  oc_tax?:              number | null;
+  raf?:                 number | null;
+  serv_charge?:         number | null;
+  gst_sell?:            number | null;
+  doc_no?:              string | null;
+  doc_date?:            string | null;
+  reference?:           string | null;
+  narration?:           string | null;
+  /** The 3-digit IATA accounting code split off the ticket number. Round-tripped
+   *  to confirm so the airline can be resolved from it; not a stored column. */
+  ticket_prefix?:       string | null;
+  /** Every source cell keyed by its original header. Round-tripped verbatim so a
+   *  column with no canonical home survives the import. */
+  raw_data?:            Record<string, string> | null;
   statement_type?:      string | null;
   pax_name?:            string | null;
   air_pnr?:             string | null;
@@ -141,6 +157,27 @@ export type TicketExtractionPreview = {
   suggested_mapping: Record<string, string>;
   is_template_match: boolean;
   sample_row:        Record<string, string>;
+
+  /** Which sheet was read, and the sheets available to switch to. */
+  sheet_name:        string | null;
+  sheet_names:       string[];
+  /** 0-based index of the row the headers were taken from. Echoed back on the
+   *  call that carries the mapping: a mapping names columns, so re-detecting the
+   *  header one row out would rename every one of them and discard it. */
+  header_row:        number;
+  /** The lines above the header — a statement's title, period and issuer. */
+  preamble:          string[];
+  /** Read out of that preamble, to prefill Valid From / Valid To. */
+  detected_from:     string | null;
+  detected_to:       string | null;
+  /** Up to three values per source column, so a mapping decision can be made by
+   *  looking at the data instead of guessing from the header. */
+  sample_rows:       Record<string, string[]>;
+  /** Source columns nothing claimed. Shown to the user, because "why is my RAF
+   *  column missing" is only answerable if we say which columns those were. */
+  unmapped_columns:  string[];
+  /** Near matches, offered for one click and never applied on their own. */
+  fuzzy_suggestions: Record<string, { column: string; score: number }[]>;
 };
 
 export type FieldGroupId =
@@ -252,9 +289,12 @@ export const TICKET_FIELDS: TicketField[] = [
     hint: "Sets invoice type automatically: TKTT → Invoice, the rest → Credit Note." },
 
   // ── Passenger & Customer ──────────────────────────────────────────────────
-  { key: "pax_name",           label: "Pax Name",        type: "text", group: "passenger", onlyFor: "AIRLINE", mappable: true, editable: true,
+  // Mappable for both types. A consolidator's B2B statement carries one "Pax Name"
+  // column in the same LAST/FIRST grammar rather than separate name columns, and
+  // the server splits it either way.
+  { key: "pax_name",           label: "Pax Name",        type: "text", group: "passenger", mappable: true, editable: true,
     placeholder: "SHARMA/RAHUL MR",
-    hint: "Split on / into last and first name." },
+    hint: "Split on / into last and first name; courtesy titles are removed." },
   { key: "last_name",          label: "Last Name", mapOnlyFor: "B2B",       type: "text", group: "passenger", mappable: true, reviewCol: true, editable: true },
   { key: "first_name",         label: "First Name", mapOnlyFor: "B2B",      type: "text", group: "passenger", mappable: true, reviewCol: true, editable: true },
   { key: "customer_name",      label: "Customer / Client", shortLabel: "Customer Name", type: "text", group: "passenger", mappable: true, reviewCol: true, editable: true },
@@ -295,7 +335,11 @@ export const TICKET_FIELDS: TicketField[] = [
     hint: "Added to the incentive base on Basic+YQ+YR deals." },
   { key: "sale_k3",            label: "K3 Tax", mapLabel: "Sale K3", shortLabel: "Sale K3",          type: "number", group: "fare", mappable: true, reviewCol: true, editable: true },
   { key: "wo_tax",             label: "WO Tax",          type: "number", group: "fare", onlyFor: "AIRLINE", mappable: true, editable: true },
-  { key: "other_tax",          label: "Other Taxes",     type: "number", group: "fare", onlyFor: "AIRLINE", mappable: true, editable: true },
+  // Not AIRLINE-only any more: a consolidator's B2B statement prints "Other Taxes"
+  // and "OC Tax" as named columns beside the fare.
+  { key: "other_tax",          label: "Other Taxes", mapLabel: "Other Taxes / Oth Tax", type: "number", group: "fare", mappable: true, reviewCol: true, editable: true },
+  { key: "oc_tax",             label: "OC Tax",          type: "number", group: "fare", mappable: true, reviewCol: true, editable: true,
+    hint: "Carrier-imposed misc fee. Recorded only — not part of any incentive base." },
   { key: "total_amt",          label: "Total Fare", mapLabel: "Total Fare / Amt", shortLabel: "Total Amt",      type: "number", group: "fare", mappable: true, reviewCol: true, editable: true },
   { key: "net_amt",            label: "Net Amount", mapLabel: "Net AMT / Net Remit", shortLabel: "Net AMT",      type: "number", group: "fare", mappable: true, reviewCol: true, editable: true },
   { key: "net_fare",           label: "Net Fare",        type: "number", group: "fare", onlyFor: "AIRLINE", mappable: true, editable: true },
@@ -310,7 +354,10 @@ export const TICKET_FIELDS: TicketField[] = [
   // ── Commission & Settlement ───────────────────────────────────────────────
   { key: "comm_sell",          label: "Commission Amount", mapLabel: "Comm Sell / Comm Amt", shortLabel: "Comm Sell", type: "number", group: "commission", mappable: true, reviewCol: true, editable: true,
     hint: "Commission received from the supplier. Zeroed automatically on a credit note." },
-  { key: "comm_percent",       label: "Commission (%)", mapLabel: "Comm (%)",  type: "number", group: "commission", onlyFor: "AIRLINE", mappable: true, editable: true },
+  // A consolidator prints the commission rate as its own column (often headed
+  // "%%%%"), so this is no longer AIRLINE-only.
+  { key: "comm_percent",       label: "Commission (%)", mapLabel: "Comm (%) / %%%%",  type: "number", group: "commission", mappable: true, editable: true,
+    hint: "A rate, not an amount — it is never divided across the legs of a ticket." },
   { key: "incentive_sell",     label: "Incentive Received", mapLabel: "Incentive Sell", shortLabel: "Incentive", type: "number", group: "commission", onlyFor: "B2B", mappable: true, reviewCol: true, editable: true,
     hint: "What the supplier already paid. The incentive we calculate is separate." },
   { key: "dis_sell",           label: "Discount", mapLabel: "Dis Sell", shortLabel: "Dis Sell",        type: "number", group: "commission", onlyFor: "B2B", mappable: true, reviewCol: true, editable: true },
@@ -329,11 +376,20 @@ export const TICKET_FIELDS: TicketField[] = [
   { key: "booking_fee_sell",   label: "Booking Fee", mapLabel: "Booking Fee Sell",     type: "number", group: "ancillary", onlyFor: "B2B", mappable: true, reviewCol: true, editable: true },
   { key: "can_charge",         label: "Cancellation Charge", mapLabel: "CAN Charge", shortLabel: "CAN Charge", type: "number", group: "ancillary", onlyFor: "B2B", mappable: true, reviewCol: true, editable: true },
   { key: "rfd_sell",           label: "RFD Sell",        type: "number", group: "ancillary", onlyFor: "B2B", mappable: true, reviewCol: true, editable: true },
+  // A consolidator's own charges. Deliberately NOT folded into booking_fee_sell or
+  // can_charge: those are ancillary incentive bases, so a service fee landing there
+  // would change a payout rather than simply be filed in the wrong column.
+  { key: "serv_charge",        label: "Service Charge", mapLabel: "Serv. Chrgs / Service Charge", shortLabel: "Serv. Chrg", type: "number", group: "ancillary", mappable: true, reviewCol: true, editable: true,
+    hint: "The consolidator's own fee. Recorded only — not an incentive base." },
+  { key: "raf",                label: "RAF", mapLabel: "RAF / Refund Admin Fee", type: "number", group: "ancillary", mappable: true, reviewCol: true, editable: true,
+    hint: "Refund administration fee, charged on a credit note." },
 
   // ── GST & Payment ─────────────────────────────────────────────────────────
   { key: "cgst_sell",          label: "CGST", mapLabel: "CGST Sell",            type: "number", group: "gst_payment", onlyFor: "B2B", mappable: true, reviewCol: true, editable: true },
   { key: "sgst_sell",          label: "SGST", mapLabel: "SGST Sell",            type: "number", group: "gst_payment", onlyFor: "B2B", mappable: true, reviewCol: true, editable: true },
   { key: "igst_sell",          label: "IGST", mapLabel: "IGST Sell",            type: "number", group: "gst_payment", onlyFor: "B2B", mappable: true, reviewCol: true, editable: true },
+  { key: "gst_sell",           label: "GST (single figure)", mapLabel: "GST", shortLabel: "GST", type: "number", group: "gst_payment", mappable: true, reviewCol: true, editable: true,
+    hint: "For statements that print one GST figure instead of CGST/SGST/IGST. Not K3, which is GST on the air fare." },
   { key: "paid_by_credit_card", label: "Paid By Credit Card", shortLabel: "Paid CC", type: "number", group: "gst_payment", onlyFor: "B2B", mappable: true, reviewCol: true, editable: true },
   { key: "cc",                 label: "CC",              type: "text", group: "gst_payment", onlyFor: "B2B", mappable: true, reviewCol: true, editable: true },
   { key: "fop",                label: "FOP",             type: "text", group: "gst_payment", onlyFor: "AIRLINE", mappable: true, editable: true },
@@ -343,6 +399,13 @@ export const TICKET_FIELDS: TicketField[] = [
 
   // ── Accounting & Codes ────────────────────────────────────────────────────
   { key: "acc_code",           label: "Acc Code", mapLabel: "Acc Code / AC_ACCT",        type: "text", group: "accounting", mappable: true, reviewCol: true, editable: true },
+  // The consolidator's own voucher, e.g. "IS26/ 1067" for a sale and "IR26/ 358"
+  // for a refund. Kept apart from invoice_no / ticket_date, which belong to the
+  // airline's document — on a credit note the two dates are not the same date.
+  { key: "doc_no",             label: "Document No", mapLabel: "DocNo / Voucher No",   type: "text", group: "accounting", mappable: true, reviewCol: true, editable: true },
+  { key: "doc_date",           label: "Document Date", mapLabel: "Doc Date",           type: "date", group: "accounting", mappable: true, editable: true },
+  { key: "reference",          label: "Reference",       type: "text", group: "accounting", mappable: true, editable: true },
+  { key: "narration",          label: "Narration", mapLabel: "Narration / Particulars", type: "text", group: "accounting", mappable: true, editable: true },
   { key: "tour_code",          label: "Tour / Deal Code", mapLabel: "Tour Code", type: "text", group: "accounting", mappable: true, editable: true,
     hint: "Read by payout inclusion and exclusion rules for tour and corporate fares." },
   { key: "ai_code",            label: "AI Code",         type: "text", group: "accounting", onlyFor: "AIRLINE", editable: true },
@@ -438,14 +501,16 @@ const REVIEW_GROUP_KEYS: { label: string; color: string; keys: string[] }[] = [
     "airline_name", "ticket_number",
   ]},
   { label: "Financial", color: "#059669", keys: [
-    "sell_fare", "sell_tax", "sell_tax_yq", "sale_yr", "sale_k3", "rei_sell",
+    "sell_fare", "sell_tax", "sell_tax_yq", "sale_yr", "sale_k3", "other_tax",
+    "oc_tax", "rei_sell",
     "seat_selection", "excess_baggage", "meals", "rfd_sell", "can_charge",
-    "booking_fee_sell", "cgst_sell", "sgst_sell", "igst_sell", "comm_sell",
+    "booking_fee_sell", "serv_charge", "raf",
+    "cgst_sell", "sgst_sell", "igst_sell", "gst_sell", "comm_sell",
     "adm", "incentive_sell", "dis_sell", "tds_sell", "total_amt",
     "paid_by_credit_card", "net_amt",
   ]},
   { label: "Account", color: "#9333ea", keys: [
-    "cc", "acc_code", "sold_to", "customer_name",
+    "cc", "acc_code", "doc_no", "sold_to", "customer_name",
   ]},
 ];
 

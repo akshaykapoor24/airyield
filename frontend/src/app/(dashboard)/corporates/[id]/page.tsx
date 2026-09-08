@@ -5,10 +5,15 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { ArrowLeft, RefreshCw, Building, Ticket, FileText, Download, Trash2, Save, X, Eye, Edit2 } from "lucide-react";
 import api from "@/lib/api";
+import RetagPartyControl, {
+  RetagBulkBar, RetagPayerControl, usePartyOptions, retagTickets, type RetagResult,
+} from "@/components/billing/RetagPartyControl";
 // Editing a corporate lives in Corporate Master (/user-master/corporate-master);
 // this page is the billing workspace and reads the record.
 import { corporateTypeLabel, partyAddress, partyName, type Party as Corporate } from "@/lib/party";
 import { INCENTIVE_TYPE_COLS } from "@/lib/incentives";
+import { splitGst, type GstTreatment, type PlaceOfSupply } from "@/lib/gstSplit";
+import GstCells, { GstTotalCells } from "@/components/billing/GstCells";
 
 type SoldTicket = {
   id: number;
@@ -30,16 +35,33 @@ type SoldTicket = {
   billing_id: number | null;
   /** 'link' = the ticket names this party; 'name' = matched on the passenger's name. */
   matched_by?: string | null;
+  /** Who flew and who pays, as stored. `corporate_id` set means the employer is
+   *  billed and the ticket lives in Corporate Billing; cleared means the
+   *  passenger is billed and it lives here. */
+  customer_id?: number | null;
+  corporate_id?: number | null;
   base_amount: number;
   markup_amount: number;
   gst_amount: number;
+  /** The same tax as `gst_amount`, in the heads it is charged under. Exactly one
+   *  side is non-zero, and all three are zero when the place of supply is
+   *  unknown — `gst_treatment` says which of those a zero means. */
+  cgst_amount: number;
+  sgst_amount: number;
+  igst_amount: number;
+  gst_treatment: GstTreatment | null;
   total_with_markup: number;
 };
 
 type SoldTicketsResponse = {
   corporate: Corporate;
   tickets: SoldTicket[];
-  summary: { count: number; total_base: number; total_markup: number; total_gst: number; total_with_markup: number };
+  summary: {
+    count: number; total_base: number; total_markup: number; total_gst: number;
+    total_cgst: number; total_sgst: number; total_igst: number; total_with_markup: number;
+  };
+  /** Why these rows carry the heads they do — shown when it could not be decided. */
+  place_of_supply: PlaceOfSupply | null;
 };
 
 type BillingListItem = {
@@ -51,6 +73,10 @@ type BillingListItem = {
   total_markup: number;
   total_additional_markup: number;
   total_gst: number;
+  total_cgst: number;
+  total_sgst: number;
+  total_igst: number;
+  gst_treatment: GstTreatment | null;
   grand_total: number;
   item_count: number;
   created_at: string;
@@ -69,6 +95,11 @@ type BillingDetailLine = {
   additional_markup: number;
   discount: number;
   gst_amount: number;
+  // Absent on bills raised before the split — the API defaults them to 0 and
+  // `gst_treatment` on the billing is NULL, which is what the screens branch on.
+  cgst: number;
+  sgst: number;
+  igst: number;
   total: number;
 };
 
@@ -83,6 +114,15 @@ type BillingDetail = {
   total_markup: number;
   total_additional_markup: number;
   total_gst: number;
+  total_cgst: number;
+  total_sgst: number;
+  total_igst: number;
+  /** The place-of-supply decision this bill was RAISED under. Editing re-applies
+   *  it rather than re-deciding, so an issued invoice cannot move between
+   *  CGST + SGST and IGST because the party's address changed afterwards. */
+  gst_treatment: GstTreatment | null;
+  supplier_state_code: string | null;
+  place_of_supply_code: string | null;
   grand_total: number;
   line_items: BillingDetailLine[];
   created_at: string;
@@ -90,8 +130,6 @@ type BillingDetail = {
 
 const TABS = ["Corporate Details", "Sold Tickets", "Billing Info"] as const;
 type Tab = (typeof TABS)[number];
-
-const GST_RATE = 0.18;
 
 const money = (n: number | null | undefined) =>
   n == null ? "—" : `₹${Number(n).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
@@ -163,32 +201,37 @@ function periodFromTickets(rows: SoldTicket[]): { from: string; to: string; unda
   };
 }
 
-/** Recompute one row with the corporate markup + the entered additional (flat) markup. */
-function rowCalc(t: SoldTicket, additionalStr: string, discountStr: string, billingType: Corporate["billing_type"]) {
+/** Recompute one row with the corporate markup + the entered additional (flat) markup.
+ *
+ *  The tax comes from lib/gstSplit, the mirror of the server's billing_calc, so
+ *  the live preview and the saved invoice cannot disagree. `treatment` is the
+ *  row's own — the server decided it from the two parties' GSTINs; the browser
+ *  only applies it. */
+function rowCalc(
+  t: SoldTicket, additionalStr: string, discountStr: string, billingType: Corporate["billing_type"],
+) {
   const base = t.base_amount;
   const custMarkup = t.markup_amount;
   const addl = parseFloat(additionalStr) || 0;
   const disc = parseFloat(discountStr) || 0;
   const totalMarkup = custMarkup + addl;
-  let gst = 0;
-  if (billingType === "reseller") gst = Math.max(0, base + totalMarkup - disc) * GST_RATE;
-  else if (billingType === "agency") gst = Math.max(0, totalMarkup - disc) * GST_RATE;
-  const total = base + totalMarkup - disc + gst;
-  return { base, custMarkup, addl, disc, totalMarkup, gst, total };
+  // Discount reduces the taxable value first, then GST applies on the reduced amount.
+  const g = splitGst(base, totalMarkup, billingType, disc, t.gst_treatment);
+  const total = base + totalMarkup - disc + g.gst;
+  return { base, custMarkup, addl, disc, totalMarkup, gst: g.gst, split: g, total };
 }
 
 /** Recompute a saved billing line when its additional markup is being edited (base markup preserved). */
-function editRowCalc(it: BillingDetailLine, additionalStr: string, billingType: string | null) {
+function editRowCalc(it: BillingDetailLine, additionalStr: string, billing: BillingDetail | null) {
   const base = it.base_amount;
   const markup = it.markup_amount;
   const addl = parseFloat(additionalStr) || 0;
   const disc = it.discount ?? 0;
   const totalMarkup = markup + addl;
-  let gst = 0;
-  if (billingType === "reseller") gst = Math.max(0, base + totalMarkup - disc) * GST_RATE;
-  else if (billingType === "agency") gst = Math.max(0, totalMarkup - disc) * GST_RATE;
-  const total = base + totalMarkup - disc + gst;
-  return { base, addl, markup, gst, total };
+  // The treatment the BILLING was raised under, not the party's current address.
+  const g = splitGst(base, totalMarkup, billing?.billing_type ?? null, disc, billing?.gst_treatment);
+  const total = base + totalMarkup - disc + g.gst;
+  return { base, addl, markup, gst: g.gst, split: g, total };
 }
 
 function DetailRow({ label, value }: { label: string; value: React.ReactNode }) {
@@ -215,6 +258,10 @@ export default function CorporateDetailPage() {
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
   const [soldTickets, setSoldTickets] = useState<SoldTicket[] | null>(null);
+  // Which GST heads this party's supplies carry, and why — decided server-side
+  // from the two GSTINs. One answer for the whole list: it is a fact about the
+  // two parties, not about any one ticket.
+  const [placeOfSupply, setPlaceOfSupply] = useState<PlaceOfSupply | null>(null);
   const [loadingTickets, setLoadingTickets] = useState(false);
   const [ticketsError, setTicketsError] = useState<string | null>(null);
   const [additional, setAdditional] = useState<Record<number, string>>({});
@@ -294,6 +341,7 @@ export default function CorporateDetailPage() {
       if (dateTo) params.date_to = dateTo;
       const { data } = await api.get<SoldTicketsResponse>(`/corporates/${corporateId}/sold-tickets`, { params });
       setSoldTickets(data.tickets);
+      setPlaceOfSupply(data.place_of_supply ?? null);
       setAdditional({});
       setDiscounts({});
       setSelected(new Set());
@@ -327,6 +375,9 @@ export default function CorporateDetailPage() {
       markup = 0,
       addl = 0,
       gst = 0,
+      cgst = 0,
+      sgst = 0,
+      igst = 0,
       total = 0;
     for (const t of rows) {
       const c = rowCalc(t, additional[t.id] ?? "", discounts[t.id] ?? "", corporate?.billing_type ?? null);
@@ -334,10 +385,46 @@ export default function CorporateDetailPage() {
       markup += c.custMarkup;
       addl += c.addl;
       gst += c.gst;
+      cgst += c.split.cgst;
+      sgst += c.split.sgst;
+      igst += c.split.igst;
       total += c.total;
     }
-    return { count: rows.length, base, markup, addl, gst, total };
+    return { count: rows.length, base, markup, addl, gst, cgst, sgst, igst, total };
   }, [soldTickets, additional, discounts, corporate]);
+
+  // Who a ticket can be moved to. Loaded once here rather than per row, so a
+  // 200-row table makes two requests instead of four hundred.
+  const { options: partyOptions, employerOf } = usePartyOptions();
+  const [retagBusy, setRetagBusy] = useState(false);
+  const [retagNote, setRetagNote] = useState("");
+
+  // A re-tagged ticket LEAVES this party's list — that is what the move means.
+  // Say where it went, or a row vanishing reads as data loss.
+  const afterRetag = useCallback((r: RetagResult) => {
+    setTicketsError("");
+    setRetagNote(
+      r.untagged
+        ? `${r.updated} ticket${r.updated === 1 ? "" : "s"} no longer tagged to anyone — they now match on passenger name alone.`
+        : `${r.updated} ticket${r.updated === 1 ? "" : "s"} moved to ${r.party_name ?? "the selected party"}.`,
+    );
+    setSelected(new Set());
+    applyRange();
+  }, [applyRange]);
+
+  const bulkRetag = useCallback(async (opt: Parameters<typeof retagTickets>[1]) => {
+    // Billed rows are locked, and the endpoint refuses the whole batch if one
+    // slips in, so filter them out here rather than letting it fail.
+    const ids = (soldTickets ?? []).filter(t => selected.has(t.id) && !t.is_billed).map(t => t.id);
+    if (ids.length === 0) { setTicketsError("Those rows are already billed, so they cannot be moved."); return; }
+    setRetagBusy(true);
+    try {
+      afterRetag(await retagTickets(ids, opt));
+    } catch (e) {
+      const d = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+      setTicketsError(typeof d === "string" ? d : "Could not move these tickets.");
+    } finally { setRetagBusy(false); }
+  }, [soldTickets, selected, afterRetag]);
 
   const selectableIds = useMemo(
     () => (soldTickets ?? []).filter((t) => !t.is_billed).map((t) => t.id),
@@ -367,16 +454,22 @@ export default function CorporateDetailPage() {
       markup = 0,
       addl = 0,
       gst = 0,
+      cgst = 0,
+      sgst = 0,
+      igst = 0,
       total = 0;
     for (const it of items) {
-      const c = editRowCalc(it, addlEdits[it.ticket_id] ?? "", editBilling?.billing_type ?? null);
+      const c = editRowCalc(it, addlEdits[it.ticket_id] ?? "", editBilling);
       base += c.base;
       markup += c.markup;
       addl += c.addl;
       gst += c.gst;
+      cgst += c.split.cgst;
+      sgst += c.split.sgst;
+      igst += c.split.igst;
       total += c.total;
     }
-    return { base, markup, addl, gst, total };
+    return { base, markup, addl, gst, cgst, sgst, igst, total };
   }, [editBilling, addlEdits]);
 
   /**
@@ -642,6 +735,20 @@ export default function CorporateDetailPage() {
             )}
           </div>
 
+          {retagNote && (
+            <div className="px-4 py-3 text-xs text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg flex items-center justify-between gap-3">
+              <span>{retagNote}</span>
+              <button onClick={() => setRetagNote("")} className="text-emerald-600 hover:text-emerald-800 text-[11px] font-semibold">Dismiss</button>
+            </div>
+          )}
+
+          <RetagBulkBar
+            count={(soldTickets ?? []).filter(t => selected.has(t.id) && !t.is_billed).length}
+            options={partyOptions}
+            busy={retagBusy}
+            onApply={bulkRetag}
+          />
+
           {ticketsError && <div className="px-4 py-3 text-xs text-red-500 bg-red-50 border border-red-100 rounded-lg">{ticketsError}</div>}
 
           {loadingTickets ? (
@@ -658,14 +765,23 @@ export default function CorporateDetailPage() {
             </div>
           ) : (
             <>
-              {/* Summary cards */}
-              <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
+              {/* Summary cards. The GST card is replaced by the head that
+                  actually applies — showing CGST, SGST and IGST side by side
+                  would imply a supply carries all three, and no supply does. */}
+              <div className="grid grid-cols-2 md:grid-cols-7 gap-3">
                 {[
                   { label: "Tickets", value: String(summary.count) },
                   { label: "Total Base", value: money(summary.base) },
                   { label: "Total Markup", value: money(summary.markup) },
                   { label: "Total Additional", value: money(summary.addl) },
-                  { label: "Total GST (18%)", value: money(summary.gst) },
+                  ...(placeOfSupply?.treatment === "igst"
+                    ? [{ label: "Total IGST (18%)", value: money(summary.igst) }]
+                    : placeOfSupply?.treatment === "cgst_sgst"
+                      ? [
+                          { label: "Total CGST (9%)", value: money(summary.cgst) },
+                          { label: "Total SGST (9%)", value: money(summary.sgst) },
+                        ]
+                      : [{ label: "Total GST (18%)", value: money(summary.gst) }]),
                   { label: "Grand Total", value: money(summary.total) },
                 ].map((s) => (
                   <div key={s.label} className="bg-white rounded-xl border border-gray-100 px-4 py-3 shadow-sm">
@@ -674,6 +790,31 @@ export default function CorporateDetailPage() {
                   </div>
                 ))}
               </div>
+
+              {/* Why these rows carry the heads they do. Shown always when
+                  decided (one line, so an invoice can be checked at a glance)
+                  and as a warning when not — an empty CGST column with no
+                  explanation just looks broken. */}
+              {placeOfSupply && (
+                <div
+                  className={`px-4 py-2.5 rounded-lg border text-[11px] ${
+                    placeOfSupply.decided
+                      ? "bg-blue-50 border-blue-100 text-blue-800"
+                      : "bg-amber-50 border-amber-100 text-amber-800"
+                  }`}
+                >
+                  <span className="font-semibold">
+                    {placeOfSupply.decided ? "Place of supply: " : "GST not split: "}
+                  </span>
+                  {placeOfSupply.note}
+                  {!placeOfSupply.decided && (
+                    <span className="ml-1">
+                      The GST above is still charged and included in the totals — it just
+                      cannot be attributed to CGST/SGST or IGST yet.
+                    </span>
+                  )}
+                </div>
+              )}
 
               <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
                 <div className="px-4 py-3 border-b border-gray-100">
@@ -708,7 +849,7 @@ export default function CorporateDetailPage() {
                             className="accent-emerald-500 cursor-pointer align-middle"
                           />
                         </th>
-                        {["TICKET #", "AIRLINE", "CODE", "PASSENGER", "SECTOR", "DATE", "TOTAL FARE", "MARKUP", "ADD. MARKUP", "DISCOUNT", "GST", "TOTAL BILLING", "STATUS", "MATCHED"].map((h) => (
+                        {["TICKET #", "AIRLINE", "CODE", "PASSENGER", "SECTOR", "DATE", "TOTAL FARE", "MARKUP", "ADD. MARKUP", "DISCOUNT", "CGST", "SGST", "IGST", "TOTAL BILLING", "STATUS", "MATCHED", "CORPORATE"].map((h) => (
                           <th key={h} className="px-3 py-2.5 text-left text-[10px] font-semibold text-white uppercase tracking-wider whitespace-nowrap">
                             {h}
                           </th>
@@ -726,8 +867,8 @@ export default function CorporateDetailPage() {
                     <tbody>
                       {soldTickets.length === 0 ? (
                         <tr>
-                          {/* 27 = checkbox + 14 named + 11 incentive + Total Inc. */}
-                          <td colSpan={27} className="px-4 py-16 text-center">
+                          {/* 30 = checkbox + 17 named + 11 incentive + Total Inc. */}
+                          <td colSpan={30} className="px-4 py-16 text-center">
                             <div className="flex flex-col items-center justify-center">
                               <div className="w-14 h-14 bg-gray-50 rounded-full flex items-center justify-center mb-3">
                                 <Ticket className="w-7 h-7 text-gray-300" />
@@ -788,7 +929,7 @@ export default function CorporateDetailPage() {
                                   className="w-24 border border-gray-200 rounded px-2 py-1 text-[11px] focus:outline-none focus:ring-1 focus:ring-rose-400/50 bg-white"
                                 />
                               </td>
-                              <td className="px-3 py-2 text-[11px] text-amber-600">{money(c.gst)}</td>
+                              <GstCells split={c.split} />
                               <td className="px-3 py-2 text-[11px] font-semibold text-gray-800">{money(c.total)}</td>
                               <td className="px-3 py-2 whitespace-nowrap">
                                 {t.is_billed ? (
@@ -801,15 +942,56 @@ export default function CorporateDetailPage() {
                                   party, or nobody claimed it and the passenger's name
                                   matched. Name matching is the fuzzy one, so say which. */}
                               <td className="px-3 py-2 whitespace-nowrap">
-                                {t.matched_by === "link" ? (
-                                  <span title="This ticket is tagged to this party"
-                                    className="inline-block bg-sky-50 text-sky-700 text-[10px] font-semibold px-2 py-0.5 rounded-full border border-sky-200">Tagged</span>
-                                ) : t.matched_by === "name" ? (
-                                  <span title="No party is tagged on this ticket; the passenger's name matched"
-                                    className="inline-block bg-gray-50 text-gray-500 text-[10px] font-semibold px-2 py-0.5 rounded-full border border-gray-200">By name</span>
-                                ) : (
-                                  <span className="text-gray-300 text-[10px]">—</span>
-                                )}
+                                <div className="flex flex-col gap-1">
+                                  {t.matched_by === "link" ? (
+                                    <span title="This ticket is tagged to this party"
+                                      className="inline-block w-fit bg-sky-50 text-sky-700 text-[10px] font-semibold px-2 py-0.5 rounded-full border border-sky-200">Tagged</span>
+                                  ) : t.matched_by === "name" ? (
+                                    <span title="No party is tagged on this ticket; the passenger's name matched"
+                                      className="inline-block w-fit bg-gray-50 text-gray-500 text-[10px] font-semibold px-2 py-0.5 rounded-full border border-gray-200">By name</span>
+                                  ) : (
+                                    <span className="text-gray-300 text-[10px]">—</span>
+                                  )}
+                                  {/* Billing this elsewhere is a correction, not an edit
+                                      of the ticket, so it belongs beside "who claimed
+                                      this" rather than in a form. */}
+                                  <div className="min-w-44">
+                                    <RetagPartyControl
+                                      ticketIds={[t.id]}
+                                      options={partyOptions}
+                                      // The route param is a string; the picker keys on
+                                      // the numeric master id.
+                                      value={Number(corporateId)}
+                                      valueKind="corporate"
+                                      disabled={t.is_billed}
+                                      disabledReason={t.is_billed
+                                        ? "Already billed — delete that billing before moving this ticket."
+                                        : undefined}
+                                      onDone={afterRetag}
+                                      onError={setTicketsError}
+                                    />
+                                  </div>
+                                </div>
+                              </td>
+
+                              {/* WHO PAYS. Flipping this moves the ticket to the other
+                                  billing screen, which is the whole point — a ticket
+                                  belongs to exactly one payer. */}
+                              <td className="px-3 py-2 whitespace-nowrap">
+                                <div className="min-w-40">
+                                  <RetagPayerControl
+                                    ticketId={t.id}
+                                    customerId={t.customer_id ?? null}
+                                    corporateId={t.corporate_id ?? null}
+                                    employerOf={employerOf}
+                                    disabled={t.is_billed}
+                                    disabledReason={t.is_billed
+                                      ? "Already billed — delete that billing before moving this ticket."
+                                      : undefined}
+                                    onDone={afterRetag}
+                                    onError={setTicketsError}
+                                  />
+                                </div>
                               </td>
                               {INCENTIVE_TYPE_COLS.map((col) => {
                                 const val = t.incentive_breakdown?.[col.key] ?? null;
@@ -1043,7 +1225,7 @@ export default function CorporateDetailPage() {
               <table className="w-full">
                 <thead className="sticky top-0">
                   <tr style={{ background: "#1e3a5f" }}>
-                    {["TICKET #", "AIRLINE", "CODE", "PASSENGER", "SECTOR", "DATE", "TOTAL FARE", "MARKUP", "ADD. MARKUP", "GST", "TOTAL BILLING"].map((h) => (
+                    {["TICKET #", "AIRLINE", "CODE", "PASSENGER", "SECTOR", "DATE", "TOTAL FARE", "MARKUP", "ADD. MARKUP", "CGST", "SGST", "IGST", "TOTAL BILLING"].map((h) => (
                       <th key={h} className="px-3 py-2.5 text-left text-[10px] font-semibold text-white uppercase tracking-wider whitespace-nowrap">
                         {h}
                       </th>
@@ -1062,7 +1244,12 @@ export default function CorporateDetailPage() {
                       <td className="px-3 py-2 text-[11px] text-gray-600">{money(it.base_amount)}</td>
                       <td className="px-3 py-2 text-[11px] font-semibold text-emerald-600">{money(it.markup_amount)}</td>
                       <td className="px-3 py-2 text-[11px] text-gray-600">{money(it.additional_markup)}</td>
-                      <td className="px-3 py-2 text-[11px] text-amber-600">{money(it.gst_amount)}</td>
+                      {/* The heads as SAVED on the bill, not recomputed — an issued
+                          invoice shows what was issued. */}
+                      <GstCells split={{
+                        cgst: it.cgst, sgst: it.sgst, igst: it.igst,
+                        gst: it.gst_amount, treatment: viewBilling.gst_treatment ?? "unsplit",
+                      }} />
                       <td className="px-3 py-2 text-[11px] font-semibold text-gray-800">{money(it.total)}</td>
                     </tr>
                   ))}
@@ -1071,7 +1258,11 @@ export default function CorporateDetailPage() {
                     <td className="px-3 py-2 text-[11px] text-gray-800">{money(viewBilling.total_base)}</td>
                     <td className="px-3 py-2 text-[11px] text-emerald-700">{money(viewBilling.total_markup)}</td>
                     <td className="px-3 py-2 text-[11px] text-gray-800">{money(viewBilling.total_additional_markup)}</td>
-                    <td className="px-3 py-2 text-[11px] text-amber-700">{money(viewBilling.total_gst)}</td>
+                    <GstTotalCells
+                      cgst={viewBilling.total_cgst} sgst={viewBilling.total_sgst}
+                      igst={viewBilling.total_igst} gst={viewBilling.total_gst}
+                      treatment={viewBilling.gst_treatment ?? "unsplit"}
+                    />
                     <td className="px-3 py-2 text-[11px] text-gray-900">{money(viewBilling.grand_total)}</td>
                   </tr>
                 </tbody>
@@ -1120,7 +1311,7 @@ export default function CorporateDetailPage() {
               <table className="w-full">
                 <thead className="sticky top-0">
                   <tr style={{ background: "#1e3a5f" }}>
-                    {["TICKET #", "PASSENGER", "SECTOR", "DATE", "TOTAL FARE", "MARKUP", "ADD. MARKUP", "GST", "TOTAL BILLING"].map((h) => (
+                    {["TICKET #", "PASSENGER", "SECTOR", "DATE", "TOTAL FARE", "MARKUP", "ADD. MARKUP", "CGST", "SGST", "IGST", "TOTAL BILLING"].map((h) => (
                       <th key={h} className="px-3 py-2.5 text-left text-[10px] font-semibold text-white uppercase tracking-wider whitespace-nowrap">
                         {h}
                       </th>
@@ -1129,7 +1320,7 @@ export default function CorporateDetailPage() {
                 </thead>
                 <tbody>
                   {editBilling.line_items.map((it, idx) => {
-                    const c = editRowCalc(it, addlEdits[it.ticket_id] ?? "", editBilling.billing_type);
+                    const c = editRowCalc(it, addlEdits[it.ticket_id] ?? "", editBilling);
                     return (
                       <tr key={`${it.ticket_id}-${idx}`} className={`border-b border-gray-50 ${idx % 2 === 0 ? "bg-white" : "bg-gray-50/30"}`}>
                         <td className="px-3 py-2 text-[11px] font-semibold text-gray-800">{it.ticket_number ?? "—"}</td>
@@ -1147,7 +1338,7 @@ export default function CorporateDetailPage() {
                             className="w-24 border border-gray-200 rounded px-2 py-1 text-[11px] focus:outline-none focus:ring-1 focus:ring-[#1e3a5f]/40 bg-white"
                           />
                         </td>
-                        <td className="px-3 py-2 text-[11px] text-amber-600">{money(c.gst)}</td>
+                        <GstCells split={c.split} />
                         <td className="px-3 py-2 text-[11px] font-semibold text-gray-800">{money(c.total)}</td>
                       </tr>
                     );
@@ -1157,7 +1348,10 @@ export default function CorporateDetailPage() {
                     <td className="px-3 py-2 text-[11px] text-gray-800">{money(editTotals.base)}</td>
                     <td className="px-3 py-2 text-[11px] text-emerald-700">{money(editTotals.markup)}</td>
                     <td className="px-3 py-2 text-[11px] text-gray-800">{money(editTotals.addl)}</td>
-                    <td className="px-3 py-2 text-[11px] text-amber-700">{money(editTotals.gst)}</td>
+                    <GstTotalCells
+                      cgst={editTotals.cgst} sgst={editTotals.sgst} igst={editTotals.igst}
+                      gst={editTotals.gst} treatment={editBilling.gst_treatment ?? "unsplit"}
+                    />
                     <td className="px-3 py-2 text-[11px] text-gray-900">{money(editTotals.total)}</td>
                   </tr>
                 </tbody>

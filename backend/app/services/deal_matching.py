@@ -83,6 +83,43 @@ _FIRST_CLASSES    = {"F", "A", "P"}
 SKIP_CLASS       = "class"
 SKIP_TRAVEL_DATE = "travel_date"
 
+# ── B2B supplier guard ──────────────────────────────────────────────────────
+# How a statement's counterparty was matched to a deal's, reported on the result so
+# callers can say so rather than presenting an unverified match as a verified one.
+SUPPLIER_BY_ID   = "id"           # both sides name an Agency Master row — unambiguous
+SUPPLIER_BY_NAME = "name"         # legacy: a case-insensitive supplier-name compare
+SUPPLIER_ANY     = "unrestricted"  # the deal names no supplier, so it covers any
+
+
+def _supplier_guard(deal, supplier_agency: str | None,
+                    supplier_agency_id: int | None) -> tuple[bool, str]:
+    """(passes, how) for a B2B deal against this statement's counterparty.
+
+    ONE rule, shared by find_all_deals, diagnose_match and find_all_deals_for_ticket. It
+    used to be written out separately at each site; a popup that explains a result the
+    engine did not actually produce is worse than no popup.
+
+    BOTH SIDES NAME A ROW IN THE PLATFORM-ADMIN SUPPLIER MASTER — `deals.supplier_id` and
+    the id the statement was uploaded against (`statement_batch_suppliers.supplier_id`).
+
+    ID BEATS NAME because the name is not unique: 141 of the master's 2,340 names repeat
+    across branches, and "Riya Travel & Tours" is fourteen rows. Comparing names cannot
+    tell one branch's contract from another's; `suppliers.code` is the unique one and the
+    id is its key.
+
+    THE NAME BRANCH IS NOT LEGACY CRUFT, IT IS THE COMPATIBILITY CONTRACT. Deals written
+    before the id existed have none, and every caller that does not pass an id at all —
+    the BSP commission run, the ticket calculation run — must keep behaving EXACTLY as it
+    did. With supplier_agency_id=None this collapses to the original expression:
+    deal.supplier_name and deal.supplier_name.lower() != supplier_agency.lower()
+    """
+    if deal.supplier_id is not None and supplier_agency_id is not None:
+        return deal.supplier_id == supplier_agency_id, SUPPLIER_BY_ID
+    if deal.supplier_name and supplier_agency:
+        return deal.supplier_name.lower() == supplier_agency.lower(), SUPPLIER_BY_NAME
+    # A deal naming no supplier applies to every B2B statement — unchanged behaviour.
+    return True, SUPPLIER_ANY
+
 # Sums the achieved base for an airline over a period, for slab band selection.
 # Defaults to the uploaded-ticket scan (_period_cumulative_base); BSP runs pass
 # their own provider so the band reflects the airline's own settlement.
@@ -806,6 +843,12 @@ class DealMatchResult:
     # unverified match. Empty means every criterion the deal cares about was
     # actually checked, so the figure is exact.
     unconfirmed_criteria: list[str] = field(default_factory=list)
+    # B2B matches only: how this deal's counterparty was matched — SUPPLIER_BY_ID,
+    # SUPPLIER_BY_NAME or SUPPLIER_ANY. None on airline and outgoing matches, which have
+    # no supplier guard. A `name` match is real but unverified: it cannot tell two
+    # channels of one vendor apart, so the caller should say so rather than present it
+    # like an id match. Defaults to None so no existing caller changes.
+    supplier_match_by:    str | None = None
 
 
 # ── Main service ───────────────────────────────────────────────────────────
@@ -830,6 +873,10 @@ class DealMatchingService:
         excess_baggage:  float | None = None,
         meals:           float | None = None,
         supplier_agency: str | None = None,
+        # The Agency Master row the statement was uploaded against, when the caller
+        # has one. Optional: every existing caller passes only the name, and with this
+        # None the supplier guard behaves exactly as it did.
+        supplier_agency_id: int | None = None,
         statement_type:  str | None = None,
         skip_criteria:   set[str] | None = None,
         cumulative_provider: CumulativeProvider | None = None,
@@ -911,6 +958,10 @@ class DealMatchingService:
         )
         for deal in u_result.scalars().all():
             deal_type_str = deal.deal_type.value  # "airline" | "b2b"
+            # Reset per deal, not per call: this loop reports on ONE deal at a time, and a
+            # leftover value from the previous iteration would label an airline match with
+            # the last B2B deal's supplier verdict.
+            supplier_match_by = None
 
             if is_outbound:
                 # Scope guard. Replaces the supplier-name guard entirely: an
@@ -922,9 +973,12 @@ class DealMatchingService:
                     continue
             else:
                 scope_tier = None
-                # Supplier guard (B2B)
-                if deal_type_str == "b2b" and supplier_agency:
-                    if deal.supplier_name and deal.supplier_name.lower() != supplier_agency.lower():
+                # Supplier guard (B2B) — see _supplier_guard: id when both sides have one,
+                # otherwise the original case-insensitive name compare.
+                if deal_type_str == "b2b" and (supplier_agency or supplier_agency_id is not None):
+                    passes, supplier_match_by = _supplier_guard(
+                        deal, supplier_agency, supplier_agency_id)
+                    if not passes:
                         continue
 
             # Trigger guard (airline deals only)
@@ -1011,6 +1065,7 @@ class DealMatchingService:
                     scope_tier=scope_tier,
                     scope_label=_deal_scope_label(deal) if is_outbound else None,
                     unconfirmed_criteria=sorted(unconfirmed),
+                    supplier_match_by=None if is_outbound else supplier_match_by,
                 ))
 
         # ── Scope ladder (outgoing only) ───────────────────────────────────
@@ -1045,6 +1100,7 @@ class DealMatchingService:
         ticket_departure_raw: str | None = None,
         ticket_airline_name: str | None = None,
         supplier_agency:     str | None = None,
+        supplier_agency_id:  int | None = None,
         tour_code:           str | None = None,
         statement_type:      str | None = None,
         skip_criteria:       set[str] | None = None,
@@ -1219,18 +1275,39 @@ class DealMatchingService:
                             f"{_SCOPE_LABEL[tier]} deal"
                         ),
                     ))
-                # Supplier (B2B only, income side)
-                elif deal_type_str == "b2b" and supplier_agency and deal.supplier_name:
-                    sup_pass = deal.supplier_name.lower() == supplier_agency.lower()
+                # Supplier (B2B only, income side). Uses the SAME rule the run used —
+                # a popup that explains a verdict the engine did not reach is worse than
+                # no popup — and says WHICH way the two sides were compared, because an
+                # id match is certain and a name match is not.
+                elif deal_type_str == "b2b" and (supplier_agency or supplier_agency_id is not None):
+                    sup_pass, how = _supplier_guard(deal, supplier_agency, supplier_agency_id)
+                    if how == SUPPLIER_BY_ID:
+                        detail = (
+                            f"statement uploaded against supplier #{supplier_agency_id}"
+                            + (f" ('{supplier_agency}')" if supplier_agency else "")
+                            + f"; this deal is signed with supplier #{deal.supplier_id} — "
+                            + ("match" if sup_pass else
+                               "MISMATCH: a different BRANCH of this vendor. One supplier row is "
+                               "one branch, and each branch is its own commercial relationship.")
+                        )
+                    elif how == SUPPLIER_BY_NAME:
+                        detail = (
+                            f"statement agency='{supplier_agency}', deal supplier='{deal.supplier_name}'; "
+                            + ("match" if sup_pass else "MISMATCH — this deal is for a different supplier")
+                            + " — compared by NAME ONLY, because this deal names no supplier branch. "
+                              "141 names in the Supplier master repeat across branches, so open the "
+                              "deal and pick its Branch to be certain."
+                        )
+                    else:
+                        detail = "this deal names no supplier, so it applies to any B2B statement"
                     steps.append(MatchStepResult(
                         step="Supplier Match",
                         passed=sup_pass,
-                        ticket_value=supplier_agency,
-                        deal_value=deal.supplier_name,
-                        detail=(
-                            f"statement agency='{supplier_agency}', deal supplier='{deal.supplier_name}'; "
-                            + ("match" if sup_pass else "MISMATCH — this deal is for a different supplier")
-                        ),
+                        ticket_value=supplier_agency or (
+                            f"supplier #{supplier_agency_id}" if supplier_agency_id else "—"),
+                        deal_value=deal.supplier_name or (
+                            f"supplier #{deal.supplier_id}" if deal.supplier_id else "—"),
+                        detail=detail,
                     ))
 
                 # Config sub-validity (matched against the ticket ISSUE date)
@@ -1455,9 +1532,9 @@ class DealMatchingService:
                 if tier is None:
                     continue
                 scope_tier_by_deal[deal.id] = tier
-            # Skip wrong supplier for B2B (income side)
-            elif deal_type_str == "b2b" and supplier_agency and deal.supplier_name:
-                if deal.supplier_name.lower() != supplier_agency.lower():
+            # Skip wrong supplier for B2B (income side) — same rule as the run.
+            elif deal_type_str == "b2b" and (supplier_agency or supplier_agency_id is not None):
+                if not _supplier_guard(deal, supplier_agency, supplier_agency_id)[0]:
                     continue
             results.append(await _diagnose_unified_deal(deal))
 
@@ -1508,6 +1585,10 @@ class DealMatchingService:
         excess_baggage:  float | None = None,
         meals:           float | None = None,
         supplier_agency: str | None = None,
+        # The Agency Master row the statement was uploaded against, when the caller
+        # has one. Optional: every existing caller passes only the name, and with this
+        # None the supplier guard behaves exactly as it did.
+        supplier_agency_id: int | None = None,
         statement_type:  str | None = None,
         skip_criteria:   set[str] | None = None,
         cumulative_provider: CumulativeProvider | None = None,
@@ -1528,6 +1609,7 @@ class DealMatchingService:
             sell_fare=sell_fare, sell_tax_yq=sell_tax_yq, sale_yr=sale_yr,
             seat_selection=seat_selection, excess_baggage=excess_baggage, meals=meals,
             supplier_agency=supplier_agency,
+            supplier_agency_id=supplier_agency_id,
             statement_type=statement_type,
             skip_criteria=skip_criteria,
             cumulative_provider=cumulative_provider,
