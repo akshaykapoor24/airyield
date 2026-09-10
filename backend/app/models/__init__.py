@@ -37,6 +37,7 @@ from app.models.statement_row import (
     ThirdPartyGds, ThirdPartyLcc, STATEMENT_MODELS,
 )
 from app.models.lcc_detailed import LccDetailed, LccDetailedBatch
+from app.models.lcc_detailed_batch_file import LccDetailedBatchFile
 from app.models.lcc_batch_airline_id import LccBatchAirlineId
 from app.models.commission_calculation import CommissionCalculation
 from app.models.commission_run import CommissionRun

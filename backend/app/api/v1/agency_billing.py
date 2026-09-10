@@ -34,6 +34,7 @@ from app.schemas.billing import (
 )
 from app.services.billing_calc import (
     to_float as _f,
+    gst_taxable,
     split_gst as _split_gst,
     interstate_from_treatment as _interstate_from_treatment,
     safe_date as _safe_date,
@@ -303,6 +304,11 @@ async def create_agency_billing(
         disc = disc_map.get(t.id, 0.0)
         total_mk = agency_markup + addl
         # Discount reduces the taxable value first, then GST applies on the reduced amount.
+        # NOT narrowed to `agency_markup` the way the customer and corporate paths
+        # are: that is hard-coded 0 above, so an agency's additional markup IS its
+        # markup. Taxing `agency_markup` alone would charge no GST on any agency
+        # invoice at all.
+        taxable = gst_taxable(base, total_mk, _AGENCY_BILLING_TYPE, disc)
         split = _split_gst(base, total_mk, _AGENCY_BILLING_TYPE, disc, interstate=pos.interstate)
         gst = split["gst_amount"]
         line_total = base + total_mk - disc + gst
@@ -326,6 +332,10 @@ async def create_agency_billing(
             "markup_amount": round(agency_markup, 2),
             "additional_markup": round(addl, 2),
             "discount": round(disc, 2),
+            # The figure GST was actually charged on, STORED rather than
+            # re-derived at print time: the invoice must show the tax base the
+            # tax came from, and re-deriving it lets the two drift apart.
+            "taxable_value": round(taxable, 2),
             "gst_amount": round(gst, 2),
             "cgst": split["cgst"],
             "sgst": split["sgst"],
@@ -457,6 +467,7 @@ async def update_agency_billing(
         markup = _f(it.get("markup_amount"))
         addl = addl_map.get(it.get("ticket_id"), _f(it.get("additional_markup")))
         disc = _f(it.get("discount"))   # preserved from creation (not edited in the popup)
+        taxable = gst_taxable(base, markup + addl, billing.billing_type, disc)
         split = _split_gst(base, markup + addl, billing.billing_type, disc, interstate=interstate)
         gst = split["gst_amount"]
         line_total = base + markup + addl - disc + gst
@@ -472,6 +483,10 @@ async def update_agency_billing(
             **it,
             "additional_markup": round(addl, 2),
             "discount": round(disc, 2),
+            # The figure GST was actually charged on, STORED rather than
+            # re-derived at print time: the invoice must show the tax base the
+            # tax came from, and re-deriving it lets the two drift apart.
+            "taxable_value": round(taxable, 2),
             "gst_amount": round(gst, 2),
             "cgst": split["cgst"],
             "sgst": split["sgst"],

@@ -81,6 +81,24 @@ class LccDetailedBatch(Base):
     default_customer_id:   Mapped[int | None] = mapped_column(Integer, ForeignKey("customers.id", ondelete="SET NULL"), nullable=True)
     default_corporate_id:  Mapped[int | None] = mapped_column(Integer, ForeignKey("corporates.id", ondelete="SET NULL"), nullable=True)
 
+    # ── Two-file merge (Air India Express) ───────────────────────────────────
+    # An AIX statement arrives as an account file plus a passenger file, merged at
+    # ingest into one row set. See models/lcc_detailed_batch_file.py for the files
+    # themselves and services/lcc_merge.py for the join.
+    #
+    # `source_rows` is the non-blank lines READ across every file; `total_rows` is the
+    # rows WRITTEN. For a single-file upload they are equal; for a merged one the
+    # merge collapses passenger-per-segment lines into passenger rows, so written is
+    # fewer. The upload wizard's "expected records" check compares against this, not
+    # against total_rows — otherwise every merged upload ends on a false "N missing".
+    source_rows:   Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Counters the merge reports back: matched/unmatched PNRs, duplicate source lines,
+    # legs past the fifth, currencies seen, and any unrecognised account Note prefix.
+    merge_stats:   Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # The reshape is a second thing (after header detection) that must reproduce
+    # identically on re-ingest, or a stored column_map silently means something else.
+    merge_version: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+
     resolution_status: Mapped[str] = mapped_column(String(12), nullable=False, default="none", server_default="none", index=True)  # none|resolved|projected
     # The `ticket_statements.batch_id` this batch projects into. Allocated once and
     # REUSED on every re-projection — that is what keeps one stable statement header
@@ -137,9 +155,40 @@ class LccDetailed(Base):
     other_fee_total:         Mapped[float | None]    = mapped_column(Numeric(14, 2), nullable=True)
     other_ssr_total:         Mapped[float | None]    = mapped_column(Numeric(14, 2), nullable=True)
 
+    # ── Account-statement columns (Air India Express and kin) ────────────────
+    # An LCC account/prepaid statement carries facts an IndiGo detailed export has no
+    # column for. They are typed rather than folded into `extra` so the drill-in grid
+    # can show them, the filter bar can search them, and — for `gst_number` — the
+    # billing resolver can key on them.
+    transaction_type:        Mapped[str | None]      = mapped_column(String(60), nullable=True)
+    # The reissue link: a rebooking names the cancelled PNR it inherited value from.
+    parent_pnr:              Mapped[str | None]      = mapped_column(String(20), nullable=True)
+    account_transaction_id:  Mapped[str | None]      = mapped_column(String(40), nullable=True)
+    note:                    Mapped[str | None]      = mapped_column(String(500), nullable=True)
+    # The GST party the booking was raised for. An exact key to a Corporate — far
+    # stronger than matching a passenger name, which is what the resolver falls back to.
+    gst_company_name:        Mapped[str | None]      = mapped_column(String(255), nullable=True)
+    gst_number:              Mapped[str | None]      = mapped_column(String(20), nullable=True)
+    gst_email:               Mapped[str | None]      = mapped_column(String(255), nullable=True)
+    # Comma-joined LISTS in practice ("SEAT,VFPF"), not single codes — hence the width,
+    # and hence `text` rather than a facet in the filter spec.
+    fee_code:                Mapped[str | None]      = mapped_column(String(120), nullable=True)
+    ssr_code:                Mapped[str | None]      = mapped_column(String(120), nullable=True)
+    # `payment_amount` is denominated in this, which need not be `currency_code`.
+    foreign_currency_code:   Mapped[str | None]      = mapped_column(String(8), nullable=True)
+    pax_type:                Mapped[str | None]      = mapped_column(String(8), nullable=True)
+
     # ── Derived typed columns ────────────────────────────────────────────────
     departure_date:          Mapped[date | None]     = mapped_column(Date, nullable=True)
     taxes_total:             Mapped[float | None]    = mapped_column(Numeric(14, 2), nullable=True)
+    # Which half of a merged statement this row came from. Explicit rather than
+    # inferred from `total IS NULL`, because a genuinely zero-fare booking exists.
+    row_kind:                Mapped[str | None]      = mapped_column(String(12), nullable=True)   # pax|account
+    # Classified from the account row's Note prefix, NOT from `transaction_type`:
+    # "Funds Added: J7IL8G" (value returned from a cancelled booking) and
+    # "Refund by utility: ... RL:IBWGPK" (money actually refunded) are BOTH
+    # `PPAccountCredit`, and only the note separates them. See services/lcc_merge.py.
+    movement_kind:           Mapped[str | None]      = mapped_column(String(24), nullable=True)
 
     # ── Folded / audit JSONB ─────────────────────────────────────────────────
     taxes:                   Mapped[list | None]     = mapped_column(JSONB, nullable=True)   # [{code, amount}]

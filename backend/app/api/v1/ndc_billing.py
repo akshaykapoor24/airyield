@@ -38,6 +38,7 @@ from app.models.statement_row import Ndc
 from app.models.uploaded_ticket import UploadedTicket
 from app.models.user import User
 from app.services import customer_resolver as cres
+from app.services import employee_from_passenger as emp
 from app.services import ndc_billing_projection as proj
 from app.services import ticket_retag as retag
 
@@ -923,6 +924,188 @@ async def set_rows_billing_party(
 # ══════════════════════════════════════════════════════════════════════════════
 # 8. SEND
 # ══════════════════════════════════════════════════════════════════════════════
+
+# ── adding a passenger to the Employee Master ────────────────────────────────
+# The twin of the LCC worklist's own button. The creation rule is shared —
+# services/employee_from_passenger — because it decides what lands in the master and
+# on what terms, and two copies would drift. The GUARDS below are NDC's own: only
+# this statement type can latch a row to another ticket.
+
+class CreateEmployeePayload(BaseModel):
+    # The employer to file them under. Omitted, the corporate already chosen on the
+    # row is used — the ordinary path, since the button only appears once a party has
+    # been picked.
+    corporate_id: int | None = None
+
+
+class CreateEmployeesBulkPayload(BaseModel):
+    row_ids: list[int]
+    corporate_id: int | None = None
+
+
+async def _corporate_for(db: AsyncSession, user: User, corporate_id: int | None) -> Corporate:
+    corp = (await db.execute(select(Corporate).where(
+        Corporate.id == corporate_id,
+        Corporate.tenant_id == user.tenant_id,
+        Corporate.created_by_id == user.id,
+    ))).scalar_one_or_none()
+    if corp is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Corporate id {corporate_id} is not in your corporates.",
+        )
+    return corp
+
+
+def _guard_row_for_employee(row: Ndc) -> str | None:
+    """Why this row cannot take an employee, or None. Mirrors set_row_billing_party."""
+    if row.bill_kind == "payment":
+        return "No money moved on this row, so there is nothing to bill."
+    if row.bill_latch_status == proj.LATCHED:
+        doc = (row.data or {}).get("document_no") or "the flight line"
+        return (f"This row is billed on ticket {doc}. Add the passenger from that "
+                f"ticket's line instead — this one has no invoice of its own.")
+    if row.projected_ticket_id is not None:
+        return "This row is already in billing. Remove it from the billing first."
+    return None
+
+
+async def _add_row_passenger_to_master(
+    db: AsyncSession, user: User, row: Ndc, corp: Corporate, dupes, index=None,
+):
+    """File this row's passenger under `corp`, then point the row at them."""
+    outcome = await emp.create_employee_from_passenger(
+        db, user, (row.data or {}).get("passenger_name"), corp, dupes, index)
+    if not outcome.created:
+        return outcome
+
+    # Both ids together: the employer is invoiced, the employee is recorded as who
+    # travelled. Same shape the party picker produces, same OVERRIDDEN status.
+    row.bill_customer_type = "corporate"
+    row.bill_customer_id = outcome.customer_id
+    row.bill_corporate_id = corp.id
+    row.bill_status = cres.OVERRIDDEN
+    row.bill_match_reason = None
+    row.resolved_at = datetime.utcnow()
+    row.resolved_by_id = user.id
+    return outcome
+
+
+@router.post("/ndc/rows/{row_id}/create-employee", status_code=201)
+async def create_employee_from_row(
+    row_id: int,
+    payload: CreateEmployeePayload | None = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Add this row's passenger to the Employee Master under a corporate, and bill the
+    row to them."""
+    from app.services.party_dedupe import CustomerDuplicates
+
+    payload = payload or CreateEmployeePayload()
+    row = await db.scalar(select(Ndc).where(Ndc.id == row_id, *_scope(Ndc, current_user)))
+    if not row:
+        raise HTTPException(status_code=404, detail="Row not found.")
+    blocked = _guard_row_for_employee(row)
+    if blocked:
+        raise HTTPException(status_code=409, detail=blocked)
+
+    corporate_id = payload.corporate_id or row.bill_corporate_id
+    if not corporate_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Pick the corporate this passenger works for first.",
+        )
+    corp = await _corporate_for(db, current_user, corporate_id)
+
+    dupes = await CustomerDuplicates.load(db, current_user)
+    index = await cres.CustomerIndex.load(
+        db, tenant_id=current_user.tenant_id, created_by_id=current_user.id)
+    outcome = await _add_row_passenger_to_master(db, current_user, row, corp, dupes, index)
+    if not outcome.created:
+        raise HTTPException(status_code=409, detail=outcome.reason)
+
+    header = await _owned_header(db, row.batch_id, current_user, create=True)
+    await _recount(db, header)
+    await db.commit()
+
+    return {
+        "customer_id": outcome.customer_id,
+        "passenger": outcome.display_name,
+        "corporate_id": corp.id,
+        "company": corp.company,
+        "inherited": list(outcome.inherited),
+        "row_id": row.id,
+        "bill_status": row.bill_status,
+    }
+
+
+@router.post("/ndc/batches/{batch_id}/create-employees", status_code=201)
+async def create_employees_from_rows(
+    batch_id: str,
+    payload: CreateEmployeesBulkPayload,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The same, for a hand-picked selection.
+
+    Rows that cannot take an employee are SKIPPED and reported, not failed — a
+    selection of thirty nearly always contains one already on file, and refusing the
+    lot for it would make the button useless at the size it exists for.
+    """
+    from app.services.party_dedupe import CustomerDuplicates
+
+    header = await _owned_header(db, batch_id, current_user, create=True)
+    ids = _checked_ids(payload.row_ids, "tick the rows to add")
+    await _owned_row_ids(db, batch_id, current_user, ids)
+
+    rows = (await db.execute(
+        select(Ndc).where(Ndc.id.in_(ids), *_scope(Ndc, current_user)).order_by(Ndc.id)
+    )).scalars().all()
+
+    dupes = await CustomerDuplicates.load(db, current_user)
+    # Loaded ONCE. It does not see employees created earlier in this same loop —
+    # `dupes` is what catches those, claiming each identity as it goes.
+    index = await cres.CustomerIndex.load(
+        db, tenant_id=current_user.tenant_id, created_by_id=current_user.id)
+    corps: dict[int, Corporate] = {}
+    created: list[dict] = []
+    skipped: list[dict] = []
+
+    for row in rows:
+        passenger = (row.data or {}).get("passenger_name")
+        blocked = _guard_row_for_employee(row)
+        if blocked:
+            skipped.append({"row_id": row.id, "passenger": passenger, "reason": blocked})
+            continue
+        corporate_id = payload.corporate_id or row.bill_corporate_id
+        if not corporate_id:
+            skipped.append({"row_id": row.id, "passenger": passenger,
+                            "reason": "No corporate picked for this row."})
+            continue
+        if corporate_id not in corps:
+            corps[corporate_id] = await _corporate_for(db, current_user, corporate_id)
+        outcome = await _add_row_passenger_to_master(
+            db, current_user, row, corps[corporate_id], dupes, index)
+        if outcome.created:
+            created.append({"row_id": row.id, "customer_id": outcome.customer_id,
+                            "passenger": outcome.display_name,
+                            "company": corps[corporate_id].company})
+        else:
+            skipped.append({"row_id": row.id, "passenger": passenger,
+                            "reason": outcome.reason})
+
+    await _recount(db, header)
+    await db.commit()
+
+    return {
+        "batch_id": batch_id,
+        "created": created,
+        "skipped": skipped,
+        "created_count": len(created),
+        "skipped_count": len(skipped),
+    }
+
 
 class SendToBillingPayload(BaseModel):
     """No body / null → the whole upload, synced. `row_ids` → those rows, added only."""

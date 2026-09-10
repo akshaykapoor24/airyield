@@ -39,6 +39,7 @@ from app.services.billing_pdf import build_billing_pdf, load_logo, supplier_bloc
 from app.services.party_dedupe import CorporateDuplicates
 from app.services.billing_calc import (
     to_float as _f,
+    gst_taxable,
     compute_markup as _compute_markup,
     split_gst as _split_gst,
     interstate_from_treatment as _interstate_from_treatment,
@@ -893,7 +894,13 @@ async def create_billing(
         addl = addl_map.get(t.id, 0.0)
         disc = disc_map.get(t.id, 0.0)
         total_mk = corp_markup + addl
-        split = _split_gst(base, total_mk, corporate.billing_type, disc, interstate=pos.interstate)
+        # GST is charged on the CORPORATE'S AGREED MARKUP alone — the additional
+        # markup is a charge on this one bill, not part of the service value the
+        # rate was agreed against. The Sold Tickets list above already computed it
+        # this way (see the preview at the top of this module); the invoice used to
+        # tax `total_mk` and quietly disagree with it.
+        taxable = gst_taxable(base, corp_markup, corporate.billing_type, disc)
+        split = _split_gst(base, corp_markup, corporate.billing_type, disc, interstate=pos.interstate)
         gst = split["gst_amount"]
         line_total = base + total_mk - disc + gst
         total_base += base
@@ -916,6 +923,10 @@ async def create_billing(
             "markup_amount": round(corp_markup, 2),
             "additional_markup": round(addl, 2),
             "discount": round(disc, 2),
+            # The figure GST was actually charged on, STORED rather than
+            # re-derived at print time: the invoice must show the tax base the
+            # tax came from, and re-deriving it lets the two drift apart.
+            "taxable_value": round(taxable, 2),
             "gst_amount": round(gst, 2),
             "cgst": split["cgst"],
             "sgst": split["sgst"],
@@ -1028,7 +1039,8 @@ async def update_billing(
         markup = _f(it.get("markup_amount"))
         addl = addl_map.get(it.get("ticket_id"), _f(it.get("additional_markup")))
         disc = _f(it.get("discount"))   # preserved from creation (not edited in the popup)
-        split = _split_gst(base, markup + addl, billing.billing_type, disc, interstate=interstate)
+        taxable = gst_taxable(base, markup, billing.billing_type, disc)
+        split = _split_gst(base, markup, billing.billing_type, disc, interstate=interstate)
         gst = split["gst_amount"]
         line_total = base + markup + addl - disc + gst
         total_base += base
@@ -1043,6 +1055,10 @@ async def update_billing(
             **it,
             "additional_markup": round(addl, 2),
             "discount": round(disc, 2),
+            # The figure GST was actually charged on, STORED rather than
+            # re-derived at print time: the invoice must show the tax base the
+            # tax came from, and re-deriving it lets the two drift apart.
+            "taxable_value": round(taxable, 2),
             "gst_amount": round(gst, 2),
             "cgst": split["cgst"],
             "sgst": split["sgst"],

@@ -23,7 +23,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  AlertTriangle, ArrowLeft, Info, Layers, Loader2, Lock, RefreshCw, Search, Send, X,
+  AlertTriangle, ArrowLeft, Info, Layers, Loader2, Lock, RefreshCw, Search, Send, UserPlus, X,
 } from "lucide-react";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
@@ -255,8 +255,8 @@ export default function NdcBillingWorklist({
 
   // Both masters, loaded whole and filtered in the browser — the same thing every other
   // party picker in the app does.
-  useEffect(() => {
-    Promise.allSettled([
+  const loadParties = useCallback(() => {
+    return Promise.allSettled([
       api.get<{ id: number; first_name: string; last_name: string | null; company: string | null; corporate_id: number | null }[]>("/customers/", { params: { limit: 1000 } }),
       api.get<{ id: number; company: string | null }[]>("/corporates/", { params: { limit: 1000 } }),
     ]).then(([cu, co]) => {
@@ -284,7 +284,12 @@ export default function NdcBillingWorklist({
       setParties(out);
       setEmployerOf(employers);
     });
+    // A callback rather than an inline effect body: adding a passenger to the
+    // Employee Master has to make them appear in this picker straight away, and
+    // nothing here ever re-read /customers/ before.
   }, []);
+
+  useEffect(() => { void loadParties(); }, [loadParties]);
 
   const rowParams = useCallback(() => ({
     ...(filter ? { status: filter } : {}),
@@ -421,6 +426,62 @@ export default function NdcBillingWorklist({
     await setRowParty(row, opt, mode === "direct");
   };
 
+  /** Add this row's passenger to the Employee Master under the corporate already
+   *  picked for them, and bill the row to that new employee. The twin of the LCC
+   *  worklist's button; the server shares the creation rule with it. */
+  const addToMaster = async (row: Row) => {
+    setBusy(`emp-${row.id}`);
+    try {
+      const { data } = await api.post<{ passenger: string; company: string; inherited: string[] }>(
+        `${apiBase}/rows/${row.id}/create-employee`, {},
+      );
+      toast.success(
+        `${data.passenger} added to Employee Master under ${data.company}.`
+        + (data.inherited.length ? ` Took ${data.inherited.length} settings from the corporate.` : ""),
+      );
+      await Promise.all([loadParties(), load(offset), refreshSummary()]);
+      onChanged();
+    } catch (e) { toast.error(errText(e, "Could not add this passenger to Employee Master.")); }
+    finally { setBusy(null); }
+  };
+
+  /** The same for the ticked rows. The server skips what it cannot add and says why,
+   *  rather than refusing the whole selection for one name already on file. */
+  const addSelectedToMaster = async () => {
+    setBusy("emp-bulk");
+    try {
+      const { data } = await api.post<{
+        created_count: number; skipped_count: number;
+        skipped: { passenger: string | null; reason: string }[];
+      }>(`${apiBase}/batches/${batchId}/create-employees`, { row_ids: [...selected] });
+
+      if (data.created_count) {
+        toast.success(`${data.created_count.toLocaleString()} added to Employee Master.`);
+      }
+      if (data.skipped_count) {
+        // Named, not just counted — "12 skipped" tells the user nothing to act on.
+        const first = data.skipped[0];
+        toast(
+          `${data.skipped_count.toLocaleString()} skipped`
+          + (first ? ` — e.g. ${first.passenger ?? "a row"}: ${first.reason}` : "."),
+          { icon: "⚠️", duration: 8000 },
+        );
+      }
+      await Promise.all([loadParties(), load(offset), refreshSummary()]);
+      onChanged();
+    } catch (e) { toast.error(errText(e, "Could not add the selected passengers.")); }
+    finally { setBusy(null); }
+  };
+
+  /** Needs a corporate to file them under and nobody already named. `locked` covers
+   *  both NDC-only refusals: a row already in billing, and one latched to another
+   *  ticket — a latched line has no invoice of its own to bill anyone for. */
+  const canAddToMaster = (r: Row) =>
+    !!r.passenger && !!r.bill_corporate_id && !r.bill_customer_id
+    && r.bill_kind !== "payment" && !locked(r);
+
+  const addableSelected = rows.filter(r => selected.has(r.id) && canAddToMaster(r)).length;
+
   const applyBulkParty = async () => {
     if (!bulkPick || !bulkKind) { toast.error("Pick a customer or corporate first."); return; }
     setBusy("bulk");
@@ -549,6 +610,16 @@ export default function NdcBillingWorklist({
             {busy === "resolve" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
             Re-match
           </button>
+          {/* Only when the selection actually contains rows that can be filed — a
+              disabled button the user cannot explain is worse than no button. */}
+          {addableSelected > 0 && (
+            <button onClick={addSelectedToMaster} disabled={!!busy}
+              title="Add each selected passenger to Employee Master under the corporate picked for their row"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-emerald-700 border border-emerald-200 bg-emerald-50 rounded-lg hover:bg-emerald-100 disabled:opacity-50">
+              {busy === "emp-bulk" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <UserPlus className="w-3.5 h-3.5" />}
+              Add {addableSelected.toLocaleString()} to Employee Master
+            </button>
+          )}
           {selected.size > 0 ? (
             <button onClick={() => sendToBilling([...selected])} disabled={!!busy || overCap}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-40">
@@ -877,9 +948,23 @@ export default function NdcBillingWorklist({
                     {r.bill_kind === "payment" || isLatched ? (
                       <span className="text-[11px] text-slate-400">—</span>
                     ) : !r.bill_customer_id ? (
-                      <span className="text-[11px] text-slate-400">
-                        {r.bill_corporate_id ? "Billed to the company" : "—"}
-                      </span>
+                      // A company billed with nobody named is exactly where this
+                      // passenger is missing from the master, so that is where the
+                      // offer to add them belongs.
+                      canAddToMaster(r) ? (
+                        <button onClick={() => addToMaster(r)} disabled={!!busy}
+                          title={`Add ${r.passenger} to Employee Master under this company`}
+                          className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 hover:text-emerald-800 disabled:opacity-50">
+                          {busy === `emp-${r.id}`
+                            ? <Loader2 className="w-3 h-3 animate-spin" />
+                            : <UserPlus className="w-3 h-3" />}
+                          Add to Employee Master
+                        </button>
+                      ) : (
+                        <span className="text-[11px] text-slate-400">
+                          {r.bill_corporate_id ? "Billed to the company" : "—"}
+                        </span>
+                      )
                     ) : employerOf.has(r.bill_customer_id) ? (
                       <select
                         className={SELECT_CLS + " w-full disabled:bg-slate-50 disabled:text-slate-400"}

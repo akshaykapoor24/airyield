@@ -214,8 +214,9 @@ function rowCalc(
   const addl = parseFloat(additionalStr) || 0;
   const disc = parseFloat(discountStr) || 0;
   const totalMarkup = custMarkup + addl;
+  // The customer's agreed markup alone — see the corporate page for why.
   // Discount reduces the taxable value first, then GST applies on the reduced amount.
-  const g = splitGst(base, totalMarkup, billingType, disc, t.gst_treatment);
+  const g = splitGst(base, custMarkup, billingType, disc, t.gst_treatment);
   const total = base + totalMarkup - disc + g.gst;
   return { base, custMarkup, addl, disc, totalMarkup, gst: g.gst, split: g, total };
 }
@@ -227,8 +228,9 @@ function editRowCalc(it: BillingDetailLine, additionalStr: string, billing: Bill
   const addl = parseFloat(additionalStr) || 0;
   const disc = it.discount ?? 0;   // discount is preserved from creation (not edited here)
   const totalMarkup = markup + addl;
+  // Taxed on the agreed markup only; see rowCalc above.
   // The treatment the BILLING was raised under, not the party's current address.
-  const g = splitGst(base, totalMarkup, billing?.billing_type ?? null, disc, billing?.gst_treatment);
+  const g = splitGst(base, markup, billing?.billing_type ?? null, disc, billing?.gst_treatment);
   const total = base + totalMarkup - disc + g.gst;
   return { base, addl, markup, gst: g.gst, split: g, total };
 }

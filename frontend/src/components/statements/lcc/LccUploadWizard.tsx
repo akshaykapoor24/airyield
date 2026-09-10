@@ -1,14 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  X, Upload, FileSpreadsheet, CheckCircle2, Loader2, Search, ChevronDown, ChevronRight,
+  X, Upload, CheckCircle2, Loader2, Search, ChevronDown, ChevronRight,
   AlertTriangle, ArrowLeft, ArrowRight, Wand2, Eraser, PartyPopper,
 } from "lucide-react";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { notifyRequired } from "@/lib/requiredFields";
 import MultiSelectDropdown from "@/components/ui/MultiSelectDropdown";
+import Dropzone from "@/components/statements/Dropzone";
 import { type TenantAirlineOpt, sameAirlineOnly, toOptions } from "@/lib/tenantAirlineOptions";
 
 type Step = "upload" | "mapping" | "preview" | "progress" | "done";
@@ -17,29 +18,59 @@ type StdCol = { header: string; field: string; role: "core" | "tax" | "leg"; dty
 type StdGroup = { group: string; columns: StdCol[] };
 type SampleRow = Record<string, string | null>;
 
+/** Which half of a split statement a file is. `single` is the ordinary one-file case. */
+type FileRole = "single" | "account" | "pax";
+
+/** One uploaded file's mapping pane, as the server prepared it. For a passenger
+ *  report the columns and samples are POST-merge, so what you map is what is stored. */
+type FileBlock = {
+  role: FileRole;
+  role_label: string;
+  file_name: string;
+  header_row: number;
+  source_rows: number;
+  xls_columns: string[];
+  suggested_mapping: Record<string, string>;   // {field: column}
+  sample_rows: SampleRow[];
+  matched_columns: number;
+  is_template_match: boolean;
+};
+
 type ExtractResp = {
   batch_id: string;
+  source_format: string;
+  source_rows: number;
+  standard_total: number;
+  primary_role: FileRole;
+  files: FileBlock[];
+  // Flattened primary — still sent, and still what the older single-file path read.
   file_name: string;
   total_rows: number;
-  header_row: number;
-  source_format: string;
-  xls_columns: string[];
-  suggested_mapping: Record<string, string>;   // {field: xls_column}
-  sample_rows: SampleRow[];
-  is_template_match: boolean;
-  matched_columns: number;
-  standard_total: number;
+};
+
+type MergeStats = {
+  source_rows?: number; account_rows?: number; pax_rows?: number;
+  skipped_not_ag?: number; pnrs_indexed?: number;
+  enriched_account_rows?: number; unmatched_account_rows?: number;
+  matched_without_fare?: number; tax_derived?: number;
+  duplicate_pax_lines?: number; repeated_legs?: number; legs_truncated?: number;
+  movement_counts?: Record<string, number>;
+  unknown_notes?: Record<string, number>;
+  currencies_seen?: string[];
 };
 
 type StatusResp = {
   batch_id: string; status: string; total_rows: number; processed_rows: number;
-  expected_rows: number | null; progress_pct: number; error: string | null;
+  expected_rows: number | null; source_rows: number | null; merge_stats: MergeStats | null;
+  progress_pct: number; error: string | null;
 };
 
 const SKIP = "";   // "— not in file —"
 
+type RequiredGroup = { label: string; fields: string[]; headers: string };
+
 /**
- * Mapping rules.
+ * Mapping rules, PER FILE ROLE.
  *
  * Only ONE of each group has to be mapped — airlines label these differently and
  * not every export carries all of them.
@@ -52,14 +83,27 @@ const SKIP = "";   // "— not in file —"
  *
  * AMOUNT is hard-required too: a settlement statement row with no money on it
  * cannot be reconciled against anything, so it is a mis-mapping, not a choice.
+ * Which HEADER carries it differs by file — an account statement's money is
+ * `ForeignAmount` — but it always lands in the same field, `total`, because that
+ * is the one `_bill_kind` and the invoice read.
  *
  * DATE is a warning only — some exports genuinely carry the period in the file
  * name rather than per row.
  */
-const REQUIRED_MAPPING_GROUPS: { label: string; fields: string[]; headers: string }[] = [
-  { label: "a booking identifier", fields: ["record_locator", "gds_record_locator"], headers: "RecordLocator or GDS_recordlocator" },
-  { label: "an amount",            fields: ["total", "base_fare"],                   headers: "Total or BaseFare" },
-];
+const REQUIRED_BY_ROLE: Record<FileRole, RequiredGroup[]> = {
+  single: [
+    { label: "a booking identifier", fields: ["record_locator", "gds_record_locator"], headers: "RecordLocator or GDS_recordlocator" },
+    { label: "an amount", fields: ["total", "base_fare"], headers: "Total or BaseFare" },
+  ],
+  pax: [
+    { label: "a booking identifier", fields: ["record_locator", "gds_record_locator"], headers: "RecordLocator" },
+    { label: "an amount", fields: ["total", "base_fare"], headers: "TotalFare or BaseFare" },
+  ],
+  account: [
+    { label: "a PNR", fields: ["record_locator", "gds_record_locator"], headers: "PNR" },
+    { label: "the transaction amount", fields: ["total"], headers: "ForeignAmount" },
+  ],
+};
 const DATE_FIELDS = ["transaction_date", "booking_date", "payment_datetime"];
 
 function errMsg(e: unknown, fallback: string): string {
@@ -112,11 +156,17 @@ export default function LccUploadWizard({
   const [step, setStep] = useState<Step>("upload");
   const [groups, setGroups] = useState<StdGroup[]>([]);
   const [extracted, setExtracted] = useState<ExtractResp | null>(null);
-  const [columnMap, setColumnMap] = useState<Record<string, string>>({});
+  // One mapping per file. The two halves of a split statement share no headers, so
+  // one map could not describe both.
+  const [columnMaps, setColumnMaps] = useState<Record<string, Record<string, string>>>({});
+  const [activeRole, setActiveRole] = useState<FileRole>("single");
 
-  // Upload state
-  const [file, setFile] = useState<File | null>(null);
-  const [dragging, setDragging] = useState(false);
+  // Upload state. Two slots: most statements fill only the first, but an airline that
+  // splits its export into an account file and a passenger file needs both, and
+  // neither is usable alone. The server decides which is which from the headers, so
+  // the order they are dropped in does not matter.
+  const [fileA, setFileA] = useState<File | null>(null);
+  const [fileB, setFileB] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [expectedRows, setExpectedRows] = useState("");   // user-declared record count (optional)
   // Airline — REQUIRED. An LCC export names no carrier (no airline column, and bare
@@ -126,7 +176,6 @@ export default function LccUploadWizard({
   // logins for that carrier — but all of one carrier; see lib/tenantAirlineOptions.ts.
   const [airlines, setAirlines] = useState<TenantAirlineOpt[]>([]);
   const [tenantAirlineIds, setTenantAirlineIds] = useState<number[]>([]);
-  const inputRef = useRef<HTMLInputElement>(null);
   const expectedNum = (() => { const n = parseInt(expectedRows.replace(/[^\d]/g, ""), 10); return Number.isFinite(n) && n > 0 ? n : null; })();
 
   // Mapping state
@@ -157,41 +206,71 @@ export default function LccUploadWizard({
     [airlines, tenantAirlineIds],
   );
 
+  // Memoised, not written inline: `?? []` would mint a fresh array every render and
+  // re-run every callback that depends on it.
+  const files: FileBlock[] = useMemo(() => extracted?.files ?? [], [extracted]);
+  const active: FileBlock | undefined =
+    files.find((f) => f.role === activeRole) ?? files[0];
+  // Memoised on the ROLE, not written inline: `?? {}` would mint a fresh object on
+  // every render and re-run the preview fold with it.
+  const columnMap = useMemo(
+    () => columnMaps[active?.role ?? ""] ?? {},
+    [columnMaps, active?.role],
+  );
+
   const allCols: StdCol[] = useMemo(() => groups.flatMap((g) => g.columns), [groups]);
   const totalStd = allCols.length || extracted?.standard_total || 0;
   const mappedCount = Object.values(columnMap).filter(Boolean).length;
-  // 87 of the 129 standard columns are tax codes, so "something is mapped" was
-  // satisfied by a single tax column. Count the ones that carry the row's identity.
-  const coreMappedCount = allCols.filter((c) => c.role === "core" && columnMap[c.field]).length;
 
-  const missingRequiredGroups = REQUIRED_MAPPING_GROUPS
-    .filter((g) => !g.fields.some((f) => columnMap[f]))
-    .map((g) => `${g.label} (${g.headers})`);
+  // A passenger file sitting beside an account file is a LOOKUP — it produces no
+  // rows of its own — so it has nothing to require. Demanding a mapping of it would
+  // block the upload on a pane that does not write anything.
+  const isLookup = useCallback(
+    (f: FileBlock) => f.role === "pax" && files.some((x) => x.role === "account"),
+    [files],
+  );
+
+  const missingFor = useCallback((f: FileBlock): string[] => {
+    if (isLookup(f)) return [];
+    const map = columnMaps[f.role] ?? {};
+    return (REQUIRED_BY_ROLE[f.role] ?? REQUIRED_BY_ROLE.single)
+      .filter((g) => !g.fields.some((fld) => map[fld]))
+      .map((g) => `${g.label} (${g.headers})`);
+  }, [columnMaps, isLookup]);
+
+  const missingRequiredGroups = active ? missingFor(active) : [];
   const dateMissing = !DATE_FIELDS.some((f) => columnMap[f]);
 
-  /** Guard for both Preview and Confirm — the mapping is what makes the rows usable. */
+  /** Guard for both Preview and Confirm — the mapping is what makes the rows usable.
+   *  Checks EVERY file, not just the one on screen, and jumps to the one at fault. */
   const checkMapping = (): boolean => {
-    if (coreMappedCount === 0) {
-      return notifyRequired("Map at least one Core column — mapping only taxes or legs would import rows with no ticket data on them.");
-    }
-    if (missingRequiredGroups.length) {
-      return notifyRequired(
-        missingRequiredGroups.length === 1
-          ? `Map ${missingRequiredGroups[0]} before continuing.`
-          : `Map ${missingRequiredGroups.join(" and ")} before continuing.`
-      );
+    for (const f of files) {
+      if (isLookup(f)) continue;
+      const map = columnMaps[f.role] ?? {};
+      const core = allCols.filter((c) => c.role === "core" && map[c.field]).length;
+      const where = files.length > 1 ? ` in the ${f.role_label.toLowerCase()}` : "";
+      if (core === 0) {
+        setActiveRole(f.role);
+        return notifyRequired(`Map at least one Core column${where} — mapping only taxes or legs would import rows with no ticket data on them.`);
+      }
+      const missing = missingFor(f);
+      if (missing.length) {
+        setActiveRole(f.role);
+        return notifyRequired(
+          missing.length === 1
+            ? `Map ${missing[0]}${where} before continuing.`
+            : `Map ${missing.join(" and ")}${where} before continuing.`
+        );
+      }
     }
     return true;
   };
 
   // ── Upload ─────────────────────────────────────────────────────────────────
-  const pickFile = (f: File | null) => {
-    if (f && !/\.(xlsx|xls|csv)$/i.test(f.name)) { toast.error("Choose an .xlsx, .xls or .csv file."); return; }
-    setFile(f);
-  };
+  const chosen = [fileA, fileB].filter(Boolean) as File[];
 
   const doExtract = async () => {
-    if (!file) { notifyRequired("Choose a statement file (.xlsx, .xls or .csv) to continue."); return; }
+    if (!chosen.length) { notifyRequired("Choose a statement file (.xlsx, .xls or .csv) to continue."); return; }
     if (!tenantAirlineIds.length) {
       notifyRequired("Select the airline ID(s) this statement belongs to — the file itself doesn't say.");
       return;
@@ -199,12 +278,13 @@ export default function LccUploadWizard({
     setUploading(true);
     try {
       const fd = new FormData();
-      fd.append("file", file);
-      // Repeated field, one per id — how FastAPI reads a list from form data.
+      // Repeated field, one per file — how FastAPI reads a list from form data.
+      for (const f of chosen) fd.append("files", f);
       for (const id of tenantAirlineIds) fd.append("tenant_airline_ids", String(id));
       const { data } = await api.post<ExtractResp>(`${apiBase}/extract`, fd);
       setExtracted(data);
-      setColumnMap(data.suggested_mapping || {});
+      setColumnMaps(Object.fromEntries(data.files.map((f) => [f.role, f.suggested_mapping || {}])));
+      setActiveRole(data.primary_role);
       setStep("mapping");
     } catch (e) { toast.error(errMsg(e, "Could not read the file.")); }
     finally { setUploading(false); }
@@ -212,9 +292,16 @@ export default function LccUploadWizard({
 
   // ── Mapping ──────────────────────────────────────────────────────────────
   const setMap = (field: string, xlsCol: string) =>
-    setColumnMap((p) => { const n = { ...p }; if (xlsCol) n[field] = xlsCol; else delete n[field]; return n; });
-  const autoMapAll = () => setColumnMap(extracted?.suggested_mapping || {});
-  const clearAll = () => setColumnMap({});
+    setColumnMaps((prev) => {
+      const role = active?.role ?? "single";
+      const next = { ...(prev[role] ?? {}) };
+      if (xlsCol) next[field] = xlsCol; else delete next[field];
+      return { ...prev, [role]: next };
+    });
+  const autoMapAll = () =>
+    setColumnMaps((prev) => ({ ...prev, [active?.role ?? "single"]: active?.suggested_mapping ?? {} }));
+  const clearAll = () =>
+    setColumnMaps((prev) => ({ ...prev, [active?.role ?? "single"]: {} }));
 
   const filteredGroups: StdGroup[] = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -224,13 +311,13 @@ export default function LccUploadWizard({
       .filter((g) => g.columns.length > 0);
   }, [groups, search]);
 
-  // ── Preview (folded client-side from sample rows + current mapping) ──────
+  // ── Preview (folded client-side from the active file's sample rows) ──────
   const previewRows = useMemo(() => {
-    if (!extracted) return [];
+    if (!active) return [];
     const coreCols = allCols.filter((c) => c.role === "core");
     const taxCols = allCols.filter((c) => c.role === "tax");
     const legCols = allCols.filter((c) => c.role === "leg");
-    return extracted.sample_rows.slice(0, 50).map((sr) => {
+    return active.sample_rows.slice(0, 50).map((sr) => {
       const core: Record<string, string> = {};
       for (const c of coreCols) {
         const src = columnMap[c.field];
@@ -258,7 +345,7 @@ export default function LccUploadWizard({
         .map((n) => `${legMap[n].route ?? ""} ${legMap[n].flight ?? ""}`.trim());
       return { core, taxes: taxes.join(" · "), taxesTotal: taxes.length ? String(taxesTotal) : "", segments: segs.join(" · ") };
     });
-  }, [extracted, columnMap, allCols]);
+  }, [active, columnMap, allCols]);
 
   const coreColsForPreview = allCols.filter((c) => c.role === "core");
 
@@ -269,8 +356,14 @@ export default function LccUploadWizard({
     // actually writes rows, and the user can reach it after editing the mapping.
     if (!checkMapping()) { setStep("mapping"); return; }
     try {
-      await api.post(`${apiBase}/confirm`, { batch_id: extracted.batch_id, column_map: columnMap, expected_rows: expectedNum });
-      setStatusData({ batch_id: extracted.batch_id, status: "pending", total_rows: extracted.total_rows, processed_rows: 0, expected_rows: expectedNum, progress_pct: 0, error: null });
+      await api.post(`${apiBase}/confirm`, {
+        batch_id: extracted.batch_id, column_maps: columnMaps, expected_rows: expectedNum,
+      });
+      setStatusData({
+        batch_id: extracted.batch_id, status: "pending", total_rows: extracted.source_rows,
+        processed_rows: 0, expected_rows: expectedNum, source_rows: extracted.source_rows,
+        merge_stats: null, progress_pct: 0, error: null,
+      });
       setStep("progress");
     } catch (e) { toast.error(errMsg(e, "Could not start the import.")); }
   };
@@ -293,6 +386,27 @@ export default function LccUploadWizard({
   }, [step, pollStatus]);
 
   const failed = statusData?.status === "failed";
+  const multi = files.length > 1;
+
+  /** Role tabs, shown only when there is more than one file to map.
+   *  A plain function, not a nested component: declaring a component inside a
+   *  component gives React a new type every render and remounts the subtree. */
+  const roleTabs = () => !multi ? null : (
+    <div className="flex items-center gap-1 mb-3 border-b border-slate-200">
+      {files.map((f) => {
+        const on = f.role === active?.role;
+        const bad = missingFor(f).length > 0;
+        return (
+          <button key={f.role} onClick={() => setActiveRole(f.role)}
+            className={`inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold border-b-2 -mb-px ${on ? "border-blue-600 text-blue-600" : "border-transparent text-slate-400 hover:text-slate-600"}`}>
+            {f.role_label}
+            {bad && <AlertTriangle className="w-3 h-3 text-amber-500" />}
+            <span className="font-normal text-slate-400">{f.source_rows.toLocaleString()} rows</span>
+          </button>
+        );
+      })}
+    </div>
+  );
 
   // ── render ─────────────────────────────────────────────────────────────────
   return (
@@ -309,30 +423,29 @@ export default function LccUploadWizard({
           {/* STEP 1 — UPLOAD */}
           {step === "upload" && (
             <div>
-              <div
-                onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
-                onDragLeave={() => setDragging(false)}
-                onDrop={(e) => { e.preventDefault(); setDragging(false); pickFile(e.dataTransfer.files?.[0] ?? null); }}
-                onClick={() => !file && inputRef.current?.click()}
-                className={`cursor-pointer flex flex-col items-center justify-center rounded-xl border-2 border-dashed p-10 text-center ${
-                  dragging ? "border-blue-500 bg-blue-50" : file ? "border-emerald-200 bg-emerald-50/40" : "border-slate-200 bg-slate-50/60 hover:border-slate-300"}`}
-              >
-                {file ? (
-                  <div className="w-full max-w-sm flex items-center gap-3 rounded-lg border border-emerald-200 bg-white p-3 shadow-sm">
-                    <div className="w-9 h-9 rounded-lg bg-emerald-50 border border-emerald-100 flex items-center justify-center shrink-0"><FileSpreadsheet className="w-5 h-5 text-emerald-600" /></div>
-                    <div className="min-w-0 flex-1 text-left"><p className="text-xs font-semibold text-slate-800 truncate" title={file.name}>{file.name}</p><p className="text-[11px] text-slate-500">{(file.size / 1024).toFixed(0)} KB</p></div>
-                    <CheckCircle2 className="w-5 h-5 text-emerald-500 shrink-0" />
-                    <button onClick={(e) => { e.stopPropagation(); setFile(null); }} className="p-1 text-slate-400 hover:text-red-500 shrink-0"><X className="w-4 h-4" /></button>
-                  </div>
-                ) : (
-                  <>
-                    <div className="w-12 h-12 rounded-full bg-blue-50 flex items-center justify-center mb-3"><Upload className="w-6 h-6 text-blue-600" /></div>
-                    <p className="text-sm font-medium text-slate-700">Drop your statement export here</p>
-                    <p className="text-xs text-slate-400 mt-0.5">or click to browse · .xlsx, .xls, .csv</p>
-                  </>
-                )}
-                <input ref={inputRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={(e) => pickFile(e.target.files?.[0] ?? null)} />
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <Dropzone
+                  file={fileA} onPick={setFileA}
+                  label="Drop your statement export here"
+                  note="The whole statement, or either half of a split one"
+                />
+                {/* Second slot, optional. Some airlines — Air India Express among
+                    them — issue the statement as an account file plus a passenger
+                    file that only mean anything joined on PNR. Which is which is
+                    read from the headers, so either can go in either slot. */}
+                <Dropzone
+                  file={fileB} onPick={setFileB}
+                  label="Second file (optional)"
+                  note="Only if your airline splits the statement in two"
+                  compact={!fileB}
+                />
               </div>
+              {chosen.length === 2 && (
+                <p className="text-[11px] text-slate-500 mt-2">
+                  Both files will be merged into one statement, matched on PNR. We&apos;ll work out
+                  which is the account statement and which is the passenger report from their columns.
+                </p>
+              )}
 
               {/* Airline — REQUIRED. Nothing in an LCC export identifies the carrier:
                   there is no airline column and the flight numbers are bare, so this
@@ -380,7 +493,7 @@ export default function LccUploadWizard({
                   inputMode="numeric" placeholder="e.g. 50,000"
                   className="w-36 px-3 py-1.5 border border-slate-200 rounded-lg text-xs tabular-nums bg-white focus:outline-none focus:ring-1 focus:ring-blue-400" />
                 <span className="text-[11px] text-slate-400">
-                  How many records are in this file? We&apos;ll confirm that many rows landed in the database after import.
+                  How many lines are in your file(s)? We&apos;ll confirm we read that many.
                 </span>
               </div>
 
@@ -389,13 +502,38 @@ export default function LccUploadWizard({
           )}
 
           {/* STEP 2 — MAPPING */}
-          {step === "mapping" && extracted && (
+          {step === "mapping" && active && (
             <div>
-              <div className={`flex items-start gap-2 rounded-lg border px-3 py-2 mb-3 text-xs ${extracted.is_template_match ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-amber-200 bg-amber-50 text-amber-700"}`}>
-                {extracted.is_template_match
-                  ? <><CheckCircle2 className="w-4 h-4 mt-0.5 shrink-0" /><span>Looks like the standard template — all {totalStd} columns auto-matched. Review and adjust if needed.</span></>
-                  : <><AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" /><span>{mappedCount} of {totalStd} columns auto-matched. Map the remaining columns below (or leave them unmapped).</span></>}
+              {roleTabs()}
+              <div className={`flex items-start gap-2 rounded-lg border px-3 py-2 mb-3 text-xs ${active.is_template_match ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-amber-200 bg-amber-50 text-amber-700"}`}>
+                {active.is_template_match
+                  ? <><CheckCircle2 className="w-4 h-4 mt-0.5 shrink-0" /><span>Looks like the standard template — every column in <b>{active.file_name}</b> matched a standard column. Review and adjust if needed.</span></>
+                  : <><AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" /><span>{mappedCount} of {totalStd} standard columns auto-matched from <b>{active.file_name}</b>. Map the rest below (or leave them unmapped).</span></>}
               </div>
+
+              {active.role === "account" && multi && (
+                <p className="text-[11px] text-slate-500 mb-3">
+                  These are the columns <i>after</i> merging: one row per transaction, with the
+                  passenger, booking date, sectors and base fare joined in from the passenger
+                  report on PNR, and <b>Tax Total</b> worked out as the amount minus the base fare.
+                  Only rows whose payment method is <b>AG</b> are imported — that leaves the
+                  statement-balance lines out. What you map here is what gets stored.
+                </p>
+              )}
+              {active.role === "pax" && multi && (
+                <p className="text-[11px] text-slate-500 mb-3">
+                  This file is a <b>lookup</b>, not a second set of rows — it supplies the
+                  passenger, the sectors and the base fare to the account statement, matched on
+                  PNR. Nothing here is imported on its own, so there is nothing to map.
+                </p>
+              )}
+              {active.role === "pax" && !multi && (
+                <p className="text-[11px] text-slate-500 mb-3">
+                  Uploaded on its own, this imports as an ordinary statement: one row per
+                  passenger, their flights folded into the leg columns. Add the account statement
+                  alongside it to get the transaction amounts.
+                </p>
+              )}
 
               {/* What must be mapped, stated up front rather than only on rejection. */}
               {missingRequiredGroups.length > 0 && (
@@ -437,7 +575,7 @@ export default function LccUploadWizard({
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-1.5 px-3 py-2.5">
                           {g.columns.map((c) => {
                             const mappedTo = columnMap[c.field] || "";
-                            const sample = mappedTo && extracted.sample_rows[0] ? extracted.sample_rows[0][mappedTo] : null;
+                            const sample = mappedTo && active.sample_rows[0] ? active.sample_rows[0][mappedTo] : null;
                             return (
                               <div key={c.field} className="flex items-center gap-2">
                                 <div className="w-40 shrink-0">
@@ -447,7 +585,7 @@ export default function LccUploadWizard({
                                   <select value={mappedTo} onChange={(e) => setMap(c.field, e.target.value)}
                                     className={`w-full border rounded-md pl-2 pr-6 py-1 text-[11px] focus:outline-none focus:ring-1 focus:ring-blue-400 ${mappedTo ? "border-emerald-200 bg-emerald-50/40 text-slate-700" : "border-slate-200 bg-white text-slate-400"}`}>
                                     <option value={SKIP}>— not in file —</option>
-                                    {extracted.xls_columns.map((x) => <option key={x} value={x}>{x}</option>)}
+                                    {active.xls_columns.map((x) => <option key={x} value={x}>{x}</option>)}
                                   </select>
                                 </div>
                                 {mappedTo
@@ -469,11 +607,13 @@ export default function LccUploadWizard({
           )}
 
           {/* STEP 3 — PREVIEW */}
-          {step === "preview" && extracted && (
+          {step === "preview" && active && extracted && (
             <div>
+              {roleTabs()}
               <p className="text-xs text-slate-500 mb-3">
-                Preview of the first {previewRows.length} of {extracted.total_rows.toLocaleString()} rows, mapped as configured.
-                Confirm to ingest all {extracted.total_rows.toLocaleString()} rows in the background.
+                {multi
+                  ? <>Preview of the merged <b>{active.role_label.toLowerCase()}</b> rows — {previewRows.length} shown, from {active.source_rows.toLocaleString()} source lines. A merge writes fewer rows than it reads.</>
+                  : <>Preview of the first {previewRows.length} of {extracted.source_rows.toLocaleString()} rows, mapped as configured. Confirm to ingest them all in the background.</>}
               </p>
               {/* Not blocking — some exports carry the period in the file name — but
                   worth saying before ingesting tens of thousands of undated rows. */}
@@ -489,7 +629,10 @@ export default function LccUploadWizard({
                     <thead className="sticky top-0">
                       <tr className="bg-slate-50 border-b border-slate-200 text-[11px] uppercase tracking-wide text-slate-400">
                         {coreColsForPreview.map((c) => <th key={c.field} className="px-3 py-2 font-semibold whitespace-nowrap">{c.header}</th>)}
-                        <th className="px-3 py-2 font-semibold whitespace-nowrap">Taxes Total</th>
+                        {/* Distinct from the mappable "Tax Total" column above: this is
+                            the sum of the per-code tax columns, which an export that
+                            ships one lump-sum tax figure will not have. */}
+                        <th className="px-3 py-2 font-semibold whitespace-nowrap">Taxes Σ</th>
                         <th className="px-3 py-2 font-semibold whitespace-nowrap">Taxes</th>
                         <th className="px-3 py-2 font-semibold whitespace-nowrap">Segments</th>
                       </tr>
@@ -544,25 +687,92 @@ export default function LccUploadWizard({
           {step === "done" && statusData && (() => {
             const saved = statusData.processed_rows;
             const exp = statusData.expected_rows;
-            const matches = exp != null && saved === exp;
-            const diff = exp != null ? saved - exp : 0;
+            // Compared against SOURCE lines, not rows written. A merge collapses
+            // passenger-per-segment lines into passenger rows, so comparing the two
+            // would report a shortfall on every merged upload that isn't one.
+            const read = statusData.source_rows ?? saved;
+            const matches = exp != null && read === exp;
+            const diff = exp != null ? read - exp : 0;
+            const st = statusData.merge_stats;
+            const unknown = Object.entries(st?.unknown_notes ?? {});
             return (
-            <div className="py-12 flex flex-col items-center text-center">
+            <div className="py-10 flex flex-col items-center text-center">
               <div className={`w-14 h-14 rounded-full flex items-center justify-center mb-4 ${exp != null && !matches ? "bg-amber-50" : "bg-emerald-50"}`}>
                 <PartyPopper className={`w-7 h-7 ${exp != null && !matches ? "text-amber-500" : "text-emerald-500"}`} />
               </div>
               <p className="text-sm font-semibold text-slate-800 mb-1">Import complete</p>
-              <p className="text-xs text-slate-500">{saved.toLocaleString()} rows saved to {title}.</p>
+              {st && (st.account_rows ?? 0) > 0 ? (
+                <p className="text-xs text-slate-500">
+                  {read.toLocaleString()} source lines → {(st.account_rows ?? 0).toLocaleString()} transactions
+                  saved to {title}
+                  {(st.skipped_not_ag ?? 0) > 0 &&
+                    <> ({(st.skipped_not_ag ?? 0).toLocaleString()} non-AG lines left out)</>}.
+                </p>
+              ) : (
+                <p className="text-xs text-slate-500">{saved.toLocaleString()} rows saved to {title}.</p>
+              )}
+
               {exp != null && (
                 matches ? (
                   <div className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-50 border border-emerald-200 text-xs font-medium text-emerald-700">
-                    <CheckCircle2 className="w-4 h-4" /> All {exp.toLocaleString()} expected records saved.
+                    <CheckCircle2 className="w-4 h-4" /> All {exp.toLocaleString()} expected records read.
                   </div>
                 ) : (
                   <div className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-xs font-medium text-amber-700">
-                    <AlertTriangle className="w-4 h-4" /> Expected {exp.toLocaleString()}, saved {saved.toLocaleString()} — {Math.abs(diff).toLocaleString()} {diff < 0 ? "missing" : "extra"}.
+                    <AlertTriangle className="w-4 h-4" /> Expected {exp.toLocaleString()}, read {read.toLocaleString()} — {Math.abs(diff).toLocaleString()} {diff < 0 ? "missing" : "extra"}.
                   </div>
                 )
+              )}
+
+              {/* What the merge did. Only the numbers that need a person to look at
+                  something are shown — a clean merge says nothing. */}
+              {st && (
+                <div className="mt-4 w-full max-w-md space-y-1.5 text-left">
+                  {(st.tax_derived ?? 0) > 0 && (
+                    <p className="text-[11px] text-slate-500">
+                      {(st.tax_derived ?? 0).toLocaleString()} transactions matched a booking in the
+                      passenger report and got a base fare, passenger and sectors — tax was worked
+                      out as the amount minus the base fare.
+                    </p>
+                  )}
+                  {(st.unmatched_account_rows ?? 0) > 0 && (
+                    <p className="text-[11px] text-amber-600">
+                      {(st.unmatched_account_rows ?? 0).toLocaleString()} transactions had no matching PNR in
+                      the passenger report, so they carry an amount but no base fare or tax —
+                      usually because the two files cover different dates.
+                    </p>
+                  )}
+                  {(st.matched_without_fare ?? 0) > 0 && (
+                    <p className="text-[11px] text-amber-600">
+                      {(st.matched_without_fare ?? 0).toLocaleString()} transactions matched a PNR that
+                      carried no base fare, so their tax is blank rather than the whole amount.
+                    </p>
+                  )}
+                  {(st.duplicate_pax_lines ?? 0) > 0 && (
+                    <p className="text-[11px] text-slate-500">
+                      {(st.duplicate_pax_lines ?? 0).toLocaleString()} duplicate lines were dropped rather than counted twice.
+                    </p>
+                  )}
+                  {(st.legs_truncated ?? 0) > 0 && (
+                    <p className="text-[11px] text-amber-600">
+                      {(st.legs_truncated ?? 0).toLocaleString()} bookings have more than five flights — the fares are
+                      complete, but only the first five sectors are shown.
+                    </p>
+                  )}
+                  {unknown.length > 0 && (
+                    <p className="text-[11px] text-amber-600">
+                      Unrecognised transaction note{unknown.length > 1 ? "s" : ""}:{" "}
+                      {unknown.map(([k, n]) => `“${k}” (${n})`).join(", ")}. Those rows imported as
+                      movements of an unknown kind — worth a look.
+                    </p>
+                  )}
+                  {(st.currencies_seen?.length ?? 0) > 1 && (
+                    <p className="text-[11px] text-red-600">
+                      This upload mixes {st.currencies_seen?.join(", ")}. Billing can&apos;t invoice more than
+                      one currency at a time — split the statement before sending it to billing.
+                    </p>
+                  )}
+                </div>
               )}
             </div>
             );
@@ -580,7 +790,7 @@ export default function LccUploadWizard({
             {step === "upload" && (
               <>
                 <button onClick={onClose} className="px-3 py-1.5 text-xs font-medium text-slate-500 border border-slate-200 rounded-lg hover:bg-slate-50">Cancel</button>
-                <button onClick={doExtract} disabled={!file || uploading} className="inline-flex items-center gap-1.5 px-4 py-1.5 text-xs font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-40">
+                <button onClick={doExtract} disabled={!chosen.length || uploading} className="inline-flex items-center gap-1.5 px-4 py-1.5 text-xs font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-40">
                   {uploading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ArrowRight className="w-3.5 h-3.5" />} Continue
                 </button>
               </>

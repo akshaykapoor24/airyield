@@ -99,7 +99,7 @@ export const STATEMENT_NAV: StatementCategory[] = [
     slug: "lcc",
     label: "LCC",
     types: [
-      { slug: "statement-detailed", label: "Detailed Statement", kind: "lcc-detailed", status: "ready", apiBase: "/lcc-detailed", blurb: "LCC detailed statement — map any airline export to the standard 129-column template, then ingest." },
+      { slug: "statement-detailed", label: "Detailed Statement", kind: "lcc-detailed", status: "ready", apiBase: "/lcc-detailed", blurb: "LCC detailed statement — map any airline export to the standard template, then ingest. Airlines that split it into an account file and a passenger report can upload both at once." },
       // requiresAirlineId on all four: like Detailed, an LCC export names no carrier.
       { slug: "di",                 label: "DI Statement",       kind: "spec-repo", status: "ready", apiBase: "/statements/lcc-di", requiresAirlineId: true, blurb: "Deposit (DI) statement — deposit or agency ledger, normalized." },
       { slug: "divided-pnr",        label: "Divided PNR",        kind: "spec-repo", status: "ready", apiBase: "/statements/lcc-divided-pnr", requiresAirlineId: true, blurb: "Divided PNR statement — parent→child PNR splits, normalized." },

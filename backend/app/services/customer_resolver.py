@@ -136,6 +136,41 @@ REASON = {
     EXCLUDED: "Payment movement — this row carries no fare, so there is nothing to bill.",
 }
 
+# A GST match is a different KIND of match and has to read as one on the row: a GSTIN
+# is an exact identifier the statement itself carries, whereas a name match is a
+# spelling comparison. Kept out of REASON because that dict is keyed by status and
+# these share the RESOLVED / AMBIGUOUS statuses with the name path.
+GST_REASON = "Matched on the GST number on this booking."
+GST_AMBIGUOUS_REASON = "Two different parties in your master carry this GST number — pick one."
+
+
+@dataclass(frozen=True)
+class PartyRow:
+    """A corporate that can be billed directly, indexed by its GSTIN.
+
+    Corporates are loaded in their own right, not only through a customer join: a
+    corporate with no employees on the master is invisible to `CustomerIndex.load`,
+    and a GST-keyed statement line is exactly the case where that corporate is the
+    right answer.
+    """
+    corporate_id: int
+    company: str | None = None
+    gst_no: str | None = None
+
+
+def gst_key(value) -> str | None:
+    """A GSTIN reduced to a comparable key, or None when there is nothing to compare.
+
+    Case and internal punctuation vary between how a portal prints a GSTIN and how it
+    was typed into the master. Placeholders are common in both and must never match
+    each other — "NA" against "NA" would silently bill one customer's ticket to
+    another.
+    """
+    s = "".join(ch for ch in str(value or "").upper() if ch.isalnum())
+    if not s or s in {"NA", "NIL", "NONE", "NOTAPPLICABLE", "NOTREGISTERED", "0"}:
+        return None
+    return s
+
 
 @dataclass(frozen=True)
 class MasterRow:
@@ -196,7 +231,8 @@ class CustomerIndex:
     thousand rows at most, ~6 on the dev tenant).
     """
 
-    def __init__(self, rows: list[MasterRow]) -> None:
+    def __init__(self, rows: list[MasterRow], parties: list[PartyRow] | None = None,
+                 customer_gst: dict[int, str] | None = None) -> None:
         self._by_key: dict[str, list[MasterRow]] = {}
         self._by_id: dict[int, MasterRow] = {}
         for row in rows:
@@ -207,14 +243,32 @@ class CustomerIndex:
                 self._by_key.setdefault(key, []).append(row)
             self._by_id[row.id] = row
 
+        # GSTIN -> corporates, and GSTIN -> customers. Two indexes, not one, because
+        # corporates are consulted FIRST; see `resolve`.
+        self._corp_by_gst: dict[str, list[PartyRow]] = {}
+        for p in (parties or []):
+            k = gst_key(p.gst_no)
+            if k:
+                self._corp_by_gst.setdefault(k, []).append(p)
+        self._cust_by_gst: dict[str, list[MasterRow]] = {}
+        for cid, raw in (customer_gst or {}).items():
+            k = gst_key(raw)
+            row = self._by_id.get(cid)
+            if k and row is not None:
+                self._cust_by_gst.setdefault(k, []).append(row)
+
     def __len__(self) -> int:
         return len(self._by_id)
 
     @classmethod
-    def from_rows(cls, rows) -> "CustomerIndex":
+    def from_rows(cls, rows, parties=None, customer_gst=None) -> "CustomerIndex":
         """Build from plain tuples/MasterRows — the seam that makes the whole
         decision matrix testable without a database. `load` is only the DB adapter."""
-        return cls([r if isinstance(r, MasterRow) else MasterRow(*r) for r in rows])
+        return cls(
+            [r if isinstance(r, MasterRow) else MasterRow(*r) for r in rows],
+            [p if isinstance(p, PartyRow) else PartyRow(*p) for p in (parties or [])],
+            dict(customer_gst or {}),
+        )
 
     @classmethod
     async def load(cls, db: AsyncSession, *, tenant_id: int | None, created_by_id: int) -> "CustomerIndex":
@@ -232,18 +286,104 @@ class CustomerIndex:
         result = await db.execute(
             select(
                 Customer.id, Customer.first_name, Customer.last_name,
-                Customer.corporate_id, Corporate.company,
+                Customer.corporate_id, Corporate.company, Customer.gst_no,
             )
             .outerjoin(Corporate, Corporate.id == Customer.corporate_id)
             .where(Customer.tenant_id == tenant_id, Customer.created_by_id == created_by_id)
         )
-        return cls([MasterRow(*row) for row in result.all()])
+        rows, customer_gst = [], {}
+        for cid, first, last, corp_id, company, gst_no in result.all():
+            rows.append(MasterRow(cid, first, last, corp_id, company))
+            if gst_no:
+                customer_gst[cid] = gst_no
+
+        # Corporates in their OWN right, under the same scope customers use
+        # (api/v1/corporates.py::_scope). Loading them only through the join above
+        # would leave a corporate with no employees on the master unreachable — and a
+        # GST-keyed statement line is exactly when that corporate is the right answer.
+        parties = [
+            PartyRow(corporate_id=cid, company=company, gst_no=gst_no)
+            for cid, company, gst_no in (await db.execute(
+                select(Corporate.id, Corporate.company, Corporate.gst_no)
+                .where(Corporate.tenant_id == tenant_id,
+                       Corporate.created_by_id == created_by_id)
+            )).all()
+        ]
+        return cls(rows, parties, customer_gst)
 
     def get(self, customer_id: int) -> MasterRow | None:
         return self._by_id.get(customer_id)
 
-    def resolve(self, raw_name: str | None) -> CustomerMatch:
+    def resolve_gst(self, gstin, display: str = "") -> CustomerMatch | None:
+        """Match the booking's GST party. None when the GSTIN says nothing useful.
+
+        **Corporates first, then customers.** A GSTIN belongs to a company, and a
+        company's employees each carry their employer's GSTIN on their customer
+        record — so a single index over both would call every employer's booking
+        AMBIGUOUS and the whole feature would do nothing. When only customers hold
+        it and they all sit under ONE corporate, that corporate is still the answer,
+        for the same reason `_match_from_row` bills an employee's ticket to their
+        employer.
+
+        Genuine ambiguity — one GSTIN, two unrelated parties — is never tie-broken.
+        """
+        key = gst_key(gstin)
+        if not key:
+            return None
+
+        corps = self._corp_by_gst.get(key, [])
+        if len(corps) == 1:
+            c = corps[0]
+            return CustomerMatch(
+                status=RESOLVED, customer_id=None, corporate_id=c.corporate_id,
+                customer_type="corporate", canonical_name=c.company,
+                display_name=display, matched_key=key,
+                candidate_ids=(c.corporate_id,), note=GST_REASON,
+            )
+        if len(corps) > 1:
+            return CustomerMatch(
+                status=AMBIGUOUS, display_name=display, matched_key=key,
+                candidate_ids=tuple(c.corporate_id for c in corps),
+                note=GST_AMBIGUOUS_REASON,
+            )
+
+        custs = self._cust_by_gst.get(key, [])
+        if not custs:
+            return None
+        if len(custs) == 1:
+            return _match_from_row(custs[0], RESOLVED, key, display, note=GST_REASON)
+
+        # Several customers, one GSTIN: employees of the same company. Bill the
+        # company. Only a GSTIN spanning two DIFFERENT corporates is truly ambiguous.
+        corp_ids = {c.corporate_id for c in custs}
+        if len(corp_ids) == 1 and None not in corp_ids:
+            corp_id = corp_ids.pop()
+            return CustomerMatch(
+                status=RESOLVED, customer_id=None, corporate_id=corp_id,
+                customer_type="corporate",
+                canonical_name=next((c.corporate_name for c in custs if c.corporate_name), None),
+                display_name=display, matched_key=key,
+                candidate_ids=(corp_id,), note=GST_REASON,
+            )
+        return CustomerMatch(
+            status=AMBIGUOUS, display_name=display, matched_key=key,
+            candidate_ids=tuple(c.id for c in custs), note=GST_AMBIGUOUS_REASON,
+        )
+
+    def resolve(self, raw_name: str | None, gstin=None) -> CustomerMatch:
+        """The row's billing party.
+
+        The GSTIN is tried first when the statement carries one: it is an exact
+        identifier the airline printed on the booking, where a name match is a
+        spelling comparison against a master that may not even contain the traveller.
+        A GSTIN that resolves to nothing falls through to the name, so nothing that
+        used to match stops matching.
+        """
         display = (raw_name or "").strip()
+        if gstin is not None:
+            by_gst = self.resolve_gst(gstin, display)
+            if by_gst is not None:
+                return by_gst
         key, initials = person_match_key(raw_name)
 
         if not key:

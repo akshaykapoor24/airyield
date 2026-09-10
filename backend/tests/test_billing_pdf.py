@@ -262,18 +262,29 @@ class TestWhoIsBilled(unittest.TestCase):
 
 
 class TestTheLineTable(unittest.TestCase):
-    def test_amount_and_taxable_value_are_different_numbers(self):
-        """The heart of it: 26,53,226 was charged, but only 95,700 was taxable.
-        Printing the fare as the taxable value would overstate the tax base
-        twenty-seven-fold on this one line."""
+    def test_amount_and_taxable_value_are_disjoint_and_add_up(self):
+        """The heart of it: 26,70,452 was charged, and only 95,700 of it was taxable.
+
+        Amount and Taxable Value are the two halves of the line and do not overlap,
+        so a reader can add the row across: 25,57,526 + 95,700 + 17,226 = 26,70,452.
+        They used to overlap — Amount carried fare + markup (26,53,226) and Taxable
+        restated the markup slice of it — which meant the row only reconciled if you
+        knew to ignore one of the two columns.
+        """
         text = render()
-        self.assertIn("2,653,226.00", text)   # fare + markup
-        self.assertIn("95,700.00", text)      # the markup alone — the agency rule
-        self.assertIn("2,670,452.00", text)   # and the line total, tax included
+        self.assertIn("2,557,526.00", text)   # the fare — not taxed, agency rule
+        self.assertIn("95,700.00", text)      # the markup alone — what IS taxed
+        self.assertIn("2,670,452.00", text)   # the line total, tax included
+        self.assertNotIn("2,653,226.00", text)  # the old overlapping Amount
+
+    def test_the_row_reconciles(self):
+        self.assertEqual(2557526.00 + 95700.00 + 17226.00, 2670452.00)
 
     def test_a_reseller_is_taxed_on_the_whole_sale(self):
-        """Same line, different billing type: the taxable value becomes the lot."""
-        self.assertIn("2,653,226.00", render(billing_type="reseller"))
+        """Same line, different billing type: the taxable value becomes the lot, so
+        the untaxed Amount left beside it is nothing."""
+        text = render(billing_type="reseller")
+        self.assertIn("2,653,226.00", text)   # now the TAXABLE value, not the Amount
 
     def test_the_sac_code_is_printed(self):
         self.assertIn(SAC_CODE, render())

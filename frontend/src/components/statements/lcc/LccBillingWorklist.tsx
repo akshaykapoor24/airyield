@@ -21,7 +21,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  AlertTriangle, ArrowLeft, Info, Loader2, Lock, RefreshCw, Search, Send, X,
+  AlertTriangle, ArrowLeft, Info, Loader2, Lock, RefreshCw, Search, Send, UserPlus, X,
 } from "lucide-react";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
@@ -194,6 +194,9 @@ export default function LccBillingWorklist({
   const [offset, setOffset] = useState(0);
   const [filter, setFilter] = useState<string>("");
   const [billState, setBillState] = useState<string>("");
+  // Sale / credit / payment. The endpoint has always accepted `kind`, but nothing
+  // sent it — so a statement full of cancellations had no way to show just those.
+  const [kind, setKind] = useState<string>("");
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
@@ -214,8 +217,8 @@ export default function LccBillingWorklist({
 
   // Both masters, loaded whole and filtered in the browser — the same thing every
   // other party picker in the app does (CustomerPartyPanel, TicketFilingCard).
-  useEffect(() => {
-    Promise.allSettled([
+  const loadParties = useCallback(() => {
+    return Promise.allSettled([
       api.get<{ id: number; first_name: string; last_name: string | null; company: string | null; corporate_id: number | null }[]>("/customers/", { params: { limit: 1000 } }),
       api.get<{ id: number; company: string | null }[]>("/corporates/", { params: { limit: 1000 } }),
     ]).then(([cu, co]) => {
@@ -246,13 +249,19 @@ export default function LccBillingWorklist({
       setParties(out);
       setEmployerOf(employers);
     });
+    // A callback rather than an inline effect body: adding a passenger to the
+    // Employee Master has to make them appear in this picker straight away, and
+    // before now nothing in this component ever re-read /customers/.
   }, []);
+
+  useEffect(() => { void loadParties(); }, [loadParties]);
 
   const rowParams = useCallback(() => ({
     ...(filter ? { status: filter } : {}),
     ...(billState ? { billing_state: billState } : {}),
+    ...(kind ? { kind } : {}),
     ...(search.trim() ? { q: search.trim() } : {}),
-  }), [filter, billState, search]);
+  }), [filter, billState, kind, search]);
 
   // A monotonic sequence, not a boolean: with the search debounced, a slow "RAV"
   // response would otherwise land after a fast "RAVI" one and paint the wrong rows
@@ -389,6 +398,66 @@ export default function LccBillingWorklist({
     await setRowParty(row, opt, mode === "direct");
   };
 
+  /** Add this row's passenger to the Employee Master under the corporate already
+   *  picked for them, and bill the row to that new employee.
+   *
+   *  The screen could match a passenger against the master but never add one, so an
+   *  unrecognised traveller meant leaving for User master → Employee Master, retyping
+   *  the name, and coming back. The server refuses a name it can already see under
+   *  that employer — including near-spellings the exact-name duplicate check misses —
+   *  so the error here is worth showing in full rather than flattening. */
+  const addToMaster = async (row: Row) => {
+    setBusy(`emp-${row.id}`);
+    try {
+      const { data } = await api.post<{ passenger: string; company: string; inherited: string[] }>(
+        `${apiBase}/rows/${row.id}/create-employee`, {},
+      );
+      toast.success(
+        `${data.passenger} added to Employee Master under ${data.company}.`
+        + (data.inherited.length ? ` Took ${data.inherited.length} settings from the corporate.` : ""),
+      );
+      await Promise.all([loadParties(), load(offset), refreshSummary()]);
+      onChanged();
+    } catch (e) { toast.error(errText(e, "Could not add this passenger to Employee Master.")); }
+    finally { setBusy(null); }
+  };
+
+  /** The same for the ticked rows. The server skips what it cannot add and says why,
+   *  rather than refusing the whole selection for one name already on file. */
+  const addSelectedToMaster = async () => {
+    setBusy("emp-bulk");
+    try {
+      const { data } = await api.post<{
+        created_count: number; skipped_count: number;
+        skipped: { passenger: string | null; reason: string }[];
+      }>(`${apiBase}/batches/${batchId}/create-employees`, { row_ids: [...selected] });
+
+      if (data.created_count) {
+        toast.success(`${data.created_count.toLocaleString()} added to Employee Master.`);
+      }
+      if (data.skipped_count) {
+        // Named, not just counted — "12 skipped" tells the user nothing they can act on.
+        const first = data.skipped[0];
+        toast(
+          `${data.skipped_count.toLocaleString()} skipped`
+          + (first ? ` — e.g. ${first.passenger ?? "a row"}: ${first.reason}` : "."),
+          { icon: "⚠️", duration: 8000 },
+        );
+      }
+      await Promise.all([loadParties(), load(offset), refreshSummary()]);
+      onChanged();
+    } catch (e) { toast.error(errText(e, "Could not add the selected passengers.")); }
+    finally { setBusy(null); }
+  };
+
+  /** Can this row's passenger be filed as an employee? Needs a corporate to file them
+   *  under, and nobody already named — a row that resolved to a person is done. */
+  const canAddToMaster = (r: Row) =>
+    !!r.passenger && !!r.bill_corporate_id && !r.bill_customer_id
+    && r.bill_kind !== "payment" && !inBilling(r);
+
+  const addableSelected = rows.filter(r => selected.has(r.id) && canAddToMaster(r)).length;
+
   const applyBulkParty = async () => {
     if (!bulkPick || !bulkKind) { toast.error("Pick a customer or corporate first."); return; }
     setBusy("bulk");
@@ -484,7 +553,7 @@ export default function LccBillingWorklist({
   const gapRows = gaps.reduce((n, g) => n + g.count, 0);
   const start = total === 0 ? 0 : offset + 1;
   const end = Math.min(offset + rows.length, total);
-  const hasFilters = !!(search || filter || billState);
+  const hasFilters = !!(search || filter || billState || kind);
   const overCap = selected.size > MAX_SELECTION;
 
   return (
@@ -503,6 +572,16 @@ export default function LccBillingWorklist({
             {busy === "resolve" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
             Re-match
           </button>
+          {/* Only when the selection actually contains rows that can be filed —
+              a disabled button the user cannot explain is worse than no button. */}
+          {addableSelected > 0 && (
+            <button onClick={addSelectedToMaster} disabled={!!busy}
+              title="Add each selected passenger to Employee Master under the corporate picked for their row"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-emerald-700 border border-emerald-200 bg-emerald-50 rounded-lg hover:bg-emerald-100 disabled:opacity-50">
+              {busy === "emp-bulk" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <UserPlus className="w-3.5 h-3.5" />}
+              Add {addableSelected.toLocaleString()} to Employee Master
+            </button>
+          )}
           {selected.size > 0 ? (
             <button onClick={() => sendToBilling([...selected])} disabled={!!busy || overCap}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-40">
@@ -604,8 +683,14 @@ export default function LccBillingWorklist({
           <option value="no_party">Needs a party</option>
           <option value="not_billable">Not billable</option>
         </select>
+        <select value={kind} onChange={(e) => setKind(e.target.value)} className={SELECT_CLS}>
+          <option value="">Any kind</option>
+          <option value="sale">Charges</option>
+          <option value="refund">Credits</option>
+          <option value="payment">Payment movements</option>
+        </select>
         {hasFilters && (
-          <button onClick={() => { setSearch(""); setFilter(""); setBillState(""); }}
+          <button onClick={() => { setSearch(""); setFilter(""); setBillState(""); setKind(""); }}
             className="inline-flex items-center gap-1 text-[11px] text-slate-400 hover:text-slate-700">
             <X className="w-3 h-3" /> Clear
           </button>
@@ -755,10 +840,23 @@ export default function LccBillingWorklist({
                       <span className="text-[11px] text-slate-400">—</span>
                     ) : !r.bill_customer_id ? (
                       // A company billed with nobody named, or nothing picked yet.
-                      // Neither has an employer question to answer.
-                      <span className="text-[11px] text-slate-400">
-                        {r.bill_corporate_id ? "Billed to the company" : "—"}
-                      </span>
+                      // Neither has an employer question to answer — but the first
+                      // is exactly where this passenger is missing from the master,
+                      // so that is where the offer to add them belongs.
+                      canAddToMaster(r) ? (
+                        <button onClick={() => addToMaster(r)} disabled={!!busy}
+                          title={`Add ${r.passenger} to Employee Master under this company`}
+                          className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 hover:text-emerald-800 disabled:opacity-50">
+                          {busy === `emp-${r.id}`
+                            ? <Loader2 className="w-3 h-3 animate-spin" />
+                            : <UserPlus className="w-3 h-3" />}
+                          Add to Employee Master
+                        </button>
+                      ) : (
+                        <span className="text-[11px] text-slate-400">
+                          {r.bill_corporate_id ? "Billed to the company" : "—"}
+                        </span>
+                      )
                     ) : employerOf.has(r.bill_customer_id) ? (
                       <select
                         className={SELECT_CLS + " w-full disabled:bg-slate-50 disabled:text-slate-400"}
