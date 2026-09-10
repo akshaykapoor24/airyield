@@ -1,15 +1,16 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
-  AlertTriangle, ArrowRight, Check, ChevronRight, Download, FileSpreadsheet,
+  AlertTriangle, ArrowRight, Check, ChevronRight, Copy, Download, FileSpreadsheet,
   Info, RefreshCw, Save, Upload, X,
 } from "lucide-react";
 import api from "@/lib/api";
-import { INHERITED_FIELDS, PARTY, isBlankInherited, type PartyKind } from "@/lib/party";
+import { INHERITED_FIELDS, PARTY, isBlankInherited, type Party, type PartyKind } from "@/lib/party";
 import {
-  IMPORT_FIELDS, applyMapping, autoMap, parseWorkbook, toPayload, validateRow,
-  type ImportField, type ParsedSheet, type ReviewRow,
+  IMPORT_FIELDS, applyMapping, autoMap, buildDuplicateContext, duplicateRowErrors,
+  parseWorkbook, toPayload, validateRow,
+  type DuplicateContext, type ImportField, type ParsedSheet, type ReviewRow,
 } from "@/lib/partyImport";
 
 type BulkResult = { total: number; success: number; failed: number; errors: string[] };
@@ -55,17 +56,61 @@ export default function PartyUploadModal({
   const [error, setError] = useState("");
   const [result, setResult] = useState<BulkResult | null>(null);
 
+  // THE MASTER AS IT STANDS, so a row that already exists is a red cell at Review
+  // rather than a line in the post-mortem at Done. Loaded once, alongside the file
+  // being picked, because it is wanted the moment the user reaches step 3.
+  //
+  // The list endpoints cap at 1000 rows, so a master larger than that is only
+  // partly indexed here. That is a weaker warning, never a wrong save: the server
+  // re-checks every row against the whole master regardless (party_dedupe.py).
+  const [dupContext, setDupContext] = useState<DuplicateContext | null>(null);
+  const [dupState, setDupState] = useState<"loading" | "ready" | "failed">("loading");
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [master, corporates] = await Promise.all([
+          api.get<Party[]>(`/${cfg.resource}/`, { params: { limit: 1000 } }),
+          // An employee's employer is resolved by name, so the check needs the same
+          // corporate list the server matches against. A corporate import needs none.
+          kind === "customer"
+            ? api.get<Party[]>("/corporates/", { params: { limit: 1000 } })
+            : Promise.resolve({ data: [] as Party[] }),
+        ]);
+        if (cancelled) return;
+        setDupContext(buildDuplicateContext(kind, master.data, corporates.data));
+        setDupState("ready");
+      } catch {
+        // Say so rather than promise a clean file that was never checked.
+        if (!cancelled) setDupState("failed");
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [kind, cfg.resource]);
+
   const requiredFields = fields.filter((f) => f.required);
   const unmappedRequired = requiredFields.filter((f) => !mapping[f.key]);
 
   // Recomputed on every keystroke in review — the grid is small and the check is
   // pure, so there is nothing to invalidate or keep in sync.
-  const rowErrors = useMemo(
+  const baseErrors = useMemo(
     () => rows.map((r) => validateRow(fields, r.values)),
     [rows, fields]
   );
+  // Layered on top rather than folded in: a duplicate depends on the OTHER rows and on
+  // the master, so it cannot be decided by validateRow, which sees one row at a time.
+  const dupErrors = useMemo(
+    () => duplicateRowErrors(kind, rows, baseErrors, dupContext),
+    [kind, rows, baseErrors, dupContext]
+  );
+  const rowErrors = useMemo(
+    () => baseErrors.map((e, i) => ({ ...e, ...dupErrors[i] })),
+    [baseErrors, dupErrors]
+  );
   const includedIdx = rows.map((_, i) => i).filter((i) => rows[i].included);
   const badIdx = includedIdx.filter((i) => Object.keys(rowErrors[i]).length > 0);
+  const dupCount = includedIdx.filter((i) => Object.keys(dupErrors[i]).length > 0).length;
   const savableCount = includedIdx.length - badIdx.length;
 
   const handleTemplateDownload = async () => {
@@ -240,6 +285,8 @@ export default function PartyUploadModal({
               onToggle={toggleRow}
               savableCount={savableCount}
               badCount={badIdx.length}
+              dupCount={dupCount}
+              dupState={dupState}
               excludedCount={rows.length - includedIdx.length}
               kind={kind}
             />
@@ -248,7 +295,9 @@ export default function PartyUploadModal({
           {step === 4 && result && (
             <div
               className={`rounded-lg border px-4 py-3 text-xs space-y-1 ${
-                result.failed > 0 ? "bg-yellow-50 border-yellow-200" : "bg-green-50 border-green-200"
+                result.success === 0 ? "bg-red-50 border-red-200"
+                : result.failed > 0 ? "bg-yellow-50 border-yellow-200"
+                : "bg-green-50 border-green-200"
               }`}
             >
               <p className="font-semibold text-sm">
@@ -259,11 +308,15 @@ export default function PartyUploadModal({
                   {result.failed} rejected by the server. Nothing else was changed.
                 </p>
               )}
-              {result.errors.slice(0, 8).map((e, i) => (
-                <p key={i} className="text-[11px] text-red-500">{e}</p>
-              ))}
-              {result.errors.length > 8 && (
-                <p className="text-[11px] text-gray-400">…and {result.errors.length - 8} more</p>
+              {/* Every one of them, scrolling — a truncated list hides exactly the rows
+                  the user has to go back and fix, and a re-import of a file whose rows
+                  all already exist is nothing BUT this list. */}
+              {result.errors.length > 0 && (
+                <div className="max-h-56 overflow-y-auto space-y-0.5 pt-1">
+                  {result.errors.map((e, i) => (
+                    <p key={i} className="text-[11px] text-red-500">{e}</p>
+                  ))}
+                </div>
               )}
             </div>
           )}
@@ -458,7 +511,8 @@ function MappingStep({
 }
 
 function ReviewStep({
-  fields, rows, rowErrors, onEdit, onToggle, savableCount, badCount, excludedCount, kind,
+  fields, rows, rowErrors, onEdit, onToggle, savableCount, badCount, dupCount, dupState,
+  excludedCount, kind,
 }: {
   fields: ImportField[];
   rows: ReviewRow[];
@@ -467,6 +521,8 @@ function ReviewStep({
   onToggle: (rowIdx: number) => void;
   savableCount: number;
   badCount: number;
+  dupCount: number;
+  dupState: "loading" | "ready" | "failed";
   excludedCount: number;
   kind: PartyKind;
 }) {
@@ -493,6 +549,24 @@ function ReviewStep({
         {excludedCount > 0 && (
           <span className="text-[11px] font-semibold text-gray-500 bg-gray-50 border border-gray-200 rounded-lg px-2.5 py-1.5">
             {excludedCount} excluded
+          </span>
+        )}
+        {/* Called out separately from the red count even though it is part of it: a
+            duplicate is not a typo, and the fix is to drop the row rather than correct
+            a cell. See lib/partyImport duplicateRowErrors for what counts as one. */}
+        {dupCount > 0 && (
+          <span className="text-[11px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5 flex items-center gap-1.5">
+            <Copy className="w-3.5 h-3.5 shrink-0" />
+            {dupCount} {dupCount === 1 ? "duplicate" : "duplicates"} — already in{" "}
+            {PARTY[kind].masterLabel}, or repeated in this file. Untick them, or change what
+            makes them the same.
+          </span>
+        )}
+        {dupState === "failed" && (
+          <span className="text-[11px] font-medium text-gray-600 bg-gray-50 border border-gray-200 rounded-lg px-2.5 py-1.5 flex items-center gap-1.5">
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+            {PARTY[kind].masterLabel} could not be read, so duplicates are not flagged here.
+            The server still refuses them on save.
           </span>
         )}
         {inheritCount > 0 && (

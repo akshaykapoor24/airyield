@@ -9,7 +9,7 @@ supported with no fixed Tax1..Tax20 columns). Slug → dedicated model via
 """
 from datetime import datetime
 
-from sqlalchemy import String, DateTime, Integer, Boolean, ForeignKey, text
+from sqlalchemy import String, DateTime, Integer, Boolean, ForeignKey, Numeric, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -59,14 +59,66 @@ class _SplitMixin:
     orig_taxes:   Mapped[list | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
 
 
+class _BillingMixin:
+    """Party resolution + the roll-up verdict + the projection back-link.
+
+    ON `Ndc` ALONE, and that is the point. `_StatementBase` is shared by eight tables; these
+    thirteen columns on all of them would be 24 foreign keys and a model layer claiming every
+    statement type is billable while `statement_spec.supports_billing` says one is. A second
+    type opts in by adding this mixin to its class and one `add_column` migration.
+
+    IF A SECOND CLASS EVER ADOPTS THIS, every column carrying a `ForeignKey` must first
+    become a `@declared_attr`: a single `mapped_column` instance cannot be shared between
+    two mappers, and SQLAlchemy fails at import time rather than at runtime. It is a
+    single-user mixin today by design, not by accident.
+
+    See services/ndc_billing_projection.py for what writes each column.
+    """
+
+    # ── who this row is billed to ────────────────────────────────────────────
+    bill_kind:          Mapped[str | None] = mapped_column(String(12), nullable=True)   # sale|refund|payment
+    bill_status:        Mapped[str]        = mapped_column(String(16), nullable=False, default="unresolved", server_default="unresolved")
+    bill_customer_type: Mapped[str | None] = mapped_column(String(12), nullable=True)   # agency|corporate|direct
+    bill_customer_id:   Mapped[int | None] = mapped_column(Integer, ForeignKey("customers.id", ondelete="SET NULL"), nullable=True)
+    bill_corporate_id:  Mapped[int | None] = mapped_column(Integer, ForeignKey("corporates.id", ondelete="SET NULL"), nullable=True)
+    bill_match_reason:  Mapped[str | None] = mapped_column(String(300), nullable=True)
+
+    # ── the roll-up: which ticket this row's money belongs to ────────────────
+    # An NDC export writes ancillaries as their own document-less lines. `bill_group_key`
+    # is "D:<document no>" for a real ticket or "O:<row id>" for a line that could not be
+    # attached to one; exactly one row per group carries `bill_is_anchor`.
+    bill_group_key:     Mapped[str | None] = mapped_column(String(64), nullable=True)
+    bill_is_anchor:     Mapped[bool]       = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    bill_latch_status:  Mapped[str | None] = mapped_column(String(12), nullable=True)   # anchor|latched|orphan|ambiguous|unidentified
+    # This row's own signed settled figure. NO LCC COUNTERPART, and it earns its place: NDC
+    # amounts are verbatim STRINGS in `data`, so without it the worklist's amount column,
+    # the summary totals and the projection would each re-parse `data->>'payment_amount'`
+    # through a CASE guard and could disagree. NULL means the cell would not parse — which
+    # is visible on screen, rather than silently 0.
+    bill_amount:        Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+
+    # ── the projection ───────────────────────────────────────────────────────
+    # THE idempotency key. Every row in a group carries the SAME ticket id, read off the
+    # anchor — re-sending syncs rather than duplicating. Not the ticket number: re-uploading
+    # one file legitimately repeats it, and a natural key would merge two uploads.
+    projected_ticket_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("uploaded_tickets.id", ondelete="SET NULL"), nullable=True)
+
+    resolved_at:    Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    resolved_by_id: Mapped[int | None]      = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+
+
 class TgqHmpr(_SplitMixin, _StatementBase, Base):
     """TGQ HMPR statement rows — one row per flown sector (see _SplitMixin)."""
     __tablename__ = "tgq_hmpr"
 
 
-class Ndc(_SplitMixin, _StatementBase, Base):
-    """NDC statement rows — one row per ticket line (splitting available, not yet enabled
-    in statement_spec.STATEMENT_SPECS["ndc"])."""
+class Ndc(_BillingMixin, _SplitMixin, _StatementBase, Base):
+    """NDC statement rows — one row per transaction line (splitting available, not yet
+    enabled in statement_spec.STATEMENT_SPECS["ndc"]).
+
+    The only spec-driven type that feeds billing — hence `_BillingMixin`. Its rows are
+    resolved to a Customer/Corporate, rolled up per document number, and projected into
+    `uploaded_tickets`; see services/ndc_billing_projection.py."""
     __tablename__ = "ndc"
 
 

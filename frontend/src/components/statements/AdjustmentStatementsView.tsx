@@ -12,6 +12,7 @@ import MultiSelectDropdown from "@/components/ui/MultiSelectDropdown";
 import { type TenantAirlineOpt, sameAirlineOnly, toOptions } from "@/lib/tenantAirlineOptions";
 import LccPartyPicker, { type PartyOption } from "@/components/statements/lcc/LccPartyPicker";
 import StatementUploadWizard from "@/components/statements/StatementUploadWizard";
+import NdcBillingWorklist from "@/components/statements/ndc/NdcBillingWorklist";
 
 /** One row of GET /suppliers/ — only the fields the picker renders.
  *  `code` is the unique one: 141 of the master's 2,340 names repeat across branches. */
@@ -50,6 +51,24 @@ type Batch = {
   supplier_name?: string | null;
   supplier_branch?: string | null;
   supplier_code?: string | null;
+  // Where this upload stands on its way into billing, for the types with a billing flow
+  // (supportsBilling — NDC only). Null for every other type, which is what makes the
+  // column absent rather than empty. ONE nested field rather than seven flat ones, so the
+  // eight types sharing this component do not carry keys that mean nothing to them.
+  billing?: BatchBilling | null;
+};
+type BatchBilling = {
+  resolution_status: "none" | "resolved" | "projected";
+  billable_rows: number;
+  resolved_rows: number;
+  unresolved_rows: number;
+  /** NDC rows carrying a projected ticket — several can share one. */
+  projected_rows: number;
+  /** DISTINCT tickets in billing. Differs from projected_rows whenever an ancillary
+   *  latched onto a flight line, which is the normal case. */
+  projected_tickets: number;
+  /** Ancillary rows with no ticket to attach to — real money awaiting a decision. */
+  unlatched_rows: number;
 };
 // `kind: "money"` is set by the backend for amount columns so they right-align and format.
 type Column = { header: string; field: string; kind?: string };
@@ -355,7 +374,8 @@ function SummarySlab({ summary }: { summary: Summary }) {
 }
 
 export default function AdjustmentStatementsView({
-  apiBase, slug, title, requiresAirlineId, requiresSupplier, supportsMapping, doneHint,
+  apiBase, slug, title, requiresAirlineId, requiresSupplier, supportsMapping,
+  supportsBilling, doneHint,
 }: {
   apiBase: string; slug: string; title: string; blurb?: string;
   /** LCC types only — see lib/statements.ts. Drives the mandatory Airline picker in
@@ -368,6 +388,9 @@ export default function AdjustmentStatementsView({
    *  modal. Mirrors `supports_mapping` in the backend spec, which is what actually decides
    *  whether /extract and /confirm answer for this type. */
   supportsMapping?: boolean;
+  /** NDC only — see lib/statements.ts. Drives the BILLING column below and the worklist
+   *  it opens. Every other type renders no column and makes no billing request. */
+  supportsBilling?: boolean;
   /** One line on the wizard's success screen saying where the imported rows went. */
   doneHint?: string;
 }) {
@@ -377,6 +400,10 @@ export default function AdjustmentStatementsView({
   const [deleteTarget, setDeleteTarget] = useState<Batch | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [selected, setSelected] = useState<Batch | null>(null);
+  // The billing worklist is a third view, alongside the uploads list and the records
+  // drill-in. Local state rather than a route, matching `selected` — and matching what
+  // LccDetailedView does for the same screen.
+  const [billingTarget, setBillingTarget] = useState<Batch | null>(null);
 
   // drill-in records
   const [columns, setColumns] = useState<Column[]>([]);
@@ -400,9 +427,10 @@ export default function AdjustmentStatementsView({
 
   const hasFilters = Object.values(fvals).some(Boolean);
   const hasSelects = filters.some((f) => f.type === "select");
-  // File · [Airline] · [Agency] · Uploaded · Entries · Uploaded by · Actions. Computed
-  // rather than a literal, so adding a column can't leave the empty-state row short.
-  const batchCols = 5 + (requiresAirlineId ? 1 : 0) + (requiresSupplier ? 1 : 0);
+  // File · [Airline] · [Agency] · Uploaded · Entries · [Billing] · Uploaded by · Actions.
+  // Computed rather than a literal, so adding a column can't leave the empty-state row short.
+  const batchCols = 5 + (requiresAirlineId ? 1 : 0) + (requiresSupplier ? 1 : 0)
+                      + (supportsBilling ? 1 : 0);
 
   const fetchBatches = useCallback(async () => {
     setLoading(true);
@@ -514,6 +542,26 @@ export default function AdjustmentStatementsView({
       URL.revokeObjectURL(url);
     } catch { toast.error("Failed to download template."); }
   };
+
+  // ── Billing worklist ──────────────────────────────────────────────────────
+  // A third view, alongside the uploads list and the drill-in below. Only ever reachable
+  // for a type whose spec declares a billing flow, so the other seven spec-repo types
+  // never render it and never call its endpoints.
+  if (billingTarget && supportsBilling) {
+    return (
+      <NdcBillingWorklist
+        apiBase={apiBase}
+        batchId={billingTarget.batch_id}
+        fileName={billingTarget.source_file}
+        // "none" is the "Set up billing" case — the only one where opening the worklist is
+        // allowed to run the matcher, since re-matching an upload already in billing could
+        // silently re-point a row billing is using.
+        resolutionStatus={billingTarget.billing?.resolution_status ?? "none"}
+        onBack={() => { setBillingTarget(null); fetchBatches(); }}
+        onChanged={fetchBatches}
+      />
+    );
+  }
 
   // ── Drill-in: one upload's rows ───────────────────────────────────────────
   if (selected) {
@@ -660,6 +708,7 @@ export default function AdjustmentStatementsView({
               {requiresSupplier && <th className="text-left px-3 py-2.5 font-semibold">Agency</th>}
               <th className="text-left px-3 py-2.5 font-semibold">Uploaded</th>
               <th className="text-right px-3 py-2.5 font-semibold">Entries</th>
+              {supportsBilling && <th className="text-left px-3 py-2.5 font-semibold">Billing</th>}
               <th className="text-left px-3 py-2.5 font-semibold">Uploaded by</th>
               <th className="text-right px-3 py-2.5 font-semibold">Actions</th>
             </tr>
@@ -723,6 +772,37 @@ export default function AdjustmentStatementsView({
                 )}
                 <td className="px-3 py-2 text-xs text-slate-500 whitespace-nowrap">{fmtDate(b.uploaded_at)}</td>
                 <td className="px-3 py-2 text-right tabular-nums text-slate-700">{b.row_count.toLocaleString()}</td>
+                {supportsBilling && (
+                  <td className="px-3 py-2 whitespace-nowrap">
+                    {/* No "still importing" branch, unlike LccDetailedView's version of
+                        this cell: this router ingests synchronously, so a batch exists
+                        only once its rows are in. */}
+                    {!b.billing || b.billing.resolution_status === "none" ? (
+                      <button onClick={() => setBillingTarget(b)}
+                        className="text-[11px] font-medium text-blue-600 hover:underline">
+                        Set up billing
+                      </button>
+                    ) : (
+                      <button onClick={() => setBillingTarget(b)} className="text-left group">
+                        <span className="text-[11px] tabular-nums text-slate-700 group-hover:underline">
+                          {b.billing.resolved_rows.toLocaleString()} / {b.billing.billable_rows.toLocaleString()} billable
+                        </span>
+                        <span className="block text-[10px]">
+                          {b.billing.projected_tickets > 0
+                            ? <span className="text-emerald-600">
+                                {b.billing.projected_tickets.toLocaleString()} ticket{b.billing.projected_tickets === 1 ? "" : "s"} in billing
+                              </span>
+                            : <span className="text-amber-600">not sent to billing yet</span>}
+                          {b.billing.unlatched_rows > 0 && (
+                            <span className="text-amber-600" title="Ancillary rows with no ticket to attach to">
+                              {" · "}{b.billing.unlatched_rows} unattached
+                            </span>
+                          )}
+                        </span>
+                      </button>
+                    )}
+                  </td>
+                )}
                 <td className="px-3 py-2 text-xs text-slate-500">{b.created_by_name || "—"}</td>
                 <td className="px-3 py-2 text-right whitespace-nowrap">
                   <button onClick={() => openBatch(b)} className="text-xs font-medium text-blue-600 hover:underline mr-3">Open</button>

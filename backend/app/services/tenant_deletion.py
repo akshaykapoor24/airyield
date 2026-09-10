@@ -115,7 +115,8 @@ DELETION_GROUPS: tuple[DeletionGroup, ...] = (
         ("tgq_hmpr", "ndc", "lcc_di", "lcc_divided_pnr", "lcc_flown_report",
          "lcc_cta_bta", "third_party_gds", "third_party_lcc",
          "lcc_detailed", "lcc_detailed_batch", "lcc_batch_airline_ids",
-         "statement_batch_airline_ids", "statement_batch_suppliers"),
+         "statement_batch_airline_ids", "statement_batch_suppliers",
+         "statement_batch_billing"),
     ),
     DeletionGroup(
         "internal_statements", "Internal statements", "The workspace's own ticket statements.",

@@ -14,7 +14,7 @@
 // works; it is what this replaces in the UI, and it keeps serving the templates.
 
 import * as XLSX from "xlsx";
-import { CORPORATE_TYPES, GSTIN_RE, PAN_RE, type PartyKind } from "@/lib/party";
+import { CORPORATE_TYPES, GSTIN_RE, PAN_RE, type Party, type PartyKind } from "@/lib/party";
 
 // ── Field spec ───────────────────────────────────────────────────────────────
 
@@ -315,6 +315,181 @@ export function validateRow(fields: ImportField[], values: Record<string, string
     errors.gst_no = "A registered party needs a valid 15-character GSTIN (e.g. 27ABCDE1234F1Z5).";
   }
   return errors;
+}
+
+// ── Duplicates ───────────────────────────────────────────────────────────────
+//
+// THE SAME RULE AS backend/app/services/party_dedupe.py, run early so a duplicate is a
+// red cell in the review grid rather than a line in the post-mortem. The server still
+// applies it — this cannot be trusted and is not the enforcement — but a user who is
+// told at Review can fix the file, and one told at Done cannot.
+//
+// The wording differs from the server's on purpose. There, a duplicate is a row that was
+// REJECTED and the sentence has to say what happened to it; here nothing has been saved
+// yet and the sentence has to say what to change.
+//
+// An employee is their NAME under an EMPLOYER, and nothing else: phone, email, GSTIN and
+// PAN are all inherited from the corporate (lib/party.ts INHERITED_FIELDS), so every
+// employee of one company shares them by design. A corporate is its NAME or its GSTIN,
+// either alone.
+
+/** `"  Acme   Pvt Ltd "` → `"acme pvt ltd"`. Mirrors party_dedupe.name_key. */
+export function nameKey(value: string | null | undefined): string {
+  return String(value ?? "").trim().toLowerCase().split(/\s+/).join(" ");
+}
+
+/** A GSTIN as it is stored — upper, unpadded. Mirrors party_dedupe.code_key. */
+export function codeKey(value: string | null | undefined): string {
+  return String(value ?? "").trim().toUpperCase();
+}
+
+/** Not a separator anyone can type, so two key parts can never run together. */
+const KEY_SEP = " ";
+
+/**
+ * WHO THEY WORK FOR, as one comparable string — party_dedupe.employer_key.
+ *
+ * A linked employee is keyed by the corporate's id, an unlinked one by the free text
+ * they named, and `name:` (individual / direct) is a real answer rather than a blank.
+ */
+function employerKey(corporateId: number | null | undefined, company: string | null | undefined): string {
+  return corporateId != null ? `corp:${corporateId}` : `name:${nameKey(company)}`;
+}
+
+function customerKey(
+  firstName: string | null | undefined,
+  lastName: string | null | undefined,
+  corporateId: number | null | undefined,
+  company: string | null | undefined,
+): string {
+  return ["person", nameKey(`${firstName ?? ""} ${lastName ?? ""}`), employerKey(corporateId, company)]
+    .join(KEY_SEP);
+}
+
+type CorporateFacet = { facet: "name" | "gstin"; field: string; key: string; value: string };
+
+/** Every identity a corporate occupies. A blank name or GSTIN occupies none. */
+function corporateFacets(company: string | null | undefined, gstNo: string | null | undefined): CorporateFacet[] {
+  const out: CorporateFacet[] = [];
+  const name = nameKey(company);
+  if (name) out.push({ facet: "name", field: "company", key: `name${KEY_SEP}${name}`, value: name });
+  const gst = codeKey(gstNo);
+  if (gst) out.push({ facet: "gstin", field: "gst_no", key: `gstin${KEY_SEP}${gst}`, value: gst });
+  return out;
+}
+
+/** How a message names the employer. Blank is a state, so it gets named too. */
+function employerPhrase(company: string): string {
+  const label = company.trim();
+  return label ? `under ${label}` : "as an individual / direct customer";
+}
+
+export type DuplicateContext = {
+  /** Identity key → how to name whoever already holds it. */
+  existing: Map<string, string>;
+  /**
+   * Customers only: normalised corporate name → its id, so an imported row is keyed by
+   * the corporate the server will LINK it to rather than by the text it was typed as.
+   * Lowest id wins on a tie, matching api/v1/customers.py::_corporate_name_map.
+   */
+  corporateIds: Map<string, number>;
+};
+
+/**
+ * Index the master as it stands, for the review grid to check rows against.
+ *
+ * `corporates` is only read for `kind === "customer"` — it is what resolves an imported
+ * row's COMPANY column to an employer id. For a corporate import, `master` is itself the
+ * corporate list and the second argument is ignored.
+ */
+export function buildDuplicateContext(
+  kind: PartyKind,
+  master: Party[],
+  corporates: Party[],
+): DuplicateContext {
+  const corporateIds = new Map<string, number>();
+  for (const c of [...corporates].sort((a, b) => a.id - b.id)) {
+    const key = nameKey(c.company);
+    if (key && !corporateIds.has(key)) corporateIds.set(key, c.id);
+  }
+
+  const existing = new Map<string, string>();
+  for (const p of [...master].sort((a, b) => a.id - b.id)) {
+    if (kind === "customer") {
+      const key = customerKey(p.first_name, p.last_name, p.corporate_id, p.company);
+      if (!existing.has(key)) existing.set(key, `${p.first_name ?? ""} ${p.last_name ?? ""}`.trim());
+    } else {
+      const label = (p.company ?? "").trim() || "an unnamed corporate";
+      for (const { key } of corporateFacets(p.company, p.gst_no)) {
+        if (!existing.has(key)) existing.set(key, label);
+      }
+    }
+  }
+  return { existing, corporateIds };
+}
+
+/**
+ * Field key → why that cell duplicates something, per row, parallel to `rows`.
+ *
+ * Merged over `baseErrors` by the caller, so a duplicate reads like any other bad cell.
+ * Only rows that will actually be SENT can take an identity — the server never sees an
+ * unticked or already-invalid row, so neither does this, and the two stay in step on
+ * which of two identical rows is the one that survives (the first).
+ *
+ * `ctx` is null while the master is still loading, or when it could not be read; the
+ * check is then skipped entirely rather than reporting a clean file it never verified.
+ */
+export function duplicateRowErrors(
+  kind: PartyKind,
+  rows: ReviewRow[],
+  baseErrors: Record<string, string>[],
+  ctx: DuplicateContext | null,
+): Record<string, string>[] {
+  const out: Record<string, string>[] = rows.map(() => ({}));
+  if (!ctx) return out;
+
+  const claimed = new Map<string, number>();     // key → the sheet row that took it first
+
+  rows.forEach((row, i) => {
+    if (!row.included || Object.keys(baseErrors[i]).length > 0) return;
+
+    if (kind === "customer") {
+      const company = (row.values.company ?? "").trim();
+      const corporateId = ctx.corporateIds.get(nameKey(company)) ?? null;
+      const key = customerKey(row.values.first_name, row.values.last_name, corporateId, company);
+      const heldBy = claimed.get(key);
+      if (heldBy != null) {
+        out[i].first_name = `Same name and employer as row ${heldBy} of this file.`;
+      } else if (ctx.existing.has(key)) {
+        out[i].first_name = `Already in Employee Master ${employerPhrase(company)}.`;
+      } else {
+        claimed.set(key, row.sheetRow);
+      }
+      return;
+    }
+
+    const facets = corporateFacets(row.values.company, row.values.gst_no);
+    for (const { facet, field, key } of facets) {
+      const heldBy = claimed.get(key);
+      if (heldBy != null) {
+        out[i][field] = facet === "name"
+          ? `Same corporate name as row ${heldBy} of this file.`
+          : `Same GST No as row ${heldBy} of this file.`;
+        return;
+      }
+      if (ctx.existing.has(key)) {
+        out[i][field] = facet === "name"
+          ? "Already in Corporate Master."
+          : `This GST No is already in Corporate Master, on ${ctx.existing.get(key)}.`;
+        return;
+      }
+    }
+    // Claimed only once the whole row is clear, so a row rejected on its GSTIN does not
+    // leave its NAME taken and blame the wrong line for the next one.
+    for (const { key } of facets) if (!claimed.has(key)) claimed.set(key, row.sheetRow);
+  });
+
+  return out;
 }
 
 /** The row as the API wants it: trimmed, typed, and blanks as null. */

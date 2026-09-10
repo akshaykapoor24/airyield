@@ -32,9 +32,12 @@ from app.dependencies import get_current_user
 from app.models.commission_calculation import CommissionCalculation
 from app.models.commission_run import CommissionRun
 from app.models.statement_batch_supplier import StatementBatchSupplier
+from app.models.statement_batch_billing import StatementBatchBilling
 from app.models.statement_batch_airline_id import StatementBatchAirlineId
 from app.models.statement_row import STATEMENT_MODELS
 from app.models.tenant_airline import TenantAirline
+from app.models.ticket_statement import TicketStatement
+from app.models.uploaded_ticket import UploadedTicket
 from app.models.user import User
 from app.services import flat_statement as _flat
 from app.services import sector_split, spec_mapping, spreadsheet, statement_spec as spec
@@ -588,6 +591,10 @@ async def standard_columns(slug: str, current_user: User = Depends(get_current_u
         "required": spec.required_groups(slug),
         "advisory": spec.advisory_groups(slug),
         "total": len(spec.columns(slug)),
+        # Null for every type but NDC. Present so the review step can grey out the rows the
+        # import is going to skip and say why, instead of the user meeting the shortfall as
+        # an unexplained entry count. The rule is enforced at /confirm either way.
+        "row_filter": spec.row_filter(slug),
     }
 
 
@@ -716,18 +723,35 @@ async def confirm_statement(
     normalized = spec.parser(slug) is not None
     fold = spec.fold_taxes(slug)
     normmap = {} if normalized else {c: spec.norm(c) for c in columns}
+    drop, rowfilter = spec.drop_row(slug), spec.row_filter(slug)
+    derive = spec.derive_row(slug)
 
-    objs, airline_rows, edited_rows, source_rows = [], 0, 0, 0
+    objs, airline_rows, edited_rows, source_rows, excluded_rows = [], 0, 0, 0, 0
     for i, (_, row) in enumerate(df.iterrows()):
         overrides = row_edits.get(i)
         b = builder.build_row_mapped(row, columns, colmap, overrides)
         data = b["data"]
+        # Derived fields read the WHOLE line, not the mapping — same reason as the tax fold
+        # below: NDC's `Other Taxes` is eleven of the airline's columns added up, and no
+        # one-field-to-one-column mapping can express that. Spread FIRST so a column the
+        # user did map, or corrected on the review step, wins over the computed value.
+        if derive is not None:
+            extra = derive({n: _clean(row.get(c)) for c, n in normmap.items()})
+            if extra:
+                data = {**extra, **data}
         # Taxes are folded from the WHOLE row, not from the mapping: a Tax_TypeN/TaxN pair
         # is not a mappable field, and folding here keeps the mapped path and the verbatim
         # `/upload` path producing the same `taxes` array.
         taxes = b["taxes"] if normalized else (_fold_taxes(row, normmap) if fold else [])
         if not data and not taxes:
             continue    # every mapped column empty on this line
+        # A row this type does not keep — NDC's unpaid holds and free seats. Checked AFTER
+        # the edits are applied, so correcting a mis-read TXN Type in the review step
+        # decides the row's fate, and counted separately from `source_rows` so the response
+        # can say the file had 106 lines and 78 of them were transactions.
+        if drop is not None and drop(data):
+            excluded_rows += 1
+            continue
         source_rows += 1
         if overrides:
             edited_rows += 1
@@ -744,6 +768,15 @@ async def confirm_statement(
             objs.extend(_build_rows(model, slug, prov, data, taxes, source_rows))
 
     if not objs:
+        # Two different failures with the same symptom, and telling them apart is the whole
+        # point: a bad mapping is the user's to fix, a file of nothing but unpaid holds is
+        # not — re-mapping it would not produce a single row.
+        if excluded_rows and rowfilter:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Every row in this file is {rowfilter['label']} "
+                       f"({', '.join(rowfilter['exclude'])}), so there is nothing to import. "
+                       f"{rowfilter['note']}")
         raise HTTPException(
             status_code=400,
             detail="Every row came out empty under this mapping. Check that the mapped columns "
@@ -761,6 +794,16 @@ async def confirm_statement(
         "matched_columns": len(colmap),
         "source_rows": source_rows,
         "edited_rows": edited_rows,
+        # Rows the type discards on content (NDC's unpaid holds and free seats). Always
+        # present so the wizard can account for the shortfall between the file's line count
+        # and the entry count on the uploads list; 0 for every other type.
+        "excluded_rows": excluded_rows,
+        # Null unless the rule could not run — TXN Type was left unmapped, so nothing was
+        # classified and nothing was skipped. The wizard says so rather than letting the
+        # user believe the filter applied.
+        "filter_column_mapped": (
+            bool(colmap.get(rowfilter["field"])) if rowfilter else None
+        ),
         "leg_rows": sum(1 for o in objs if not getattr(o, "is_total", False)),
         "airline_resolved_rows": airline_rows if stamp_airline is not None else None,
         **_supplier_fields(supplier),
@@ -806,6 +849,7 @@ async def upload_statement(
     objs = []
     source_rows = 0
     airline_rows = 0
+    excluded_rows = 0   # rows the type discards on content; only the verbatim path sets it
     stamp_airline = await _airline_stamper(db, slug)
     if parser_name:
         # Multi-format normalizer (LCC / DI): alias-map → canonical fields (+ fold taxes/segments/ssr for LCC).
@@ -836,15 +880,33 @@ async def upload_statement(
             batch_id=batch_id, source_file=file.filename, file_url=file_url,
             uploaded_at=uploaded_at,
         )
+        drop, derive = spec.drop_row(slug), spec.derive_row(slug)
         for seq, (_, row) in enumerate(df.iterrows(), start=1):
             data = {field: _clean(row[col]) for col, field in colmap.items()}
+            if derive is not None:
+                # Same precedence as `/confirm`: derived first, the file's own column wins.
+                extra = derive({n: _clean(row[c]) for c, n in normmap.items()})
+                if extra:
+                    data = {**extra, **data}
             taxes = _fold_taxes(row, normmap) if fold else []
             if not any(v is not None for v in data.values()) and not taxes:
                 continue  # blank row
+            # Same rule as `/confirm`, so a direct upload and a mapped one agree on what
+            # belongs in the table. NDC only reaches this path if something bypasses the
+            # wizard, but a row that is not a transaction is not a transaction either way.
+            if drop is not None and drop(data):
+                excluded_rows += 1
+                continue
             source_rows += 1
             objs.extend(_build_rows(model, slug, prov, data, taxes, seq))
 
     if not objs:
+        rowfilter = spec.row_filter(slug)
+        if excluded_rows and rowfilter:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Every row in this file is {rowfilter['label']} "
+                       f"({', '.join(rowfilter['exclude'])}), so there is nothing to import.")
         raise HTTPException(status_code=400, detail="No data rows were found in the file.")
 
     db.add_all(objs)
@@ -863,6 +925,7 @@ async def upload_statement(
         "inserted": len(objs),
         "matched_columns": matched,
         "source_rows": source_rows,
+        "excluded_rows": excluded_rows,
         "leg_rows": sum(1 for o in objs if not getattr(o, "is_total", False)),
         "airline_name": airlines[0].airline_name if airlines else None,
         "airline_code": airlines[0].airline_code if airlines else None,
@@ -1253,6 +1316,40 @@ async def list_batches(slug: str, db: AsyncSession = Depends(get_db), current_us
         )).scalars().all():
             suppliers[link.batch_id] = link
 
+    # Where each upload stands on its way into billing, for the types that have a billing
+    # flow — NDC only today. ONE query for the whole list, exactly like the two blocks
+    # above, and absent for every other type: a batch with no header row has never had its
+    # Billing screen opened, and the frontend reads that as "Set up billing".
+    billing: dict[str, StatementBatchBilling] = {}
+    if spec.supports_billing(slug) and rows:
+        for link in (await db.execute(
+            select(StatementBatchBilling).where(
+                StatementBatchBilling.slug == slug,
+                StatementBatchBilling.tenant_id == current_user.tenant_id,
+                StatementBatchBilling.created_by_id == current_user.id,
+                StatementBatchBilling.batch_id.in_([r.batch_id for r in rows]),
+            )
+        )).scalars().all():
+            billing[link.batch_id] = link
+
+    def _billing_fields(link: StatementBatchBilling | None) -> dict | None:
+        """A NESTED object, not seven flat keys: eight statement types share this response
+        and this frontend view, so the shared `Batch` type grows one optional field rather
+        than seven that are meaningless for the other seven."""
+        if link is None:
+            return {"resolution_status": "none", "billable_rows": 0, "resolved_rows": 0,
+                    "unresolved_rows": 0, "projected_rows": 0, "projected_tickets": 0,
+                    "unlatched_rows": 0}
+        return {
+            "resolution_status": link.resolution_status,
+            "billable_rows": link.billable_rows,
+            "resolved_rows": link.resolved_rows,
+            "unresolved_rows": link.unresolved_rows,
+            "projected_rows": link.projected_rows,
+            "projected_tickets": link.projected_tickets,
+            "unlatched_rows": link.unlatched_rows,
+        }
+
     return [
         {
             "batch_id": r.batch_id,
@@ -1271,6 +1368,8 @@ async def list_batches(slug: str, db: AsyncSession = Depends(get_db), current_us
             "supplier_name": suppliers[r.batch_id].supplier_name if r.batch_id in suppliers else None,
             "supplier_branch": suppliers[r.batch_id].supplier_branch if r.batch_id in suppliers else None,
             "supplier_code": suppliers[r.batch_id].supplier_code if r.batch_id in suppliers else None,
+            # None for the types with no billing flow, so the shared view renders no column.
+            "billing": _billing_fields(billing.get(r.batch_id)) if spec.supports_billing(slug) else None,
         }
         for r in rows
     ]
@@ -1330,8 +1429,33 @@ async def delete_record(slug: str, record_id: int, db: AsyncSession = Depends(ge
 
 @router.delete("/{slug}/batches/{batch_id}")
 async def delete_batch(slug: str, batch_id: str, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
-    """Delete an entire upload (all rows sharing the batch_id)."""
+    """Delete an entire upload (all rows sharing the batch_id).
+
+    REFUSED once any of the upload's rows is on an invoice. Deleting them would leave the
+    invoice quoting a ticket whose provenance no longer exists, which is not a state a
+    billed figure may be put into — the same guard as lcc_detailed.py::delete_batch.
+    """
     slug, model = _resolve(slug)
+    tickets: list[int] = []
+    if spec.supports_billing(slug):
+        tickets = list((await db.execute(
+            select(model.projected_ticket_id).where(
+                model.batch_id == batch_id, *_scope(model, current_user),
+                model.projected_ticket_id.isnot(None),
+            ).distinct()
+        )).scalars().all())
+        if tickets:
+            invoiced = await db.scalar(
+                select(func.count()).select_from(UploadedTicket).where(
+                    UploadedTicket.id.in_(tickets), UploadedTicket.billing_id.isnot(None))
+            ) or 0
+            if invoiced:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(f"{invoiced} of this upload's tickets are already on an invoice. "
+                            f"Delete those billings first."),
+                )
+
     res = await db.execute(delete(model).where(model.batch_id == batch_id, *_scope(model, current_user)))
     # Explicitly: batch_id carries no FK, because these types keep no batch header row
     # for one to point at. Left behind, these links would keep an airline id looking
@@ -1353,6 +1477,26 @@ async def delete_batch(slug: str, batch_id: str, db: AsyncSession = Depends(get_
             StatementBatchSupplier.tenant_id == current_user.tenant_id,
         )
     )
+    # And the billing side: the projected tickets, their statement header, and the billing
+    # header itself. The rows are already gone above, so nothing is left pointing at these
+    # — and an UploadedTicket left behind would show in Sold Tickets as a billable ticket
+    # with no statement, which is worse than absent.
+    if spec.supports_billing(slug):
+        link = await db.scalar(
+            select(StatementBatchBilling).where(
+                StatementBatchBilling.slug == slug,
+                StatementBatchBilling.batch_id == batch_id,
+                StatementBatchBilling.tenant_id == current_user.tenant_id,
+                StatementBatchBilling.created_by_id == current_user.id,
+            )
+        )
+        if tickets:
+            await db.execute(delete(UploadedTicket).where(UploadedTicket.id.in_(tickets)))
+        if link is not None:
+            if link.billing_batch_id:
+                await db.execute(delete(TicketStatement).where(
+                    TicketStatement.batch_id == link.billing_batch_id))
+            await db.delete(link)
     await db.commit()
     if not res.rowcount:
         raise HTTPException(status_code=404, detail="Upload not found.")

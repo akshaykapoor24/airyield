@@ -39,6 +39,16 @@ export type StatementType = {
    *  names. Mirrors `supports_mapping` in services/statement_spec.py, which is what
    *  actually decides whether /extract and /confirm answer for the type. */
   supportsMapping?: boolean;
+  /** This type has a Billing flow: its rows are resolved to a Customer/Corporate, rolled
+   *  up per ticket, and projected into `uploaded_tickets` — the one table the billing
+   *  screens read. Turns on the uploads list's **Billing** column and the worklist behind
+   *  it. Mirrors `supports_billing` in services/statement_spec.py, which is what actually
+   *  decides whether the /statements/ndc/**\/billing-* endpoints answer.
+   *
+   *  Opt-in per type, like the two flags above, because eight statement types share this
+   *  one view — and only NDC has the columns (`_BillingMixin` is on `Ndc` alone) or the
+   *  semantics for it. A commission ledger is not an invoice. */
+  supportsBilling?: boolean;
   /** One line on the wizard's success screen telling the user where the rows went. */
   doneHint?: string;
 };
@@ -79,9 +89,9 @@ export const STATEMENT_NAV: StatementCategory[] = [
       // front of the uploader rather than guessed at.
       {
         slug: "ndc", label: "NDC", kind: "spec-repo", status: "ready",
-        apiBase: "/statements/ndc", supportsMapping: true,
+        apiBase: "/statements/ndc", supportsMapping: true, supportsBilling: true,
         blurb: "NDC statements — the airline's own sales export, one row per transaction.",
-        doneHint: "Find them under this upload, or price them in Commission income.",
+        doneHint: "Open Billing on the upload to bill them, or price them in Commission income.",
       },
     ],
   },

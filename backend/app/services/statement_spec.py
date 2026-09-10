@@ -180,6 +180,18 @@ STATEMENT_SPECS: dict[str, dict] = {
         "filters": _ndc.FILTERS,
         "summary": _ndc.SUMMARY,
         "money": _ndc.MONEY_FIELDS,
+        # The only type that discards rows on content. Unpaid holds and free seats are not
+        # transactions, so they never reach the table — see ndc_spec.EXCLUDED_TXN_TYPES.
+        # Opt-in per type, like `requires_airline_id`: no other type on this router drops
+        # anything but a blank line.
+        "drop_row": _ndc.is_excluded,
+        "row_filter": _ndc.ROW_FILTER,
+        # The only spec-driven type whose rows are resolved to a party and projected into
+        # `uploaded_tickets` — see api/v1/ndc_billing.py.
+        "supports_billing": True,
+        # Fields computed from the raw line rather than mapped from one column — NDC's
+        # `Other Taxes`, which is eleven of the airline's tax columns added together.
+        "derive_row": _ndc.derive,
     },
     # LCC Detailed Statement now has its OWN dedicated batch+rows schema, wizard router
     # (api/v1/lcc_detailed.py) and spec (services/lcc_detailed_spec.py) — it is no longer
@@ -379,6 +391,57 @@ def advisory_groups(slug: str) -> list[dict]:
     """Field groups the confirm step ACCEPTS but warns about. See `required_groups`."""
     s = spec_for(slug)
     return list((s or {}).get("advisory_groups") or _flat.ADVISORY_GROUPS)
+
+
+def drop_row(slug: str):
+    """`(data) -> bool` deciding whether a built row is discarded instead of written.
+
+    None for every type but NDC, whose export is a transaction ledger carrying unpaid holds
+    and free seats alongside the sales (see ndc_spec.EXCLUDED_TXN_TYPES). Returning None
+    rather than a "keep everything" lambda is what lets the ingest loops skip the call —
+    and what makes it obvious in the registry which type discards rows.
+
+    It reads the MAPPED row, not the spreadsheet line, so it sees the same values that are
+    about to be stored and works identically on the mapped and verbatim ingest paths.
+    """
+    s = spec_for(slug)
+    return (s or {}).get("drop_row")
+
+
+def supports_billing(slug: str) -> bool:
+    """Does this type resolve its rows to a party and project them into uploaded_tickets?
+
+    True for NDC only. Opt-in per type exactly like `requires_airline_id` and
+    `requires_supplier`: nine slugs share this router and one shared frontend view, and the
+    flag is what stops a Billing column and a set of billing endpoints leaking onto the
+    eight that have neither the columns (`_BillingMixin` is on `Ndc` alone) nor the
+    semantics for them. A commission ledger is not an invoice.
+    """
+    s = spec_for(slug)
+    return bool(s and s.get("supports_billing"))
+
+
+def derive_row(slug: str):
+    """`({normalised source header: value}) -> {field: value}` for fields no single column holds.
+
+    None for every type but NDC. The mapping screen maps one field to one column, so a
+    field that is eleven columns added together (`Other Taxes`) cannot come from the
+    mapping — it is computed from the raw line, the same way `_fold_taxes` builds TGQ
+    HMPR's tax array. A value the user DID map wins over the derived one, so a file
+    carrying its own `Other Taxes` column round-trips.
+    """
+    s = spec_for(slug)
+    return (s or {}).get("derive_row")
+
+
+def row_filter(slug: str) -> dict | None:
+    """How `drop_row` is explained on the upload wizard — which column, which values.
+
+    The API enforces the rule regardless; this only lets the screen grey out the rows it is
+    about to skip instead of the user discovering the shortfall in the entry count.
+    """
+    s = spec_for(slug)
+    return (s or {}).get("row_filter")
 
 
 def resolves_airline(slug: str) -> bool:

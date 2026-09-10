@@ -41,6 +41,7 @@ from app.models.lcc_batch_airline_id import LccBatchAirlineId
 from app.models.commission_calculation import CommissionCalculation
 from app.models.commission_run import CommissionRun
 from app.models.statement_batch_supplier import StatementBatchSupplier
+from app.models.statement_batch_billing import StatementBatchBilling
 from app.models.statement_batch_airline_id import StatementBatchAirlineId
 from app.models.bsp_statement import BspStatement, BspStatementRow, BspTaxBreakup, BspParseError
 from app.models.bsp_summary import BspSummaryStatement, BspSummaryRow
@@ -119,7 +120,8 @@ __all__ = [
     "TgqHmpr", "Ndc", "LccDi", "LccDividedPnr", "LccFlownReport", "LccCtaBta",
     "ThirdPartyGds", "ThirdPartyLcc", "STATEMENT_MODELS",
     "LccDetailed", "LccDetailedBatch", "LccBatchAirlineId", "StatementBatchAirlineId",
-    "StatementBatchSupplier", "CommissionRun", "CommissionCalculation",
+    "StatementBatchSupplier", "StatementBatchBilling",
+    "CommissionRun", "CommissionCalculation",
     "BspStatement", "BspStatementRow", "BspTaxBreakup", "BspParseError",
     "BspSummaryStatement", "BspSummaryRow",
     "TicketReconciliation",
