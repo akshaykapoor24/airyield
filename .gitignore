@@ -5,6 +5,10 @@
 !.env.*.example
 !.env.local.example
 
+# ─── PM2 process files (machine-specific paths, and may carry inline env) ─────
+ecosystem.config.js
+ecosystem.config.cjs
+
 # ─── Claude Code local settings (machine-specific, not for version control) ───
 .claude/settings.local.json
 

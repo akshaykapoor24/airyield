@@ -27,6 +27,7 @@ from app.schemas.customer import (
 )
 from app.schemas.billing import BillingCreate, BillingUpdate, BillingRead, BillingListItem
 from app.services.billing_pdf import build_billing_pdf, load_logo, supplier_block
+from app.services.party_dedupe import CustomerDuplicates, name_key
 from app.services.party_inherit import INHERITED_FIELDS, inherit_from_corporate
 from app.services.billing_calc import (
     to_float as _f,
@@ -135,10 +136,12 @@ def _company_key(name: Optional[str]) -> Optional[str]:
     sides fixes that — which does mean MORE employees link than before, on a link that
     decides whose invoice a ticket lands on. Intended: it aligns the runtime with the
     migration that first created these links.
+
+    Delegates to services/party_dedupe so the spelling the import matches an employer
+    under is the same spelling the duplicate check compares names under. None rather
+    than "" because the callers below use it as a dict key and a blank company must miss.
     """
-    if not name:
-        return None
-    return " ".join(str(name).split()).lower() or None
+    return name_key(name) or None
 
 
 async def _corporate_name_map(db: AsyncSession, current_user: User) -> dict[str, Corporate]:
@@ -304,17 +307,29 @@ async def create_customer(
     first_name = (payload.first_name or "").strip()
     if not first_name:
         raise HTTPException(status_code=400, detail="first_name is required.")
+    last_name = (payload.last_name or "").strip() or None
     gst_registered = bool(payload.gst_registered)
     corporate = await _resolve_corporate(payload.corporate_id, db, current_user)
+    # Linked: the corporate's name wins over anything typed. Unlinked: keep whatever
+    # free text came in, so an individual can still name an employer.
+    company = corporate.company if corporate else ((payload.company or "").strip() or None)
+
+    # ONE NAME PER EMPLOYER. Not per person: two John Does at two different corporates
+    # are two different people, and inherited phone/email/GSTIN say nothing about who
+    # someone is — see services/party_dedupe for why those cannot be the key.
+    clash = (await CustomerDuplicates.load(db, current_user)).check(
+        first_name, last_name, corporate.id if corporate else None, company
+    )
+    if clash:
+        raise HTTPException(status_code=409, detail=clash)
+
     customer = Customer(
         tenant_id=current_user.tenant_id,
         created_by_id=current_user.id,
         first_name=first_name,
-        last_name=(payload.last_name or "").strip() or None,
+        last_name=last_name,
         corporate_id=corporate.id if corporate else None,
-        # Linked: the corporate's name wins over anything typed. Unlinked: keep
-        # whatever free text came in, so an individual can still name an employer.
-        company=(corporate.company if corporate else (payload.company or "").strip() or None),
+        company=company,
         title=(payload.title or "").strip() or None,
         phone=(payload.phone or "").strip() or None,
         email=(payload.email or "").strip() or None,
@@ -391,6 +406,10 @@ async def bulk_upload_customers(
     success = 0
     errors: list[str] = []
     corporates = await _corporate_name_map(db, current_user)
+    # Loaded once, then carried through the loop: it holds both what the workspace
+    # already has AND what earlier rows of THIS sheet have claimed, so re-importing
+    # the same file — or a file that lists someone twice — is caught either way.
+    duplicates = await CustomerDuplicates.load(db, current_user)
 
     for i, row in df.iterrows():
         row_num = i + used_header_row + 2
@@ -399,6 +418,7 @@ async def bulk_upload_customers(
         if not first_name:
             errors.append(f"{row_prefix}: FIRST_NAME is required.")
             continue
+        last_name = _cell(row, "LAST_NAME")
 
         markup_value_raw = _cell(row, "MARKUP_VALUE")
         markup_value: float | None = None
@@ -416,6 +436,17 @@ async def bulk_upload_customers(
         # supplies the terms every blank cell below would otherwise leave unset.
         company_raw = _cell(row, "COMPANY")
         corporate = corporates.get(_company_key(company_raw) or "")
+        company = corporate.company if corporate else company_raw
+
+        # Checked here, where the employer is finally known — a row's identity is its
+        # name UNDER that employer, so it cannot be judged before the COMPANY column
+        # has been matched to Corporate Master.
+        clash = duplicates.check(
+            first_name, last_name, corporate.id if corporate else None, company
+        )
+        if clash:
+            errors.append(f"{row_prefix}: {clash}")
+            continue
 
         values = _apply_inheritance({
             "phone": _cell(row, "PHONE"),
@@ -433,9 +464,9 @@ async def bulk_upload_customers(
                 tenant_id=current_user.tenant_id,
                 created_by_id=current_user.id,
                 first_name=first_name,
-                last_name=_cell(row, "LAST_NAME"),
+                last_name=last_name,
                 corporate_id=corporate.id if corporate else None,
-                company=corporate.company if corporate else company_raw,
+                company=company,
                 title=_cell(row, "TITLE"),
                 **values,
             )
@@ -477,6 +508,10 @@ async def bulk_create_customers(
     success = 0
     errors: list[str] = []
     corporates = await _corporate_name_map(db, current_user)
+    # The wizard flags duplicates in the review grid before it ever gets here, but the
+    # browser's answer is a courtesy and this is the boundary: it re-checks against the
+    # master AND against the rest of this batch.
+    duplicates = await CustomerDuplicates.load(db, current_user)
 
     for i, row in enumerate(payload.rows):
         # The wizard sends only the rows it kept, so its sheet-line numbers cannot
@@ -487,9 +522,18 @@ async def bulk_create_customers(
             errors.append(f"{row_prefix}: First name is required.")
             continue
 
+        last_name = (row.last_name or "").strip() or None
         company_raw = (row.company or "").strip() or None
         corporate = corporates.get(_company_key(company_raw) or "")
+        company = corporate.company if corporate else company_raw
         gst_registered = bool(row.gst_registered)
+
+        clash = duplicates.check(
+            first_name, last_name, corporate.id if corporate else None, company
+        )
+        if clash:
+            errors.append(f"{row_prefix}: {clash}")
+            continue
 
         # THE FIX. A hand-added employee picks the corporate's terms up from
         # PartyModal's seedFromCorporate; an imported one used to land on NULL markup
@@ -511,9 +555,9 @@ async def bulk_create_customers(
                 tenant_id=current_user.tenant_id,
                 created_by_id=current_user.id,
                 first_name=first_name,
-                last_name=(row.last_name or "").strip() or None,
+                last_name=last_name,
                 corporate_id=corporate.id if corporate else None,
-                company=corporate.company if corporate else company_raw,
+                company=company,
                 title=(row.title or "").strip() or None,
                 **values,
             ))
@@ -694,6 +738,22 @@ async def update_customer(
             corporate.company if corporate
             else ((data.get("company") or "").strip() or None)
         )
+    # A RENAME OR A MOVE can collide as surely as a fresh add — "John" edited to "Amit"
+    # under a corporate that already has an Amit is the same duplicate by another route.
+    # Judged on what the row will HOLD after this edit, and excused from clashing with
+    # the identity it holds right now.
+    if {"first_name", "last_name", "corporate_id", "company"} & data.keys():
+        clash = (await CustomerDuplicates.load(db, current_user)).check(
+            data.get("first_name", obj.first_name),
+            data.get("last_name", obj.last_name),
+            data.get("corporate_id", obj.corporate_id),
+            data.get("company", obj.company),
+            exclude=CustomerDuplicates.key(
+                obj.first_name, obj.last_name, obj.corporate_id, obj.company
+            ),
+        )
+        if clash:
+            raise HTTPException(status_code=409, detail=clash)
     if "markup_type" in data:
         data["markup_type"] = _norm_choice(data["markup_type"], _MARKUP_TYPES)
     if "billing_type" in data:

@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.v1 import auth, users, subscriptions, airlines, suppliers, airports, routes, deals, tickets, income, documents, reports, classes, approval_workflows, dashboard, customers, corporates, entities, login_ids, tenant_airlines, iata_commissions, gst_configurations, user_entities, user_login_ids, agencies, agency_account, agency_entities, agency_login_ids, agency_billing, adjustments, airline_adjustments, statements, bsp, bsp_summary, bsp_reconciliation, bsp_commission, commission, customer_statements, lcc_detailed, ticket_details, series_contracts
+from app.api.v1 import auth, users, subscriptions, airlines, suppliers, airports, routes, deals, tickets, income, documents, reports, classes, approval_workflows, dashboard, customers, corporates, entities, login_ids, tenant_airlines, iata_commissions, gst_configurations, user_entities, user_login_ids, agencies, agency_account, agency_entities, agency_login_ids, agency_billing, adjustments, airline_adjustments, statements, ndc_billing, bsp, bsp_summary, bsp_reconciliation, bsp_commission, commission, customer_statements, lcc_detailed, ticket_details, series_contracts
 
 router = APIRouter()
 
@@ -35,6 +35,11 @@ router.include_router(agency_login_ids.router, prefix="/agency-login-ids", tags=
 router.include_router(agency_billing.router, prefix="/agency-billings", tags=["Agency Billing"])
 router.include_router(adjustments.router, prefix="/adjustments", tags=["Tickets - Airline Adjustments"])
 router.include_router(airline_adjustments.router, prefix="/airline-adjustments", tags=["Tickets - Airline Adjustments (ADM/ACM/RA)"])
+# BEFORE statements.router, and that ordering is load-bearing: every route in that file is
+# `/{slug}/…`, so `/statements/ndc/batches/{id}/billing-rows` would match `/{slug}/batches`
+# and be answered by the generic handler with slug="ndc" and a 404 for the rest of the path.
+# A literal path registered first is matched first.
+router.include_router(ndc_billing.router, prefix="/statements", tags=["Vendor Statements (NDC Billing)"])
 router.include_router(statements.router, prefix="/statements", tags=["Vendor Statements (TGQ HMPR / NDC / LCC / GDS)"])
 router.include_router(lcc_detailed.router, prefix="/lcc-detailed", tags=["Vendor Statements (LCC Detailed)"])
 router.include_router(ticket_details.router, prefix="/ticket-details", tags=["Ticket Details"])

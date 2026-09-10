@@ -36,6 +36,7 @@ from app.core.india_tax import tax_id_error
 from app.schemas.customer import PlaceOfSupplyRead, SoldTicketRead, SoldTicketsSummary
 from app.schemas.billing import BillingCreate, BillingUpdate, BillingRead, BillingListItem
 from app.services.billing_pdf import build_billing_pdf, load_logo, supplier_block
+from app.services.party_dedupe import CorporateDuplicates
 from app.services.billing_calc import (
     to_float as _f,
     compute_markup as _compute_markup,
@@ -281,6 +282,14 @@ async def create_corporate(
     state = (payload.state or "").strip() or None
     # Required, with no unregistered option — see _GSTIN_REQUIRED above.
     gst_no = _require_gstin(payload.gst_no, payload.pan_no, state)
+
+    # ONE NAME AND ONE GSTIN PER WORKSPACE. The name because the employee import links
+    # people to their employer by it (api/v1/customers.py::_corporate_name_map), the
+    # GSTIN because a registration belongs to exactly one entity.
+    clash = (await CorporateDuplicates.load(db, current_user)).check(company, gst_no)
+    if clash:
+        raise HTTPException(status_code=409, detail=clash)
+
     corporate = Corporate(
         tenant_id=current_user.tenant_id,
         created_by_id=current_user.id,
@@ -362,6 +371,10 @@ async def bulk_upload_corporates(
     total = len(df)
     success = 0
     errors: list[str] = []
+    # Loaded once, then carried through the loop: it holds both what the workspace
+    # already has AND what earlier rows of THIS sheet have claimed, so re-importing the
+    # same file — or a file that lists one company twice — is caught either way.
+    duplicates = await CorporateDuplicates.load(db, current_user)
 
     for i, row in df.iterrows():
         row_num = i + used_header_row + 2
@@ -384,9 +397,17 @@ async def bulk_upload_corporates(
         # the column cannot say otherwise. A row without a valid one is reported
         # against its own row number and the rest of the sheet still imports.
         state = _cell(row, "STATE")
-        gst_problem = _gstin_problem(_cell(row, "GST_NO"), _cell(row, "PAN_NO"), state)
+        gst_no = _cell(row, "GST_NO")
+        gst_problem = _gstin_problem(gst_no, _cell(row, "PAN_NO"), state)
         if gst_problem:
             errors.append(f"{row_prefix}: {gst_problem}")
+            continue
+
+        # After the GSTIN is known to be valid, so a bad number is reported as a bad
+        # number rather than as a clash with whatever else happens to hold it.
+        clash = duplicates.check(company, gst_no)
+        if clash:
+            errors.append(f"{row_prefix}: {clash}")
             continue
 
         try:
@@ -403,7 +424,7 @@ async def bulk_upload_corporates(
                 pincode=_cell(row, "PINCODE"),
                 country=_cell(row, "COUNTRY"),
                 gst_registered=True,
-                gst_no=_clean_upper(_cell(row, "GST_NO")),
+                gst_no=_clean_upper(gst_no),
                 pan_no=_clean_upper(_cell(row, "PAN_NO")),
                 markup_type=_norm_choice(_cell(row, "MARKUP_TYPE"), _MARKUP_TYPES),
                 markup_value=markup_value,
@@ -445,6 +466,10 @@ async def bulk_create_corporates(
     total = len(payload.rows)
     success = 0
     errors: list[str] = []
+    # The wizard flags duplicates in the review grid before it ever gets here, but the
+    # browser's answer is a courtesy and this is the boundary: it re-checks against the
+    # master AND against the rest of this batch.
+    duplicates = await CorporateDuplicates.load(db, current_user)
 
     for i, row in enumerate(payload.rows):
         # The wizard labels rows by their line in the sheet, but it only sends the
@@ -462,6 +487,11 @@ async def bulk_create_corporates(
         gst_problem = _gstin_problem(row.gst_no, row.pan_no, state)
         if gst_problem:
             errors.append(f"{row_prefix}: {gst_problem}")
+            continue
+
+        clash = duplicates.check(company, row.gst_no)
+        if clash:
+            errors.append(f"{row_prefix}: {clash}")
             continue
 
         try:
@@ -570,6 +600,20 @@ async def update_corporate(
         data.get("state", obj.state),
     )
     data["gst_registered"] = True
+
+    # A RENAME, or moving a GSTIN onto a different corporate, collides exactly as a
+    # fresh add does. Judged on what the row will HOLD after this edit; each facet is
+    # excused separately from the value it holds now, so renaming a corporate while it
+    # keeps its own GSTIN is not read as a clash with itself.
+    if {"company", "gst_no"} & data.keys():
+        clash = (await CorporateDuplicates.load(db, current_user)).check(
+            data.get("company", obj.company),
+            data.get("gst_no", obj.gst_no),
+            exclude=CorporateDuplicates.keys(obj.company, obj.gst_no),
+        )
+        if clash:
+            raise HTTPException(status_code=409, detail=clash)
+
     renamed_to = data["company"] if data.get("company") and data["company"] != obj.company else None
     for field, value in data.items():
         setattr(obj, field, value)

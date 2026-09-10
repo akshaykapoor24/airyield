@@ -25,7 +25,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   X, Upload, FileSpreadsheet, CheckCircle2, Loader2, Search, AlertTriangle,
-  ArrowLeft, ArrowRight, Wand2, Eraser, PartyPopper, Pencil, RotateCcw,
+  ArrowLeft, ArrowRight, Wand2, Eraser, PartyPopper, Pencil, RotateCcw, Filter,
 } from "lucide-react";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
@@ -37,7 +37,21 @@ type Step = "upload" | "mapping" | "review" | "done";
 type StdCol = { header: string; field: string; group: string };
 type StdGroup = { group: string; columns: StdCol[] };
 type FieldGroup = { label: string; fields: string[]; headers: string; consequence?: string };
-type StdResp = { groups: StdGroup[]; required: FieldGroup[]; advisory: FieldGroup[]; total: number };
+/** Rows this type discards on content rather than importing — NDC's unpaid holds and free
+ *  seats, and nothing else so far. Null for every other type. The API enforces it at
+ *  confirm; this is only what lets the review step show which rows are about to go. */
+type RowFilter = {
+  field: string;        // the mapped field the rule reads, e.g. "txn_type"
+  header: string;       // its canonical header, for prose
+  exclude: string[];    // normalised values that are dropped
+  keep: string[];       // the ones that survive, listed for the user
+  label: string;        // "unpaid and free-seat rows"
+  note: string;
+};
+type StdResp = {
+  groups: StdGroup[]; required: FieldGroup[]; advisory: FieldGroup[]; total: number;
+  row_filter: RowFilter | null;
+};
 
 type SampleRow = Record<string, string | null> & { __index__: number };
 type ExtractResp = {
@@ -56,6 +70,16 @@ type ExtractResp = {
   supplier_name: string | null;
 };
 
+type SaveResp = {
+  inserted: number;
+  edited_rows: number;
+  /** Rows dropped by `row_filter` — 0 for the types that drop nothing. */
+  excluded_rows: number;
+  /** Null unless the type has a row filter; false means its column was never mapped, so
+   *  nothing was classified and nothing was skipped. */
+  filter_column_mapped: boolean | null;
+};
+
 /** One row of GET /suppliers/ — the platform-admin master. `code` is the unique one:
  *  141 of its 2,340 names repeat across branches. */
 type SupplierOpt = {
@@ -65,6 +89,11 @@ type SupplierOpt = {
 
 const SKIP = "";        // "— not in file —"
 const PAGE = 25;
+
+/** Must match ndc_spec._norm_txn — "Paid Booking" and "paid-booking" are PAID_BOOKING.
+ *  The API is what actually decides; this only has to agree with it well enough that the
+ *  preview greys the same rows the import drops. */
+const normTxn = (v: string) => v.toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_|_$/g, "");
 
 function errMsg(e: unknown, fallback: string): string {
   const m = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
@@ -121,7 +150,7 @@ export default function StatementUploadWizard({
   const [extracted, setExtracted] = useState<ExtractResp | null>(null);
   const [columnMap, setColumnMap] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState<{ inserted: number; edited_rows: number } | null>(null);
+  const [saved, setSaved] = useState<SaveResp | null>(null);
 
   // Upload
   const [file, setFile] = useState<File | null>(null);
@@ -273,6 +302,25 @@ export default function StatementUploadWizard({
   const pageRows = rows.slice(page * PAGE, page * PAGE + PAGE);
   const pageCount = Math.max(1, Math.ceil(rows.length / PAGE));
 
+  // ── Rows the import will skip ─────────────────────────────────────────────
+  // Recomputed from the CURRENT mapping and edits, not from the extract response, so
+  // remapping TXN Type or correcting one in a cell moves the row in or out of the grey
+  // immediately — which is the only way the user can tell the rule is reading the column
+  // they think it is. Only ever covers the previewed rows; the footer says the rest of the
+  // file is filtered too.
+  const rowFilter = std?.row_filter ?? null;
+  const filterMapped = !!rowFilter && !!columnMap[rowFilter.field];
+  const isSkipped = (r: SampleRow): boolean => {
+    if (!rowFilter || !filterMapped) return false;
+    const v = valueAt(r, rowFilter.field).trim();
+    return v !== "" && rowFilter.exclude.includes(normTxn(v));
+  };
+  const skippedPreview = useMemo(
+    () => (rowFilter && filterMapped ? rows.filter(isSkipped).length : 0),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [rows, rowFilter, filterMapped, columnMap, edits],
+  );
+
   // ── Save ──────────────────────────────────────────────────────────────────
   const doConfirm = async () => {
     if (!extracted || !file) { notifyRequired("Nothing to save — upload a file first."); return; }
@@ -288,8 +336,7 @@ export default function StatementUploadWizard({
       fd.append("header_row", String(extracted.header_row));
       fd.append("file_digest", extracted.file_digest);
       fd.append("edits", JSON.stringify(edits));
-      const { data } = await api.post<{ inserted: number; edited_rows: number }>(
-        `${apiBase}/confirm`, fd);
+      const { data } = await api.post<SaveResp>(`${apiBase}/confirm`, fd);
       setSaved(data);
       setStep("done");
     } catch (e) { toast.error(errMsg(e, "Could not save the statement.")); }
@@ -516,6 +563,38 @@ export default function StatementUploadWizard({
                 </span>
               </div>
 
+              {/* What this type throws away, said before it happens. Without it the only
+                  evidence is an entry count lower than the file's row count, discovered
+                  later on a screen that cannot explain it. */}
+              {rowFilter && (
+                <div className={`flex items-start gap-2 px-3 py-2.5 mb-3 rounded-xl border text-xs ${
+                  filterMapped
+                    ? "border-slate-200 bg-white text-slate-600"
+                    : "border-amber-200 bg-amber-50 text-amber-800"}`}>
+                  <Filter className={`w-4 h-4 shrink-0 mt-px ${filterMapped ? "text-slate-400" : "text-amber-500"}`} />
+                  {filterMapped ? (
+                    <span>
+                      <strong>
+                        {skippedPreview > 0
+                          ? `${skippedPreview.toLocaleString("en-IN")} of the ${rows.length.toLocaleString("en-IN")} rows shown will be skipped`
+                          : "No rows shown will be skipped"}
+                      </strong>{" "}
+                      — {rowFilter.note} Skipped rows are greyed out below.{" "}
+                      <span className="text-slate-400">
+                        Kept: {rowFilter.keep.join(", ")}. Dropped: {rowFilter.exclude.join(", ")}.
+                      </span>
+                      {truncated && <> The same rule applies to the rows past the preview.</>}
+                    </span>
+                  ) : (
+                    <span>
+                      <strong>{rowFilter.header} isn&apos;t mapped</strong>, so {rowFilter.label} cannot
+                      be identified and <strong>every row will import</strong>. Go back and map it if
+                      your file has that column.
+                    </span>
+                  )}
+                </div>
+              )}
+
               {reviewCols.length === 0 ? (
                 <p className="text-xs text-slate-400 py-10 text-center">
                   Nothing is mapped yet — go back and map at least one column.
@@ -554,9 +633,20 @@ export default function StatementUploadWizard({
                           </tr>
                         </thead>
                         <tbody>
-                          {pageRows.map((r) => (
-                            <tr key={r.__index__} className="border-b border-slate-100 hover:bg-slate-50/60">
-                              <td className="px-2 py-1 text-slate-400 tabular-nums">{r.__index__ + 1}</td>
+                          {pageRows.map((r) => {
+                          // Still editable, deliberately: the way out of the grey is to fix
+                          // the TXN Type cell, and a disabled input would make the row look
+                          // like a dead end.
+                          const skipped = isSkipped(r);
+                          return (
+                            <tr key={r.__index__}
+                                className={`border-b border-slate-100 ${
+                                  skipped ? "bg-slate-50/80 opacity-60" : "hover:bg-slate-50/60"}`}
+                                title={skipped ? "Not imported — see the note above." : undefined}>
+                              <td className="px-2 py-1 text-slate-400 tabular-nums whitespace-nowrap">
+                                {r.__index__ + 1}
+                                {skipped && <span className="ml-1 text-[9px] uppercase tracking-wide text-slate-400">skip</span>}
+                              </td>
                               {reviewCols.map((c) => {
                                 const src = columnMap[c.field];
                                 const original = (src ? r[src] : null) ?? "";
@@ -576,7 +666,8 @@ export default function StatementUploadWizard({
                                 );
                               })}
                             </tr>
-                          ))}
+                          );
+                          })}
                         </tbody>
                       </table>
                     </div>
@@ -610,6 +701,15 @@ export default function StatementUploadWizard({
               <p className="text-sm font-semibold text-slate-800">
                 Imported {saved.inserted.toLocaleString("en-IN")} row{saved.inserted === 1 ? "" : "s"}.
               </p>
+              {/* The file had more lines than this. Say so here, where the reason is still
+                  at hand — the uploads list shows only the entry count. */}
+              {saved.excluded_rows > 0 && rowFilter && (
+                <p className="text-xs text-slate-600 mt-1.5 max-w-md">
+                  {saved.excluded_rows.toLocaleString("en-IN")} {rowFilter.label}
+                  {" "}({rowFilter.exclude.join(", ")}) {saved.excluded_rows === 1 ? "was" : "were"} skipped
+                  — no money moved on them, so there is nothing to reconcile.
+                </p>
+              )}
               <p className="text-xs text-slate-500 mt-1">
                 {saved.edited_rows > 0
                   ? `${saved.edited_rows} row${saved.edited_rows === 1 ? " was" : "s were"} saved with your corrections. `

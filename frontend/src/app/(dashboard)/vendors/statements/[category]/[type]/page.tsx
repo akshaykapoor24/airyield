@@ -86,6 +86,7 @@ export default function StatementTypePage() {
       requiresAirlineId={type.requiresAirlineId}
       requiresSupplier={type.requiresSupplier}
       supportsMapping={type.supportsMapping}
+      supportsBilling={type.supportsBilling}
       doneHint={type.doneHint}
     />
   );
