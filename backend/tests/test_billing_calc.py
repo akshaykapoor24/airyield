@@ -104,15 +104,24 @@ class TestComputeGst(unittest.TestCase):
     def test_discount_reduces_the_taxable_amount(self):
         self.assertAlmostEqual(compute_gst(1000.0, 100.0, "reseller", discount=200.0), 900.0 * GST_RATE)
 
-    def test_refund_reverses_no_gst(self):
-        # Documented, deliberate, and NOT changed by the markup fix: the clamp at
-        # zero means a credit note carries no GST reversal. Pinned so that if it
-        # ever should reverse, this test is the place the decision gets made.
-        self.assertEqual(compute_gst(-3728.0, -300.0, "reseller"), 0.0)
-        self.assertEqual(compute_gst(-3728.0, -300.0, "agency"), 0.0)
+    def test_refund_reverses_the_tax_it_charged(self):
+        # This is the decision the previous version of this test was pinned for.
+        # Clamping a credit note at zero meant the reversal returned the fare and the
+        # markup but NOT the 18% originally charged on them — the customer was
+        # short-credited by the tax on every refunded ticket. A credit note reverses
+        # tax; that is what makes it a credit note.
+        self.assertAlmostEqual(compute_gst(-3728.0, -300.0, "reseller"), -4028.0 * GST_RATE)
+        self.assertAlmostEqual(compute_gst(-3728.0, -300.0, "agency"), -300.0 * GST_RATE)
 
     def test_oversized_discount_cannot_create_negative_tax(self):
+        # The clamp still does the job it was written for. The sign of the BASE is
+        # what separates the two cases: this is a sale over-discounted, not a refund.
         self.assertEqual(compute_gst(100.0, 0.0, "reseller", discount=10_000.0), 0.0)
+        self.assertEqual(compute_gst(100.0, 50.0, "agency", discount=10_000.0), 0.0)
+
+    def test_a_zero_base_still_clamps(self):
+        # `base < 0` is the test, not `base <= 0` — a zero-fare line is not a credit.
+        self.assertEqual(compute_gst(0.0, 100.0, "agency", discount=10_000.0), 0.0)
 
 
 class TestSplitGst(unittest.TestCase):
@@ -179,11 +188,29 @@ class TestSplitGst(unittest.TestCase):
         self.assertEqual(got["gst_amount"], 144.0)     # 800 * 18%
         self.assertEqual(got["cgst"], 72.0)
 
-    def test_a_refund_is_clamped_to_zero_not_negative_tax(self):
-        """Live data carries a -745.00 line. Negative CGST is a credit of tax
-        nobody paid."""
+    def test_a_refund_reverses_tax_under_both_heads(self):
+        """Live data carries a -745.00 line. The tax on it WAS charged when the
+        ticket sold, so the credit note has to give it back — under the same heads,
+        which is what lets the two lines cancel on a GST return."""
         got = split_gst(-745.0, -74.5, "reseller", interstate=False)
-        self.assertEqual((got["cgst"], got["sgst"], got["gst_amount"]), (0.0, 0.0, 0.0))
+        taxable = -745.0 - 74.5
+        self.assertEqual(got["cgst"], round(taxable * 0.09, 2))
+        self.assertEqual(got["sgst"], round(taxable * 0.09, 2))
+        self.assertEqual(got["gst_amount"], got["cgst"] + got["sgst"])
+        self.assertLess(got["gst_amount"], 0.0)
+        self.assertEqual(got["igst"], 0.0)
+
+    def test_a_refund_reverses_igst_interstate(self):
+        got = split_gst(-745.0, -74.5, "reseller", interstate=True)
+        self.assertEqual(got["igst"], round(-819.5 * GST_RATE, 2))
+        self.assertEqual(got["gst_amount"], got["igst"])
+        self.assertEqual((got["cgst"], got["sgst"]), (0.0, 0.0))
+
+    def test_a_refund_and_its_sale_cancel(self):
+        """The property that matters: credit a ticket in full and the tax nets out."""
+        sale = split_gst(5000.0, 500.0, "reseller", interstate=False)
+        credit = split_gst(-5000.0, -500.0, "reseller", interstate=False)
+        self.assertAlmostEqual(sale["gst_amount"] + credit["gst_amount"], 0.0)
 
     def test_an_unset_billing_type_is_not_taxed(self):
         got = split_gst(5000.0, 1000.0, None, interstate=False)

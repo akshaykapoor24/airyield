@@ -115,6 +115,7 @@ DELETION_GROUPS: tuple[DeletionGroup, ...] = (
         ("tgq_hmpr", "ndc", "lcc_di", "lcc_divided_pnr", "lcc_flown_report",
          "lcc_cta_bta", "third_party_gds", "third_party_lcc",
          "lcc_detailed", "lcc_detailed_batch", "lcc_batch_airline_ids",
+         "lcc_detailed_batch_file",
          "statement_batch_airline_ids", "statement_batch_suppliers",
          "statement_batch_billing"),
     ),
@@ -251,6 +252,10 @@ CHILD_TABLES: dict[str, ChildTable] = {
     # tenant_airlines: the batch is what belongs to the workspace's statement data,
     # and linking it the other way would tie this table to the Setup groups.
     "lcc_batch_airline_ids": ChildTable(
+        (ParentLink("batch_id", "lcc_detailed_batch", "batch_id"),)),
+    # The source files behind an LCC upload — same reasoning as the airline ids above:
+    # reached through the batch, which is what belongs to the workspace's statement data.
+    "lcc_detailed_batch_file": ChildTable(
         (ParentLink("batch_id", "lcc_detailed_batch", "batch_id"),)),
     "approval_workflow_steps": ChildTable((ParentLink("workflow_id", "approval_workflows"),)),
     "approval_workflow_step_approvers": ChildTable(

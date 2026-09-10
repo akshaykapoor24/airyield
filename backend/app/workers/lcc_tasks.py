@@ -134,8 +134,12 @@ async def _flush(db, rows: list[dict], batch_id: str, running_before: int) -> in
 async def _ingest(batch_id: str, tenant_id: int, user_id: int):
     from sqlalchemy import select, delete, update
     from app.models.lcc_detailed import LccDetailed, LccDetailedBatch
+    from app.models.lcc_detailed_batch_file import LccDetailedBatchFile
+    from app.api.v1.lcc_detailed import _bill_kind
+    from app.services import customer_resolver as cres
     from app.services import gcs
     from app.services import lcc_detailed_spec as spec
+    from app.services import lcc_merge
 
     engine, Session = _new_engine()
     try:
@@ -167,10 +171,24 @@ async def _ingest(batch_id: str, tenant_id: int, user_id: int):
                         "re-imported. Delete the billing and the upload, then upload again."
                     )
                     return
-                file_url = batch.file_url
-                header_row = batch.header_row or 0
-                column_map = dict(batch.column_map or {})
-                source_file = batch.source_file or ""
+                # Every source file, each with its OWN header row and column map — the
+                # two halves of a split export share no headers, so one map could not
+                # describe both. Loaded inside the claim tx with everything else.
+                files = [
+                    {"role": f.role, "file_url": f.file_url, "header_row": f.header_row or 0,
+                     "column_map": dict(f.column_map or {}), "source_file": f.source_file or ""}
+                    for f in (await db.execute(
+                        select(LccDetailedBatchFile)
+                        .where(LccDetailedBatchFile.batch_id == batch_id)
+                    )).scalars().all()
+                ]
+                # A batch staged before the child table existed has no file rows; its
+                # scalars still describe the single file it was.
+                if not files:
+                    files = [{"role": lcc_merge.ROLE_SINGLE, "file_url": batch.file_url,
+                              "header_row": batch.header_row or 0,
+                              "column_map": dict(batch.column_map or {}),
+                              "source_file": batch.source_file or ""}]
                 # Denormalised onto every row: an LCC export names no carrier, so the
                 # airline the user declared at upload is the only source of it.
                 airline_id = batch.airline_id
@@ -181,24 +199,65 @@ async def _ingest(batch_id: str, tenant_id: int, user_id: int):
                 batch.processed_rows = 0
                 await db.execute(delete(LccDetailed).where(LccDetailed.batch_id == batch_id))
 
-            if not file_url:
-                await _fail(db, batch_id, "No file attached to this upload.")
-                return
-            if not column_map:
-                await _fail(db, batch_id, "No column mapping was confirmed for this upload.")
-                return
+            for f in files:
+                if not f["file_url"]:
+                    await _fail(db, batch_id,
+                                f"No {f['role']} file is attached to this upload.")
+                    return
+                if not f["column_map"]:
+                    await _fail(db, batch_id,
+                                f"No column mapping was confirmed for the {f['role']} file.")
+                    return
 
-            # ── Download + parse (using the header row detected at extract) ──
-            content = await gcs.download_bytes(file_url, _bucket())
-            df = _read_df(content, source_file, header_row)
-            df.dropna(how="all", inplace=True)
+            # ── Download + parse (each at the header row pinned at extract) ──
+            frames: dict[str, list[dict]] = {}
+            columns: dict[str, list[str]] = {}
+            maps: dict[str, dict] = {f["role"]: f["column_map"] for f in files}
+            source_rows = 0
+            for f in files:
+                content = await gcs.download_bytes(f["file_url"], _bucket())
+                df = _read_df(content, f["source_file"], f["header_row"])
+                df.dropna(how="all", inplace=True)
+                frames[f["role"]] = [{str(k): v for k, v in row.to_dict().items()}
+                                     for _, row in df.iterrows()]
+                columns[f["role"]] = [str(c) for c in df.columns]
+                source_rows += len(df)
+
+            # ── Merge ────────────────────────────────────────────────────────
+            # A `single` file is passed through untouched. Anything else goes through
+            # the merge even when only one half was uploaded: a passenger file still
+            # needs its segments folded, and an account file still needs its movement
+            # kinds classified from the note.
+            single = frames.get(lcc_merge.ROLE_SINGLE)
+            if single is not None:
+                merged = [
+                    lcc_merge.MergedRow(role=lcc_merge.ROLE_SINGLE,
+                                        row_kind=lcc_merge.ROW_KIND_PAX, data=r)
+                    for r in single
+                ]
+                stats = None
+            else:
+                merged, stats = lcc_merge.merge(
+                    frames.get(lcc_merge.ROLE_PAX, []), columns.get(lcc_merge.ROLE_PAX, []),
+                    frames.get(lcc_merge.ROLE_ACCOUNT, []), columns.get(lcc_merge.ROLE_ACCOUNT, []),
+                    airline_code=airline_code,
+                )
+
+            # The merge writes FEWER rows than it reads, so the count set at extract is
+            # the wrong denominator. Correct it before the first flush or the progress
+            # bar climbs past its own target and then jumps back.
+            async with db.begin():
+                await db.execute(
+                    update(LccDetailedBatch).where(LccDetailedBatch.batch_id == batch_id)
+                    .values(total_rows=len(merged), source_rows=source_rows,
+                            merge_stats=(stats.as_dict() if stats else None))
+                )
 
             inserted = 0     # rows durably written
             seen = 0         # non-blank rows attempted (for skip accounting)
             buf: list[dict] = []
-            for _, row in df.iterrows():
-                raw = {str(k): v for k, v in row.to_dict().items()}
-                built = spec.build_typed_row(raw, column_map)
+            for row in merged:
+                built = spec.build_typed_row(row.data, maps.get(row.role, {}))
                 if built is None:
                     continue
                 built["tenant_id"] = tenant_id
@@ -207,6 +266,25 @@ async def _ingest(batch_id: str, tenant_id: int, user_id: int):
                 built["airline_id"] = airline_id
                 built["airline_name"] = airline_name
                 built["airline_code"] = airline_code
+                built["row_kind"] = row.row_kind
+                built["movement_kind"] = row.movement_kind
+                if row.extra:
+                    built["extra"] = {**(built.get("extra") or {}), **row.extra}
+                # Classified at INSERT rather than left to `resolve-customers`:
+                # until something sets bill_kind, the commission engine reads NULL as
+                # an ISSUE and prices the row as a fare-less sale, so leaving it null
+                # opens a window where a commission run is wrong. `_bill_kind` is the
+                # same function `resolve-customers` will apply, so this only closes
+                # that window early — it never decides anything differently.
+                #
+                # Set on EVERY row, not just some: the chunked executemany below needs
+                # one key set across the batch, and a dict that gains keys on some
+                # rows would drop the whole chunk into the slow row-by-row fallback.
+                kind = _bill_kind(built.get("total"))
+                built["bill_kind"] = kind
+                built["bill_status"] = (
+                    cres.EXCLUDED if kind == "payment" else cres.UNRESOLVED
+                )
                 buf.append(built)
                 seen += 1
                 if len(buf) >= CHUNK_ROWS:
@@ -223,6 +301,7 @@ async def _ingest(batch_id: str, tenant_id: int, user_id: int):
                     .values(status="completed", total_rows=inserted, processed_rows=inserted,
                             completed_at=datetime.utcnow())
                 )
-            logger.info("LCC batch %s completed: %d rows inserted, %d skipped", batch_id, inserted, skipped)
+            logger.info("LCC batch %s completed: %d source lines, %d rows inserted, %d skipped",
+                        batch_id, source_rows, inserted, skipped)
     finally:
         await engine.dispose()

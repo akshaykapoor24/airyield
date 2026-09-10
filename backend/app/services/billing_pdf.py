@@ -19,16 +19,26 @@ receives from this system looks like the one they already receive:
     └──────┴────────────┴──────┴────────┴────────┴────────┴──────┴─────┘
             Add GST Tax · Nett Bill Amount · amount in words
 
-WHAT "AMOUNT" AND "TAXABLE VALUE" MEAN, because they are not the same number
-───────────────────────────────────────────────────────────────────────────
-`Amount` is what the line costs before tax — fare plus markup less discount.
-`Taxable Value` is only the slice of that which GST is charged on, which for an
-agency sale is the markup alone: the airline has already taxed the fare, and
-taxing it again would be charging tax on tax. On a real sale those differ by
-more than an order of magnitude (the reference invoice: 26,53,226 against
-95,700), so printing one where the other belongs would misstate the tax base on
-a document a tax authority reads. It is taken from the same `gst_taxable` the
-tax itself was computed from, never re-derived here.
+WHAT "AMOUNT" AND "TAXABLE VALUE" MEAN — they are DISJOINT, and they add up
+──────────────────────────────────────────────────────────────────────────
+    Total = Amount + Taxable Value + GST
+
+`Taxable Value` is the part of the line GST is charged on, which for an agency
+sale is the agreed markup alone: the airline has already taxed the fare, and
+taxing it again would be charging tax on tax. `Amount` is everything else the
+line costs — the fare, plus any additional markup, less any discount.
+
+The two do not overlap, which is what lets a reader add a row across and get the
+total. They used to: `Amount` carried the whole cost and `Taxable Value` restated
+a slice of it, so the row only reconciled if you knew to ignore one of them. On a
+real sale they differ by more than an order of magnitude (the reference invoice:
+26,53,226 against 95,700), so which number sits where misstates the tax base on a
+document a tax authority reads.
+
+`Taxable Value` is READ OFF THE LINE — `taxable_value`, stored by the routers at
+the moment the tax was computed — and not worked out again here, so the invoice
+cannot disagree with the tax it charged. Billings saved before that field existed
+fall back to re-deriving it the way they were taxed.
 
 WHO IS BILLED is decided by the billing's own foreign key, not by inspecting the
 party object: `corporate_id` means the company is the recipient and its
@@ -433,11 +443,26 @@ def build_billing_pdf(billing, customer, agency: dict | None = None) -> io.Bytes
     total_amount = total_taxable = 0.0
     for it in items:
         base = _f(it.get("base_amount"))
-        markup = _f(it.get("markup_amount")) + _f(it.get("additional_markup"))
+        std_markup = _f(it.get("markup_amount"))
+        addl = _f(it.get("additional_markup"))
         disc = _f(it.get("discount"))
-        amount = base + markup - disc
-        # The same figure the tax was charged on — see the module docstring.
-        taxable = gst_taxable(base, markup, getattr(billing, "billing_type", None), disc)
+
+        # The figure the tax was CHARGED on, read off the line rather than worked out
+        # again here. Older billings predate the stored value, so they fall back to
+        # the derivation that produced them — including the additional markup, which
+        # is how they were taxed at the time.
+        stored = it.get("taxable_value")
+        taxable = (_f(stored) if stored is not None
+                   else gst_taxable(base, std_markup + addl,
+                                    getattr(billing, "billing_type", None), disc))
+
+        # Amount and Taxable Value are the two DISJOINT halves of the line, so
+        # Total = Amount + Taxable + GST and a reader can add the row up. Whatever
+        # tax was charged on goes in Taxable; everything else the line costs goes in
+        # Amount. On the ordinary agency sale that puts the fare and any additional
+        # markup in Amount and the agreed markup in Taxable; on a reseller sale,
+        # where the whole gross is taxable, Amount holds only what is left over.
+        amount = base + std_markup + addl - disc - taxable
         total_amount += amount
         total_taxable += taxable
 
@@ -459,7 +484,10 @@ def build_billing_pdf(billing, customer, agency: dict | None = None) -> io.Bytes
         ])
 
     rows.append([
-        "", Paragraph("<b>Total :</b>", cell_b), "",
+        # The Amount column is totalled now that it is a real, disjoint figure —
+        # blank, a reader could not check the invoice adds up.
+        "", Paragraph("<b>Total :</b>", cell_b),
+        Paragraph(_num(total_amount), cell_b),
         Paragraph(_num(total_taxable), cell_b),
         "", Paragraph(_num(billing.total_cgst), cell_b),
         "", Paragraph(_num(billing.total_sgst), cell_b),

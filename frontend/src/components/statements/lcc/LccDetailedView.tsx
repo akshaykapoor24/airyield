@@ -32,6 +32,13 @@ type Batch = {
   progress_pct: number;
   row_count: number;
   has_file: boolean;
+  // Lines READ across every source file, as against total_rows = rows WRITTEN. They
+  // differ when an airline splits its statement in two and the halves are merged.
+  source_rows: number | null;
+  // Every source file behind this upload. One entry for an ordinary statement; two
+  // when the airline issues an account file and a passenger file separately.
+  // `source_file` / `has_file` above still describe the primary one.
+  files: { role: string; source_file: string | null; has_file: boolean; row_count: number | null }[];
   created_by_name: string | null;
   // Declared at upload from User Master → Airline Master. Null on batches imported
   // before the airline was captured — those are fixed with "Set airline", not re-uploaded.
@@ -298,18 +305,23 @@ export default function LccDetailedView({ apiBase, title }: { apiBase: string; t
 
   const clearFilters = () => { setFvals({}); setShowMore(false); };
 
-  const downloadFile = async (b: Batch) => {
-    try { const { data } = await api.get<{ url: string }>(`${apiBase}/batches/${b.batch_id}/file-url`, { params: { inline: false } }); window.open(data.url, "_blank"); }
-    catch { toast.error("No stored file for this upload."); }
+  // `role` picks which source file, for an upload the airline split in two. Omitted,
+  // the server serves the primary one — which is what every single-file upload wants
+  // and what this did before there could be more than one.
+  const downloadFile = async (b: Batch, role?: string) => {
+    try {
+      const { data } = await api.get<{ url: string }>(`${apiBase}/batches/${b.batch_id}/file-url`, { params: { inline: false, role } });
+      window.open(data.url, "_blank");
+    } catch { toast.error("No stored file for this upload."); }
   };
 
-  const previewFile = async (b: Batch) => {
+  const previewFile = async (b: Batch, role?: string) => {
     // Open the tab synchronously so it isn't blocked as a popup, then navigate it to the
     // Microsoft Office web viewer once we have the (possibly just-converted) xlsx URL.
     const w = window.open("", "_blank");
     if (w) w.document.write("<p style='font:14px system-ui,sans-serif;padding:24px;color:#555'>Preparing preview…</p>");
     try {
-      const { data } = await api.get<{ url: string }>(`${apiBase}/batches/${b.batch_id}/viewer-url`);
+      const { data } = await api.get<{ url: string }>(`${apiBase}/batches/${b.batch_id}/viewer-url`, { params: { role } });
       const office = `https://view.officeapps.live.com/op/view.aspx?src=${encodeURIComponent(data.url)}`;
       if (w) w.location.href = office; else window.open(office, "_blank");
     } catch { if (w) w.close(); toast.error("Could not open preview."); }
@@ -401,7 +413,21 @@ export default function LccDetailedView({ apiBase, title }: { apiBase: string; t
             {hasFilters && <span className="text-amber-600"> (filtered from {selected.row_count.toLocaleString()})</span>}
             {" "}· {fmtDate(selected.uploaded_at)}
           </span>
-          {selected.has_file && (
+          {/* One pair of buttons per source file. A merged upload has two, and a
+              single Preview button would silently only ever open one of them. */}
+          {(selected.files?.length ?? 0) > 1 ? (
+            <div className="ml-auto flex items-center gap-3">
+              {selected.files.filter((f) => f.has_file).map((f) => (
+                <div key={f.role} className="flex items-center gap-1.5">
+                  <span className="text-[11px] font-medium text-slate-400 capitalize">{f.role}</span>
+                  <button onClick={() => previewFile(selected, f.role)} title={`Preview ${f.source_file ?? f.role}`}
+                    className="p-1.5 text-blue-600 border border-blue-200 bg-blue-50 rounded-lg hover:bg-blue-100"><Eye className="w-3.5 h-3.5" /></button>
+                  <button onClick={() => downloadFile(selected, f.role)} title={`Download ${f.source_file ?? f.role}`}
+                    className="p-1.5 text-slate-600 border border-slate-200 rounded-lg hover:bg-slate-50"><Download className="w-3.5 h-3.5" /></button>
+                </div>
+              ))}
+            </div>
+          ) : selected.has_file && (
             <div className="ml-auto flex items-center gap-2">
               <button onClick={() => previewFile(selected)} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-blue-700 border border-blue-200 bg-blue-50 rounded-lg hover:bg-blue-100"><Eye className="w-3.5 h-3.5" /> Preview</button>
               <button onClick={() => downloadFile(selected)} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-600 border border-slate-200 rounded-lg hover:bg-slate-50"><Download className="w-3.5 h-3.5" /> Download</button>

@@ -141,6 +141,9 @@ EXCLUDED_TABLES: frozenset[str] = frozenset({
     # about an already-classified upload, not records the workspace produced
     "lcc_batch_airline_ids", "statement_batch_airline_ids", "statement_batch_suppliers",
     "statement_batch_billing",
+    # the source files behind an LCC upload — one or two spreadsheets per already-counted
+    # batch, and the rows they produce are what `lcc_detailed` counts
+    "lcc_detailed_batch_file",
     # derived caches, not user data — a commission figure is recomputed from a statement
     # row and a deal, so counting it would count the same work twice
     "ticket_calculations", "ticket_reconciliation",

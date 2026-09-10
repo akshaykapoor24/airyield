@@ -1,12 +1,18 @@
-"""LCC Detailed Statement — standard 129-column spec + typed-row builder.
+"""LCC Detailed Statement — standard 141-column spec + typed-row builder.
 
 Single source of truth for the LCC Detailed "standard template": the exact ordered
 columns a user downloads, fills and uploads, and the rules that route each column's
 value into the redesigned ``lcc_detailed`` table:
 
-  * 27 CORE columns  -> typed columns on the row (dates, money, codes, flags)
+  * 39 CORE columns  -> typed columns on the row (dates, money, codes, flags)
   * 87 TAX/FEE codes -> folded into ``taxes``    JSONB [{code, amount}] (non-zero only)
   * 15 LEG columns   -> folded into ``segments`` JSONB [{leg, route, flight_no, dep_date}]
+
+The last 12 core columns were appended for account-style exports (Air India Express
+and kin), which carry a GST party, a transaction type, a parent PNR and a lump-sum tax
+where an IndiGo export carries none of those. They are APPENDED, never inserted: this
+list's order is the template's column order and the drill-in grid's, and inserting
+would reshuffle both for every existing user.
 
 Header auto-matching and value cleaning reuse the helpers in
 ``services/lcc_statement.py`` (``norm``, ``_clean``, ``LCC_ALIASES``) so the same
@@ -56,6 +62,27 @@ _CORE: list[tuple] = [
     ("BaseFare",                "base_fare",                "numeric",  "base_fare",                None),
     ("OtherFeeTotal",           "other_fee_total",          "numeric",  "other_fee_total",          None),
     ("OtherSSRTotal",           "other_ssr_total",          "numeric",  "other_ssr_total",          None),
+    # ── Appended for account-style exports (Air India Express and kin) ───────
+    # APPENDED, never inserted: the order of this list is the order of the template's
+    # columns and of the drill-in grid, and inserting would silently reshuffle both
+    # for every existing user.
+    #
+    # `taxes_total` is normally DERIVED from the per-code tax columns, but an account
+    # export ships one lump-sum `Tax` column and no codes at all. Making it mappable
+    # is what lets that land; build_typed_row below prefers a mapped value over the
+    # derived sum.
+    ("Tax Total",               "taxes_total",              "numeric",  "taxes_total",              None),
+    ("AccountTransactionType",  "transaction_type",         "str",      "transaction_type",         60),
+    ("ParentPNR",               "parent_pnr",               "str",      "parent_pnr",               20),
+    ("AccountTransactionID",    "account_transaction_id",   "str",      "account_transaction_id",   40),
+    ("Note",                    "note",                     "str",      "note",                     500),
+    ("GSTCompanyName",          "gst_company_name",         "str",      "gst_company_name",         255),
+    ("GSTNumber",               "gst_number",               "str",      "gst_number",               20),
+    ("GSTEmailAddress",         "gst_email",                "str",      "gst_email",                255),
+    ("FeeCode",                 "fee_code",                 "str",      "fee_code",                 120),
+    ("SSRCode",                 "ssr_code",                 "str",      "ssr_code",                 120),
+    ("ForeignCurrencyCode",     "foreign_currency_code",    "str",      "foreign_currency",         8),
+    ("PaxType",                 "pax_type",                 "str",      "pax_type",                 8),
 ]
 
 # 87 named tax/fee codes — each folds into `taxes` by its own code, no fixed columns.
@@ -151,6 +178,23 @@ FILTERS: list[dict] = [
     # built — and they match what _disp() renders, so the filter reads like the column.
     {"field": "international",            "label": "Intl",            "type": "select",
      "options": ["Yes", "No"]},
+    # ── Account-statement filters ────────────────────────────────────────────
+    # `row_kind` first: on a merged upload it is the split a reconciler reaches for
+    # before any other — the billable booking lines versus the money movements.
+    {"field": "row_kind",                 "label": "Row Type",        "type": "select"},
+    {"field": "movement_kind",            "label": "Movement",        "type": "select"},
+    {"field": "transaction_type",         "label": "Txn Type",        "type": "select"},
+    # The exact key to a corporate, and the reason a GSTIN beats a passenger name for
+    # billing. Text, not a facet: a consolidator's file carries hundreds.
+    {"field": "gst_number",               "label": "GST No.",         "type": "text"},
+    {"field": "gst_company_name",         "label": "GST Company",     "type": "text"},
+    # The reissue link — "what did this rebooking come from".
+    {"field": "parent_pnr",               "label": "Parent PNR",      "type": "text"},
+    # TEXT, not a facet, even though it looks like a code vocabulary: the real values
+    # are comma-joined LISTS ("SEAT,VFPF"), so a distinct-value dropdown would offer
+    # combinations as though they were codes.
+    {"field": "fee_code",                 "label": "Fee Code",        "type": "text"},
+    {"field": "pax_type",                 "label": "Pax Type",        "type": "select"},
     {"field": "booking_date",             "label": "Booking Date",    "type": "daterange"},
     # Ranked last: departure_date is DERIVED from the first leg carrying a dep date
     # (see build_typed_row), so rows whose legs had none are NULL and any range on it
@@ -191,15 +235,56 @@ def grouped_columns() -> list[dict]:
 
 
 # ── auto-match ───────────────────────────────────────────────────────────────
+# Spec-LOCAL header fallbacks, keyed by standard field. Deliberately not merged into
+# ``lcc_statement.LCC_ALIASES``: that module flattens its map into ``_ALIAS_TO_CANON``
+# last-writer-wins, so adding "pnr" there would re-point it away from the canonical
+# ``pnr`` field and "organizationname" would steal it from ``organization_name``.
+# These are decisions about THIS spec's 141 columns, not about the canonical
+# vocabulary, so they live here and are consulted first.
+_SPEC_ALIASES: dict[str, list[str]] = {
+    # An account statement calls the booking reference PNR, a sales report calls it
+    # RecordLocator. They are the same value and the same column here — this is the
+    # join key the two-file merge runs on.
+    "record_locator":           ["pnr"],
+    "source_organization_code": ["sourceorganization"],
+    # The account the booking sits under, which is the NAME column — not the
+    # passenger, who is Name1.
+    "name":                     ["organizationname"],
+    # ForeignAmount is the TRANSACTION AMOUNT and lands in `total`, not in
+    # `payment_amount`: it is the money the row is billed on, and `_bill_kind` reads
+    # `total` alone. Deliberately not also aliased to payment_amount — two fields
+    # pointing at one column would show the same money twice in the totals strip.
+    # (ACAmount, by contrast, is a constant account identifier and is never money.)
+    "total":                    ["totalfare", "foreignamount"],
+    "other_fee_total":          ["transactionfee"],
+    "other_ssr_total":          ["otherservices"],
+    "source_agent_code":        ["createdagentcode"],
+    # A lump-sum tax column, as opposed to the 87 per-code columns.
+    "taxes_total":              ["tax", "taxtotal", "totaltax"],
+    "pax_type":                 ["paxtype", "passengertype", "ptc"],
+    "ssr_code":                 ["ssrcode"],
+}
+
+# A file can share a couple of headers with the template by coincidence ("Name",
+# "Total"), so a match on a handful proves nothing. Below this, "every column you have
+# is a standard column" is not evidence that the file IS the template.
+_MIN_TEMPLATE_COLUMNS = 10
+
+
 def suggest_mapping(xls_columns: list[str]) -> tuple[dict[str, str], int, bool]:
     """Best-guess {standard_field: xls_column}.
 
     1. Direct: xls column whose norm() equals norm(standard header) — the fill-the-
        template case resolves 100%.
-    2. Fallback (core only): LCC_ALIASES variants, so a raw airline export still
-       auto-fills the core fields.
+    2. Fallback (core only): ``_SPEC_ALIASES`` then ``LCC_ALIASES`` variants, so a raw
+       airline export still auto-fills the core fields.
 
     Returns (mapping, matched_columns, is_template_match).
+
+    ``is_template_match`` asks "is every column in YOUR file a standard column?", not
+    "do you have all of OURS". The distinction matters the moment the template grows:
+    keyed the other way, a user who filled in the 129-column template would be told
+    their perfectly-mapped file only matched 129 of 141 the day column 130 was added.
     """
     norm_xls: dict[str, str] = {}
     for c in xls_columns:
@@ -215,12 +300,13 @@ def suggest_mapping(xls_columns: list[str]) -> tuple[dict[str, str], int, bool]:
             direct += 1
             continue
         if col["role"] == "core":
-            for alias in LCC_ALIASES.get(col.get("alias_key") or "", []):
+            fallbacks = _SPEC_ALIASES.get(field, []) + LCC_ALIASES.get(col.get("alias_key") or "", [])
+            for alias in fallbacks:
                 if alias in norm_xls:
                     mapping[field] = norm_xls[alias]
                     break
 
-    is_template_match = direct == len(LCC_STANDARD_COLUMNS)
+    is_template_match = direct == len(norm_xls) and direct >= _MIN_TEMPLATE_COLUMNS
     return mapping, len(mapping), is_template_match
 
 
@@ -248,28 +334,52 @@ def _to_decimal(v):
 
 
 # Common explicit formats — a fallback if dateutil isn't importable, and faster too.
+# The "%d %b %y" pair is Air India Express's booking date ("01 Sep 26", and
+# "01 Sep 26 13:41:15" once the merge joins BookingDate to BookingTime). dateutil
+# parses both correctly, but listing them avoids a dateutil call per row per column.
 _DT_FORMATS = (
     "%d-%b-%Y %I:%M:%S %p", "%d-%b-%Y %H:%M:%S", "%d-%b-%Y",
+    "%d %b %y %H:%M:%S", "%d %b %y", "%d %b %Y %H:%M:%S", "%d %b %Y",
     "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d",
     "%d/%m/%Y %H:%M:%S", "%d/%m/%Y", "%m/%d/%Y",
 )
 
 
 def _to_datetime(v):
-    from datetime import datetime as _dt
+    """Parse a datetime, ALWAYS returning a naive one.
+
+    Every DateTime column in this schema is naive (`TIMESTAMP WITHOUT TIME ZONE`), and
+    asyncpg refuses an aware value for one — its encoder subtracts a naive epoch and
+    raises `TypeError: can't subtract offset-naive and offset-aware datetimes`. An LCC
+    account export stamps its transaction date with an offset
+    (`2026-08-15T01:49:20.513+0000`), which dateutil quite correctly parses as aware.
+
+    Left unconverted, that does not surface as an error: `lcc_tasks._flush` catches the
+    bulk-insert failure and retries row by row under SAVEPOINTs, and since every row of
+    such a file carries the same format, EVERY row is skipped and the batch reports
+    "completed" with zero rows. Hence the normalisation here, at the single point every
+    datetime in this spec passes through, rather than at the call sites.
+    """
+    from datetime import datetime as _dt, timezone as _tz
     s = _clean(v)
     if not s:
         return None
+    parsed = None
     for fmt in _DT_FORMATS:
         try:
-            return _dt.strptime(s, fmt)
+            parsed = _dt.strptime(s, fmt)
+            break
         except ValueError:
             continue
-    try:
-        from dateutil import parser as dateparser
-        return dateparser.parse(s, dayfirst=True)
-    except Exception:  # noqa: BLE001
-        return None
+    if parsed is None:
+        try:
+            from dateutil import parser as dateparser
+            parsed = dateparser.parse(s, dayfirst=True)
+        except Exception:  # noqa: BLE001
+            return None
+    if parsed is not None and parsed.tzinfo is not None:
+        parsed = parsed.astimezone(_tz.utc).replace(tzinfo=None)
+    return parsed
 
 
 def _to_date(v):
@@ -376,7 +486,16 @@ def build_typed_row(raw_row: dict, column_map: dict[str, str]) -> dict | None:
     row["segments"] = segments or None
     row["ssr"] = None
     row["extra"] = None
-    row["taxes_total"] = sum((Decimal(str(t["amount"])) for t in taxes), Decimal("0")) if taxes else None
+    # Set here only so every built row carries the SAME key set — the chunked
+    # executemany in workers/lcc_tasks.py requires that. The merge is what actually
+    # knows these values, and the worker overwrites them per row.
+    row["row_kind"] = None
+    row["movement_kind"] = None
+    # A MAPPED lump-sum tax wins over the derived sum. An account-style export ships
+    # one `Tax` column and no per-code columns, so deriving unconditionally (as this
+    # did) would overwrite the only tax figure the file has with None.
+    if row.get("taxes_total") is None:
+        row["taxes_total"] = sum((Decimal(str(t["amount"])) for t in taxes), Decimal("0")) if taxes else None
     dep = next((s["dep_date"] for s in segments if s.get("dep_date")), None)
     row["departure_date"] = _to_date(dep)
     row["raw_data"] = {str(k): _clean(v) for k, v in raw_row.items() if _clean(v) is not None} or None

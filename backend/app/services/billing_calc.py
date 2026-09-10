@@ -63,8 +63,15 @@ def compute_markup(base: float, markup_type: Optional[str], markup_value) -> flo
 def gst_taxable(base: float, markup: float, billing_type: Optional[str], discount: float = 0.0) -> float:
     """What GST is charged ON, before any rate is applied.
 
+    `markup` IS THE PARTY'S AGREED MARKUP, NOT THE LINE'S TOTAL MARKUP. The
+    per-invoice "additional markup" is deliberately excluded by every caller: it is a
+    charge added to that one bill, not part of the service value the rate was agreed
+    against. Passing `markup + additional` here taxes it, which is what the three
+    create/update paths used to do while the Sold-Tickets preview beside them did not
+    — so the figure on screen and the figure on the invoice disagreed.
+
     The taxable value depends on billing type. The discount reduces it BEFORE
-    the rate applies (clamped at 0 so a large discount can't create negative tax):
+    the rate applies:
       - reseller: gross + markup − discount
       - agency:   markup − discount
       - unset/other: nothing is taxable
@@ -72,13 +79,23 @@ def gst_taxable(base: float, markup: float, billing_type: Optional[str], discoun
     Split out of `compute_gst` so the heads can each be taken from the same
     figure. Charging CGST at 9% of the taxable value is not the same arithmetic
     as halving an 18% total, and only the first is what an invoice must show.
+
+    **A negative base is a credit note and reverses tax.** The clamp below exists so
+    an over-large DISCOUNT cannot manufacture negative tax on a sale; applied to a
+    refund it did something quite different — it zeroed the tax on every credit line,
+    so the credit reversed the fare and the markup but not the 18% originally charged,
+    under-crediting the customer by that much. The sign of `base` is what separates the
+    two cases: a sale clamps, a refund carries its sign through, exactly as
+    `compute_markup` above already does.
     """
     bt = (billing_type or "").lower()
     if bt == "reseller":
-        return max(0.0, base + markup - discount)
-    if bt == "agency":
-        return max(0.0, markup - discount)
-    return 0.0
+        taxable = base + markup - discount
+    elif bt == "agency":
+        taxable = markup - discount
+    else:
+        return 0.0
+    return taxable if base < 0 else max(0.0, taxable)
 
 
 def compute_gst(base: float, markup: float, billing_type: Optional[str], discount: float = 0.0) -> float:

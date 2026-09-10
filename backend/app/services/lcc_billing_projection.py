@@ -237,6 +237,11 @@ def _build_ticket(row: LccDetailed, batch: LccDetailedBatch, *, now: datetime) -
         "booking_ref": row.record_locator,
         "air_pnr": row.record_locator,
         "gds_pnr": row.gds_record_locator,
+        # The booking this one inherited its value from, when the statement says so.
+        # `exchanged_for` is the column already meant for an original document, and
+        # it is the ONLY link available here: `_find_original_ticket` pairs a credit
+        # note with its sale by `ticket_number`, which LCC deliberately never sets.
+        "exchanged_for": row.parent_pnr,
 
         # flight
         "airline_name": row.airline_name,
