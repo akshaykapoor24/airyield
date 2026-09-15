@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from app.services.billing_pdf import (  # noqa: E402
     SAC_CODE, _bill_to_lines, _invoice_number, _place_of_supply,
-    amount_in_words, build_billing_pdf, supplier_block,
+    amount_in_words, build_billing_pdf, sac_for, supplier_block,
 )
 
 TENANT = N(
@@ -299,6 +299,61 @@ class TestTheLineTable(unittest.TestCase):
         text = render()
         for head in ("CGST", "SGST", "IGST", "Taxable", "Hs/Sac"):
             self.assertIn(head, text)
+
+
+# A hotel and a train from a Third Party API statement, as billing_calc.line_identity
+# stores them: no ticket number, airline or sector — a booking ref and a description.
+LINE_HOTEL = {
+    **LINE, "ticket_number": None, "airline_name": None, "airlines_code": None, "sector": None,
+    "passenger": "PURVA SINGH", "ticket_date": "2026-08-28",
+    "product_category": "hotel", "booking_ref": "MW/2627/116055",
+    "description": "Hyatt Regency Pune & Residences · Pune · 30 Aug → 31 Aug 2026 · 1 night",
+}
+LINE_TRAIN = {
+    **LINE_HOTEL, "product_category": "train", "booking_ref": "SM/2627/566301",
+    "description": "22221 NZM RAJDHANI · CSMT → NZM · 3A · 02 Aug 2026",
+}
+
+
+class TestCategoryLines(unittest.TestCase):
+    """A hotel night is not an air ticket, and its invoice line must not pretend to be one."""
+
+    def test_a_hotel_is_a_different_service_code(self):
+        self.assertEqual(sac_for("hotel"), "998552")
+
+    def test_transport_and_legacy_lines_keep_the_air_code(self):
+        for category in ("air", "train", "bus", "car", None):
+            with self.subTest(category=category):
+                self.assertEqual(sac_for(category), SAC_CODE)
+
+    def test_a_hotel_line_prints_its_booking_and_stay(self):
+        """And the ampersand in the property name must not break the Paragraph markup."""
+        text = render(line_items=[LINE_HOTEL])
+        self.assertIn("998552", text)
+        self.assertIn("MW/2627/116055", text)
+        self.assertIn("Hyatt Regency Pune", text)
+        self.assertIn("Residences", text)
+        self.assertNotIn("Sector", text)
+
+    def test_a_mixed_bill_carries_both_codes(self):
+        text = render(line_items=[LINE, LINE_HOTEL, LINE_TRAIN])
+        self.assertIn("998552", text)
+        self.assertIn(SAC_CODE, text)
+        self.assertIn("NZM RAJDHANI", text)
+        self.assertIn("Booking Ref", text)
+
+    def test_the_arrow_is_not_printed_as_a_missing_glyph(self):
+        text = render(line_items=[LINE_TRAIN])
+        self.assertIn("CSMT - NZM", text)
+
+    def test_a_multi_pax_line_says_how_many(self):
+        """Its fixed markup was charged per passenger; the invoice has to explain why."""
+        self.assertIn("6 pax", render(line_items=[{**LINE_TRAIN, "pax_count": 6}]))
+        self.assertIn("2 pax", render(line_items=[{**LINE, "pax_count": 2}]))
+
+    def test_a_single_pax_or_old_line_prints_as_before(self):
+        self.assertNotIn(" pax", render(line_items=[{**LINE_TRAIN, "pax_count": 1}]))
+        self.assertNotIn(" pax", render())
 
 
 class TestTaxHeads(unittest.TestCase):

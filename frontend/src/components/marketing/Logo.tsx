@@ -1,39 +1,47 @@
-import { Send } from "lucide-react";
+import Image from "next/image";
+
+// The brand artwork, as supplied — public/brand/. The width/height here are the files'
+// intrinsic pixels: next/image reads them for the aspect ratio only, and the rendered size
+// is whatever height the caller's className sets (`h-10 w-auto`).
+const FULL = { src: "/brand/fareqube-logo.png", width: 2400, height: 521 };
+const MARK = { src: "/brand/fareqube-mark.png", width: 1024, height: 1024 };
 
 /**
- * FareQube wordmark + paper-plane mark.
- * `light` inverts it for use on the deep-blue brand panels.
+ * The fareqube.com logo.
+ *
+ *   variant="full"  the mark, wordmark and "AUTOMATION THAT ASCENDS" tagline, side by side
+ *   variant="mark"  the mark alone, for spaces too narrow for the wordmark (a collapsed
+ *                   sidebar, a square badge)
+ *
+ * `onDark` puts it on a white card. The artwork is navy on transparent and has no light
+ * version, so on the deep-blue brand panels it would otherwise all but disappear.
+ *
+ * Size it with a HEIGHT class and `w-auto` — the tagline is baked into the image, so the
+ * logo can only be made readable by giving it height, never by squeezing its width.
  */
 export default function Logo({
-  light = false,
-  tagline,
-  className = "",
+  variant = "full",
+  onDark = false,
+  preload = false,
+  className = "h-10 w-auto",
 }: {
-  light?: boolean;
-  tagline?: string;
+  variant?: "full" | "mark";
+  onDark?: boolean;
+  /** For the one logo that is above the fold on first paint — the home page header. */
+  preload?: boolean;
   className?: string;
 }) {
-  return (
-    <div className={`flex items-center gap-2.5 ${className}`}>
-      <div
-        className={`relative grid h-9 w-9 place-items-center rounded-xl shadow-md ${
-          light ? "bg-white/15 ring-1 ring-white/25" : "shadow-blue-500/25"
-        }`}
-        style={light ? undefined : { background: "var(--brand-grad)" }}
-      >
-        <Send className="h-[18px] w-[18px] -translate-x-px translate-y-px text-white" />
-      </div>
-      <div className="leading-none">
-        <span className="text-lg font-bold tracking-tight">
-          <span className={light ? "text-white" : "text-slate-900"}>Fare</span>
-          <span className={light ? "text-orange-400" : "text-orange-500"}>Qube</span>
-        </span>
-        {tagline && (
-          <p className={`mt-1 text-[11px] ${light ? "text-blue-200" : "text-slate-400"}`}>
-            {tagline}
-          </p>
-        )}
-      </div>
-    </div>
+  const art = variant === "mark" ? MARK : FULL;
+  const image = (
+    <Image
+      src={art.src}
+      width={art.width}
+      height={art.height}
+      alt={variant === "mark" ? "fareqube" : "fareqube.com — Automation that ascends"}
+      preload={preload}
+      className={className}
+    />
   );
+  if (!onDark) return image;
+  return <span className="inline-flex rounded-xl bg-white px-3 py-2 shadow-sm ring-1 ring-white/40">{image}</span>;
 }

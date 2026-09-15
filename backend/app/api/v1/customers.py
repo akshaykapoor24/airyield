@@ -1,3 +1,4 @@
+import re
 from datetime import date
 from io import BytesIO
 from typing import Optional
@@ -28,19 +29,32 @@ from app.schemas.customer import (
 from app.schemas.billing import BillingCreate, BillingUpdate, BillingRead, BillingListItem
 from app.services.billing_pdf import build_billing_pdf, load_logo, supplier_block
 from app.services.party_dedupe import CustomerDuplicates, name_key
+from app.services.party_ticket_export import (
+    booking_order as _booking_order,
+    export_rows as _export_rows,
+    xlsx_download as _xlsx_download,
+)
 from app.services.party_inherit import INHERITED_FIELDS, inherit_from_corporate
 from app.services.billing_calc import (
     to_float as _f,
     gst_taxable,
-    compute_markup as _compute_markup,
     split_gst as _split_gst,
     interstate_from_treatment as _interstate_from_treatment,
     safe_date as _safe_date,
     passenger_name as _passenger_name,
+    line_identity as _line_identity,
+    ticket_category_clause as _ticket_category_clause,
     customer_ticket_scope as _customer_ticket_scope,
     ticket_matched_by as _ticket_matched_by,
 )
 from app.services.place_of_supply import as_payload as _pos_payload, place_of_supply
+from app.services.party_markup import (
+    CATEGORY_COLUMNS,
+    category_markups_from_cells as _categories_from_cells,
+    line_markup as _line_markup,
+    norm_category_markups as _norm_categories,
+    pax_of as _pax_of,
+)
 from app.services import spreadsheet
 
 router = APIRouter()
@@ -210,25 +224,13 @@ async def _get_owned_billing(billing_id: int, customer_id: int, db: AsyncSession
     return obj
 
 
-@router.get("/", response_model=list[CustomerListItem])
-async def list_customers(
-    response: Response,
-    skip: int = Query(0, ge=0),
-    # 1000, not 500: PartyModal, OutgoingScopeFields, TicketFilingCard,
-    # CustomerPartyPanel and LccBillingWorklist all ask for a whole master at limit=1000.
-    limit: int = Query(500, ge=1, le=1000),
-    search: Optional[str] = None,
-    ticket_state: Optional[str] = Query(None, pattern="^(any|unbilled|has|none)$"),
-    # "" / absent = all, "none" = individual / direct, "<id>" = that corporate's staff.
-    corporate: Optional[str] = Query(None, pattern="^(none|[0-9]+)$"),
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+def _customer_list_query(
+    current_user: User, search: Optional[str], ticket_state: Optional[str], corporate: Optional[str],
 ):
-    """The employee list, filtered and counted server-side.
+    """`(Customer, ticket_count, unbilled_count)` rows under the list's search and filters.
 
-    Search, filters and paging all happen in SQL so they cover every row rather than
-    whatever the browser happened to have fetched. The row total goes back in
-    `X-Total-Count`; the body stays a bare array because ten call sites read it as one.
+    Shared by the list and the tickets export, so the file always holds the tickets of
+    exactly the customers the Customer Billing screen is showing.
     """
     # Tickets HARD-LINKED to each customer. Shaped to use the partial index
     # ix_uploaded_tickets_bill_customer (tenant_id, created_by_id, customer_id).
@@ -267,6 +269,9 @@ async def list_customers(
             # here, moving search to the server would quietly stop finding people by
             # the number they are most often looked up by.
             Customer.phone.ilike(term),
+            # The code is the one field that identifies a person outright, so it is the
+            # first thing someone types when two share a name.
+            Customer.employee_code.ilike(term),
         ))
 
     if ticket_state == "unbilled":
@@ -280,6 +285,30 @@ async def list_customers(
         q = q.where(Customer.corporate_id.is_(None))
     elif corporate:
         q = q.where(Customer.corporate_id == int(corporate))
+    return q
+
+
+@router.get("/", response_model=list[CustomerListItem])
+async def list_customers(
+    response: Response,
+    skip: int = Query(0, ge=0),
+    # 1000, not 500: PartyModal, OutgoingScopeFields, TicketFilingCard,
+    # CustomerPartyPanel and LccBillingWorklist all ask for a whole master at limit=1000.
+    limit: int = Query(500, ge=1, le=1000),
+    search: Optional[str] = None,
+    ticket_state: Optional[str] = Query(None, pattern="^(any|unbilled|has|none)$"),
+    # "" / absent = all, "none" = individual / direct, "<id>" = that corporate's staff.
+    corporate: Optional[str] = Query(None, pattern="^(none|[0-9]+)$"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The employee list, filtered and counted server-side.
+
+    Search, filters and paging all happen in SQL so they cover every row rather than
+    whatever the browser happened to have fetched. The row total goes back in
+    `X-Total-Count`; the body stays a bare array because ten call sites read it as one.
+    """
+    q = _customer_list_query(current_user, search, ticket_state, corporate)
 
     # Counted through the SAME builder, or the pager and the rows disagree the moment
     # any filter is on.
@@ -318,8 +347,10 @@ async def create_customer(
     # ONE NAME PER EMPLOYER. Not per person: two John Does at two different corporates
     # are two different people, and inherited phone/email/GSTIN say nothing about who
     # someone is — see services/party_dedupe for why those cannot be the key.
+    employee_code = _clean_upper(payload.employee_code)
     clash = (await CustomerDuplicates.load(db, current_user)).check(
-        first_name, last_name, corporate.id if corporate else None, company
+        first_name, last_name, corporate.id if corporate else None, company,
+        employee_code,
     )
     if clash:
         raise HTTPException(status_code=409, detail=clash)
@@ -328,6 +359,7 @@ async def create_customer(
         tenant_id=current_user.tenant_id,
         created_by_id=current_user.id,
         first_name=first_name,
+        employee_code=employee_code,
         last_name=last_name,
         corporate_id=corporate.id if corporate else None,
         company=company,
@@ -344,6 +376,7 @@ async def create_customer(
         pan_no=_clean_upper(payload.pan_no),
         markup_type=_norm_choice(payload.markup_type, _MARKUP_TYPES),
         markup_value=payload.markup_value,
+        category_markups=_norm_categories(payload.category_markups),
         billing_type=_norm_choice(payload.billing_type, _BILLING_TYPES),
     )
     db.add(customer)
@@ -432,18 +465,26 @@ async def bulk_upload_customers(
 
         gst_registered = (_cell(row, "GST_REGISTERED") or "").lower() in _TRUTHY
 
+        # Optional AIR_MARKUP_TYPE / AIR_MARKUP_VALUE … columns; absent on older templates.
+        category_markups, category_problem = _categories_from_cells(lambda c: _cell(row, c))
+        if category_problem:
+            errors.append(f"{row_prefix}: {category_problem}")
+            continue
+
         # COMPANY names an employer; if that employer is a corporate on file the
         # row is LINKED to it rather than left as another unlinked string — and it
         # supplies the terms every blank cell below would otherwise leave unset.
         company_raw = _cell(row, "COMPANY")
         corporate = corporates.get(_company_key(company_raw) or "")
         company = corporate.company if corporate else company_raw
+        employee_code = _clean_upper(_cell(row, "EMPLOYEE_CODE"))
 
         # Checked here, where the employer is finally known — a row's identity is its
         # name UNDER that employer, so it cannot be judged before the COMPANY column
         # has been matched to Corporate Master.
         clash = duplicates.check(
-            first_name, last_name, corporate.id if corporate else None, company
+            first_name, last_name, corporate.id if corporate else None, company,
+            employee_code,
         )
         if clash:
             errors.append(f"{row_prefix}: {clash}")
@@ -457,6 +498,8 @@ async def bulk_upload_customers(
             "pan_no": _clean_upper(_cell(row, "PAN_NO")),
             "markup_type": _norm_choice(_cell(row, "MARKUP_TYPE"), _MARKUP_TYPES),
             "markup_value": markup_value,
+            # Blank here inherits the corporate's, like every other term in this dict.
+            "category_markups": _norm_categories(category_markups),
             "billing_type": _norm_choice(_cell(row, "BILLING_TYPE"), _BILLING_TYPES),
         }, corporate)
 
@@ -465,6 +508,7 @@ async def bulk_upload_customers(
                 tenant_id=current_user.tenant_id,
                 created_by_id=current_user.id,
                 first_name=first_name,
+                employee_code=employee_code,
                 last_name=last_name,
                 corporate_id=corporate.id if corporate else None,
                 company=company,
@@ -527,10 +571,12 @@ async def bulk_create_customers(
         company_raw = (row.company or "").strip() or None
         corporate = corporates.get(_company_key(company_raw) or "")
         company = corporate.company if corporate else company_raw
+        employee_code = _clean_upper(row.employee_code)
         gst_registered = bool(row.gst_registered)
 
         clash = duplicates.check(
-            first_name, last_name, corporate.id if corporate else None, company
+            first_name, last_name, corporate.id if corporate else None, company,
+            employee_code,
         )
         if clash:
             errors.append(f"{row_prefix}: {clash}")
@@ -548,6 +594,7 @@ async def bulk_create_customers(
             "pan_no": _clean_upper(row.pan_no),
             "markup_type": _norm_choice(row.markup_type, _MARKUP_TYPES),
             "markup_value": row.markup_value,
+            "category_markups": _norm_categories(row.category_markups),
             "billing_type": _norm_choice(row.billing_type, _BILLING_TYPES),
         }, corporate)
 
@@ -556,6 +603,7 @@ async def bulk_create_customers(
                 tenant_id=current_user.tenant_id,
                 created_by_id=current_user.id,
                 first_name=first_name,
+                employee_code=employee_code,
                 last_name=last_name,
                 corporate_id=corporate.id if corporate else None,
                 company=company,
@@ -689,16 +737,22 @@ async def download_customer_template():
     ws = wb.active
     ws.title = "Customer Template"
 
+    # Category columns LAST, so a file made from any older template is still valid here.
     headers = [
-        "FIRST_NAME", "LAST_NAME", "COMPANY", "TITLE", "PHONE", "EMAIL",
+        "FIRST_NAME", "LAST_NAME", "EMPLOYEE_CODE", "COMPANY", "TITLE", "PHONE", "EMAIL",
         "GST_REGISTERED", "GST_NO", "PAN_NO",
         "MARKUP_TYPE", "MARKUP_VALUE", "BILLING_TYPE",
+        *CATEGORY_COLUMNS,
     ]
     ws.append(headers)
     # Sample rows: GST_REGISTERED (Registered|Unregistered) — GST_NO is ignored when Unregistered.
-    # MARKUP_TYPE (percentage|fixed) / BILLING_TYPE (reseller|agency).
-    ws.append(["John", "Doe", "Acme Pvt Ltd", "Mr", "9876543210", "john@acme.com", "Registered", "27ABCDE1234F1Z5", "ABCDE1234F", "percentage", "10", "reseller"])
-    ws.append(["Jane", "Roe", "Beta Travels", "Ms", "9123456780", "jane@beta.com", "Unregistered", "", "", "fixed", "500", "agency"])
+    # MARKUP_TYPE (percentage|fixed) / BILLING_TYPE (reseller|agency). Category pairs are
+    # optional: blank means the default markup, or the corporate's categories when linked.
+    no_categories = [""] * len(CATEGORY_COLUMNS)
+    john_categories = list(no_categories)
+    john_categories[:4] = ["fixed", "300", "percentage", "5"]          # Air ₹300, Hotel 5%
+    ws.append(["John", "Doe", "EMP-001", "Acme Pvt Ltd", "Mr", "9876543210", "john@acme.com", "Registered", "27ABCCA1234F1Z6", "ABCCA1234F", "percentage", "10", "reseller", *john_categories])
+    ws.append(["Jane", "Roe", "", "Beta Travels", "Ms", "9123456780", "jane@beta.com", "Unregistered", "", "", "fixed", "500", "agency", *no_categories])
 
     bio = BytesIO()
     wb.save(bio)
@@ -708,6 +762,66 @@ async def download_customer_template():
         bio,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": 'attachment; filename="customer_template.xlsx"'},
+    )
+
+
+# Declared BEFORE /{customer_id} so the path is not swallowed by it.
+@router.get("/tickets-export")
+async def export_customer_tickets(
+    search: Optional[str] = None,
+    ticket_state: Optional[str] = Query(None, pattern="^(any|unbilled|has|none)$"),
+    corporate: Optional[str] = Query(None, pattern="^(none|[0-9]+)$"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Every ticket of the listed customers as one sheet — Customer Billing's download.
+
+    THE ROWS ARE THE TICKETS COLUMN'S TOTAL: tickets hard-linked to each customer, billed and
+    unbilled, so "2 / 3" means three rows. Name-only matches are left out, as they are from
+    that count, so one ticket cannot appear under two people who share a name.
+
+    EACH ROW IS BILLED UNDER WHOEVER PAYS. That total counts an employee's tickets that also
+    name their EMPLOYER — and one ticket has one payer (services/billing_calc.py), which for
+    those is the corporate. So such a row is priced at the corporate's markup and addressed
+    to the corporate, exactly as Corporate Billing will charge it; pricing it at the
+    person's own markup would put a figure in the sheet that no invoice will ever carry.
+    """
+    ordered = [c for c, _total, _unbilled in (await db.execute(
+        _customer_list_query(current_user, search, ticket_state, corporate)
+        .order_by(Customer.first_name, Customer.last_name)
+    )).all()]
+    customers = {c.id: c for c in ordered}
+    rank = {c.id: i for i, c in enumerate(ordered)}
+
+    tickets: list[UploadedTicket] = []
+    if customers:
+        tickets = (await db.execute(
+            select(UploadedTicket).where(
+                UploadedTicket.tenant_id == current_user.tenant_id,
+                UploadedTicket.created_by_id == current_user.id,
+                UploadedTicket.customer_id.in_(list(customers)),
+            )
+        )).scalars().all()
+
+    employer_ids = {t.corporate_id for t in tickets if t.corporate_id}
+    employers: dict[int, Corporate] = {}
+    if employer_ids:
+        employers = {c.id: c for c in (await db.execute(
+            select(Corporate).where(
+                Corporate.id.in_(employer_ids),
+                Corporate.tenant_id == current_user.tenant_id,
+                Corporate.created_by_id == current_user.id,
+            )
+        )).scalars().all()}
+
+    pairs = [
+        (t, employers.get(t.corporate_id) or customers[t.customer_id])
+        for t in sorted(tickets, key=lambda t: (rank[t.customer_id], *_booking_order(t)))
+    ]
+    return _xlsx_download(
+        await _export_rows(db, current_user, pairs),
+        f"customer-tickets-{date.today().isoformat()}.xlsx",
+        "Customer Tickets",
     )
 
 
@@ -743,20 +857,29 @@ async def update_customer(
     # under a corporate that already has an Amit is the same duplicate by another route.
     # Judged on what the row will HOLD after this edit, and excused from clashing with
     # the identity it holds right now.
-    if {"first_name", "last_name", "corporate_id", "company"} & data.keys():
+    if "employee_code" in data:
+        data["employee_code"] = _clean_upper(data["employee_code"])
+    if {"first_name", "last_name", "corporate_id", "company",
+            "employee_code"} & data.keys():
         clash = (await CustomerDuplicates.load(db, current_user)).check(
             data.get("first_name", obj.first_name),
             data.get("last_name", obj.last_name),
             data.get("corporate_id", obj.corporate_id),
             data.get("company", obj.company),
-            exclude=CustomerDuplicates.key(
-                obj.first_name, obj.last_name, obj.corporate_id, obj.company
+            data.get("employee_code", obj.employee_code),
+            # Every identity it holds now, so changing the code while keeping the name
+            # is excused, and so is the reverse.
+            exclude=CustomerDuplicates.keys(
+                obj.first_name, obj.last_name, obj.corporate_id, obj.company,
+                obj.employee_code,
             ),
         )
         if clash:
             raise HTTPException(status_code=409, detail=clash)
     if "markup_type" in data:
         data["markup_type"] = _norm_choice(data["markup_type"], _MARKUP_TYPES)
+    if "category_markups" in data:
+        data["category_markups"] = _norm_categories(data["category_markups"])
     if "billing_type" in data:
         data["billing_type"] = _norm_choice(data["billing_type"], _BILLING_TYPES)
     if "state" in data:
@@ -788,16 +911,24 @@ async def delete_customer(
     await db.commit()
 
 
-@router.get("/{customer_id}/sold-tickets", response_model=SoldTicketsResponse)
-async def get_customer_sold_tickets(
-    customer_id: int,
-    date_from: Optional[date] = None,
-    date_to: Optional[date] = None,
-    date_field: str = "ticket",
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    customer = await _get_owned_customer(customer_id, db, current_user)
+async def _sold_tickets(
+    customer: Customer,
+    db: AsyncSession,
+    current_user: User,
+    *,
+    date_from: Optional[date],
+    date_to: Optional[date],
+    date_field: str,
+    category: Optional[str],
+) -> list[UploadedTicket]:
+    """The tickets the Sold Tickets tab lists for this customer.
+
+    Shared by the tab and its XLS download, so the file holds exactly the rows on screen.
+    """
+    try:
+        category_filter = _ticket_category_clause(category)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     fn = (customer.first_name or "").strip().lower()
     ln = (customer.last_name or "").strip().lower()
@@ -823,6 +954,7 @@ async def get_customer_sold_tickets(
             UploadedTicket.tenant_id == current_user.tenant_id,
             UploadedTicket.created_by_id == current_user.id,
             _customer_ticket_scope(customer, conds),
+            *category_filter,
         )
         .order_by(UploadedTicket.created_at.desc())
     )
@@ -845,6 +977,24 @@ async def get_customer_sold_tickets(
                 continue
             in_range.append(t)
         tickets = in_range
+    return list(tickets)
+
+
+@router.get("/{customer_id}/sold-tickets", response_model=SoldTicketsResponse)
+async def get_customer_sold_tickets(
+    customer_id: int,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    date_field: str = "ticket",
+    category: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    customer = await _get_owned_customer(customer_id, db, current_user)
+    tickets = await _sold_tickets(
+        customer, db, current_user,
+        date_from=date_from, date_to=date_to, date_field=date_field, category=category,
+    )
 
     # WHICH GST these rows carry. A customer billing is always a DIRECT sale —
     # customer_ticket_scope excludes any ticket naming a corporate — so the
@@ -856,7 +1006,10 @@ async def get_customer_sold_tickets(
     total_cgst = total_sgst = total_igst = 0.0
     for t in tickets:
         base = _f(t.total_amt) if t.total_amt is not None else _f(t.sell_fare)
-        markup_amount = _compute_markup(base, customer.markup_type, customer.markup_value)
+        # The party's markup for THIS line's category, a fixed one charged per passenger. With
+        # no overrides and one passenger — every line except a multi-pax aggregator booking —
+        # this is exactly the arithmetic it has always been. See services/party_markup.
+        markup_amount, markup_note = _line_markup(base, customer, t)
         gst = _split_gst(base, markup_amount, customer.billing_type, interstate=pos.interstate)
         gst_amount = gst["gst_amount"]
         total = base + markup_amount + gst_amount
@@ -879,6 +1032,11 @@ async def get_customer_sold_tickets(
             booking_class=t.booking_class,
             ticket_date=t.ticket_date,
             ticket_status=t.ticket_status,
+            product_category=t.product_category or "air",
+            booking_ref=t.booking_ref,
+            service_details=t.service_details,
+            pax_count=_pax_of(t),
+            markup_note=markup_note,
             sell_fare=_f(t.sell_fare) if t.sell_fare is not None else None,
             total_amt=_f(t.total_amt) if t.total_amt is not None else None,
             calculated_incentive=_f(t.calculated_incentive) if t.calculated_incentive is not None else None,
@@ -916,6 +1074,36 @@ async def get_customer_sold_tickets(
             total_with_markup=round(total_with_markup, 2),
         ),
         place_of_supply=PlaceOfSupplyRead(**_pos_payload(pos)),
+    )
+
+
+@router.get("/{customer_id}/tickets-export")
+async def export_customer_sold_tickets(
+    customer_id: int,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    date_field: str = "ticket",
+    category: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """One customer's Sold Tickets as the Customer Billing sheet.
+
+    THE ROWS ARE THE TAB'S ROWS, under the same filters: the tickets this person is billed
+    for directly, and untagged ones their name reaches. Twin of
+    corporates.py::export_corporate_sold_tickets.
+    """
+    customer = await _get_owned_customer(customer_id, db, current_user)
+    tickets = await _sold_tickets(
+        customer, db, current_user,
+        date_from=date_from, date_to=date_to, date_field=date_field, category=category,
+    )
+    pairs = [(t, customer) for t in sorted(tickets, key=_booking_order)]
+    person = f"{customer.first_name or ''} {customer.last_name or ''}"
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", person).strip("-").lower() or f"customer-{customer.id}"
+    return _xlsx_download(
+        await _export_rows(db, current_user, pairs),
+        f"{slug}-tickets-{date.today().isoformat()}.xlsx",
     )
 
 
@@ -961,7 +1149,7 @@ async def create_billing(
     # The tickets must actually be THIS customer's. Without this the endpoint accepts
     # any ticket id the caller owns, which makes the selector above decorative.
     names = [(customer.first_name, customer.last_name)]
-    foreign = [t.ticket_number or t.pax_name or str(t.id) for t in tickets
+    foreign = [t.ticket_number or t.booking_ref or t.pax_name or str(t.id) for t in tickets
                if not _ticket_matched_by(t, customer=customer, names=names)]
     if foreign:
         raise HTTPException(
@@ -972,7 +1160,7 @@ async def create_billing(
 
     # A ticket may belong to at most one billing. The UI prevents selecting
     # already-billed rows, so an already-billed ticket here means a stale view.
-    already = [t.ticket_number or str(t.id) for t in tickets if t.is_billed]
+    already = [t.ticket_number or t.booking_ref or str(t.id) for t in tickets if t.is_billed]
     if already:
         raise HTTPException(status_code=400, detail=f"Already billed: {', '.join(already)}. Refresh and try again.")
 
@@ -986,7 +1174,7 @@ async def create_billing(
     total_cgst = total_sgst = total_igst = 0.0
     for t in tickets:
         base = _f(t.total_amt) if t.total_amt is not None else _f(t.sell_fare)
-        cust_markup = _compute_markup(base, customer.markup_type, customer.markup_value)
+        cust_markup, markup_note = _line_markup(base, customer, t)
         addl = addl_map.get(t.id, 0.0)
         disc = disc_map.get(t.id, 0.0)
         total_mk = cust_markup + addl
@@ -1013,6 +1201,8 @@ async def create_billing(
             "passenger": _passenger_name(t),
             "sector": t.sector,
             "ticket_date": t.ticket_date,
+            **_line_identity(t),
+            "markup_note": markup_note,
             "base_amount": round(base, 2),
             "markup_amount": round(cust_markup, 2),
             "additional_markup": round(addl, 2),

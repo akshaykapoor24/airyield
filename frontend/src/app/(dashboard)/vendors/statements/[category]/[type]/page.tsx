@@ -87,6 +87,7 @@ export default function StatementTypePage() {
       requiresSupplier={type.requiresSupplier}
       supportsMapping={type.supportsMapping}
       supportsBilling={type.supportsBilling}
+      billingWorklist={type.billingWorklist}
       doneHint={type.doneHint}
     />
   );

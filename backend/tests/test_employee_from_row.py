@@ -200,6 +200,19 @@ class TestResolverDuplicateCheck(unittest.TestCase):
                    if idx.get(c).corporate_id == 5]
         self.assertEqual(len(blocked), 2)
 
+    def test_a_passenger_never_gets_an_invented_employee_code(self):
+        """A supplier statement carries a passenger name, not a payroll id.
+
+        Generating one would put a fabricated identifier on a real record and collide the
+        first time the customer imports their own HR list. The consequence — that two
+        same-named passengers for one corporate still cannot both be filed from a worklist
+        — is correct: this path cannot tell them apart either.
+        """
+        from app.services.party_dedupe import CustomerDuplicates
+        register = CustomerDuplicates.from_rows([("Rahul", "Sharma", 7, "Acme", None)])
+        # Exactly the four-argument call employee_from_passenger makes.
+        self.assertIsNotNone(register.check("Rahul", "Sharma", 7, "Acme"))
+
 
 if __name__ == "__main__":
     unittest.main()

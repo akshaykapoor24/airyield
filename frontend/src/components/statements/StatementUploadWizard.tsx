@@ -26,6 +26,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   X, Upload, FileSpreadsheet, CheckCircle2, Loader2, Search, AlertTriangle,
   ArrowLeft, ArrowRight, Wand2, Eraser, PartyPopper, Pencil, RotateCcw, Filter,
+  Sparkles,
 } from "lucide-react";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
@@ -68,6 +69,29 @@ type ExtractResp = {
   is_template_match: boolean;
   sample_rows: SampleRow[];
   supplier_name: string | null;
+  /** Null for every type but Third Party API, whose one table holds several vendor shapes
+   *  (MakeMyTrip, TBO). Shown as reassurance on the mapping step and deliberately not
+   *  editable: for a spec-driven type the mapping IS the parser, and the user is looking
+   *  straight at it. `detects_format` true with a null format means "not recognised" —
+   *  which still imports, just without a vendor label. */
+  source_format?: string | null;
+  source_format_label?: string | null;
+  detects_format?: boolean;
+  /** Which free-text field an AI pass may read, and the only fields it may fill. */
+  ai_narration?: AiNarrationCfg | null;
+};
+
+type AiNarrationCfg = { source_field: string; fields: string[]; label: string };
+
+type AiParseResp = {
+  /** The union of fields actually filled — what the review grid must reveal. */
+  fields: string[];
+  /** {rowIndex: {field: value}}, keyed by the same `__index__` we sent. */
+  rows: Record<string, Record<string, string>>;
+  requested_rows: number;
+  parsed_rows: number;
+  confidence: number;
+  warning: string | null;
 };
 
 type SaveResp = {
@@ -167,6 +191,15 @@ export default function StatementUploadWizard({
   // changed is sent, so a 900-row statement carries three edits, not 900 rows of payload.
   const [edits, setEdits] = useState<Record<number, Record<string, string>>>({});
   const [page, setPage] = useState(0);
+
+  // AI narration pass. `aiFields` is what makes the result visible — those fields have no
+  // source column, so without it they would be written to `data` and never shown.
+  // `aiFilled` is only for styling: it separates "the AI put this here" (purple) from "a
+  // person typed this" (amber), and a human touch moves a cell from the first to the second.
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiFields, setAiFields] = useState<Set<string>>(new Set());
+  const [aiFilled, setAiFilled] = useState<Record<number, Set<string>>>({});
+  const [aiResult, setAiResult] = useState<AiParseResp | null>(null);
 
   useEffect(() => {
     api.get<StdResp>(`${apiBase}/standard-columns`)
@@ -271,10 +304,13 @@ export default function StatementUploadWizard({
   }, [columnMap]);
 
   // ── Review ────────────────────────────────────────────────────────────────
-  // Only the fields that are actually mapped are worth showing: a column nobody mapped
-  // has nothing to review.
+  // The fields worth showing: those a column was mapped onto, plus those the AI filled from
+  // the narration. The second half is not cosmetic — an AI-filled field like `train_name`
+  // has NO source column, so without it the value would be sent to the server, stored, and
+  // never once be visible or editable on the screen that exists to review it.
   const reviewCols = useMemo(
-    () => allCols.filter((c) => columnMap[c.field]), [allCols, columnMap]);
+    () => allCols.filter((c) => columnMap[c.field] || aiFields.has(c.field)),
+    [allCols, columnMap, aiFields]);
 
   const valueAt = (r: SampleRow, field: string): string => {
     const edit = edits[r.__index__]?.[field];
@@ -283,6 +319,7 @@ export default function StatementUploadWizard({
     return (src ? r[src] : null) ?? "";
   };
   const isEdited = (r: SampleRow, field: string) => edits[r.__index__]?.[field] !== undefined;
+  const isAiFilled = (r: SampleRow, field: string) => !!aiFilled[r.__index__]?.has(field);
 
   const setCell = (index: number, field: string, value: string, original: string) => {
     setEdits((p) => {
@@ -295,6 +332,75 @@ export default function StatementUploadWizard({
       if (Object.keys(row).length) n[index] = row; else delete n[index];
       return n;
     });
+    // Touching a cell makes it the user's, not the AI's — so it stops being purple. Done
+    // here rather than in the renderer because the distinction is about who last wrote the
+    // value, which only this handler knows.
+    setAiFilled((p) => {
+      const s = p[index];
+      if (!s?.has(field)) return p;
+      const next = new Set(s);
+      next.delete(field);
+      const n = { ...p };
+      if (next.size) n[index] = next; else delete n[index];
+      return n;
+    });
+  };
+
+  // ── The AI narration pass ─────────────────────────────────────────────────
+  const aiCfg = extracted?.ai_narration ?? null;
+  const aiSourceCol = aiCfg ? columnMap[aiCfg.source_field] : undefined;
+
+  const runAi = async () => {
+    if (!extracted || !aiCfg || !aiSourceCol) return;
+    const payload = extracted.sample_rows
+      .map((r) => ({
+        index: r.__index__,
+        text: valueAt(r, aiCfg.source_field),
+        product_type: valueAt(r, "product_type") || null,
+      }))
+      .filter((r) => r.text.trim());
+    if (!payload.length) {
+      toast.error(`No ${aiCfg.label} text to read — every row's ${aiCfg.label} is empty.`);
+      return;
+    }
+    setAiBusy(true);
+    try {
+      // Per-call, not on the shared client: a global timeout this long would also apply to
+      // /confirm, which is the slower request on a large sheet.
+      const { data } = await api.post<AiParseResp>(
+        `${apiBase}/ai-parse`,
+        { rows: payload, source_format: extracted.source_format ?? null },
+        { timeout: 300_000 },
+      );
+      // Merged against the CURRENT edits, then both pieces of state are set from the
+      // result. Deliberately not one nested updater: React may invoke an updater twice,
+      // and a setState nested inside one would then apply its effect twice.
+      const nextEdits = { ...edits };
+      const nextFilled: Record<number, Set<string>> = { ...aiFilled };
+      for (const [key, vals] of Object.entries(data.rows)) {
+        const i = Number(key);
+        const row = { ...(nextEdits[i] ?? {}) };
+        const marks = new Set(nextFilled[i] ?? []);
+        for (const [f, v] of Object.entries(vals)) {
+          if (v == null || v === "") continue;
+          // A value the person already corrected always wins over the model's reading.
+          if (row[f] !== undefined) continue;
+          row[f] = String(v);
+          marks.add(f);
+        }
+        if (Object.keys(row).length) nextEdits[i] = row;
+        if (marks.size) nextFilled[i] = marks;
+      }
+      setAiResult(data);
+      setAiFields(new Set(data.fields));
+      setEdits(nextEdits);
+      setAiFilled(nextFilled);
+      setPage(0);
+      if (data.warning) toast(data.warning, { icon: "⚠️" });
+      else toast.success(`Read ${data.parsed_rows} of ${data.requested_rows} ${aiCfg.label}s.`);
+    } catch (e) {
+      toast.error(errMsg(e, "The AI pass could not be completed. Nothing was changed."));
+    } finally { setAiBusy(false); }
   };
 
   const editedRowCount = Object.keys(edits).length;
@@ -441,6 +547,26 @@ export default function StatementUploadWizard({
           {/* ── 2. Map columns ────────────────────────────────────────────── */}
           {step === "mapping" && extracted && (
             <>
+              {/* Only the multi-vendor types report a format at all. Shown, never editable:
+                  the mapping below IS the parser, so a dropdown here would let the label
+                  and the actual reading disagree with nothing to reconcile them. */}
+              {extracted.detects_format && (
+                <div className={`flex items-start gap-2 px-3 py-2.5 mb-3 rounded-xl border text-xs ${
+                  extracted.source_format_label
+                    ? "border-violet-200 bg-violet-50 text-violet-800"
+                    : "border-slate-200 bg-slate-50 text-slate-600"}`}>
+                  <Sparkles className="w-4 h-4 shrink-0 mt-px" />
+                  <span>
+                    {extracted.source_format_label ? (
+                      <><strong>Detected: a {extracted.source_format_label} statement.</strong>{" "}
+                        The mapping below is already set to that vendor&apos;s columns.</>
+                    ) : (
+                      <><strong>Vendor not recognised.</strong> The rows still import — they
+                        just won&apos;t carry a vendor label. Map the columns below as usual.</>
+                    )}
+                  </span>
+                </div>
+              )}
               <div className={`flex items-start gap-2 px-3 py-2.5 mb-3 rounded-xl border text-xs ${
                 extracted.is_template_match
                   ? "border-emerald-200 bg-emerald-50 text-emerald-800"
@@ -604,19 +730,55 @@ export default function StatementUploadWizard({
                   <div className="flex items-center gap-2 mb-2 text-[11px] text-slate-400">
                     <span>
                       {rows.length.toLocaleString("en-IN")} row{rows.length === 1 ? "" : "s"} ·{" "}
-                      {reviewCols.length} mapped column{reviewCols.length === 1 ? "" : "s"}
+                      {reviewCols.length} column{reviewCols.length === 1 ? "" : "s"}
                     </span>
                     {editedRowCount > 0 && (
                       <span className="inline-flex items-center gap-1 text-amber-700 font-semibold">
                         <Pencil className="w-3 h-3" /> {editedRowCount} row{editedRowCount === 1 ? "" : "s"} edited
-                        <button onClick={() => setEdits({})}
+                        <button onClick={() => { setEdits({}); setAiFilled({}); setAiFields(new Set()); setAiResult(null); }}
                           className="ml-1 inline-flex items-center gap-1 text-slate-400 hover:text-slate-700 font-medium">
                           <RotateCcw className="w-3 h-3" /> undo all
                         </button>
                       </span>
                     )}
+                    {/* Only the types that declare a free-text field get this at all, and
+                        only once that field is actually mapped — there is nothing to read
+                        otherwise, and a button that can only fail is worse than no button. */}
+                    {aiCfg && (
+                      <button
+                        onClick={runAi}
+                        disabled={aiBusy || !aiSourceCol}
+                        title={aiSourceCol
+                          ? `Read the ${aiCfg.label} column and fill in the fields written inside it.`
+                          : `Map the ${aiCfg.label} column first — there is nothing to read yet.`}
+                        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border font-semibold transition-colors ${
+                          aiBusy || !aiSourceCol
+                            ? "border-slate-200 text-slate-300 cursor-not-allowed"
+                            : "border-violet-200 bg-violet-50 text-violet-700 hover:bg-violet-100"}`}
+                      >
+                        <Sparkles className={`w-3 h-3 ${aiBusy ? "animate-pulse" : ""}`} />
+                        {aiBusy ? "Reading…" : "AI Analysis"}
+                      </button>
+                    )}
+                    {aiResult && !aiBusy && (
+                      <span className="inline-flex items-center gap-1 text-violet-700 font-semibold">
+                        {aiResult.parsed_rows} of {aiResult.requested_rows} read
+                      </span>
+                    )}
                     <span className="ml-auto">Page {page + 1} of {pageCount}</span>
                   </div>
+
+                  {aiResult && aiResult.fields.length > 0 && (
+                    <div className="flex items-start gap-2 px-3 py-2.5 mb-2 rounded-xl border border-violet-200 bg-violet-50 text-xs text-violet-800">
+                      <Sparkles className="w-4 h-4 shrink-0 mt-px" />
+                      <span>
+                        <strong>{aiResult.fields.length} field{aiResult.fields.length === 1 ? "" : "s"} were
+                        read out of the {aiCfg?.label}</strong> and added as new columns, shown in violet.
+                        They are ordinary cells — check them, correct anything wrong, and they save with
+                        the rest. {aiResult.warning}
+                      </span>
+                    </div>
+                  )}
 
                   <div className="border border-slate-200 rounded-xl overflow-hidden">
                     <div className="overflow-x-auto max-h-[46vh]">
@@ -624,12 +786,18 @@ export default function StatementUploadWizard({
                         <thead className="sticky top-0">
                           <tr className="bg-slate-50 border-b border-slate-200 text-[10px] uppercase tracking-wide text-slate-400 whitespace-nowrap">
                             <th className="text-left px-2 py-2 font-semibold w-10">#</th>
-                            {reviewCols.map((c) => (
-                              <th key={c.field} className="text-left px-2 py-2 font-semibold"
-                                  title={`${c.field} ← ${columnMap[c.field]}`}>
-                                {c.header}
-                              </th>
-                            ))}
+                            {reviewCols.map((c) => {
+                              const fromAi = !columnMap[c.field] && aiFields.has(c.field);
+                              return (
+                                <th key={c.field}
+                                    className={`text-left px-2 py-2 font-semibold ${fromAi ? "text-violet-500" : ""}`}
+                                    title={fromAi
+                                      ? `${c.field} ← read from the ${aiCfg?.label}`
+                                      : `${c.field} ← ${columnMap[c.field]}`}>
+                                  {c.header}
+                                </th>
+                              );
+                            })}
                           </tr>
                         </thead>
                         <tbody>
@@ -651,14 +819,22 @@ export default function StatementUploadWizard({
                                 const src = columnMap[c.field];
                                 const original = (src ? r[src] : null) ?? "";
                                 const edited = isEdited(r, c.field);
+                                // Violet = the AI read this out of the narration; amber = a
+                                // person typed it. Both are edits and both save identically;
+                                // the colour only says who to ask about a wrong value.
+                                const fromAi = isAiFilled(r, c.field);
                                 return (
                                   <td key={c.field} className="px-1 py-1">
                                     <input
                                       value={valueAt(r, c.field)}
                                       onChange={(e) => setCell(r.__index__, c.field, e.target.value, original)}
-                                      title={edited ? `Was: ${original || "(empty)"}` : undefined}
+                                      title={fromAi
+                                        ? `Read from the ${aiCfg?.label} — check it`
+                                        : edited ? `Was: ${original || "(empty)"}` : undefined}
                                       className={`w-full min-w-[90px] px-1.5 py-1 rounded border bg-transparent focus:outline-none focus:ring-1 focus:ring-blue-400 ${
-                                        edited
+                                        fromAi
+                                          ? "border-violet-300 bg-violet-50 text-violet-900 font-medium"
+                                          : edited
                                           ? "border-amber-300 bg-amber-50 text-amber-900 font-medium"
                                           : "border-transparent text-slate-700 hover:border-slate-200"}`}
                                     />

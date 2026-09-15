@@ -52,6 +52,7 @@ year has to produce the same paper, so nothing here recalculates tax.
 """
 import io
 from datetime import date
+from xml.sax.saxutils import escape as xml_escape
 
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
@@ -63,16 +64,67 @@ from reportlab.platypus import (
 )
 
 from app.services.billing_calc import GST_RATE, HALF_GST_RATE, gst_taxable
+from app.services.markup_categories import CATEGORY_LABELS
 
 _GREY = colors.HexColor("#666666")
 _LINE = colors.HexColor("#999999")
 _BLACK = colors.black
 
 # SAC 998551 — "Reservation services for transportation". The service code an
-# air-ticket agent's invoice carries, and the one on the reference invoice. A
-# constant rather than a column because every line this system bills is that one
-# service; give it a home in the GST master if a workspace ever sells another.
+# air-ticket agent's invoice carries, and the one on the reference invoice. It is
+# still right for a train berth, a bus seat and a car hire booked through an
+# aggregator: all reservation services for transportation.
 SAC_CODE = "998551"
+# A hotel booking is a different service: SAC 998552, "Reservation services for
+# accommodation, cruises and package tours". Keyed on the line's own
+# `product_category`, stored when the billing was raised (billing_calc.line_identity).
+_SAC_BY_CATEGORY = {"hotel": "998552"}
+
+
+def sac_for(category: str | None) -> str:
+    """The SAC a line prints under. A line with no category predates categories: air."""
+    return _SAC_BY_CATEGORY.get(category or "", SAC_CODE)
+
+
+def _line_description(it: dict) -> list[str]:
+    """The Description cell, as Paragraph markup lines.
+
+    An air line prints exactly what it always has. Any other line has no ticket number,
+    airline or sector, so it prints its booking reference, its category, and the one-line
+    description of the stay or journey instead — "Sector: -" on a hotel night tells the
+    customer nothing. Free text is escaped: a property called "Hyatt Regency Pune &
+    Residences" is otherwise invalid Paragraph markup and fails the whole PDF.
+    """
+    category = it.get("product_category")
+    # A multi-passenger booking says so beside the name: its fixed markup was charged per
+    # passenger, and the invoice has to explain a markup six times the agreed figure.
+    pax = it.get("pax_count")
+    pax_note = f" &middot; {pax} pax" if isinstance(pax, int) and pax > 1 else ""
+    if not category or category == "air":
+        return [
+            f"{it.get('ticket_date') or '-'}&nbsp;&nbsp;&nbsp;"
+            f"{it.get('ticket_number') or '-'}&nbsp;&nbsp;&nbsp;"
+            f"{it.get('airline_name') or it.get('airlines_code') or '-'}",
+            f"<b>Passenger</b>&nbsp;&nbsp;{it.get('passenger') or '-'}{pax_note}",
+            f"<b>Sector</b>&nbsp;&nbsp;{it.get('sector') or '-'}",
+        ]
+    label = CATEGORY_LABELS.get(category, category.title())
+    return [
+        f"{_esc(it.get('ticket_date')) or '-'}&nbsp;&nbsp;&nbsp;"
+        f"{_esc(it.get('booking_ref') or it.get('ticket_number')) or '-'}&nbsp;&nbsp;&nbsp;"
+        f"{_esc(label)}",
+        f"<b>Passenger</b>&nbsp;&nbsp;{_esc(it.get('passenger')) or '-'}{pax_note}",
+        f"<b>{_esc(label)}</b>&nbsp;&nbsp;{_esc(it.get('description')) or '-'}",
+    ]
+
+
+# The invoice is set in Helvetica, whose WinAnsi encoding has no arrow: the "→" the billing
+# screens use in "CSMT → NZM" would print as a blank box.
+_PDF_SAFE = str.maketrans({"→": "-"})
+
+
+def _esc(value) -> str:
+    return xml_escape(str(value).translate(_PDF_SAFE)) if value not in (None, "") else ""
 
 # The printed page, minus its margins. Every table below is sized against this,
 # so the widths cannot silently overflow when one is edited.
@@ -432,7 +484,12 @@ def build_billing_pdf(billing, customer, agency: dict | None = None) -> io.Bytes
             Paragraph("IGST", cell_b), "", Paragraph("Total", cell_b),
         ],
         [
-            "", Paragraph("Date of Travel&nbsp;&nbsp;&nbsp;Ticket&nbsp;&nbsp;&nbsp;Number", cell_b),
+            "", Paragraph(
+                "Date of Travel&nbsp;&nbsp;&nbsp;Ticket / Booking Ref"
+                if any((it.get("product_category") or "air") != "air" for it in items)
+                else "Date of Travel&nbsp;&nbsp;&nbsp;Ticket&nbsp;&nbsp;&nbsp;Number",
+                cell_b,
+            ),
             "", "",
             Paragraph("%", cell_b), Paragraph("Amount", cell_b),
             Paragraph("%", cell_b), Paragraph("Amount", cell_b),
@@ -466,16 +523,9 @@ def build_billing_pdf(billing, customer, agency: dict | None = None) -> io.Bytes
         total_amount += amount
         total_taxable += taxable
 
-        desc = [
-            f"{it.get('ticket_date') or '-'}&nbsp;&nbsp;&nbsp;"
-            f"{it.get('ticket_number') or '-'}&nbsp;&nbsp;&nbsp;"
-            f"{it.get('airline_name') or it.get('airlines_code') or '-'}",
-            f"<b>Passenger</b>&nbsp;&nbsp;{it.get('passenger') or '-'}",
-            f"<b>Sector</b>&nbsp;&nbsp;{it.get('sector') or '-'}",
-        ]
         rows.append([
-            Paragraph(SAC_CODE, cell),
-            Paragraph("<br/>".join(desc), cell),
+            Paragraph(sac_for(it.get("product_category")), cell),
+            Paragraph("<br/>".join(_line_description(it)), cell),
             Paragraph(_num(amount), cell), Paragraph(_num(taxable), cell),
             Paragraph(f"{pct['cgst']:.2f}", cell), Paragraph(_num(it.get("cgst")), cell),
             Paragraph(f"{pct['sgst']:.2f}", cell), Paragraph(_num(it.get("sgst")), cell),

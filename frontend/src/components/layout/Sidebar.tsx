@@ -5,12 +5,12 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
   BarChart2, FileText, FolderOpen, FolderOutput, Settings,
-  ChevronLeft, ChevronDown, Send, UserCircle, KeyRound, LogOut,
+  ChevronLeft, ChevronDown, UserCircle, KeyRound, LogOut,
   Plane, Building, Building2, MapPin, Route, Tag, DollarSign, Percent,
   Calculator, CheckSquare,
   Edit3, Users, Shield, GitMerge, Search,
   History, LayoutGrid, Contact, Layers,
-  CreditCard, TrendingUp, Receipt,
+  CreditCard, TrendingUp, Receipt, FileDown,
 } from "lucide-react";
 import { USER_MASTER_NAV, userMasterHref } from "@/lib/userMasterNav";
 import { cn } from "@/lib/utils";
@@ -20,6 +20,7 @@ import { logout as logoutThunk } from "@/store/slices/authSlice";
 import { getUser } from "@/lib/auth";
 import { canManageTenantUsers, canSubmitMasterRequest, isPlatformAdmin } from "@/lib/rbac";
 import ChangePasswordModal from "@/components/layout/ChangePasswordModal";
+import Logo from "@/components/marketing/Logo";
 
 type NavChild = { label: string; href: string; icon: any; badge?: number };
 type NavItem = {
@@ -125,6 +126,8 @@ const TENANT_NAV: NavItem[] = [
     id: "workspace", label: "Workspace", icon: FolderOpen,
     children: [
       { label: "Uploaded documents", href: "/documents", icon: FolderOpen },
+      // One Excel workbook of the Vendors → Statements uploads, generated in the background.
+      { label: "Report download", href: "/report-download", icon: FileDown },
       // TODO: wire badge to real count
       { label: "Approvals", href: "/deals/approvals", icon: CheckSquare, badge: 4 },
     ],
@@ -257,46 +260,42 @@ export default function Sidebar() {
       )}
       style={{ scrollbarWidth: "none" }}
     >
-      {/* Logo */}
+      {/* Logo. Open: the full logo, as wide as the bar allows — its tagline is part of the
+          artwork, so width is the only thing keeping it readable. Collapsed: the mark alone,
+          which is also the button that opens the sidebar again. */}
       <div className={cn(
-        "flex items-center h-16 border-b border-[#e6ebf2] shrink-0 px-3",
-        open ? "justify-between" : "justify-center"
+        "flex items-center h-16 border-b border-[#e6ebf2] shrink-0",
+        open ? "gap-2 px-3" : "justify-center px-2"
       )}>
-        {open && (
-          <div className="flex items-center gap-2.5 overflow-hidden">
-            <div
-              className="rounded-xl p-2 shrink-0"
-              style={{
-                background: platform
-                  ? "linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)"
-                  : "linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)",
-                boxShadow: platform
-                  ? "0 4px 12px rgba(147,51,234,0.30)"
-                  : "0 4px 12px rgba(37,99,235,0.30)",
-              }}
+        {open ? (
+          <>
+            <div className="flex min-w-0 flex-1 flex-col justify-center">
+              <Logo className="h-auto w-full" />
+              {/* A platform admin runs a different console on the same shell; say so. */}
+              {platform && (
+                <p className="mt-0.5 text-[9px] font-semibold uppercase leading-none tracking-widest text-purple-600">
+                  Platform Console
+                </p>
+              )}
+            </div>
+            <button
+              onClick={() => dispatch(toggleSidebar())}
+              title="Collapse sidebar"
+              className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors shrink-0"
             >
-              <Send className="w-4 h-4 text-white" />
-            </div>
-            <div className="leading-none">
-              <span className="font-bold text-xl tracking-tight leading-none">
-                <span className="text-slate-800">Fare</span>
-                <span className="text-orange-500">Qube</span>
-              </span>
-              <p className="text-[10px] leading-none mt-1 text-slate-400 tracking-wide">
-                {platform ? "Platform Console" : "Revenue Intelligence"}
-              </p>
-            </div>
-          </div>
+              <ChevronLeft className="w-4 h-4" />
+            </button>
+          </>
+        ) : (
+          <button
+            onClick={() => dispatch(toggleSidebar())}
+            title="Expand sidebar"
+            className="group relative grid h-10 w-10 place-items-center rounded-lg hover:bg-slate-100 transition-colors"
+          >
+            <Logo variant="mark" className="h-9 w-9 transition-opacity group-hover:opacity-0" />
+            <ChevronLeft className="absolute w-4 h-4 rotate-180 text-slate-500 opacity-0 transition-opacity group-hover:opacity-100" />
+          </button>
         )}
-        <button
-          onClick={() => dispatch(toggleSidebar())}
-          className={cn(
-            "p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors shrink-0",
-            !open && "mx-auto"
-          )}
-        >
-          <ChevronLeft className={cn("w-4 h-4 transition-transform duration-300", !open && "rotate-180")} />
-        </button>
       </div>
 
       {/* Nav */}

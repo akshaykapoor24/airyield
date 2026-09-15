@@ -25,9 +25,11 @@ api/v1/corporates.py), and it must keep being handled there.
 """
 from __future__ import annotations
 
+import copy
+
 __all__ = ["INHERITED_FIELDS", "is_blank", "inherit_from_corporate"]
 
-# The same eight as lib/party.ts INHERITED_FIELDS, in the same order. Note this is more
+# The same nine as lib/party.ts INHERITED_FIELDS, in the same order. Note this is more
 # than the "Billing & Tax" box on the form suggests: phone and email are inherited too,
 # because an invoice raised against the corporate carries the corporate's contact.
 INHERITED_FIELDS = (
@@ -35,6 +37,7 @@ INHERITED_FIELDS = (
     "email",
     "markup_type",
     "markup_value",
+    "category_markups",
     "billing_type",
     "gst_registered",
     "gst_no",
@@ -50,6 +53,13 @@ INHERITED_FIELDS = (
 #   quoted as. An employee saved with markup_type "fixed" and no value, inheriting the
 #   10 from a "percentage 10" corporate, would bill ₹10 a ticket instead of 10%. The
 #   value never travels without its type agreeing.
+#
+# `category_markups` is deliberately NOT a pair, and that is the point of its shape. Each
+# entry holds its own type and value inside one object, so the failure the markup pair
+# guards against — a bare number arriving with nothing to quote it under — cannot happen.
+# It travels whole or not at all, and it does NOT require the employee's default
+# markup_type to agree with the corporate's: "percentage 5 on hotels" means the same thing
+# whatever the employee's default is quoted in.
 _GST_FIELDS = ("gst_registered", "gst_no")
 _MARKUP_FIELDS = ("markup_type", "markup_value")
 _PAIRED_FIELDS = _GST_FIELDS + _MARKUP_FIELDS
@@ -66,8 +76,14 @@ def is_blank(field: str, value) -> bool:
       * `markup_value` is Numeric(14,2), so its blank is None. Zero is NOT blank: a
         deliberate 0% markup has to survive, or the inheritance would silently overwrite
         the one value a user set to mean "no margin on this person".
+      * `category_markups` is a dict, so its blank is "no override for any category" —
+        and NULL, {} and a dict whose entries were all pruned are ONE state. This branch
+        has to come before the `value is None` check below, because the generic
+        `return False` at the end would read {} as NOT blank and refuse to inherit.
     """
     if field == "gst_registered":
+        return not value
+    if field == "category_markups":
         return not value
     if value is None:
         return True
@@ -101,7 +117,13 @@ def inherit_from_corporate(values: dict, corporate) -> dict:
         source = getattr(corporate, field, None)
         if is_blank(field, source):
             continue                      # the corporate has nothing to give either
-        filled[field] = source
+        # COPIED, not shared. `category_markups` is a dict, and this module promises the
+        # value is "copied into the employee's own columns". Handing over the corporate's
+        # own object would have both rows pointing at one dict, so editing the employee's
+        # would silently change the corporate's — and SQLAlchemy's plain JSONB does not
+        # track mutation, so neither would reliably persist. Scalars are immutable and
+        # unaffected.
+        filled[field] = copy.deepcopy(source) if isinstance(source, (dict, list)) else source
 
     # The GST pair. Only inherit when the employee carries no registration of their own;
     # an employee already marked registered keeps their own number, and one deliberately

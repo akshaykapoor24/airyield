@@ -16,12 +16,19 @@ is invisible apart from a warning in the log.
 The local root is resolved against the backend package, NOT the process working
 directory — the API and the Celery worker are separate processes that need not share
 a CWD, and they must agree on where a file landed.
+
+A caller may keep its local copies under a DIFFERENT root by passing ``local_root``.
+Report downloads do (services/report_download/storage.py): UPLOAD_DIR is served as public
+static files by main.py, and a generated report must never be reachable that way. The
+locator format is the same; which root it resolves under is the caller's to supply
+consistently on store, load, delete and local_path.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import re
+import shutil
 from pathlib import Path
 
 from app.config import settings
@@ -53,16 +60,27 @@ def _sanitize(blob_name: str) -> str:
     return "/".join(_ILLEGAL.sub("_", p).strip() or "_" for p in parts)
 
 
-def _local_path(blob_name: str) -> Path:
-    root = _root().resolve()
-    target = (root / _sanitize(blob_name)).resolve()
-    if target != root and root not in target.parents:
+def _local_path(blob_name: str, root: Path | str | None = None) -> Path:
+    base = (Path(root) if root is not None else _root()).resolve()
+    target = (base / _sanitize(blob_name)).resolve()
+    if target != base and base not in target.parents:
         raise ValueError(f"Refusing to resolve {blob_name!r} outside the upload directory.")
     return target
 
 
 def is_local(locator: str | None) -> bool:
     return bool(locator) and locator.startswith(LOCAL_PREFIX)
+
+
+def local_path(locator: str, local_root: Path | str | None = None) -> Path:
+    """Filesystem path of a ``local://`` locator, for serving it with a FileResponse.
+
+    Raises ValueError for a GCS locator (it has no path) or one that would resolve outside
+    the root. Does not check that the file exists.
+    """
+    if not is_local(locator):
+        raise ValueError("Not a locally stored file.")
+    return _local_path(locator[len(LOCAL_PREFIX):], local_root)
 
 
 async def store(content: bytes, blob_name: str, content_type: str, bucket_name: str) -> tuple[str, bool]:
@@ -88,23 +106,64 @@ async def store(content: bytes, blob_name: str, content_type: str, bucket_name: 
     return LOCAL_PREFIX + blob_name, False
 
 
-async def load(locator: str, bucket_name: str) -> bytes:
+async def store_path(
+    path: str | Path,
+    blob_name: str,
+    content_type: str,
+    bucket_name: str,
+    *,
+    local_root: Path | str | None = None,
+    fallback_local: bool = True,
+) -> tuple[str, bool]:
+    """``store`` for a file already on disk; returns (locator, stored_remotely).
+
+    Streams to GCS instead of reading the file into memory. Same fallback contract as
+    ``store``: a remote failure lands the file locally — unless ``fallback_local`` is False,
+    in which case the GCS error propagates (for callers whose readers may run on another host).
+    On the local path the source file is MOVED (it is the caller's temporary build output),
+    so the caller must not expect it to exist afterwards; after a remote store it is left in
+    place for the caller to clean.
+    """
+    blob_name = _sanitize(blob_name)
+    source = Path(path)
+    if bucket_name:
+        try:
+            await gcs.upload_file(str(source), blob_name, content_type, bucket_name)
+            return blob_name, True
+        except Exception as exc:  # noqa: BLE001 — fall back rather than lose the file
+            if not fallback_local:
+                raise
+            logger.warning(
+                "[store] GCS unavailable, falling back to local disk | blob=%s | error: %s",
+                blob_name, exc,
+            )
+    else:
+        logger.warning("[store] No bucket configured, storing locally | blob=%s", blob_name)
+
+    target = _local_path(blob_name, local_root)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(shutil.move, str(source), str(target))
+    logger.info("[store] Stored locally | path=%s | size=%d bytes", target, target.stat().st_size)
+    return LOCAL_PREFIX + blob_name, False
+
+
+async def load(locator: str, bucket_name: str, *, local_root: Path | str | None = None) -> bytes:
     """Read a stored file back, from wherever `store` put it."""
     if is_local(locator):
-        path = _local_path(locator[len(LOCAL_PREFIX):])
+        path = _local_path(locator[len(LOCAL_PREFIX):], local_root)
         if not path.exists():
             raise FileNotFoundError(f"Stored file is missing from local storage: {path}")
         return await asyncio.to_thread(path.read_bytes)
     return await gcs.download_bytes(locator, bucket_name)
 
 
-async def delete(locator: str | None, bucket_name: str) -> None:
+async def delete(locator: str | None, bucket_name: str, *, local_root: Path | str | None = None) -> None:
     """Best-effort delete — a missing file must never block deleting its statement."""
     if not locator:
         return
     if is_local(locator):
         try:
-            _local_path(locator[len(LOCAL_PREFIX):]).unlink(missing_ok=True)
+            _local_path(locator[len(LOCAL_PREFIX):], local_root).unlink(missing_ok=True)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[store] Local delete failed (ignored) | %s | %s", locator, exc)
         return

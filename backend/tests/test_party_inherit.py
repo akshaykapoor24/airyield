@@ -31,6 +31,7 @@ class FakeCorporate:
             "email": "accounts@acme.test",
             "markup_type": "percentage",
             "markup_value": 10,
+            "category_markups": {"hotel": {"type": "fixed", "value": 500}},
             "billing_type": "reseller",
             "gst_registered": True,
             "gst_no": "27ABCDE1234F1Z5",
@@ -93,8 +94,8 @@ class InheritTests(unittest.TestCase):
         self.assertNotIn("markup_value", filled)
 
     def test_nothing_is_invented_when_the_corporate_is_blank_too(self):
-        bare = FakeCorporate(markup_type=None, markup_value=None, billing_type=None,
-                             phone=None, email=None, pan_no=None,
+        bare = FakeCorporate(markup_type=None, markup_value=None, category_markups=None,
+                             billing_type=None, phone=None, email=None, pan_no=None,
                              gst_registered=False, gst_no=None)
         self.assertEqual(inherit_from_corporate(blank_employee(), bare), {})
 
@@ -195,13 +196,63 @@ class GstPairTests(unittest.TestCase):
         self.assertEqual(filled["pan_no"], "ABCDE1234F")
 
 
+class CategoryMarkupTests(unittest.TestCase):
+    """The ninth field. A dict, and the only one that is not a scalar.
+
+    It rides the generic loop rather than `_PAIRED_FIELDS`: each entry carries its own type
+    and value in one object, so the failure the markup pair guards against cannot arise.
+    """
+
+    def test_the_whole_dict_travels_as_one_unit(self):
+        filled = inherit_from_corporate(blank_employee(), FakeCorporate())
+        self.assertEqual(filled["category_markups"],
+                         {"hotel": {"type": "fixed", "value": 500}})
+
+    def test_an_employee_with_any_override_keeps_all_of_theirs(self):
+        """NO MERGE. A per-key merge would hand an employee who set their own Train rate
+        the corporate's Hotel rate too — a partial inheritance the per-field `· inherited`
+        badge cannot show and the user cannot undo."""
+        mine = {"train": {"type": "percentage", "value": 2}}
+        filled = inherit_from_corporate(
+            blank_employee(category_markups=mine), FakeCorporate())
+        self.assertNotIn("category_markups", filled)
+
+    def test_an_empty_dict_is_blank(self):
+        """The trap: without the dict branch in `is_blank`, {} falls through to the generic
+        `return False` and reads as "the employee set something", refusing to inherit."""
+        self.assertTrue(is_blank("category_markups", {}))
+        self.assertTrue(is_blank("category_markups", None))
+        self.assertFalse(is_blank("category_markups", {"hotel": {"type": "fixed", "value": 1}}))
+        filled = inherit_from_corporate(
+            blank_employee(category_markups={}), FakeCorporate())
+        self.assertIn("category_markups", filled)
+
+    def test_the_inherited_dict_is_a_copy_not_the_corporates_object(self):
+        """Sharing one dict between two rows means editing the employee's silently edits
+        the corporate's — and SQLAlchemy's plain JSONB does not track mutation, so neither
+        would reliably persist."""
+        corp = FakeCorporate()
+        filled = inherit_from_corporate(blank_employee(), corp)
+        filled["category_markups"]["hotel"]["value"] = 999
+        self.assertEqual(corp.category_markups["hotel"]["value"], 500)
+
+    def test_it_does_not_need_the_default_markup_type_to_agree(self):
+        """Unlike markup_value, which only travels when the types match. Each entry is
+        self-contained — "fixed ₹500 on hotels" means the same thing whatever the
+        employee's default markup is quoted in — so no pairing guard belongs here."""
+        filled = inherit_from_corporate(
+            blank_employee(markup_type="fixed"), FakeCorporate())   # corporate is percentage
+        self.assertNotIn("markup_value", filled)                    # the pair rule still holds
+        self.assertIn("category_markups", filled)                   # this one is unaffected
+
+
 class FieldListTests(unittest.TestCase):
 
-    def test_the_eight_fields_match_the_frontend_twin(self):
+    def test_the_nine_fields_match_the_frontend_twin(self):
         # lib/party.ts INHERITED_FIELDS. If this fails, the same employee gets different
         # terms depending on whether they were typed in or imported.
         self.assertEqual(INHERITED_FIELDS, (
-            "phone", "email", "markup_type", "markup_value",
+            "phone", "email", "markup_type", "markup_value", "category_markups",
             "billing_type", "gst_registered", "gst_no", "pan_no",
         ))
 

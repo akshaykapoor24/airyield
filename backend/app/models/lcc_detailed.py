@@ -209,6 +209,9 @@ class LccDetailed(Base):
     # Deliberately IDENTICAL per gap type — the gaps endpoint groups on it, and
     # naming the passenger here would make one group per row.
     bill_match_reason:  Mapped[str | None] = mapped_column(String(300), nullable=True)
+    # A human's correction of `pax_count`, from the billing worklist. NULL = the statement's
+    # own figure. A fixed markup is charged per passenger — see party_markup.line_markup.
+    bill_pax_count:     Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
 
     # The idempotency key for re-projection. A real FK, not a bare int like
     # BspStatementRow.matched_deal_id, because a deleted ticket must clear it —

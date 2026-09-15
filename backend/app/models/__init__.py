@@ -68,6 +68,7 @@ from app.models.tenant_airline import TenantAirline
 from app.models.iata_commission import IataCommission
 from app.models.iata_commission_approval import IataCommissionApproval
 from app.models.gst_configuration import GstConfiguration
+from app.models.report_export import ReportExport
 from app.models.plb_accrual import (
     PlbAccrualInput,
     PlbAirlineSetting,
@@ -130,6 +131,7 @@ __all__ = [
     "Agency", "AgencyEntity", "AgencyLoginId", "AgencyTerms", "AgencyLedger",
     "Entity", "LoginId", "TenantAirline", "IataCommission", "IataCommissionApproval",
     "GstConfiguration",
+    "ReportExport",
     "PlbAccrualInput", "PlbAirlineSetting", "PlbAccrualSnapshot",
     # New unified deal schema
     "DealStatement", "Deal",

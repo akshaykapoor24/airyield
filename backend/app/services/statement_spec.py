@@ -17,6 +17,7 @@ from app.services import flown_report as _fr
 from app.services import cta_bta_report as _cb
 from app.services import flat_statement as _flat
 from app.services import ndc_spec as _ndc
+from app.services import tp_api_spec as _tpapi
 
 # ── TGQ HMPR ─────────────────────────────────────────────────────────────────
 # The user's column list MINUS the Tax_TypeN/TaxN pairs (those fold into `taxes`).
@@ -269,6 +270,53 @@ STATEMENT_SPECS: dict[str, dict] = {
         "filters": _TP_LCC_FILTERS,
         "summary": _TP_SUMMARY,
     },
+    # Third Party API — an aggregator (MakeMyTrip, TBO) settles HOTELS, FLIGHTS, TRAINS,
+    # BUSES and CARS on one statement (see services/tp_api_spec.py).
+    #
+    # Spec-driven rather than `parser`-driven, unlike its two siblings above, and for two
+    # reasons specific to it. `flat_statement.REQUIRED_GROUPS` demands a ticket number or a
+    # PNR, which an MMT hotel line does not have — so it needs its own `required_groups`,
+    # which only this path allows. And `_FlatBuilder` takes one `source_format` as a
+    # constructor constant, while this type has two, detected per file.
+    #
+    # `normalize_row` and `detect_format` are new here and are None for every other type.
+    # No `resolve_airline`: most of these rows have no carrier at all. No `drop_row`: a
+    # cancelled booking is still a statement line — it carries a refund and a cancellation
+    # fee.
+    #
+    # `supports_billing` — the SECOND type to opt in, after NDC, but on narrower terms and
+    # the difference is the point. Only FLIGHT rows become tickets: the invoice this product
+    # issues is a flight invoice (billing_pdf hardcodes SAC 998551 "Reservation services for
+    # transportation", its line columns are Ticket Number and Sector, and GST abatement is
+    # keyed on domestic/international AIR sectors), so a hotel night cannot be printed on it
+    # correctly. Hotel/train/bus/car rows are therefore stamped with a `bill_kind` saying
+    # WHY they are out and keep their `bill_amount`, so the worklist reports them with the
+    # money attached instead of dropping them — see services/tp_api_billing_projection.py.
+    # The billing base is `net_amount` (TBO's NET) falling through to `total_paid_amount`
+    # (MMT's tender total); the two are separate fields on purpose, see tp_api_spec's Money
+    # block. Still no commission adapter: an aggregator's hotel and train lines have no
+    # airline deal to price against, and `commission/__init__.py` has no entry for this slug.
+    "tp-api": {
+        "label": "API",
+        "columns": _tpapi.COLUMNS,
+        "aliases": _tpapi.ALIASES,
+        "group_order": _tpapi.GROUP_ORDER,
+        "fold_taxes": False,
+        "supports_mapping": True,
+        "requires_supplier": True,
+        "supports_billing": True,
+        "required_groups": _tpapi.REQUIRED_GROUPS,
+        "advisory_groups": _tpapi.ADVISORY_GROUPS,
+        "filters": _tpapi.FILTERS,
+        "summary": _tpapi.SUMMARY,
+        "money": _tpapi.MONEY_FIELDS,
+        "derive_row": _tpapi.derive,
+        "normalize_row": _tpapi.normalize,
+        "detect_format": _tpapi.detect_format,
+        "format_label": _tpapi.format_label,
+        "stamp_format": _tpapi.stamp_vendor,
+        "ai_narration": _tpapi.AI_NARRATION,
+    },
 }
 
 ADJ_LIKE_SLUGS = tuple(STATEMENT_SPECS)
@@ -411,11 +459,15 @@ def drop_row(slug: str):
 def supports_billing(slug: str) -> bool:
     """Does this type resolve its rows to a party and project them into uploaded_tickets?
 
-    True for NDC only. Opt-in per type exactly like `requires_airline_id` and
+    True for NDC and Third Party API. Opt-in per type exactly like `requires_airline_id` and
     `requires_supplier`: nine slugs share this router and one shared frontend view, and the
     flag is what stops a Billing column and a set of billing endpoints leaking onto the
-    eight that have neither the columns (`_BillingMixin` is on `Ndc` alone) nor the
-    semantics for them. A commission ledger is not an invoice.
+    seven that have neither the columns (`_BillingMixin` is on those two models alone) nor
+    the semantics for them. A commission ledger is not an invoice.
+
+    The two differ in what they bill. NDC bills every settled line, rolling ancillaries up
+    onto their ticket. Third Party API bills only its FLIGHT rows and records why each other
+    product is out — see its entry in STATEMENT_SPECS above.
     """
     s = spec_for(slug)
     return bool(s and s.get("supports_billing"))
@@ -432,6 +484,70 @@ def derive_row(slug: str):
     """
     s = spec_for(slug)
     return (s or {}).get("derive_row")
+
+
+def normalize_row(slug: str):
+    """`(data) -> None`, rewriting the FINAL mapped row in place.
+
+    None for every type but Third Party API. Distinct from `derive_row`, and the distinction
+    is the whole reason it exists: `derive_row` computes NEW fields from the raw line and is
+    spread before the mapping so a mapped column wins, is keyed by source header, and runs
+    before the reviewer's overrides. This runs AFTER all three and rewrites values that are
+    already there — ISO dates, bare numeric strings, one product vocabulary.
+
+    That order is what makes the upload wizard's promise true: "dates and amounts are still
+    normalised after you edit". The `parser` types get the same treatment inside their
+    builder; the spec-driven path stores verbatim strings (services/spec_mapping.py), so a
+    spec-driven type that needs normalization declares it here.
+    """
+    s = spec_for(slug)
+    return (s or {}).get("normalize_row")
+
+
+def detect_format(slug: str):
+    """`([source header, …]) -> source_format | None` for a type with several vendor shapes.
+
+    None for every type but Third Party API. A `parser` type carries one `source_format` as
+    a constant inside its builder; this is for a spec-driven type whose one table holds more
+    than one vendor's export (MakeMyTrip and TBO), where the format is a property of the
+    FILE and so is detected once per upload from the header row.
+
+    Deliberately absent from `flat_statement.CURRENT_SOURCE_FORMATS`: that staleness check
+    compares `source_format` against a single current value, so a type with two legitimate
+    formats would have every batch of one vendor permanently flagged stale. Absent means the
+    check short-circuits, which is the correct behaviour and costs no code.
+    """
+    s = spec_for(slug)
+    return (s or {}).get("detect_format")
+
+
+def format_label(slug: str, source_format: str | None) -> str | None:
+    """The human name of a detected format ("TBO"), or None."""
+    s = spec_for(slug)
+    fn = (s or {}).get("format_label")
+    return fn(source_format) if fn else None
+
+
+def stamp_format(slug: str):
+    """`(data, source_format) -> None`, mirroring the detected vendor into the row, or None.
+
+    The drill-in filter builds `model.data[field].astext`, so a vendor filter needs the value
+    inside `data` — the real `source_format` column cannot be reached that way.
+    """
+    s = spec_for(slug)
+    return (s or {}).get("stamp_format")
+
+
+def ai_narration(slug: str) -> dict | None:
+    """Which free-text field an AI pass may read, and the only fields it may fill.
+
+    None for every type but Third Party API, whose vendor packs a train's whole itinerary
+    into one `NARRATION` sentence that no column mapping can reach inside. Declared on the
+    spec rather than in the AI service so the router can answer "does this type have a
+    free-text field at all?" without importing an OpenAI client.
+    """
+    s = spec_for(slug)
+    return (s or {}).get("ai_narration")
 
 
 def row_filter(slug: str) -> dict | None:

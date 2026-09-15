@@ -23,6 +23,7 @@ from fastapi import (
     APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status,
 )
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import Numeric, case, cast, delete, func, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -43,6 +44,8 @@ from app.services import flat_statement as _flat
 from app.services import sector_split, spec_mapping, spreadsheet, statement_spec as spec
 from app.services import statement_supplier_selection as supplier_selection
 from app.services import tp_airline_resolution as tp_airline
+# Kept under the old private name: tests (test_tp_api_spec) and this router call it so.
+from app.services.statement_display import display_columns as _display_columns, flatten_record
 from app.services.lcc_airline_selection import resolve_for_upload
 
 router = APIRouter()
@@ -252,56 +255,21 @@ def _detect_df(content: bytes, filename: str, score_fn):
     return best[1]
 
 
-def _seg_str(s: dict) -> str:
-    return f"{s.get('route') or ''} {s.get('flight_no') or ''}".strip()
-
-
-def _display_columns(slug: str) -> list[dict]:
-    """Ordered display columns: the spec's own, plus folded/derived/leg extras.
-
-    Single source of truth so `/records` and `/columns` can never drift apart.
-    """
-    parser_name = spec.parser(slug)
-    cols = spec.columns(slug)
-    if parser_name == "lcc":
-        cols = cols + [
-            {"header": "Taxes", "field": "__taxes__"},
-            {"header": "Segments", "field": "__segments__"},
-            {"header": "SSR", "field": "__ssr__"},
-            {"header": "Format", "field": "__format__"},
-        ]
-    elif parser_name:  # any other custom parser (DI / Divided PNR / Flown / Third Party …) is a flat ledger
-        cols = cols + [{"header": "Format", "field": "__format__"}]
-    elif spec.fold_taxes(slug):
-        cols = cols + [{"header": "Taxes", "field": "__taxes__"}]
-
-    # Airline accounting code, lifted out of the ticket-number cell at ingest.
-    tn = spec.ticket_no_config(slug)
-    if tn:
-        col = {"header": tn.get("header", "Airline_Code"), "field": tn.get("code_field", "airline_code")}
-        i = next((k for k, c in enumerate(cols) if c["header"] == tn.get("before")), len(cols))
-        cols = cols[:i] + [col] + cols[i:]
-
-    if spec.split_config(slug):
-        # First, not next to `Sectors`: that sits at column ~48 of 66, where a Leg column
-        # would be invisible without scrolling — and which leg a row is is row identity.
-        cols = [{"header": "Leg", "field": "__leg__"}] + cols
-
-    money = spec.money_fields(slug)
-    if money:
-        cols = [{**c, "kind": "money"} if c["field"] in money else c for c in cols]
-    return cols
-
-
-def _build_rows(model, slug: str, prov: dict, data: dict, taxes: list[dict], seq: int) -> list:
+def _build_rows(model, slug: str, prov: dict, data: dict, taxes: list[dict], seq: int,
+                extra: dict | None = None) -> list:
     """One parsed source line → the model row(s) it becomes.
 
     Shared by upload and re-process so both always produce identical output. For a type
     that declares no `split_sectors` this is a single unchanged row, i.e. exactly the old
     behaviour.
+
+    `extra` is the provenance a spec-driven type on a `_NormalizedBase` table carries and a
+    plain `_StatementBase` one does not — `source_format` and `raw_data`. It is empty for
+    every type that does not declare `detect_format`, and it is only ever passed on the
+    non-splitting branch: no splitting type has those columns.
     """
     if not _splits(model):
-        return [model(**prov, data=data, taxes=taxes)]
+        return [model(**prov, **(extra or {}), data=data, taxes=taxes)]
 
     # The export's own grand-total line: kept (it's the vendor's declared figure, shown in
     # the summary slab) but flagged, so it never behaves like a ticket. Checked before any
@@ -332,6 +300,26 @@ def _build_rows(model, slug: str, prov: dict, data: dict, taxes: list[dict], seq
             orig_taxes=taxes if count > 1 else None,
         ))
     return out
+
+
+def _fmt_extra(model, detect, src_fmt: str | None, row, columns: list[str]) -> dict:
+    """`source_format` + `raw_data` for a spec-driven type whose table carries them.
+
+    `{}` for every type that does not declare `detect_format`, so the eight existing types
+    write exactly the rows they wrote before. The `hasattr` is not belt-and-braces: a
+    spec-driven type could be put on a plain `_StatementBase` table, which has neither
+    column, and passing them would be a TypeError at insert rather than at import.
+
+    `raw_data` is the whole source line keyed by its ORIGINAL header — not the mapped row.
+    That is what makes the mapping recoverable: a column the uploader mapped wrongly, or did
+    not map at all, is still on the row and can be re-read without asking for the file again.
+    """
+    if detect is None or not hasattr(model, "source_format"):
+        return {}
+    return {
+        "source_format": src_fmt,
+        "raw_data": {c: v for c in columns if (v := _clean(row.get(c))) is not None},
+    }
 
 
 async def _clear_commission(db: AsyncSession, slug: str, user: User,
@@ -627,6 +615,13 @@ async def extract_statement(
         raise HTTPException(status_code=400, detail="No columns were found in the file.")
 
     suggested = builder.suggest_mapping(columns)
+    # Null for every type but Third Party API. Shown on the mapping step as reassurance, and
+    # deliberately NOT offered as a dropdown: for a spec-driven type the mapping IS the
+    # parser, so overriding this would write a provenance claim that changes nothing and
+    # contradicts what the user is looking at. Null here means "vendor not recognised",
+    # which the wizard says plainly — the file still imports.
+    detect = spec.detect_format(slug)
+    src_fmt = detect(columns) if detect else None
     # Rows are returned by POSITION, and confirm enumerates identically, so an edit made
     # against row 7 here lands on row 7 there.
     sample = []
@@ -650,9 +645,77 @@ async def extract_statement(
         # A file built from our own Template comes back fully mapped; the wizard says so
         # rather than making the user check 56 dropdowns to find out.
         "is_template_match": len(suggested) >= len(spec.columns(slug)) - 2,
+        "source_format": src_fmt,
+        "source_format_label": spec.format_label(slug, src_fmt),
+        "detects_format": detect is not None,
+        "ai_narration": spec.ai_narration(slug),
         "sample_rows": sample,
         **_supplier_fields(supplier),
     }
+
+
+class AiParseRow(BaseModel):
+    index: int                       # the wizard's own `__index__`
+    text: str
+    product_type: str | None = None  # the mapped hint; far better than making the model guess
+
+
+class AiParseRequest(BaseModel):
+    rows: list[AiParseRow] = Field(default_factory=list)
+    source_format: str | None = None
+
+
+@router.post("/{slug}/ai-parse")
+async def ai_parse_narration(
+    slug: str,
+    body: AiParseRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Read the free-text column and return the fields it contains. Writes NOTHING.
+
+    THE ROWS ARE POSTED, NOT THE FILE, and that is not an optimisation. The parse has to run
+    against the mapping the user is looking at — which column is the narration is client
+    state that exists only between `/extract` and `/confirm` — and the result has to key
+    back onto `__index__` so it can be merged into the review step's per-cell edits. Sending
+    the file instead would mean also sending `column_map`, `header_row` and `file_digest`,
+    i.e. re-implementing `/confirm` to read one column, and would make this a third transfer
+    of a file this router deliberately moves exactly twice (see `_store_original`).
+
+    Because the result lands in that edit map, `/confirm` needs no knowledge of any of this:
+    an AI-proposed value is reviewed, editable and overridable exactly like a typed one.
+    """
+    slug, _model = _resolve(slug)
+    cfg = spec.ai_narration(slug)
+    if not cfg:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{spec.spec_for(slug)['label']} statements have no free-text column to "
+                   f"read — every field on them comes from a column of its own.",
+        )
+    if not settings.OPENAI_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="AI parsing is not configured on this server (OPENAI_API_KEY is unset). "
+                   "The narration column still imports as text — only the fields inside it "
+                   "would have to be filled in by hand.",
+        )
+    if not body.rows:
+        raise HTTPException(status_code=400, detail="No rows were sent to parse.")
+
+    from app.services import ai_client, ai_statement_narration
+
+    try:
+        return await ai_statement_narration.parse_rows(
+            [{"index": r.index, "text": r.text, "product_type": r.product_type}
+             for r in body.rows]
+        )
+    except ai_client.FatalAIError as exc:
+        # Auth/permission: every retry reaches the same answer, so say so once rather than
+        # spending four attempts per chunk to get there.
+        raise HTTPException(
+            status_code=502,
+            detail=f"The AI provider rejected the request: {exc}",
+        ) from exc
 
 
 @router.post("/{slug}/confirm")
@@ -725,6 +788,13 @@ async def confirm_statement(
     normmap = {} if normalized else {c: spec.norm(c) for c in columns}
     drop, rowfilter = spec.drop_row(slug), spec.row_filter(slug)
     derive = spec.derive_row(slug)
+    normalize, stamp_fmt = spec.normalize_row(slug), spec.stamp_format(slug)
+    # The vendor is a property of the FILE, not of a line, so it is detected once from the
+    # header row. None for every type that does not declare `detect_format`, and None for a
+    # declaring type whose file matches no known vendor — which still imports, just without
+    # a vendor label.
+    detect = spec.detect_format(slug)
+    src_fmt = detect(columns) if detect else None
 
     objs, airline_rows, edited_rows, source_rows, excluded_rows = [], 0, 0, 0, 0
     for i, (_, row) in enumerate(df.iterrows()):
@@ -742,6 +812,14 @@ async def confirm_statement(
         # Taxes are folded from the WHOLE row, not from the mapping: a Tax_TypeN/TaxN pair
         # is not a mappable field, and folding here keeps the mapped path and the verbatim
         # `/upload` path producing the same `taxes` array.
+        # Rewrite the FINAL row — after the mapping, after `derive`, and after the
+        # reviewer's overrides. That order is what makes the review step's promise true:
+        # a cell corrected to "13-08-2026" or "1,23,456.78" is normalised exactly as the
+        # file's own value was. None for every type but Third Party API.
+        if normalize is not None:
+            if stamp_fmt is not None:
+                stamp_fmt(data, src_fmt)
+            normalize(data)
         taxes = b["taxes"] if normalized else (_fold_taxes(row, normmap) if fold else [])
         if not data and not taxes:
             continue    # every mapped column empty on this line
@@ -765,7 +843,10 @@ async def confirm_statement(
         else:
             # Shared with `/upload`, so a mapped import and a direct one produce identical
             # rows — including the leg/total flags for the types that split.
-            objs.extend(_build_rows(model, slug, prov, data, taxes, source_rows))
+            objs.extend(_build_rows(
+                model, slug, prov, data, taxes, source_rows,
+                extra=_fmt_extra(model, detect, src_fmt, row, columns),
+            ))
 
     if not objs:
         # Two different failures with the same symptom, and telling them apart is the whole
@@ -881,6 +962,10 @@ async def upload_statement(
             uploaded_at=uploaded_at,
         )
         drop, derive = spec.drop_row(slug), spec.derive_row(slug)
+        normalize, stamp_fmt = spec.normalize_row(slug), spec.stamp_format(slug)
+        detect = spec.detect_format(slug)
+        cols = [str(c) for c in df.columns]
+        src_fmt = detect(cols) if detect else None
         for seq, (_, row) in enumerate(df.iterrows(), start=1):
             data = {field: _clean(row[col]) for col, field in colmap.items()}
             if derive is not None:
@@ -888,6 +973,12 @@ async def upload_statement(
                 extra = derive({n: _clean(row[c]) for c, n in normmap.items()})
                 if extra:
                     data = {**extra, **data}
+            # Same rule and same order as `/confirm`, so a direct upload and a mapped one
+            # store identical values rather than agreeing only on which rows exist.
+            if normalize is not None:
+                if stamp_fmt is not None:
+                    stamp_fmt(data, src_fmt)
+                normalize(data)
             taxes = _fold_taxes(row, normmap) if fold else []
             if not any(v is not None for v in data.values()) and not taxes:
                 continue  # blank row
@@ -898,7 +989,10 @@ async def upload_statement(
                 excluded_rows += 1
                 continue
             source_rows += 1
-            objs.extend(_build_rows(model, slug, prov, data, taxes, seq))
+            objs.extend(_build_rows(
+                model, slug, prov, data, taxes, seq,
+                extra=_fmt_extra(model, detect, src_fmt, row, cols),
+            ))
 
     if not objs:
         rowfilter = spec.row_filter(slug)
@@ -972,39 +1066,9 @@ async def list_records(
     q = select(model).where(*conds).order_by(*order).limit(limit).offset(offset)
     rows = (await db.execute(q)).scalars().all()
 
-    parser_name = spec.parser(slug)
-    fold = spec.fold_taxes(slug)
     split_cfg = spec.split_config(slug)
     cols = _display_columns(slug)
-
-    out_rows = []
-    for r in rows:
-        d = dict(r.data or {})
-        d["id"] = r.id
-        if split_cfg:
-            count = getattr(r, "sector_count", None)
-            d["__leg__"] = f"{r.sector_index}/{count}" if count else ""
-            d["__split__"] = getattr(r, "split_status", None)
-            d["__legs__"] = count
-        if parser_name == "lcc":
-            d["__taxes__"] = " · ".join(
-                f"{t.get('code')} {t.get('amount') or ''}".strip()
-                for t in (r.taxes or []) if t.get("code")
-            )
-            d["__segments__"] = " · ".join(_seg_str(s) for s in (r.segments or []))
-            d["__ssr__"] = " · ".join(
-                f"{s.get('code')} {s.get('amount') or ''}".strip()
-                for s in (r.ssr or []) if s.get("code")
-            )
-            d["__format__"] = r.source_format or ""
-        elif parser_name:
-            d["__format__"] = r.source_format or ""
-        elif fold:
-            d["__taxes__"] = " · ".join(
-                f"{t.get('type')} {t.get('amount') or ''}".strip()
-                for t in (r.taxes or []) if t.get("type")
-            )
-        out_rows.append(d)
+    out_rows = [flatten_record(slug, r) for r in rows]
 
     payload = {"total": total or 0, "limit": limit, "offset": offset, "columns": cols, "rows": out_rows}
 
@@ -1423,6 +1487,23 @@ async def delete_record(slug: str, record_id: int, db: AsyncSession = Depends(ge
         # Its commission figure goes with it — nothing else points at this row id, and a
         # figure describing a row that no longer exists would still be summed.
         await _clear_commission(db, slug, current_user, row_ids=[obj.id])
+        # And its projected ticket, on the two types that have one. `projected_ticket_id` is
+        # ON DELETE SET NULL, so without this the ticket survives in Sold Tickets with no
+        # statement row behind it and no way to reach it — the same orphan `delete_batch`
+        # below already prevents for a whole upload. Refused once invoiced, for that
+        # endpoint's reason: an invoice may not be left quoting a ticket whose provenance is
+        # gone.
+        ticket_id = getattr(obj, "projected_ticket_id", None)
+        if ticket_id is not None:
+            ticket = await db.get(UploadedTicket, ticket_id)
+            if ticket is not None:
+                if ticket.billing_id is not None:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=("This row is on an invoice. Delete that billing before "
+                                "removing the row it was billed from."),
+                    )
+                await db.delete(ticket)
         await db.delete(obj)
     await db.commit()
 

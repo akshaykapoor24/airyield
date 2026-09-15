@@ -5,8 +5,10 @@ import Link from "next/link";
 import { X } from "lucide-react";
 import api from "@/lib/api";
 import {
-  CORPORATE_TYPES, GSTIN_RE, INHERITED_FIELDS, PAN_RE, PARTY,
-  corporateLabel, seedFromCorporate, type InheritedField, type Party, type PartyKind,
+  CORPORATE_TYPES, GSTIN_RE, INHERITED_FIELDS, MARKUP_CATEGORIES, PAN_RE, PARTY,
+  corporateLabel, seedFromCorporate,
+  type CategoryMarkups, type InheritedField, type InheritedValues, type MarkupCategory,
+  type MarkupType, type Party, type PartyKind,
 } from "@/lib/party";
 import { PARTY_ICON } from "@/components/party/icons";
 import { STATE_NAMES } from "@/lib/indiaTax";
@@ -28,6 +30,38 @@ const SECTION = "text-[10px] font-bold text-gray-400 uppercase tracking-widest p
  */
 const INDIVIDUAL = "";
 const LEGACY = "legacy";
+
+/**
+ * One row of the category table AS TYPED. A row is filled in two steps — type, then
+ * value — so its half-way state has to survive a render. It used to be written straight
+ * into `form.category_markups`, which only accepts finished rows, so picking a type
+ * deleted the row again and no category could ever be set.
+ *
+ * `form.category_markups` still only ever holds FINISHED rows: that is what inheritance
+ * compares and what gets saved. These drafts are the screen's copy.
+ */
+type CategoryRow = { type: MarkupType | ""; value: string };
+type CategoryRows = Record<MarkupCategory, CategoryRow>;
+
+function toCategoryRows(markups: CategoryMarkups | null | undefined): CategoryRows {
+  return Object.fromEntries(
+    MARKUP_CATEGORIES.map(({ value }) => {
+      const entry = markups?.[value];
+      return [value, { type: entry?.type ?? "", value: entry?.value != null ? String(entry.value) : "" }];
+    }),
+  ) as CategoryRows;
+}
+
+/** Finished rows only. A type with no number is not a markup yet — handleSave reports it. */
+function fromCategoryRows(rows: CategoryRows): CategoryMarkups {
+  const out: CategoryMarkups = {};
+  for (const { value: slug } of MARKUP_CATEGORIES) {
+    const { type, value } = rows[slug];
+    const num = value.trim() === "" ? NaN : Number(value);
+    if (type && !Number.isNaN(num)) out[slug] = { type, value: num };
+  }
+  return out;
+}
 
 /**
  * A field label, marked when the value below it was copied from a corporate
@@ -90,11 +124,19 @@ export default function PartyModal({
     country: party?.country ?? (isEdit ? "" : "India"),
     phone: party?.phone ?? "",
     email: party?.email ?? "",
-    gst_registered: party?.gst_registered ? "true" : "false",
+    // A NEW corporate starts Registered, since most are; a new employee starts
+    // Unregistered. An existing party keeps what it has.
+    gst_registered: party?.gst_registered || (!isEdit && isCorporate) ? "true" : "false",
     gst_no: party?.gst_no ?? "",
     pan_no: party?.pan_no ?? "",
     markup_type: party?.markup_type ?? "",
     markup_value: party?.markup_value != null ? String(party.markup_value) : "",
+    // The one non-string field on this form. Cloned so editing a cell cannot reach back
+    // into the loaded party object the list is still rendering from.
+    category_markups: (party?.category_markups
+      ? structuredClone(party.category_markups)
+      : {}) as CategoryMarkups,
+    employee_code: party?.employee_code ?? "",
     // Agency on a NEW party, the way `country` defaults to India above. Blank is
     // not a neutral starting point here: billing_calc.compute_gst applies NO GST
     // at all to an unset billing type, so a party onboarded without touching this
@@ -105,6 +147,11 @@ export default function PartyModal({
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  // A NEW party's "agency" above is the form's placeholder, not a choice anyone made — so
+  // an employer's billing type must replace it. Without this, an employee added under a
+  // Reseller corporate was saved as Agency and taxed on the service charge alone. It stops
+  // being a placeholder the moment the user picks a billing type themselves.
+  const [billingIsDefault, setBillingIsDefault] = useState(!isEdit);
 
   // Employer picker (customers only). A row with a company but no corporate_id
   // predates the link, so its text is offered back as its own option.
@@ -141,8 +188,9 @@ export default function PartyModal({
   const inheritedFrom = (key: InheritedField) =>
     inherited.has(key) && selectedCorporate ? corporateLabel(selectedCorporate) : undefined;
 
-  const set = (k: keyof typeof form, v: string) => {
+  const set = (k: keyof typeof form, v: string | CategoryMarkups) => {
     setForm((p) => ({ ...p, [k]: v }));
+    if (k === "billing_type") setBillingIsDefault(false);
     setInherited((prev) => {
       if (!prev.has(k)) return prev;
       const next = new Set(prev);
@@ -151,16 +199,88 @@ export default function PartyModal({
     });
   };
 
+  const categoryCount = Object.keys(form.category_markups).length;
+  const [categoryRows, setCategoryRows] = useState<CategoryRows>(
+    () => toCategoryRows(party?.category_markups),
+  );
+
+  // Does the chosen employer already have someone by this name? A WARNING, never a block:
+  // the server's register is the rule (services/party_dedupe) and it will 409 if this is a
+  // real clash. This just puts the fix — an Employee Code — in front of the user before
+  // they hit Save, rather than after.
+  const [nameTwin, setNameTwin] = useState<string | null>(null);
+  useEffect(() => {
+    const first = form.first_name.trim();
+    if (isCorporate || !first || form.employee_code.trim()) { setNameTwin(null); return; }
+    const corporateId = employer.startsWith("corp:") ? Number(employer.slice(5)) : null;
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      try {
+        const { data } = await api.get<Party[]>("/customers/", {
+          params: { search: first, limit: 50 },
+        });
+        if (cancelled) return;
+        const wanted = `${first} ${form.last_name.trim()}`.trim().toLowerCase();
+        const twin = data.find(
+          (c) =>
+            c.id !== party?.id &&
+            (c.corporate_id ?? null) === corporateId &&
+            `${c.first_name ?? ""} ${c.last_name ?? ""}`.trim().toLowerCase() === wanted,
+        );
+        setNameTwin(twin ? (twin.company || "This workspace") : null);
+      } catch {
+        // A failed lookup must never stand between the user and Save.
+      }
+    }, 400);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [form.first_name, form.last_name, form.employee_code, employer, isCorporate, party?.id]);
+
+  /**
+   * One cell of the category table. The draft keeps whatever was typed; only finished rows
+   * reach `form.category_markups`, because a type with no value, or a value with no type,
+   * bills nothing (billing_calc.compute_markup is inert on both). Setting the type back to
+   * Default is how you return a category to the party's default rate.
+   */
+  const editCategory = (category: MarkupCategory, patch: Partial<CategoryRow>) => {
+    const row = { ...categoryRows[category], ...patch };
+    // Typing a number into a Default row starts an override quoted the way the default is.
+    if (patch.value !== undefined && patch.value.trim() !== "" && !row.type) {
+      row.type = form.markup_type === "fixed" ? "fixed" : "percentage";
+    }
+    if (!row.type) row.value = "";
+    const rows = { ...categoryRows, [category]: row };
+    setCategoryRows(rows);
+    set("category_markups", fromCategoryRows(rows));
+  };
+
+  /** What a Default row bills at, shown in its empty value box. */
+  const defaultMarkupHint =
+    form.markup_type && form.markup_value.trim()
+      ? `Default ${form.markup_type === "fixed" ? `₹${form.markup_value}` : `${form.markup_value}%`}`
+      : "Default";
+
   /** Switching employer re-seeds the inherited fields — see seedFromCorporate. */
   const selectEmployer = (next: string) => {
     setEmployer(next);
     const corporate = corporates.find((c) => `corp:${c.id}` === next) ?? null;
     const current = Object.fromEntries(
       INHERITED_FIELDS.map((k) => [k, form[k]])
-    ) as Record<InheritedField, string>;
-    const seeded = seedFromCorporate(current, inherited, corporate);
+    ) as InheritedValues;
+    // The placeholder billing type is offered up for replacement like a held value.
+    const replaceable = billingIsDefault ? new Set([...inherited, "billing_type"]) : inherited;
+    const seeded = seedFromCorporate(current, replaceable, corporate);
+    if (billingIsDefault && !seeded.values.billing_type) {
+      // The employer has no billing type (or there is no employer): keep the safe default,
+      // and do not mark it as coming from the corporate.
+      seeded.values.billing_type = "agency";
+      seeded.held.delete("billing_type");
+    }
     setForm((prev) => ({ ...prev, ...seeded.values }));
     setInherited(seeded.held as Set<string>);
+    // Re-seeding hands back the same object when it left the categories alone.
+    if (seeded.values.category_markups !== current.category_markups) {
+      setCategoryRows(toCategoryRows(seeded.values.category_markups));
+    }
   };
 
   // A corporate is identified by its name; a customer by the person's first name.
@@ -171,25 +291,33 @@ export default function PartyModal({
       setError(isCorporate ? "Corporate name is required." : "First name is required.");
       return;
     }
+    // Place of supply falls back to the state whenever there is no GSTIN, so a corporate
+    // without one would bill GST that cannot be split into CGST + SGST or IGST.
+    if (isCorporate && !form.state.trim()) {
+      setError("State is required. It decides whether this corporate's invoices carry CGST + SGST or IGST.");
+      return;
+    }
     if (form.markup_value && isNaN(Number(form.markup_value))) {
       setError("Markup value must be a number.");
       return;
     }
-    // A corporate is always registered — the choice is not offered, so it cannot
-    // be read off the form. See the GST block below for why.
-    const registered = isCorporate || form.gst_registered === "true";
-    const gstNo = form.gst_no.trim().toUpperCase();
-    const panNo = form.pan_no.trim().toUpperCase();
-    if (isCorporate && !gstNo) {
+    const unfinished = MARKUP_CATEGORIES.filter(({ value }) => {
+      const row = categoryRows[value];
+      return row.type && (row.value.trim() === "" || Number.isNaN(Number(row.value)));
+    });
+    if (unfinished.length) {
       setError(
-        "GST No is required for a corporate. It decides whether the invoice carries " +
-        "CGST + SGST or IGST, and the corporate cannot claim input credit without it."
+        `Enter a markup value for ${unfinished.map((c) => c.label).join(", ")}, or set it back to Default.`
       );
       return;
     }
+    const registered = form.gst_registered === "true";
+    const gstNo = form.gst_no.trim().toUpperCase();
+    const panNo = form.pan_no.trim().toUpperCase();
     if (registered && !GSTIN_RE.test(gstNo)) {
       setError(
-        `A valid 15-character GST No is required for registered ${cfg.masterPlural.toLowerCase()} (e.g. 27ABCDE1234F1Z5).`
+        `A valid 15-character GST No is required for a registered ${cfg.masterSingular.toLowerCase()} ` +
+        "(e.g. 27ABCDE1234F1Z5). If they have none, choose Unregistered."
       );
       return;
     }
@@ -208,6 +336,9 @@ export default function PartyModal({
       pan_no: panNo || null,
       markup_type: form.markup_type || null,
       markup_value: form.markup_value ? Number(form.markup_value) : null,
+      // null, not {}, so the column stays NULL — the server treats the two as one
+      // state and this keeps the wire honest about which it is.
+      category_markups: categoryCount ? form.category_markups : null,
       billing_type: form.billing_type || null,
     };
     // The two routers take different payloads: /corporates/ has no person
@@ -227,6 +358,7 @@ export default function PartyModal({
           ...shared,
           first_name: form.first_name.trim(),
           last_name: form.last_name.trim() || null,
+          employee_code: form.employee_code.trim().toUpperCase() || null,
           title: form.title.trim() || null,
           // The only geographic field `customers` has, and it exists for place
           // of supply on a direct bill. Cleared when they have a GSTIN, which
@@ -310,6 +442,30 @@ export default function PartyModal({
                 </div>
               </div>
 
+              <div>
+                <label className={LABEL}>Employee Code</label>
+                <input
+                  value={form.employee_code}
+                  onChange={(e) => set("employee_code", e.target.value.toUpperCase())}
+                  placeholder="e.g. EMP-042 (optional)"
+                  maxLength={50}
+                  className={INPUT}
+                />
+                {/* The only field that can tell two people of one name apart: every other
+                    detail on this form is either the name itself or inherited from their
+                    corporate, so colleagues legitimately share it. */}
+                {nameTwin ? (
+                  <p className="text-[10px] text-amber-600 mt-1">
+                    <strong>{nameTwin}</strong> already has someone by this name. Give this
+                    one an Employee Code so bills and pickers can tell them apart.
+                  </p>
+                ) : (
+                  <p className="text-[10px] text-gray-400 mt-1">
+                    Your own reference for this person. Needed only when two of them share a name.
+                  </p>
+                )}
+              </div>
+
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className={LABEL}>Company</label>
@@ -386,8 +542,19 @@ export default function PartyModal({
                   <input value={form.city} onChange={(e) => set("city", e.target.value)} placeholder="e.g. Mumbai" className={INPUT} />
                 </div>
                 <div>
-                  <label className={LABEL}>State</label>
-                  <input value={form.state} onChange={(e) => set("state", e.target.value)} placeholder="e.g. Maharashtra" className={INPUT} />
+                  {/* Required, and a picker rather than free text: place of supply matches
+                      the state to a GSTIN state code, so a spelling it cannot read is as
+                      good as no state — and for an Unregistered corporate the state is the
+                      only thing it has to go on. */}
+                  <label className={LABEL}>State *</label>
+                  <select value={form.state} onChange={(e) => set("state", e.target.value)} className={INPUT}>
+                    <option value="">— Select state —</option>
+                    {/* A spelling stored before this was a picker would otherwise vanish. */}
+                    {form.state && !STATE_NAMES.includes(form.state) && (
+                      <option value={form.state}>{form.state}</option>
+                    )}
+                    {STATE_NAMES.map((s) => <option key={s} value={s}>{s}</option>)}
+                  </select>
                 </div>
               </div>
 
@@ -408,13 +575,14 @@ export default function PartyModal({
                 </div>
               </div>
 
-              <p className={SECTION}>Billing &amp; Tax</p>
             </>
           )}
 
+          <p className={SECTION}>Billing &amp; Tax</p>
+
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <FieldLabel text="Markup Type" from={inheritedFrom("markup_type")} />
+              <FieldLabel text="Default Markup Type" from={inheritedFrom("markup_type")} />
               <select value={form.markup_type} onChange={(e) => set("markup_type", e.target.value)} className={INPUT}>
                 <option value="">— Select —</option>
                 <option value="percentage">Percentage (%)</option>
@@ -423,7 +591,7 @@ export default function PartyModal({
             </div>
             <div>
               <FieldLabel
-                text={`Markup Value ${form.markup_type === "percentage" ? "(%)" : form.markup_type === "fixed" ? "(₹)" : ""}`.trim()}
+                text={`Default Markup Value ${form.markup_type === "percentage" ? "(%)" : form.markup_type === "fixed" ? "(₹)" : ""}`.trim()}
                 from={inheritedFrom("markup_value")}
               />
               <input
@@ -434,6 +602,46 @@ export default function PartyModal({
                 className={INPUT}
               />
             </div>
+          </div>
+
+          <div>
+            <FieldLabel
+              text={`Markup by category${categoryCount ? ` · ${categoryCount} set` : ""}`}
+              from={inheritedFrom("category_markups")}
+            />
+            <div className="rounded-lg border border-gray-200 divide-y divide-gray-100">
+              {MARKUP_CATEGORIES.map(({ value, label }) => {
+                const row = categoryRows[value];
+                return (
+                  <div key={value} className="grid grid-cols-[4.5rem_1fr_1fr] gap-2 items-center px-2.5 py-1.5">
+                    <span className="text-xs font-medium text-gray-600">{label}</span>
+                    <select
+                      value={row.type}
+                      onChange={(e) => editCategory(value, { type: e.target.value as MarkupType | "" })}
+                      className={INPUT + " py-1 text-xs"}
+                    >
+                      {/* How you CLEAR an override — the top-level select has no such option. */}
+                      <option value="">Default</option>
+                      <option value="percentage">Percentage (%)</option>
+                      <option value="fixed">Fixed (₹)</option>
+                    </select>
+                    <input
+                      type="number"
+                      step="any"
+                      value={row.value}
+                      onChange={(e) => editCategory(value, { value: e.target.value })}
+                      placeholder={row.type === "fixed" ? "e.g. 500" : row.type ? "e.g. 5" : defaultMarkupHint}
+                      className={INPUT + " py-1 text-xs"}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+            <p className="text-[10px] text-gray-400 mt-1">
+              A category left on Default uses the default markup above. Air rates apply to
+              ticket billing today; Hotel, Train, Bus, Car and MICE are saved now and apply
+              to those bills as they come online.
+            </p>
           </div>
 
           <div>
@@ -455,13 +663,11 @@ export default function PartyModal({
             </p>
           </div>
 
-          {/* A CORPORATE MUST HAVE A GSTIN, so it is not offered the choice —
-              the registration decides whether its invoices carry CGST + SGST or
-              IGST, and it cannot claim input credit on a bill without one. A
-              customer keeps the Registered / Unregistered choice: an individual
-              traveller genuinely may not be registered. */}
-          <div className="grid grid-cols-2 gap-3">
-            {!isCorporate && (
+          {/* Registered / Unregistered for BOTH kinds. A GST No is asked for, and
+              required, only when Registered — some corporates genuinely have none,
+              and then the State decides CGST + SGST vs IGST instead. */}
+          <div>
+            <div className="grid grid-cols-2 gap-3">
               <div>
                 <FieldLabel text="GST Registration" from={inheritedFrom("gst_registered")} />
                 <select
@@ -472,28 +678,29 @@ export default function PartyModal({
                   }}
                   className={INPUT}
                 >
-                  <option value="false">Unregistered</option>
                   <option value="true">Registered</option>
+                  <option value="false">Unregistered</option>
                 </select>
               </div>
-            )}
-            {(isCorporate || form.gst_registered === "true") && (
-              <div>
-                <FieldLabel text="GST No *" from={inheritedFrom("gst_no")} />
-                <input
-                  value={form.gst_no}
-                  onChange={(e) => set("gst_no", e.target.value.toUpperCase())}
-                  placeholder="27ABCDE1234F1Z5"
-                  maxLength={15}
-                  className={`${INPUT} uppercase`}
-                />
-                {isCorporate && (
-                  <p className="text-[10px] text-gray-400 mt-1">
-                    Required. It decides whether this corporate&apos;s invoices carry
-                    CGST + SGST or IGST.
-                  </p>
-                )}
-              </div>
+              {form.gst_registered === "true" && (
+                <div>
+                  <FieldLabel text="GST No *" from={inheritedFrom("gst_no")} />
+                  <input
+                    value={form.gst_no}
+                    onChange={(e) => set("gst_no", e.target.value.toUpperCase())}
+                    placeholder="27ABCDE1234F1Z5"
+                    maxLength={15}
+                    className={`${INPUT} uppercase`}
+                  />
+                </div>
+              )}
+            </div>
+            {isCorporate && (
+              <p className="text-[10px] text-gray-400 mt-1">
+                {form.gst_registered === "true"
+                  ? "Its GSTIN decides whether this corporate's invoices carry CGST + SGST or IGST."
+                  : "No GSTIN, so the State above decides whether its invoices carry CGST + SGST or IGST."}
+              </p>
             )}
           </div>
 

@@ -20,6 +20,12 @@
 
 export type MarkupType = "percentage" | "fixed";
 export type BillingType = "reseller" | "agency";
+/** Slugs, not labels — see MARKUP_CATEGORIES below and the server twin. */
+export type MarkupCategory = "air" | "hotel" | "train" | "bus" | "car" | "mice";
+/** Per-category overrides of a party's default markup. Absent = "as usual", never "free". */
+export type CategoryMarkups = Partial<
+  Record<MarkupCategory, { type: MarkupType; value: number }>
+>;
 
 export type Party = {
   id: number;
@@ -55,7 +61,14 @@ export type Party = {
   pan_no: string | null;
   markup_type: MarkupType | null;
   markup_value: number | null;
+  /** Per-category overrides of the two above. Null/absent means "no overrides". */
+  category_markups?: CategoryMarkups | null;
   billing_type: BillingType | null;
+  /** Customer only — the customer's own id for this person (a payroll or staff number).
+   *  Optional, unique per workspace when set, and the ONLY field that can tell two
+   *  employees of one name apart: everything else is either the name or inherited from
+   *  their corporate. */
+  employee_code?: string | null;
   is_active: boolean;
   /**
    * Tickets HARD-LINKED to this party — uploaded_tickets.customer_id for a customer,
@@ -116,7 +129,7 @@ export const PARTY: Record<PartyKind, PartyConfig> = {
     detailHref: (id) => `/customers/${id}`,
     templateFile: "customer_template.xlsx",
     templateColumns:
-      "FIRST_NAME, LAST_NAME, COMPANY, TITLE, PHONE, EMAIL, GST_REGISTERED (Registered|Unregistered), GST_NO, PAN_NO, MARKUP_TYPE (percentage|fixed), MARKUP_VALUE, BILLING_TYPE (reseller|agency)",
+      "FIRST_NAME, LAST_NAME, EMPLOYEE_CODE, COMPANY, TITLE, PHONE, EMAIL, GST_REGISTERED (Registered|Unregistered), GST_NO, PAN_NO, MARKUP_TYPE (percentage|fixed), MARKUP_VALUE, BILLING_TYPE (reseller|agency), then optional AIR / HOTEL / TRAIN / BUS / CAR / MICE _MARKUP_TYPE + _MARKUP_VALUE",
     templateNote:
       "COMPANY is matched to Corporate Master by name — an exact match links the employee to that corporate AND fills in any markup, billing, GST, PAN, phone or email you left blank, from that corporate. Anything you do fill in is kept. No match is left as an individual.",
     emailPlaceholder: "customer@email.com",
@@ -135,7 +148,7 @@ export const PARTY: Record<PartyKind, PartyConfig> = {
     detailHref: (id) => `/corporates/${id}`,
     templateFile: "corporate_template.xlsx",
     templateColumns:
-      "COMPANY, CORPORATE_TYPE, PHONE, EMAIL, ADDRESS, CITY, STATE, PINCODE, COUNTRY, GST_REGISTERED (Registered|Unregistered), GST_NO, PAN_NO, MARKUP_TYPE (percentage|fixed), MARKUP_VALUE, BILLING_TYPE (reseller|agency)",
+      "COMPANY, CORPORATE_TYPE, PHONE, EMAIL, ADDRESS, CITY, STATE (required), PINCODE, COUNTRY, GST_REGISTERED (Registered|Unregistered), GST_NO (required when Registered), PAN_NO, MARKUP_TYPE (percentage|fixed), MARKUP_VALUE, BILLING_TYPE (reseller|agency), then optional AIR / HOTEL / TRAIN / BUS / CAR / MICE _MARKUP_TYPE + _MARKUP_VALUE",
     emailPlaceholder: "corporate@email.com",
   },
 };
@@ -145,18 +158,18 @@ export const PARTY: Record<PartyKind, PartyConfig> = {
  * them in step with backend/app/api/v1/corporates.py:_CORPORATE_TYPES, which
  * also maps the spellings people type into an Excel import onto these.
  */
-export const CORPORATE_TYPES: { value: string; label: string }[] = [
-  { value: "proprietorship",  label: "Proprietorship / Proprietary Firm" },
-  { value: "partnership",     label: "Partnership Firm" },
-  { value: "llp",             label: "LLP (Limited Liability Partnership)" },
-  { value: "private_limited", label: "Private Limited Company" },
-  { value: "public_limited",  label: "Public Limited Company" },
-  { value: "opc",             label: "One Person Company (OPC)" },
-  { value: "huf",             label: "HUF (Hindu Undivided Family)" },
-  { value: "trust",           label: "Trust" },
-  { value: "society",         label: "Society / NGO" },
-  { value: "government",      label: "Government / PSU" },
-  { value: "other",           label: "Other" },
+export const CORPORATE_TYPES: { value: string; label: string; short: string }[] = [
+  { value: "proprietorship",  label: "Proprietorship / Proprietary Firm",   short: "Proprietorship" },
+  { value: "partnership",     label: "Partnership Firm",                    short: "Partnership" },
+  { value: "llp",             label: "LLP (Limited Liability Partnership)", short: "LLP" },
+  { value: "private_limited", label: "Private Limited Company",             short: "Pvt Ltd" },
+  { value: "public_limited",  label: "Public Limited Company",              short: "Public Ltd" },
+  { value: "opc",             label: "One Person Company (OPC)",            short: "OPC" },
+  { value: "huf",             label: "HUF (Hindu Undivided Family)",        short: "HUF" },
+  { value: "trust",           label: "Trust",                               short: "Trust" },
+  { value: "society",         label: "Society / NGO",                       short: "Society / NGO" },
+  { value: "government",      label: "Government / PSU",                    short: "Govt / PSU" },
+  { value: "other",           label: "Other",                               short: "Other" },
 ];
 
 export function corporateTypeLabel(value: string | null | undefined): string {
@@ -164,9 +177,63 @@ export function corporateTypeLabel(value: string | null | undefined): string {
   return CORPORATE_TYPES.find((t) => t.value === value)?.label ?? value;
 }
 
+/** The legal form in a word or two, for a list cell. "" when unset. */
+export function corporateTypeShortLabel(value: string | null | undefined): string {
+  if (!value) return "";
+  return CORPORATE_TYPES.find((t) => t.value === value)?.short ?? value;
+}
+
 // Shared with ProfileInfoSection / signup: GSTIN = 15 chars, PAN = 10 chars.
 export const PAN_RE = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
 export const GSTIN_RE = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
+
+/**
+ * The six things a party can be quoted a different markup on.
+ *
+ * Keep them in step with backend/app/services/markup_categories.py:MARKUP_CATEGORIES,
+ * exactly as CORPORATE_TYPES is kept in step with corporates.py:_CORPORATE_TYPES. The
+ * SLUGS are what travel on the wire and are stored as the keys of `category_markups`;
+ * the labels are only ever displayed.
+ *
+ * "air", not "flight": the statement parser's PRODUCT_VALUES uses Title-Case "Flight" as
+ * display text, but every config slug in this product is lowercase. The server's
+ * CATEGORY_ALIASES maps between them.
+ */
+export const MARKUP_CATEGORIES: { value: MarkupCategory; label: string }[] = [
+  { value: "air", label: "Air" },
+  { value: "hotel", label: "Hotel" },
+  { value: "train", label: "Train" },
+  { value: "bus", label: "Bus" },
+  { value: "car", label: "Car" },
+  { value: "mice", label: "MICE" },
+];
+
+/** Each override as its own "Hotel ₹500", in form order — for chips. */
+export function categoryMarkupParts(p: Party): string[] {
+  const set = p.category_markups ?? {};
+  return MARKUP_CATEGORIES.flatMap(({ value, label }) => {
+    const entry = set[value];
+    if (!entry || entry.value == null || !entry.type) return [];
+    return [`${label} ${entry.type === "percentage" ? `${entry.value}%` : `₹${entry.value}`}`];
+  });
+}
+
+/** "Hotel ₹500 · Train 0%" — the overrides in one line, for a list cell or a detail row. */
+export function categoryMarkupLabel(p: Party): string {
+  return categoryMarkupParts(p).join(" · ");
+}
+
+/**
+ * An employee in a picker. The same problem `agencyLabel` solves, and the same shape of
+ * answer: two people of one name under one employer are legal now (they were refused
+ * outright before services/party_dedupe grew the code facet), and a dropdown keyed on the
+ * DISPLAY STRING resolves both to whichever `find` reaches first — silently tagging the
+ * ticket to the wrong person. The code is what separates them.
+ */
+export function customerLabel(p: Party): string {
+  const name = partyName(p);
+  return p.employee_code ? `${name} · ${p.employee_code}` : name;
+}
 
 export function markupTypeLabel(p: Party): string {
   if (!p.markup_type) return "—";
@@ -226,15 +293,36 @@ export function corporateLabel(p: Party): string {
  * and really is kept in sync; see models/customer.py for why.)
  */
 export const INHERITED_FIELDS = [
-  "phone", "email", "markup_type", "markup_value",
+  "phone", "email", "markup_type", "markup_value", "category_markups",
   "billing_type", "gst_registered", "gst_no", "pan_no",
 ] as const;
 
 export type InheritedField = (typeof INHERITED_FIELDS)[number];
 
-/** Form values are all strings; GST Registration's empty state is "false", not "". */
-export function isBlankInherited(key: InheritedField, value: string): boolean {
-  return key === "gst_registered" ? value !== "true" : value.trim() === "";
+/** Inherited together or not at all — party_inherit._PAIRED_FIELDS. */
+const PAIRED_FIELDS: ReadonlySet<InheritedField> = new Set([
+  "gst_registered", "gst_no", "markup_type", "markup_value",
+]);
+
+/**
+ * Form values are strings — except `category_markups`, the one inherited field that is not
+ * a text input. Keeping it in the same record is what lets `seedFromCorporate`'s loop stay
+ * a single generic pass over INHERITED_FIELDS, exactly as the server's does.
+ */
+export type InheritedValues =
+  Record<Exclude<InheritedField, "category_markups">, string> &
+  { category_markups: CategoryMarkups };
+
+/** GST Registration's empty state is "false", not ""; category markups' is an empty object.
+ *  Mirrors party_inherit.is_blank, including its dict branch. */
+export function isBlankInherited(
+  key: InheritedField, value: string | CategoryMarkups,
+): boolean {
+  if (key === "category_markups") {
+    return Object.keys((value as CategoryMarkups) ?? {}).length === 0;
+  }
+  if (key === "gst_registered") return value !== "true";
+  return (value as string).trim() === "";
 }
 
 /**
@@ -248,15 +336,21 @@ export function isBlankInherited(key: InheritedField, value: string): boolean {
  * Returns the new values and the new held-set; nothing is mutated.
  */
 export function seedFromCorporate(
-  current: Record<InheritedField, string>,
+  current: InheritedValues,
   held: ReadonlySet<string>,
   corporate: Party | null,
-): { values: Record<InheritedField, string>; held: Set<InheritedField> } {
-  const source: Record<InheritedField, string> = {
+): { values: InheritedValues; held: Set<InheritedField> } {
+  const source: InheritedValues = {
     phone: corporate?.phone ?? "",
     email: corporate?.email ?? "",
     markup_type: corporate?.markup_type ?? "",
     markup_value: corporate?.markup_value != null ? String(corporate.markup_value) : "",
+    // CLONED, not shared — the same reason party_inherit.py deep-copies it. Handing over
+    // the corporate's own object would have the form and the loaded corporate pointing at
+    // one dict, so editing a cell here would silently edit the corporate in the list.
+    category_markups: corporate?.category_markups
+      ? (structuredClone(corporate.category_markups) as CategoryMarkups)
+      : {},
     billing_type: corporate?.billing_type ?? "",
     gst_registered: corporate?.gst_registered ? "true" : "false",
     gst_no: corporate?.gst_no ?? "",
@@ -264,10 +358,37 @@ export function seedFromCorporate(
   };
   const values = { ...current };
   const nextHeld = new Set<InheritedField>();
-  for (const key of INHERITED_FIELDS) {
-    if (!held.has(key) && !isBlankInherited(key, current[key])) continue;   // theirs, not ours
-    values[key] = source[key];
+  /** Still blank, or still holding the last corporate's value — ours to replace. */
+  const free = (key: InheritedField) => held.has(key) || isBlankInherited(key, current[key]);
+  const take = (key: InheritedField) => {
+    (values as Record<string, unknown>)[key] = source[key];
     if (corporate) nextHeld.add(key);
+  };
+
+  for (const key of INHERITED_FIELDS) {
+    if (PAIRED_FIELDS.has(key) || !free(key)) continue;
+    // `category_markups` travels WHOLE, so an employee who set any override keeps all of
+    // theirs — no per-key merge, matching the server.
+    take(key);
+  }
+
+  // THE TWO PAIRS are decided together, exactly as party_inherit.inherit_from_corporate
+  // decides them — the form and the import must give one employee the same terms.
+  //
+  // GST: only when NEITHER half is the user's own. Someone already marked Registered keeps
+  // their registration, and is not handed the employer's GSTIN to go with it.
+  if (free("gst_registered") && free("gst_no")) {
+    take("gst_registered");
+    take("gst_no");
+  }
+  // Markup: the type as usual, but the VALUE only under the corporate's own type. An
+  // employee on "Fixed" taking a "Percentage 10" corporate's 10 would bill ₹10 a ticket
+  // instead of 10%. A value held from the previous corporate is cleared rather than kept
+  // under a type it was never quoted in.
+  if (free("markup_type")) take("markup_type");
+  if (free("markup_value")) {
+    if (values.markup_type && values.markup_type === source.markup_type) take("markup_value");
+    else values.markup_value = "";
   }
   return { values, held: nextHeld };
 }

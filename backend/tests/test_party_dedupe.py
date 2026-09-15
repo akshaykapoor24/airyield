@@ -144,6 +144,121 @@ class EmployeeEditTests(unittest.TestCase):
         self.assertIsNotNone(register.check("John", "Doe", 7, "Acme", exclude=own))
 
 
+class EmployeeCodeTests(unittest.TestCase):
+    """The second identity facet — and the whole point of it.
+
+    Before the code existed, two people genuinely called Rahul Sharma at one corporate could
+    not both be saved: the register refused the second and told the user to change a name or
+    an employer. The code is the third option that message was missing.
+    """
+
+    def setUp(self):
+        # (first, last, corporate_id, company, employee_code)
+        self.rows = [("Rahul", "Sharma", 7, "Acme", "EMP-001")]
+
+    def _register(self, rows=None):
+        return CustomerDuplicates.from_rows(rows if rows is not None else self.rows)
+
+    def test_two_of_one_name_are_allowed_when_their_codes_differ(self):
+        """THE FEATURE."""
+        self.assertIsNone(
+            self._register().check("Rahul", "Sharma", 7, "Acme", "EMP-002"))
+
+    def test_two_of_one_name_are_still_refused_when_neither_has_a_code(self):
+        """THE REGRESSION GUARD. Nothing tells them apart, so nothing should pretend to."""
+        register = self._register([("Rahul", "Sharma", 7, "Acme", None)])
+        clash = register.check("Rahul", "Sharma", 7, "Acme", None)
+        self.assertIsNotNone(clash)
+        self.assertIn("Employee Code", clash)      # the refusal names the fix
+
+    def test_a_third_uncoded_namesake_is_still_refused(self):
+        register = self._register([("Rahul", "Sharma", 7, "Acme", None)])
+        self.assertIsNone(register.check("Rahul", "Sharma", 7, "Acme", "EMP-009"))
+        self.assertIsNotNone(register.check("Rahul", "Sharma", 7, "Acme", None))
+
+    def test_a_code_cannot_be_shared_even_by_a_different_person(self):
+        clash = self._register().check("Priya", "Nair", 7, "Acme", "EMP-001")
+        self.assertIsNotNone(clash)
+        self.assertIn("EMP-001", clash)
+        self.assertIn("Rahul Sharma", clash)       # names who already holds it
+
+    def test_a_code_cannot_be_shared_across_employers_either(self):
+        """Workspace-scoped, not per-corporate: a code meaning two people in one workspace
+        is not an identifier, and searching it would return both."""
+        self.assertIsNotNone(self._register().check("Priya", "Nair", 9, "Beta", "EMP-001"))
+
+    def test_a_blank_code_occupies_no_code_identity(self):
+        """Mirrors the blank-GSTIN rule on CorporateDuplicates."""
+        register = self._register([("Rahul", "Sharma", 7, "Acme", None)])
+        self.assertIsNone(register.check("Priya", "Nair", 7, "Acme", None))
+        self.assertIsNone(register.check("Anil", "Kumar", 9, "Beta", ""))
+
+    def test_an_uncoded_namesake_of_a_coded_employee_is_refused(self):
+        """THE HOLE THIS CLOSES. The person keys differ only by a code the new row does not
+        have, so it used to read as someone new — and it is exactly the row a sheet without
+        codes produces when it re-imports someone already on file."""
+        clash = self._register().check("rahul", " SHARMA ", 7, "Acme", None)
+        self.assertIsNotNone(clash)
+        self.assertIn("EMP-001", clash)            # says which namesake it collides with
+        self.assertIn("Employee Code", clash)      # and names the fix
+
+    def test_the_uncoded_namesake_is_still_free_under_another_employer(self):
+        self.assertIsNone(self._register().check("Rahul", "Sharma", 9, "Beta", None))
+
+    def test_existing_uncoded_then_new_coded_still_works(self):
+        """The order Employee Master's form suggests: the existing person, then the new one
+        with a code. Only the uncoded arrival is checked against `named`."""
+        register = self._register([("Rahul", "Sharma", 7, "Acme", None)])
+        self.assertIsNone(register.check("Rahul", "Sharma", 7, "Acme", "EMP-002"))
+
+    def test_editing_an_employee_who_already_shares_a_name_is_not_blocked(self):
+        """A workspace can hold an uncoded Rahul next to a coded one. Re-saving the uncoded
+        one without moving him must not be refused."""
+        register = self._register([("Rahul", "Sharma", 7, "Acme", None),
+                                   ("Rahul", "Sharma", 7, "Acme", "EMP-002")])
+        own = CustomerDuplicates.keys("Rahul", "Sharma", 7, "Acme", None)
+        self.assertIsNone(register.check("Rahul", "Sharma", 7, "Acme", None, exclude=own))
+
+    def test_removing_the_code_is_refused_while_a_coded_namesake_remains(self):
+        register = self._register([("Rahul", "Sharma", 7, "Acme", "EMP-001"),
+                                   ("Rahul", "Sharma", 7, "Acme", "EMP-002")])
+        own = CustomerDuplicates.keys("Rahul", "Sharma", 7, "Acme", "EMP-002")
+        self.assertIsNotNone(register.check("Rahul", "Sharma", 7, "Acme", None, exclude=own))
+
+    def test_a_file_with_a_coded_then_an_uncoded_namesake_refuses_the_second(self):
+        register = self._register([])
+        self.assertIsNone(register.check("Amit", "Rao", 7, "Acme", "A1"))
+        self.assertIsNotNone(register.check("Amit", "Rao", 7, "Acme", None))
+
+    def test_case_and_padding_do_not_make_a_new_code(self):
+        self.assertIsNotNone(self._register().check("Priya", "Nair", 7, "Acme", " emp-001 "))
+
+    def test_editing_a_coded_employee_is_not_a_duplicate_of_itself(self):
+        own = CustomerDuplicates.keys("Rahul", "Sharma", 7, "Acme", "EMP-001")
+        self.assertIsNone(
+            self._register().check("Rahul", "Sharma", 7, "Acme", "EMP-001", exclude=own))
+
+    def test_changing_the_code_while_keeping_the_name_is_allowed(self):
+        """Each facet is excused independently, like the corporate name/GSTIN pair."""
+        own = CustomerDuplicates.keys("Rahul", "Sharma", 7, "Acme", "EMP-001")
+        self.assertIsNone(
+            self._register().check("Rahul", "Sharma", 7, "Acme", "EMP-007", exclude=own))
+
+    def test_a_file_listing_one_code_twice_is_caught(self):
+        register = self._register([])
+        self.assertIsNone(register.check("Rahul", "Sharma", 7, "Acme", "EMP-001"))
+        clash = register.check("Priya", "Nair", 7, "Acme", "EMP-001")
+        self.assertIsNotNone(clash)
+        self.assertIn("more than once in this file", clash)
+
+    def test_four_tuples_still_load(self):
+        """from_rows is called with four-tuples by callers written before the code, and by
+        the tests above; a row with no code has to behave exactly as it did then."""
+        register = CustomerDuplicates.from_rows([("John", "Doe", 7, "Acme")])
+        self.assertIsNotNone(register.check("John", "Doe", 7, "Acme"))
+        self.assertIsNone(register.check("Jane", "Roe", 7, "Acme"))
+
+
 class CorporateDuplicateTests(unittest.TestCase):
     """One NAME and one GSTIN per workspace, each decisive on its own."""
 

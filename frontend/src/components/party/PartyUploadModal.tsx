@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle, ArrowRight, Check, ChevronRight, Copy, Download, FileSpreadsheet,
   Info, RefreshCw, Save, Upload, X,
@@ -8,7 +8,7 @@ import {
 import api from "@/lib/api";
 import { INHERITED_FIELDS, PARTY, isBlankInherited, type Party, type PartyKind } from "@/lib/party";
 import {
-  IMPORT_FIELDS, applyMapping, autoMap, buildDuplicateContext, duplicateRowErrors,
+  CATEGORY_FIELD_KEYS, IMPORT_FIELDS, applyMapping, autoMap, buildDuplicateContext, duplicateRowErrors,
   parseWorkbook, toPayload, validateRow,
   type DuplicateContext, type ImportField, type ParsedSheet, type ReviewRow,
 } from "@/lib/partyImport";
@@ -435,9 +435,14 @@ function MappingStep({
           <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Your Column</p>
         </div>
         <div className="space-y-1">
-          {fields.map((field) => (
+          {fields.map((field, i) => (
+            <Fragment key={field.key}>
+            {field.group && field.group !== fields[i - 1]?.group && (
+              <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider px-3 pt-3 pb-0.5">
+                {field.group}
+              </p>
+            )}
             <div
-              key={field.key}
               className="grid grid-cols-2 gap-3 items-center bg-gray-50/40 rounded-lg px-3 py-1.5 border border-gray-100 hover:border-blue-200 transition-colors"
             >
               <div>
@@ -467,6 +472,7 @@ function MappingStep({
                 )}
               </div>
             </div>
+            </Fragment>
           ))}
         </div>
       </div>
@@ -532,7 +538,10 @@ function ReviewStep({
     r.included
     && Object.keys(rowErrors[i]).length === 0
     && (r.values.company ?? "").trim()
-    && INHERITED_FIELDS.some((k) => isBlankInherited(k, r.values[k] ?? ""))
+    && INHERITED_FIELDS.some((k) => k === "category_markups"
+      // Travels as flat pairs in the grid, folded into one object only at save.
+      ? !CATEGORY_FIELD_KEYS.some(({ typeKey }) => (r.values[typeKey] ?? "").trim())
+      : isBlankInherited(k, r.values[k] ?? ""))
   ).length;
 
   return (

@@ -1104,6 +1104,9 @@ async def resolve_customers(
             summary[cres.OVERRIDDEN] = summary.get(cres.OVERRIDDEN, 0) + 1
             updates.append({"id": row_id, "bill_kind": kind})
             continue
+        # A reset clears every human correction, the pax as well as the party. Without one,
+        # a corrected pax is left alone — it is not written in the dict below at all.
+        pax_reset = {"bill_pax_count": None} if payload.reset_overrides else {}
 
         if kind == "payment":
             m = cres.CustomerMatch(status=cres.EXCLUDED, note=cres.REASON[cres.EXCLUDED])
@@ -1136,6 +1139,7 @@ async def resolve_customers(
             "bill_match_reason": m.note,
             "resolved_at": now,
             "resolved_by_id": current_user.id,
+            **pax_reset,
         })
 
     if updates:
@@ -1316,6 +1320,13 @@ async def list_billing_rows(
                 if state == "stale" else None
             ),
             "sendable": state in proj.SENDABLE_STATES,
+            # What this row bills with, where that came from, and what the statement says —
+            # so a corrected figure can show what it replaced.
+            "pax_count": proj.row_pax(r),
+            "pax_source": ("user" if r.bill_pax_count
+                           else "file" if proj.file_pax(r) == r.pax_count else "default"),
+            "pax_in_file": proj.file_pax(r),
+            "ticket_pax_count": t.pax_count if t is not None else None,
         }
 
     # No state_counts here on purpose: they cover the whole batch, so recomputing them
@@ -1481,6 +1492,52 @@ async def set_row_billing_party(
 
     return {"id": row.id, "bill_status": row.bill_status, "customer_type": ct,
             "customer_id": cust_id, "corporate_id": corp_id}
+
+
+class PaxCountPayload(BaseModel):
+    # None puts the row back on the statement's own figure.
+    pax_count: int | None = Field(default=None, ge=1, le=proj.MAX_PAX)
+
+
+@router.patch("/rows/{row_id}/pax-count")
+async def set_row_pax_count(
+    row_id: int,
+    payload: PaxCountPayload,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Correct how many passengers one row bills for. Survives a re-resolve.
+
+    A party's FIXED markup is charged per passenger, so this is a price, not a label — which
+    is why it follows the party picker's rules exactly: refused on a payment movement, and
+    refused once the row is in billing, where the ticket is the thing billing reads.
+    """
+    row = await db.scalar(
+        select(LccDetailed).where(LccDetailed.id == row_id, *_scope(LccDetailed, current_user))
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Row not found.")
+    if row.bill_kind == "payment":
+        raise HTTPException(
+            status_code=409,
+            detail="This row is a payment movement — it carries no fare, so there is nothing to bill.",
+        )
+    if row.projected_ticket_id is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=("This row is already in billing, so its pax is locked. Change it before "
+                    "sending, or take the row out of billing first."),
+        )
+
+    # Storing the file's own figure as an "override" would make it read as edited, so a
+    # value equal to the statement's is recorded as no override at all.
+    row.bill_pax_count = (payload.pax_count
+                          if payload.pax_count is not None and payload.pax_count != proj.file_pax(row)
+                          else None)
+    await db.commit()
+    return {"id": row.id, "pax_count": proj.row_pax(row),
+            "pax_source": "user" if row.bill_pax_count else "file",
+            "pax_in_file": proj.file_pax(row)}
 
 
 class BulkBillingPartyPayload(BillingPartyPayload):

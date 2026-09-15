@@ -21,6 +21,8 @@ venv.bak/
 
 # ─── Uploaded / user-generated files ──────────────────────────────────────────
 uploads/
+# Generated Report download workbooks (local-storage fallback; see config.REPORTS_LOCAL_DIR)
+report_files/
 
 # ─── Distribution / packaging ─────────────────────────────────────────────────
 dist/

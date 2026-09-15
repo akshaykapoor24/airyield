@@ -23,6 +23,11 @@ class CorporateCreate(BaseModel):
     gst_no: Optional[str] = None
     pan_no: Optional[str] = None
     markup_type: Optional[str] = None   # 'percentage' | 'fixed'
+    # Per-category overrides of the markup above, keyed by markup_categories.CATEGORY_SLUGS.
+    # Declared as a plain dict for the same reason markup_type is a plain str: the shape is
+    # what Pydantic guards, and the VOCABULARY is coerced server-side by
+    # party_markup.norm_category_markups — an unrecognised category is dropped, never a 422.
+    category_markups: Optional[dict] = None
     markup_value: Optional[float] = None
     billing_type: Optional[str] = None  # 'reseller' | 'agency'
 
@@ -41,6 +46,7 @@ class CorporateUpdate(BaseModel):
     gst_no: Optional[str] = None
     pan_no: Optional[str] = None
     markup_type: Optional[str] = None
+    category_markups: Optional[dict] = None
     markup_value: Optional[float] = None
     billing_type: Optional[str] = None
     is_active: Optional[bool] = None
@@ -65,6 +71,7 @@ class CorporateRead(BaseModel):
     gst_no: Optional[str] = None
     pan_no: Optional[str] = None
     markup_type: Optional[str] = None
+    category_markups: Optional[dict] = None
     markup_value: Optional[float] = None
     billing_type: Optional[str] = None
     is_active: bool
@@ -111,6 +118,8 @@ class CorporateBulkCreateRow(BaseModel):
     pan_no: Optional[str] = None
     markup_type: Optional[str] = None
     markup_value: Optional[float] = None
+    # Built by the wizard from the optional <CATEGORY>_MARKUP_TYPE / _VALUE columns.
+    category_markups: Optional[dict] = None
     billing_type: Optional[str] = None
 
 

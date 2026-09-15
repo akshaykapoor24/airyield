@@ -10,10 +10,13 @@ import RetagPartyControl, {
 } from "@/components/billing/RetagPartyControl";
 // Editing a customer lives in Employee Master (/user-master/employee-master);
 // this page is the billing workspace and reads the record.
-import { type Party as Customer } from "@/lib/party";
+import { categoryMarkupLabel, type Party as Customer } from "@/lib/party";
 import { INCENTIVE_TYPE_COLS } from "@/lib/incentives";
 import { splitGst, type GstTreatment, type PlaceOfSupply } from "@/lib/gstSplit";
 import GstCells, { GstTotalCells } from "@/components/billing/GstCells";
+import CategoryBadge, {
+  BILLABLE_CATEGORIES, isAirLine, lineProvider, lineReference, lineRoute, type ServiceDetails,
+} from "@/components/billing/CategoryBadge";
 
 type SoldTicket = {
   id: number;
@@ -27,6 +30,16 @@ type SoldTicket = {
   booking_class: string | null;
   ticket_date: string | null;
   ticket_status: string | null;
+  /** air | hotel | train | bus | car — which of the party's markups priced this line. */
+  product_category: string;
+  /** A non-air line's stand-in for a ticket number. */
+  booking_ref: string | null;
+  /** A non-air line's stand-in for airline + sector. Null on an air ticket. */
+  service_details: ServiceDetails | null;
+  /** Passengers on the booking — a fixed markup is charged per passenger. */
+  pax_count: number;
+  /** How `markup_amount` was reached: "₹300 × 6 pax", "2% of fare". */
+  markup_note: string | null;
   sell_fare: number | null;
   total_amt: number | null;
   calculated_incentive: number | null;
@@ -90,6 +103,13 @@ type BillingDetailLine = {
   passenger: string | null;
   sector: string | null;
   ticket_date: string | null;
+  /** Absent on bills raised before categories — those lines are air. */
+  product_category?: string | null;
+  booking_ref?: string | null;
+  description?: string | null;
+  /** Absent on bills raised before pax counts — they were billed as 1. */
+  pax_count?: number;
+  markup_note?: string | null;
   base_amount: number;
   markup_amount: number;
   additional_markup: number;
@@ -258,6 +278,8 @@ export default function CustomerDetailPage() {
   const [dateField, setDateField] = useState<"ticket" | "travel">("ticket");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
+  // Narrowed on the server, so the summary cards total exactly the category shown.
+  const [category, setCategory] = useState("");
   const [soldTickets, setSoldTickets] = useState<SoldTicket[] | null>(null);
   // Which GST heads this party's supplies carry, and why — decided server-side
   // from the two GSTINs. One answer for the whole list: it is a fact about the
@@ -265,6 +287,10 @@ export default function CustomerDetailPage() {
   const [placeOfSupply, setPlaceOfSupply] = useState<PlaceOfSupply | null>(null);
   const [loadingTickets, setLoadingTickets] = useState(false);
   const [ticketsError, setTicketsError] = useState<string | null>(null);
+  // The filters the list on screen was loaded with — NOT the boxes, which may hold a date
+  // typed but not yet applied. Download XLS sends these, so the file is the rows shown.
+  const [appliedFilters, setAppliedFilters] = useState<Record<string, string> | null>(null);
+  const [exportingTickets, setExportingTickets] = useState(false);
   const [additional, setAdditional] = useState<Record<number, string>>({});
   const [discounts, setDiscounts] = useState<Record<number, string>>({});
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -340,8 +366,10 @@ export default function CustomerDetailPage() {
       const params: Record<string, string> = { date_field: dateField };
       if (dateFrom) params.date_from = dateFrom;
       if (dateTo) params.date_to = dateTo;
+      if (category) params.category = category;
       const { data } = await api.get<SoldTicketsResponse>(`/customers/${customerId}/sold-tickets`, { params });
       setSoldTickets(data.tickets);
+      setAppliedFilters(params);
       setPlaceOfSupply(data.place_of_supply ?? null);
       setAdditional({});
       setDiscounts({});
@@ -351,7 +379,7 @@ export default function CustomerDetailPage() {
     } finally {
       setLoadingTickets(false);
     }
-  }, [customerId, dateFrom, dateTo, dateField]);
+  }, [customerId, dateFrom, dateTo, dateField, category]);
 
   // Load once, the first time the tab is actually opened — not on mount, because the
   // page lands on Details and this fetch is unpaginated. A ref guard rather than
@@ -588,6 +616,39 @@ export default function CustomerDetailPage() {
     }
   };
 
+  /**
+   * This customer's Sold Tickets as the Customer Billing sheet — the rows on screen, billed
+   * and unbilled. Figures are what is SAVED: a billed ticket's invoice line, an unbilled one
+   * at the customer's markup; additional markup typed here but not yet saved as a billing
+   * is not in the file. Twin of corporates/[id]/page.tsx — keep the two in step.
+   */
+  const downloadTickets = async () => {
+    setExportingTickets(true);
+    try {
+      const res = await api.get(`/customers/${customerId}/tickets-export`, {
+        params: appliedFilters ?? {},
+        responseType: "blob",
+      });
+      const now = new Date();
+      const stamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+      const person = `${customer?.first_name ?? ""} ${customer?.last_name ?? ""}`;
+      const slug = person.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "").toLowerCase()
+        || `customer-${customerId}`;
+      const url = window.URL.createObjectURL(res.data as Blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${slug}-tickets-${stamp}.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch {
+      setTicketsError("Failed to download the tickets.");
+    } finally {
+      setExportingTickets(false);
+    }
+  };
+
   const deleteBilling = async (b: BillingListItem) => {
     if (!window.confirm(`Delete billing "${b.billing_name}"?`)) return;
     try {
@@ -654,6 +715,7 @@ export default function CustomerDetailPage() {
         <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-6">
           <div className="grid grid-cols-2 md:grid-cols-3 gap-5">
             <DetailRow label="First Name" value={customer.first_name} />
+            <DetailRow label="Employee Code" value={customer.employee_code || "—"} />
             <DetailRow label="Last Name" value={customer.last_name} />
             <DetailRow label="Company" value={customer.company} />
             <DetailRow label="Title" value={customer.title} />
@@ -662,7 +724,8 @@ export default function CustomerDetailPage() {
             <DetailRow label="GST Registration" value={customer.gst_registered ? "Registered" : "Unregistered"} />
             <DetailRow label="GST No" value={customer.gst_registered ? customer.gst_no : "—"} />
             <DetailRow label="PAN No" value={customer.pan_no} />
-            <DetailRow label="Markup Type" value={customer.markup_type ? customer.markup_type.charAt(0).toUpperCase() + customer.markup_type.slice(1) : "—"} />
+            <DetailRow label="Default Markup Type" value={customer.markup_type ? customer.markup_type.charAt(0).toUpperCase() + customer.markup_type.slice(1) : "—"} />
+            <DetailRow label="Category Markups" value={categoryMarkupLabel(customer) || "—"} />
             <DetailRow label="Markup" value={markupLabel(customer)} />
             <DetailRow
               label="Billing Type"
@@ -704,6 +767,19 @@ export default function CustomerDetailPage() {
                 className="border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#1e3a5f]/30 bg-gray-50"
               />
             </div>
+            <div>
+              <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Category</label>
+              <select
+                value={category}
+                onChange={(e) => setCategory(e.target.value)}
+                className="border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#1e3a5f]/30 bg-gray-50"
+              >
+                <option value="">All categories</option>
+                {BILLABLE_CATEGORIES.map((c) => (
+                  <option key={c.value} value={c.value}>{c.label}</option>
+                ))}
+              </select>
+            </div>
             <button
               onClick={() => applyRange()}
               disabled={loadingTickets}
@@ -726,13 +802,25 @@ export default function CustomerDetailPage() {
               and also hides any ticket whose date cannot be read.
             </p>
             {soldTickets && soldTickets.length > 0 && (
-              <button
-                onClick={() => { openSaveBilling(); }}
-                disabled={selected.size === 0}
-                className="ml-auto flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg px-4 py-2 text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <Save className="w-4 h-4" /> Save Billing{selected.size > 0 ? ` (${selected.size})` : ""}
-              </button>
+              <div className="ml-auto flex items-center gap-2">
+                <button
+                  onClick={downloadTickets}
+                  disabled={exportingTickets || loadingTickets}
+                  className="flex items-center gap-1.5 bg-[#1e3a5f] hover:bg-[#16304f] text-white rounded-lg px-4 py-2 text-sm font-semibold disabled:opacity-60"
+                  title="The tickets listed below — billed and unbilled — as an Excel sheet. Uses saved figures: additional markup typed here counts once the billing is saved."
+                >
+                  {exportingTickets
+                    ? <><RefreshCw className="w-4 h-4 animate-spin" /> Downloading…</>
+                    : <><Download className="w-4 h-4" /> Download Tickets XLS</>}
+                </button>
+                <button
+                  onClick={() => { openSaveBilling(); }}
+                  disabled={selected.size === 0}
+                  className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg px-4 py-2 text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Save className="w-4 h-4" /> Save Billing{selected.size > 0 ? ` (${selected.size})` : ""}
+                </button>
+              </div>
             )}
           </div>
 
@@ -827,7 +915,8 @@ export default function CustomerDetailPage() {
                   </p>
                   <p className="text-[10px] text-gray-400 mt-0.5">
                     Markup: {markupLabel(customer)}
-                    {customer.markup_type ? ` (${customer.markup_type})` : ""} · Billing:{" "}
+                    {customer.markup_type ? ` (${customer.markup_type})` : ""}
+                    {categoryMarkupLabel(customer) ? ` · by category: ${categoryMarkupLabel(customer)}` : ""} · Billing:{" "}
                     {customer.billing_type
                       ? `${customer.billing_type} — 18% GST on ${customer.billing_type === "reseller" ? "gross + markup" : "markup only"}`
                       : "not set — no GST applied"}
@@ -850,7 +939,7 @@ export default function CustomerDetailPage() {
                             className="accent-emerald-500 cursor-pointer align-middle"
                           />
                         </th>
-                        {["TICKET #", "AIRLINE", "CODE", "PASSENGER", "SECTOR", "DATE", "TOTAL FARE", "MARKUP", "ADD. MARKUP", "DISCOUNT", "CGST", "SGST", "IGST", "TOTAL BILLING", "STATUS", "MATCHED", "CORPORATE"].map((h) => (
+                        {["CATEGORY", "TICKET # / REF", "AIRLINE / SERVICE", "CODE", "PASSENGER", "PAX", "SECTOR / ROUTE", "DATE", "TOTAL FARE", "MARKUP", "ADD. MARKUP", "DISCOUNT", "CGST", "SGST", "IGST", "TOTAL BILLING", "STATUS", "MATCHED", "CORPORATE"].map((h) => (
                           <th key={h} className="px-3 py-2.5 text-left text-[10px] font-semibold text-white uppercase tracking-wider whitespace-nowrap">
                             {h}
                           </th>
@@ -868,8 +957,8 @@ export default function CustomerDetailPage() {
                     <tbody>
                       {soldTickets.length === 0 ? (
                         <tr>
-                          {/* 30 = checkbox + 17 named + 11 incentive + Total Inc. */}
-                          <td colSpan={30} className="px-4 py-16 text-center">
+                          {/* 32 = checkbox + 19 named + 11 incentive + Total Inc. */}
+                          <td colSpan={32} className="px-4 py-16 text-center">
                             <div className="flex flex-col items-center justify-center">
                               <div className="w-14 h-14 bg-gray-50 rounded-full flex items-center justify-center mb-3">
                                 <Ticket className="w-7 h-7 text-gray-300" />
@@ -902,14 +991,33 @@ export default function CustomerDetailPage() {
                                   className="accent-emerald-500 cursor-pointer align-middle disabled:cursor-not-allowed disabled:opacity-40"
                                 />
                               </td>
-                              <td className="px-3 py-2 text-[11px] font-semibold text-gray-800">{t.ticket_number ?? "—"}</td>
-                              <td className="px-3 py-2 text-[11px] text-gray-600">{t.airline_name ?? "—"}</td>
+                              <td className="px-3 py-2">
+                                <CategoryBadge category={t.product_category}
+                                  title={t.base_amount < 0 ? "A credit — this line reduces the bill" : undefined} />
+                                {t.base_amount < 0 && (
+                                  <span className="ml-1 text-[9px] font-semibold uppercase text-red-600">Credit</span>
+                                )}
+                              </td>
+                              <td className="px-3 py-2 text-[11px] font-semibold text-gray-800 whitespace-nowrap">{lineReference(t) ?? "—"}</td>
+                              <td className="px-3 py-2 text-[11px] text-gray-600 max-w-50 truncate" title={lineProvider(t) ?? undefined}>{lineProvider(t) ?? "—"}</td>
                               <td className="px-3 py-2 text-[11px] font-mono text-gray-600">{t.airlines_code ?? "—"}</td>
                               <td className="px-3 py-2 text-[11px] text-gray-600">{passengerName(t)}</td>
-                              <td className="px-3 py-2 text-[11px] text-gray-500">{t.sector ?? "—"}</td>
+                              <td className={`px-3 py-2 text-[11px] tabular-nums ${t.pax_count > 1 ? "font-semibold text-gray-800" : "text-gray-500"}`}
+                                  title="Passengers on the booking. A fixed markup is charged per passenger.">
+                                {t.pax_count ?? 1}
+                              </td>
+                              <td className="px-3 py-2 text-[11px] text-gray-500 max-w-55 truncate"
+                                  title={isAirLine(t) ? undefined : t.service_details?.summary}>
+                                {lineRoute(t) ?? "—"}
+                              </td>
                               <td className="px-3 py-2 text-[11px] text-gray-500">{t.ticket_date ?? "—"}</td>
                               <td className="px-3 py-2 text-[11px] text-gray-600">{money(c.base)}</td>
-                              <td className="px-3 py-2 text-[11px] font-semibold text-emerald-600">{money(c.custMarkup)}</td>
+                              <td className="px-3 py-2 text-[11px] font-semibold text-emerald-600 whitespace-nowrap" title={t.markup_note ?? undefined}>
+                                {money(c.custMarkup)}
+                                {t.pax_count > 1 && t.markup_note?.includes("pax") && (
+                                  <span className="ml-1 text-[9px] font-medium text-emerald-700/70">×{t.pax_count}</span>
+                                )}
+                              </td>
                               <td className="px-3 py-2">
                                 <input
                                   type="number"
@@ -1226,7 +1334,7 @@ export default function CustomerDetailPage() {
               <table className="w-full">
                 <thead className="sticky top-0">
                   <tr style={{ background: "#1e3a5f" }}>
-                    {["TICKET #", "AIRLINE", "CODE", "PASSENGER", "SECTOR", "DATE", "TOTAL FARE", "MARKUP", "ADD. MARKUP", "CGST", "SGST", "IGST", "TOTAL BILLING"].map((h) => (
+                    {["TICKET # / REF", "AIRLINE / CATEGORY", "CODE", "PASSENGER", "SECTOR / SERVICE", "DATE", "TOTAL FARE", "MARKUP", "ADD. MARKUP", "CGST", "SGST", "IGST", "TOTAL BILLING"].map((h) => (
                       <th key={h} className="px-3 py-2.5 text-left text-[10px] font-semibold text-white uppercase tracking-wider whitespace-nowrap">
                         {h}
                       </th>
@@ -1236,11 +1344,16 @@ export default function CustomerDetailPage() {
                 <tbody>
                   {viewBilling.line_items.map((it, idx) => (
                     <tr key={`${it.ticket_id}-${idx}`} className={`border-b border-gray-50 ${idx % 2 === 0 ? "bg-white" : "bg-gray-50/30"}`}>
-                      <td className="px-3 py-2 text-[11px] font-semibold text-gray-800">{it.ticket_number ?? "—"}</td>
-                      <td className="px-3 py-2 text-[11px] text-gray-600">{it.airline_name ?? "—"}</td>
+                      <td className="px-3 py-2 text-[11px] font-semibold text-gray-800 whitespace-nowrap">{lineReference(it) ?? "—"}</td>
+                      <td className="px-3 py-2 text-[11px] text-gray-600">
+                        {isAirLine(it) ? it.airline_name ?? "—" : <CategoryBadge category={it.product_category} />}
+                      </td>
                       <td className="px-3 py-2 text-[11px] font-mono text-gray-600">{it.airlines_code ?? "—"}</td>
-                      <td className="px-3 py-2 text-[11px] text-gray-600">{it.passenger ?? "—"}</td>
-                      <td className="px-3 py-2 text-[11px] text-gray-500">{it.sector ?? "—"}</td>
+                      <td className="px-3 py-2 text-[11px] text-gray-600">{it.passenger ?? "—"}{(it.pax_count ?? 1) > 1 ? ` · ${it.pax_count} pax` : ""}</td>
+                      <td className="px-3 py-2 text-[11px] text-gray-500 max-w-65 truncate"
+                          title={isAirLine(it) ? undefined : it.description ?? undefined}>
+                        {(isAirLine(it) ? it.sector : it.description) ?? "—"}
+                      </td>
                       <td className="px-3 py-2 text-[11px] text-gray-500">{it.ticket_date ?? "—"}</td>
                       <td className="px-3 py-2 text-[11px] text-gray-600">{money(it.base_amount)}</td>
                       <td className="px-3 py-2 text-[11px] font-semibold text-emerald-600">{money(it.markup_amount)}</td>
@@ -1324,9 +1437,12 @@ export default function CustomerDetailPage() {
                     const c = editRowCalc(it, addlEdits[it.ticket_id] ?? "", editBilling);
                     return (
                       <tr key={`${it.ticket_id}-${idx}`} className={`border-b border-gray-50 ${idx % 2 === 0 ? "bg-white" : "bg-gray-50/30"}`}>
-                        <td className="px-3 py-2 text-[11px] font-semibold text-gray-800">{it.ticket_number ?? "—"}</td>
-                        <td className="px-3 py-2 text-[11px] text-gray-600">{it.passenger ?? "—"}</td>
-                        <td className="px-3 py-2 text-[11px] text-gray-500">{it.sector ?? "—"}</td>
+                        <td className="px-3 py-2 text-[11px] font-semibold text-gray-800 whitespace-nowrap">{lineReference(it) ?? "—"}</td>
+                        <td className="px-3 py-2 text-[11px] text-gray-600">{it.passenger ?? "—"}{(it.pax_count ?? 1) > 1 ? ` · ${it.pax_count} pax` : ""}</td>
+                        <td className="px-3 py-2 text-[11px] text-gray-500 max-w-65 truncate"
+                            title={isAirLine(it) ? undefined : it.description ?? undefined}>
+                          {(isAirLine(it) ? it.sector : it.description) ?? "—"}
+                        </td>
                         <td className="px-3 py-2 text-[11px] text-gray-500">{it.ticket_date ?? "—"}</td>
                         <td className="px-3 py-2 text-[11px] text-gray-600">{money(c.base)}</td>
                         <td className="px-3 py-2 text-[11px] text-gray-600">{money(c.markup)}</td>

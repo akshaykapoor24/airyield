@@ -26,7 +26,7 @@ from datetime import datetime
 
 from collections.abc import Collection
 
-from sqlalchemy import and_, func, not_, or_, select
+from sqlalchemy import and_, case, func, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.lcc_detailed import LccDetailed, LccDetailedBatch
@@ -35,8 +35,9 @@ from app.models.uploaded_ticket import UploadedTicket
 from app.services import customer_resolver as cres
 
 __all__ = [
-    "BILLABLE_STATUSES", "BILLING_STATES", "SENDABLE_STATES",
+    "BILLABLE_STATUSES", "BILLING_STATES", "SENDABLE_STATES", "MAX_PAX",
     "billing_state", "billing_state_cond", "project_batch", "projected_ticket_ids",
+    "file_pax", "row_pax",
 ]
 
 # The statuses that mean "a party has been settled for this row".
@@ -55,7 +56,7 @@ BILLING_STATES = (
     "no_party",      # not in billing, and still has nobody to bill
     "ready",         # has a party, not yet in billing
     "withdrawn",     # in billing, but the row is no longer billable
-    "stale",         # in billing, but under a different party than the row now names
+    "stale",         # in billing, but under a different party or pax than the row now says
     "sent",          # in billing, and billing agrees with the row
 )
 
@@ -88,6 +89,38 @@ _MAX_SECTOR = 200                # UploadedTicket.sector / .flight_no are String
 # exists in this codebase — lcc_detailed.py's billing-default excludes them, while
 # project_batch below includes them — so everything here goes through `_is_payment` and
 # its `_not_payment_cond` twin, and the two answers finally agree.
+
+
+# ── pax: how many passengers the booking bills for ───────────────────────────
+# A party's FIXED markup is charged per passenger (party_markup.line_markup). An LCC export
+# repeats the booking's `pax_count` on every transaction row of the PNR — the sale, its
+# refund, a change fee — rather than writing one row per passenger, so multiplying each row
+# by it charges the markup once per passenger per transaction, and a refund reverses exactly
+# what its sale charged.
+MAX_PAX = 99
+
+
+def file_pax(row) -> int:
+    """The statement's own pax for this row — 1 when blank, zero or absurd.
+
+    NEVER 0: that would zero the row's fixed markup with nothing on screen to say why.
+    """
+    n = getattr(row, "pax_count", None)
+    return n if isinstance(n, int) and 1 <= n <= MAX_PAX else 1
+
+
+def row_pax(row) -> int:
+    """The pax this row bills with: a human's correction when there is one, else the file's."""
+    override = getattr(row, "bill_pax_count", None)
+    return override if isinstance(override, int) and 1 <= override <= MAX_PAX else file_pax(row)
+
+
+def _row_pax_sql():
+    """SQL twin of `row_pax`. Both columns are real here, so unlike Third Party API nothing
+    has to be stamped for the two answers to agree."""
+    file_figure = case((LccDetailed.pax_count.between(1, MAX_PAX), LccDetailed.pax_count), else_=1)
+    return case((LccDetailed.bill_pax_count.between(1, MAX_PAX), LccDetailed.bill_pax_count),
+                else_=file_figure)
 
 
 def _is_payment(bill_kind: str | None) -> bool:
@@ -124,7 +157,10 @@ def billing_state(row, ticket) -> str:
         and ticket.customer_id == row.bill_customer_id
         and ticket.corporate_id == row.bill_corporate_id
     )
-    return "sent" if same_party else "stale"
+    # The pax prices the line too — a fixed markup is multiplied by it — so a ticket sent
+    # with a different count is out of date exactly as one sent to a different party is.
+    same_pax = (getattr(ticket, "pax_count", None) or 1) == row_pax(row)
+    return "sent" if same_party and same_pax else "stale"
 
 
 def billing_state_cond(state: str, T):
@@ -143,6 +179,7 @@ def billing_state_cond(state: str, T):
         T.customer_type.is_not_distinct_from(LccDetailed.bill_customer_type),
         T.customer_id.is_not_distinct_from(LccDetailed.bill_customer_id),
         T.corporate_id.is_not_distinct_from(LccDetailed.bill_corporate_id),
+        T.pax_count == _row_pax_sql(),
     )
     live = not_(invoiced)          # `invoiced` is built from IS NOT NULL, never NULL itself
 
@@ -231,6 +268,8 @@ def _build_ticket(row: LccDetailed, batch: LccDetailedBatch, *, now: datetime) -
         "pax_name": row.name1,
         "first_name": first,
         "last_name": last,
+        # The booking's passengers — a fixed markup is charged per passenger.
+        "pax_count": row_pax(row),
         # LCC issues no ticket number. Do NOT synthesise one: _find_original_ticket and
         # BSP reconciliation both key on it.
         "ticket_number": None,

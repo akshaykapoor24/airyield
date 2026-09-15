@@ -458,7 +458,7 @@ export default function HomePage() {
       {/* ══ Footer ═════════════════════════════════════════════════════ */}
       <footer className="border-t border-slate-100">
         <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-5 px-5 py-9 sm:flex-row sm:px-6">
-          <Logo />
+          <Logo className="h-12 w-auto" />
           <p className="order-last text-sm text-slate-400 sm:order-none">
             © 2026 FareQube · All rights reserved
           </p>

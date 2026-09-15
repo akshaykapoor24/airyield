@@ -48,8 +48,8 @@ export default function SiteNav() {
       }`}
     >
       <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-5 sm:px-6">
-        <Link href="/" aria-label="FareQube home">
-          <Logo />
+        <Link href="/" aria-label="fareqube.com home">
+          <Logo preload className="h-11 w-auto" />
         </Link>
 
         <div className="flex items-center gap-2">

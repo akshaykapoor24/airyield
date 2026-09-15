@@ -1,5 +1,6 @@
 from datetime import datetime
 from sqlalchemy import String, DateTime, Boolean, Numeric, Integer, ForeignKey, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
 
@@ -47,8 +48,13 @@ class Corporate(Base):
     gst_no:        Mapped[str | None] = mapped_column(String(30),  nullable=True)   # only set when gst_registered
     pan_no:        Mapped[str | None] = mapped_column(String(20),  nullable=True)   # optional
 
+    # The DEFAULT markup — what a line is charged unless its category overrides it below.
     markup_type:   Mapped[str | None]   = mapped_column(String(20), nullable=True)   # 'percentage' | 'fixed'
     markup_value:  Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    # Per-category overrides; see the twin on models/customer.py. An employee inherits this
+    # whole dict from their corporate (services/party_inherit), which is why it is one JSONB
+    # column rather than a child table.
+    category_markups: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     billing_type:  Mapped[str | None]   = mapped_column(String(20), nullable=True)   # 'reseller' | 'agency'
 
     is_active:     Mapped[bool]     = mapped_column(Boolean, default=True)

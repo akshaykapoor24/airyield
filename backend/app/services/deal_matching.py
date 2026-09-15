@@ -56,6 +56,7 @@ from sqlalchemy.orm import selectinload
 from app.models.airline_class_master import AirlineClassMaster
 from app.models.airline import Airline
 from app.models.uploaded_ticket import UploadedTicket
+from app.services.markup_categories import CATEGORY_AIR
 from app.models.deal import (
     Deal as UnifiedDeal,
     DealIncentiveConfig,
@@ -587,6 +588,11 @@ async def _period_cumulative_base(
             UploadedTicket.tenant_id == tenant_id,
             UploadedTicket.created_by_id == created_by_id,
             func.upper(UploadedTicket.airlines_code).in_({v.upper() for v in variants}),
+            # Defence in depth: the airlines_code match already excludes non-air lines
+            # because the Third Party API projection leaves that column NULL on them.
+            # Stated here too so a slab's achieved sales can never be lifted by a hotel
+            # night's sell_fare if a future writer fills airlines_code for another category.
+            UploadedTicket.product_category == CATEGORY_AIR,
         )
     )
     total = 0.0
