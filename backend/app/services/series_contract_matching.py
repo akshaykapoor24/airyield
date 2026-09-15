@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.series_contract import SeriesContract
 from app.models.uploaded_ticket import UploadedTicket
+from app.services.markup_categories import CATEGORY_AIR
 
 # Backstop so a pathological tenant cannot build an unbounded in-memory index.
 # Mirrors MAX_TGQ_ROWS in bsp_tgq_enrichment.
@@ -120,6 +121,11 @@ class SeriesContractMatchingService:
                 # a ticket, not an issued ticket. Counting them would inflate the
                 # contract twice over — once for the ticket, once for its memo.
                 UploadedTicket.adm_acm_ra.is_(None),
+                # Seats on a group PNR are airline seats. A train booking from the
+                # Third Party API projection carries a 10-digit IRCTC PNR of its own;
+                # the projection keeps it out of gds_pnr/air_pnr today, but filtering
+                # here means a future writer that does not cannot count berths as seats.
+                UploadedTicket.product_category == CATEGORY_AIR,
             ).limit(MAX_TICKET_ROWS)
         )).all()
 

@@ -3,7 +3,8 @@
 import { Suspense, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { CheckCircle2, XCircle, Loader2, MailCheck, Send } from "lucide-react";
+import { CheckCircle2, XCircle, Loader2, MailCheck } from "lucide-react";
+import Logo from "@/components/marketing/Logo";
 import api from "@/lib/api";
 import { setToken, setUser } from "@/lib/auth";
 import { apiError } from "@/components/userMaster/shared";
@@ -54,13 +55,8 @@ function VerifyEmailInner() {
 
   return (
     <div className="w-full max-w-md">
-      <div className="lg:hidden flex items-center gap-2.5 mb-8">
-        <div className="w-9 h-9 rounded-xl flex items-center justify-center shadow-md shadow-blue-500/30" style={{ background: BTN }}>
-          <Send className="w-4 h-4 text-white" />
-        </div>
-        <span className="font-bold text-lg tracking-tight">
-          <span className="text-slate-800">Fare</span><span className="text-orange-500">Qube</span>
-        </span>
+      <div className="lg:hidden mb-8">
+        <Logo />
       </div>
 
       {status === "verifying" && (

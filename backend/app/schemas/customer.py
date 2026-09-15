@@ -5,6 +5,7 @@ from typing import Optional
 class CustomerCreate(BaseModel):
     first_name: str
     last_name: Optional[str] = None
+    employee_code: Optional[str] = None   # unique per workspace when set
     # The corporate this person works for; None = individual / direct. `company`
     # is derived from it and ignored on input whenever corporate_id is set.
     corporate_id: Optional[int] = None
@@ -19,6 +20,11 @@ class CustomerCreate(BaseModel):
     gst_no: Optional[str] = None
     pan_no: Optional[str] = None
     markup_type: Optional[str] = None   # 'percentage' | 'fixed'
+    # Per-category overrides of the markup above, keyed by markup_categories.CATEGORY_SLUGS.
+    # Declared as a plain dict for the same reason markup_type is a plain str: the shape is
+    # what Pydantic guards, and the VOCABULARY is coerced server-side by
+    # party_markup.norm_category_markups — an unrecognised category is dropped, never a 422.
+    category_markups: Optional[dict] = None
     markup_value: Optional[float] = None
     billing_type: Optional[str] = None  # 'reseller' | 'agency'
 
@@ -26,6 +32,7 @@ class CustomerCreate(BaseModel):
 class CustomerUpdate(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
+    employee_code: Optional[str] = None   # unique per workspace when set
     corporate_id: Optional[int] = None   # send explicitly as null to unlink
     company: Optional[str] = None
     title: Optional[str] = None
@@ -36,6 +43,7 @@ class CustomerUpdate(BaseModel):
     gst_no: Optional[str] = None
     pan_no: Optional[str] = None
     markup_type: Optional[str] = None
+    category_markups: Optional[dict] = None
     markup_value: Optional[float] = None
     billing_type: Optional[str] = None
     is_active: Optional[bool] = None
@@ -45,6 +53,7 @@ class CustomerRead(BaseModel):
     id: int
     first_name: str
     last_name: Optional[str] = None
+    employee_code: Optional[str] = None   # unique per workspace when set
     corporate_id: Optional[int] = None
     company: Optional[str] = None
     title: Optional[str] = None
@@ -55,6 +64,7 @@ class CustomerRead(BaseModel):
     gst_no: Optional[str] = None
     pan_no: Optional[str] = None
     markup_type: Optional[str] = None
+    category_markups: Optional[dict] = None
     markup_value: Optional[float] = None
     billing_type: Optional[str] = None
     is_active: bool
@@ -75,6 +85,7 @@ class CustomerBulkCreateRow(BaseModel):
     """
     first_name: Optional[str] = None
     last_name: Optional[str] = None
+    employee_code: Optional[str] = None   # unique per workspace when set
     company: Optional[str] = None
     title: Optional[str] = None
     phone: Optional[str] = None
@@ -84,6 +95,8 @@ class CustomerBulkCreateRow(BaseModel):
     pan_no: Optional[str] = None
     markup_type: Optional[str] = None
     markup_value: Optional[float] = None
+    # Built by the wizard from the optional <CATEGORY>_MARKUP_TYPE / _VALUE columns.
+    category_markups: Optional[dict] = None
     billing_type: Optional[str] = None
 
 
@@ -146,6 +159,16 @@ class SoldTicketRead(BaseModel):
     booking_class: Optional[str] = None
     ticket_date: Optional[str] = None
     ticket_status: Optional[str] = None
+    # air | hotel | train | bus | car — which markup priced this line. A non-air line has no
+    # ticket number, airline or sector: `booking_ref` and `service_details` (its `title`,
+    # `route` and `summary`) are what the billing screens show in their place.
+    product_category: str = "air"
+    booking_ref: Optional[str] = None
+    service_details: Optional[dict] = None
+    # Passengers on the booking. A FIXED markup is multiplied by it; `markup_note` says how
+    # `markup_amount` was reached ("₹300 × 6 pax", "2% of fare") so the screen can show it.
+    pax_count: int = 1
+    markup_note: Optional[str] = None
     sell_fare: Optional[float] = None
     total_amt: Optional[float] = None
     calculated_incentive: Optional[float] = None

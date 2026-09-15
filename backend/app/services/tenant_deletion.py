@@ -110,10 +110,10 @@ DELETION_GROUPS: tuple[DeletionGroup, ...] = (
     ),
     DeletionGroup(
         "vendor_statements", "Vendor statements",
-        "TGQ HMPR, NDC, DI, Divided PNR, Flown Report, CTA/BTA, third-party GDS/LCC and Detailed.",
+        "TGQ HMPR, NDC, DI, Divided PNR, Flown Report, CTA/BTA, third-party GDS/LCC/API and Detailed.",
         GroupCategory.RECORDS,
         ("tgq_hmpr", "ndc", "lcc_di", "lcc_divided_pnr", "lcc_flown_report",
-         "lcc_cta_bta", "third_party_gds", "third_party_lcc",
+         "lcc_cta_bta", "third_party_gds", "third_party_lcc", "third_party_api",
          "lcc_detailed", "lcc_detailed_batch", "lcc_batch_airline_ids",
          "lcc_detailed_batch_file",
          "statement_batch_airline_ids", "statement_batch_suppliers",
@@ -138,6 +138,13 @@ DELETION_GROUPS: tuple[DeletionGroup, ...] = (
     DeletionGroup(
         "series", "Series / SIT / MICE", "Series contracts.",
         GroupCategory.RECORDS, ("series_contracts",),
+    ),
+    DeletionGroup(
+        # Rows only. The stored workbooks under reports/{tenant}/ are left to the GCS
+        # lifecycle rule on that prefix; a database transaction cannot delete objects.
+        "reports", "Generated reports",
+        "Excel workbooks generated in Workspace → Report download.",
+        GroupCategory.RECORDS, ("report_exports",),
     ),
     DeletionGroup(
         "legacy", "Legacy records",

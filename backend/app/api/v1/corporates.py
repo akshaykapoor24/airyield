@@ -32,23 +32,36 @@ from app.schemas.corporate import (
     CorporateCreate, CorporateUpdate, CorporateRead, CorporateBulkUploadResult,
     CorporateBulkCreate, CorporateListItem, CorporateSoldTicketsResponse,
 )
-from app.core.india_tax import tax_id_error
+from app.core.india_tax import canonical_state, pan_error, tax_id_error
 from app.schemas.customer import PlaceOfSupplyRead, SoldTicketRead, SoldTicketsSummary
 from app.schemas.billing import BillingCreate, BillingUpdate, BillingRead, BillingListItem
 from app.services.billing_pdf import build_billing_pdf, load_logo, supplier_block
+from app.services.party_ticket_export import (
+    booking_order as _booking_order,
+    export_rows as _export_rows,
+    xlsx_download as _xlsx_download,
+)
 from app.services.party_dedupe import CorporateDuplicates
 from app.services.billing_calc import (
     to_float as _f,
     gst_taxable,
-    compute_markup as _compute_markup,
     split_gst as _split_gst,
     interstate_from_treatment as _interstate_from_treatment,
     safe_date as _safe_date,
     passenger_name as _passenger_name,
+    line_identity as _line_identity,
+    ticket_category_clause as _ticket_category_clause,
     corporate_ticket_scope as _corporate_ticket_scope,
     ticket_matched_by as _ticket_matched_by,
 )
 from app.services.place_of_supply import as_payload as _pos_payload, place_of_supply
+from app.services.party_markup import (
+    CATEGORY_COLUMNS,
+    category_markups_from_cells as _categories_from_cells,
+    line_markup as _line_markup,
+    norm_category_markups as _norm_categories,
+    pax_of as _pax_of,
+)
 from app.services import spreadsheet
 
 router = APIRouter()
@@ -120,23 +133,52 @@ def _clean_upper(value) -> Optional[str]:
     return v or None
 
 
-# ── A corporate must carry a GSTIN ──────────────────────────────────────────
-# The business rule, stated as "always required, no exceptions". A corporate is
-# a registered business being invoiced, and its GSTIN is what decides the place
-# of supply — which is what decides whether the invoice carries CGST + SGST or
-# IGST. Without it the tax cannot be attributed, and the corporate cannot claim
-# input credit on a bill it has paid.
+# ── GST registration and state ──────────────────────────────────────────────
+# A corporate is REGISTERED or UNREGISTERED — the same choice a customer has. It
+# used to be "a GSTIN always, no exceptions", but real corporates exist with no
+# GSTIN, and refusing to save them left the user nothing to do but invent one.
 #
-# This is why `gst_registered` is no longer a meaningful choice for a corporate:
-# it is forced True wherever a GSTIN is written, so the two can never disagree.
+#   Registered   ⇒ a valid GSTIN, checked against itself and the row around it.
+#   Unregistered ⇒ no GSTIN is kept, whatever was sent.
+#
+# STATE IS ALWAYS REQUIRED. Place of supply reads the GSTIN first and falls back
+# to the state (services/place_of_supply), so for an unregistered corporate the
+# state is the ONLY thing deciding CGST + SGST vs IGST. For a registered one it is
+# a cross-check that catches a GSTIN typed for the wrong state.
 _GSTIN_REQUIRED = (
-    "GST No is required for a corporate. It decides whether the invoice carries "
-    "CGST + SGST or IGST, and the corporate cannot claim input credit without it."
+    "GST No is required for a registered corporate. It decides whether the invoice "
+    "carries CGST + SGST or IGST. If this corporate has no GSTIN, mark it Unregistered."
+)
+_STATE_REQUIRED = (
+    "State is required for a corporate. It decides whether the invoice carries "
+    "CGST + SGST or IGST."
 )
 
 
+def _clean_state(value) -> Optional[str]:
+    """A state filed under its canonical spelling, or None. Twin of customers._clean_state:
+    an unrecognised spelling is kept verbatim rather than dropped."""
+    raw = (str(value).strip() if value is not None else "") or None
+    return canonical_state(raw) or raw
+
+
+def _is_registered(flag, gst_no) -> bool:
+    """Registered / Unregistered, as sent — or, when nothing was sent, whether there is a GSTIN.
+
+    The fallback is for a spreadsheet with a GST_NO column and no GST_REGISTERED column,
+    and for API callers that predate the choice. Reading those as Unregistered would
+    silently discard every GSTIN they carry.
+    """
+    if isinstance(flag, bool):
+        return flag
+    text = str(flag).strip().lower() if flag is not None else ""
+    if text:
+        return text in _TRUTHY
+    return bool(_clean_upper(gst_no))
+
+
 def _gstin_problem(gst_no, pan_no=None, state=None) -> Optional[str]:
-    """Why this GSTIN is not acceptable for a corporate, or None.
+    """Why this GSTIN is not acceptable for a REGISTERED corporate, or None.
 
     Non-raising, because the bulk import paths attribute a problem to one row
     and still save the others — see bulk_upload_corporates.
@@ -149,12 +191,14 @@ def _gstin_problem(gst_no, pan_no=None, state=None) -> Optional[str]:
     return tax_id_error(value, _clean_upper(pan_no), state)
 
 
-def _require_gstin(gst_no, pan_no=None, state=None) -> str:
-    """The validated GSTIN, or a 400 naming exactly what is wrong with it."""
-    problem = _gstin_problem(gst_no, pan_no, state)
-    if problem:
-        raise HTTPException(status_code=400, detail=problem)
-    return _clean_upper(gst_no)
+def _tax_problem(registered: bool, gst_no, pan_no=None, state=None) -> Optional[str]:
+    """Why this corporate's state / GST / PAN cannot be saved together, or None."""
+    if not (state or "").strip():
+        return _STATE_REQUIRED
+    if registered:
+        return _gstin_problem(gst_no, pan_no, state)
+    # No GSTIN to cross-check against, but a PAN that is given must still be a PAN.
+    return pan_error(_clean_upper(pan_no))
 
 
 def _scope(current_user: User):
@@ -197,18 +241,12 @@ async def _get_owned_billing(billing_id: int, corporate_id: int, db: AsyncSessio
     return obj
 
 
-@router.get("/", response_model=list[CorporateListItem])
-async def list_corporates(
-    response: Response,
-    skip: int = Query(0, ge=0),
-    # See the same note in customers.py: several screens fetch a whole master at 1000.
-    limit: int = Query(500, ge=1, le=1000),
-    search: Optional[str] = None,
-    ticket_state: Optional[str] = Query(None, pattern="^(any|unbilled|has|none)$"),
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """The corporate list, filtered and counted server-side. Twin of list_customers."""
+def _corporate_list_query(current_user: User, search: Optional[str], ticket_state: Optional[str]):
+    """`(Corporate, ticket_count, unbilled_count)` rows under the list's search and filter.
+
+    Shared by the list and the tickets export, so the file always holds the tickets of
+    exactly the corporates the Corporate Billing screen is showing.
+    """
     # Tickets HARD-LINKED to each corporate — the partial index for this is
     # ix_uploaded_tickets_bill_corporate. Note an LCC ticket for an employee carries
     # BOTH ids, so it is counted once here and once on Employee Master; the two screens
@@ -254,6 +292,22 @@ async def list_corporates(
         q = q.where(total_col > 0)
     elif ticket_state == "none":
         q = q.where(total_col == 0)
+    return q
+
+
+@router.get("/", response_model=list[CorporateListItem])
+async def list_corporates(
+    response: Response,
+    skip: int = Query(0, ge=0),
+    # See the same note in customers.py: several screens fetch a whole master at 1000.
+    limit: int = Query(500, ge=1, le=1000),
+    search: Optional[str] = None,
+    ticket_state: Optional[str] = Query(None, pattern="^(any|unbilled|has|none)$"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The corporate list, filtered and counted server-side. Twin of list_customers."""
+    q = _corporate_list_query(current_user, search, ticket_state)
 
     response.headers["X-Total-Count"] = str(
         (await db.execute(select(func.count()).select_from(q.order_by(None).subquery()))).scalar_one()
@@ -280,9 +334,12 @@ async def create_corporate(
     company = (payload.company or "").strip()
     if not company:
         raise HTTPException(status_code=400, detail="Corporate name is required.")
-    state = (payload.state or "").strip() or None
-    # Required, with no unregistered option — see _GSTIN_REQUIRED above.
-    gst_no = _require_gstin(payload.gst_no, payload.pan_no, state)
+    state = _clean_state(payload.state)
+    registered = _is_registered(payload.gst_registered, payload.gst_no)
+    problem = _tax_problem(registered, payload.gst_no, payload.pan_no, state)
+    if problem:
+        raise HTTPException(status_code=400, detail=problem)
+    gst_no = _clean_upper(payload.gst_no) if registered else None
 
     # ONE NAME AND ONE GSTIN PER WORKSPACE. The name because the employee import links
     # people to their employer by it (api/v1/customers.py::_corporate_name_map), the
@@ -303,13 +360,12 @@ async def create_corporate(
         state=state,
         pincode=(payload.pincode or "").strip() or None,
         country=(payload.country or "").strip() or None,
-        # Always True: a corporate now always has a GSTIN, so a stored False
-        # would contradict the column beside it.
-        gst_registered=True,
+        gst_registered=registered,
         gst_no=gst_no,
         pan_no=_clean_upper(payload.pan_no),
         markup_type=_norm_choice(payload.markup_type, _MARKUP_TYPES),
         markup_value=payload.markup_value,
+        category_markups=_norm_categories(payload.category_markups),
         billing_type=_norm_choice(payload.billing_type, _BILLING_TYPES),
     )
     db.add(corporate)
@@ -394,14 +450,20 @@ async def bulk_upload_corporates(
                 errors.append(f"{row_prefix}: MARKUP_VALUE '{markup_value_raw}' is not a number.")
                 continue
 
-        # GST_REGISTERED is no longer read: a corporate always has a GSTIN, so
-        # the column cannot say otherwise. A row without a valid one is reported
+        # A row with no state, or registered without a valid GSTIN, is reported
         # against its own row number and the rest of the sheet still imports.
-        state = _cell(row, "STATE")
-        gst_no = _cell(row, "GST_NO")
-        gst_problem = _gstin_problem(gst_no, _cell(row, "PAN_NO"), state)
+        state = _clean_state(_cell(row, "STATE"))
+        registered = _is_registered(_cell(row, "GST_REGISTERED"), _cell(row, "GST_NO"))
+        gst_problem = _tax_problem(registered, _cell(row, "GST_NO"), _cell(row, "PAN_NO"), state)
         if gst_problem:
             errors.append(f"{row_prefix}: {gst_problem}")
+            continue
+        gst_no = _clean_upper(_cell(row, "GST_NO")) if registered else None
+
+        # Optional AIR_MARKUP_TYPE / AIR_MARKUP_VALUE … columns; absent on older templates.
+        category_markups, category_problem = _categories_from_cells(lambda c: _cell(row, c))
+        if category_problem:
+            errors.append(f"{row_prefix}: {category_problem}")
             continue
 
         # After the GSTIN is known to be valid, so a bad number is reported as a bad
@@ -424,11 +486,12 @@ async def bulk_upload_corporates(
                 state=state,
                 pincode=_cell(row, "PINCODE"),
                 country=_cell(row, "COUNTRY"),
-                gst_registered=True,
-                gst_no=_clean_upper(gst_no),
+                gst_registered=registered,
+                gst_no=gst_no,
                 pan_no=_clean_upper(_cell(row, "PAN_NO")),
                 markup_type=_norm_choice(_cell(row, "MARKUP_TYPE"), _MARKUP_TYPES),
                 markup_value=markup_value,
+                category_markups=_norm_categories(category_markups),
                 billing_type=_norm_choice(_cell(row, "BILLING_TYPE"), _BILLING_TYPES),
             )
             db.add(corporate)
@@ -482,15 +545,16 @@ async def bulk_create_corporates(
             errors.append(f"{row_prefix}: Corporate name is required.")
             continue
 
-        # A corporate always has a GSTIN; a row without a valid one is reported
-        # against its own row number and the rest of the batch still saves.
-        state = (row.state or "").strip() or None
-        gst_problem = _gstin_problem(row.gst_no, row.pan_no, state)
+        # Same per-row rule as the .xls path above.
+        state = _clean_state(row.state)
+        registered = _is_registered(row.gst_registered, row.gst_no)
+        gst_problem = _tax_problem(registered, row.gst_no, row.pan_no, state)
         if gst_problem:
             errors.append(f"{row_prefix}: {gst_problem}")
             continue
+        gst_no = _clean_upper(row.gst_no) if registered else None
 
-        clash = duplicates.check(company, row.gst_no)
+        clash = duplicates.check(company, gst_no)
         if clash:
             errors.append(f"{row_prefix}: {clash}")
             continue
@@ -508,11 +572,12 @@ async def bulk_create_corporates(
                 state=state,
                 pincode=(row.pincode or "").strip() or None,
                 country=(row.country or "").strip() or None,
-                gst_registered=True,
-                gst_no=_clean_upper(row.gst_no),
+                gst_registered=registered,
+                gst_no=gst_no,
                 pan_no=_clean_upper(row.pan_no),
                 markup_type=_norm_choice(row.markup_type, _MARKUP_TYPES),
                 markup_value=row.markup_value,
+                category_markups=_norm_categories(row.category_markups),
                 billing_type=_norm_choice(row.billing_type, _BILLING_TYPES),
             ))
             await db.commit()
@@ -532,19 +597,31 @@ async def download_corporate_template():
     ws = wb.active
     ws.title = "Corporate Template"
 
+    # The category columns go LAST, after every column older templates had, so a file
+    # made from any earlier template is still a valid (if shorter) version of this one.
     headers = [
         "COMPANY", "CORPORATE_TYPE", "PHONE", "EMAIL",
         "ADDRESS", "CITY", "STATE", "PINCODE", "COUNTRY",
         "GST_REGISTERED", "GST_NO", "PAN_NO",
         "MARKUP_TYPE", "MARKUP_VALUE", "BILLING_TYPE",
+        *CATEGORY_COLUMNS,
     ]
     ws.append(headers)
+    # Category columns are optional: a blank pair means "use MARKUP_TYPE / MARKUP_VALUE".
+    no_categories = [""] * len(CATEGORY_COLUMNS)
+    acme_categories = list(no_categories)
+    acme_categories[:4] = ["fixed", "300", "percentage", "5"]          # Air ₹300, Hotel 5%
+    # A made-up GSTIN that PASSES _tax_problem: a Maharashtra code, a company PAN (4th
+    # letter C) and a correct check digit. The previous sample failed all three checks,
+    # so uploading the template unchanged rejected its own first row.
     ws.append(["Acme Pvt Ltd", "Private Limited", "9876543210", "accounts@acme.com",
                "12 MG Road, Andheri East", "Mumbai", "Maharashtra", "400069", "India",
-               "Registered", "27ABCDE1234F1Z5", "ABCDE1234F", "percentage", "10", "reseller"])
+               "Registered", "27ABCCA1234F1Z6", "ABCCA1234F", "percentage", "10", "reseller",
+               *acme_categories])
     ws.append(["Beta Traders", "Proprietorship", "9123456780", "info@betatraders.in",
                "Shop 4, Sector 18", "Noida", "Uttar Pradesh", "201301", "India",
-               "Unregistered", "", "", "fixed", "500", "agency"])
+               "Unregistered", "", "", "fixed", "500", "agency",
+               *no_categories])
 
     bio = BytesIO()
     wb.save(bio)
@@ -554,6 +631,51 @@ async def download_corporate_template():
         bio,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": 'attachment; filename="corporate_template.xlsx"'},
+    )
+
+
+# Declared BEFORE /{corporate_id} so the path is not swallowed by it.
+@router.get("/tickets-export")
+async def export_corporate_tickets(
+    search: Optional[str] = None,
+    ticket_state: Optional[str] = Query(None, pattern="^(any|unbilled|has|none)$"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Every ticket of the listed corporates as one sheet — Corporate Billing's download.
+
+    THE ROWS ARE THE TICKETS COLUMN'S TOTAL: tickets hard-linked to each corporate, billed
+    and unbilled. Untagged tickets the Sold Tickets tab also reaches by passenger name are
+    left out, as they are from that count — so "4 / 9" means nine rows, and a ticket whose
+    passenger shares a name with two corporates' employees cannot appear twice.
+
+    The figures come from services/party_ticket_export: a billed ticket's saved invoice
+    line, or the Sold Tickets pricing for one not yet billed.
+    """
+    ordered = [c for c, _total, _unbilled in (await db.execute(
+        _corporate_list_query(current_user, search, ticket_state)
+        .order_by(Corporate.company, Corporate.first_name)
+    )).all()]
+    corporates = {c.id: c for c in ordered}
+    rank = {c.id: i for i, c in enumerate(ordered)}
+
+    tickets: list[UploadedTicket] = []
+    if corporates:
+        tickets = (await db.execute(
+            select(UploadedTicket).where(
+                UploadedTicket.tenant_id == current_user.tenant_id,
+                UploadedTicket.created_by_id == current_user.id,
+                UploadedTicket.corporate_id.in_(list(corporates)),
+            )
+        )).scalars().all()
+
+    pairs = [(t, corporates[t.corporate_id]) for t in sorted(
+        tickets, key=lambda t: (rank[t.corporate_id], *_booking_order(t)),
+    )]
+    return _xlsx_download(
+        await _export_rows(db, current_user, pairs),
+        f"corporate-tickets-{date.today().isoformat()}.xlsx",
+        "Corporate Tickets",
     )
 
 
@@ -584,23 +706,32 @@ async def update_corporate(
         data["corporate_type"] = _norm_corporate_type(data["corporate_type"])
     if "markup_type" in data:
         data["markup_type"] = _norm_choice(data["markup_type"], _MARKUP_TYPES)
+    if "category_markups" in data:
+        data["category_markups"] = _norm_categories(data["category_markups"])
     if "billing_type" in data:
         data["billing_type"] = _norm_choice(data["billing_type"], _BILLING_TYPES)
     if "pan_no" in data:
         data["pan_no"] = _clean_upper(data["pan_no"])
-    # The GSTIN is required, so it is validated against whatever the row will
-    # HOLD after this edit, not just against what the request sent. Clearing it,
-    # or saving a corporate that never had one, is refused.
-    #
-    # This does block editing a pre-existing corporate that has no GSTIN until
-    # one is supplied — which is the rule as stated ("always required, no
-    # exceptions"), and the error says exactly what to add.
-    data["gst_no"] = _require_gstin(
-        data.get("gst_no", obj.gst_no),
-        data.get("pan_no", obj.pan_no),
-        data.get("state", obj.state),
-    )
-    data["gst_registered"] = True
+    if "state" in data:
+        data["state"] = _clean_state(data["state"])
+    # Judged against what the row will HOLD after this edit, not just what the request
+    # sent — so clearing the state, or marking a corporate Registered without a GSTIN, is
+    # refused. Only when the edit touches one of these: a PATCH of `is_active` alone must
+    # not be blocked by a pre-existing row that was saved before the state was required.
+    if {"state", "gst_registered", "gst_no", "pan_no"} & data.keys():
+        registered = _is_registered(
+            data.get("gst_registered", obj.gst_registered), data.get("gst_no", obj.gst_no),
+        )
+        problem = _tax_problem(
+            registered,
+            data.get("gst_no", obj.gst_no),
+            data.get("pan_no", obj.pan_no),
+            data.get("state", obj.state),
+        )
+        if problem:
+            raise HTTPException(status_code=400, detail=problem)
+        data["gst_registered"] = registered
+        data["gst_no"] = _clean_upper(data.get("gst_no", obj.gst_no)) if registered else None
 
     # A RENAME, or moving a GSTIN onto a different corporate, collides exactly as a
     # fresh add does. Judged on what the row will HOLD after this edit; each facet is
@@ -673,16 +804,24 @@ async def delete_corporate(
     await db.commit()
 
 
-@router.get("/{corporate_id}/sold-tickets", response_model=CorporateSoldTicketsResponse)
-async def get_corporate_sold_tickets(
-    corporate_id: int,
-    date_from: Optional[date] = None,
-    date_to: Optional[date] = None,
-    date_field: str = "ticket",
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    corporate = await _get_owned_corporate(corporate_id, db, current_user)
+async def _sold_tickets(
+    corporate: Corporate,
+    db: AsyncSession,
+    current_user: User,
+    *,
+    date_from: Optional[date],
+    date_to: Optional[date],
+    date_field: str,
+    category: Optional[str],
+) -> tuple[list[UploadedTicket], list[tuple]]:
+    """The tickets the Sold Tickets tab lists for this corporate, and the names they match on.
+
+    Shared by the tab and its XLS download, so the file holds exactly the rows on screen.
+    """
+    try:
+        category_filter = _ticket_category_clause(category)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     # WHOSE TICKETS COUNT AS THIS CORPORATE'S. An organisation is not a passenger,
     # so the names to match are its EMPLOYEES' — every customer in Employee Master
@@ -724,6 +863,7 @@ async def get_corporate_sold_tickets(
             UploadedTicket.tenant_id == current_user.tenant_id,
             UploadedTicket.created_by_id == current_user.id,
             _corporate_ticket_scope(corporate, conds),
+            *category_filter,
         )
         .order_by(UploadedTicket.created_at.desc())
     )
@@ -744,6 +884,24 @@ async def get_corporate_sold_tickets(
                 continue
             in_range.append(t)
         tickets = in_range
+    return list(tickets), names
+
+
+@router.get("/{corporate_id}/sold-tickets", response_model=CorporateSoldTicketsResponse)
+async def get_corporate_sold_tickets(
+    corporate_id: int,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    date_field: str = "ticket",
+    category: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    corporate = await _get_owned_corporate(corporate_id, db, current_user)
+    tickets, names = await _sold_tickets(
+        corporate, db, current_user,
+        date_from=date_from, date_to=date_to, date_field=date_field, category=category,
+    )
 
     # WHICH GST these rows carry. The corporate IS the recipient here — an
     # employee's ticket billed to the company they work for is a supply to the
@@ -757,7 +915,10 @@ async def get_corporate_sold_tickets(
     total_cgst = total_sgst = total_igst = 0.0
     for t in tickets:
         base = _f(t.total_amt) if t.total_amt is not None else _f(t.sell_fare)
-        markup_amount = _compute_markup(base, corporate.markup_type, corporate.markup_value)
+        # This line's category, falling back to the corporate's default markup when it has
+        # no override, and a fixed markup charged per passenger. With no overrides and one
+        # passenger the arithmetic is unchanged. See services/party_markup.
+        markup_amount, markup_note = _line_markup(base, corporate, t)
         gst = _split_gst(base, markup_amount, corporate.billing_type, interstate=pos.interstate)
         gst_amount = gst["gst_amount"]
         total = base + markup_amount + gst_amount
@@ -780,6 +941,11 @@ async def get_corporate_sold_tickets(
             booking_class=t.booking_class,
             ticket_date=t.ticket_date,
             ticket_status=t.ticket_status,
+            product_category=t.product_category or "air",
+            booking_ref=t.booking_ref,
+            service_details=t.service_details,
+            pax_count=_pax_of(t),
+            markup_note=markup_note,
             sell_fare=_f(t.sell_fare) if t.sell_fare is not None else None,
             total_amt=_f(t.total_amt) if t.total_amt is not None else None,
             calculated_incentive=_f(t.calculated_incentive) if t.calculated_incentive is not None else None,
@@ -815,6 +981,36 @@ async def get_corporate_sold_tickets(
             total_with_markup=round(total_with_markup, 2),
         ),
         place_of_supply=PlaceOfSupplyRead(**_pos_payload(pos)),
+    )
+
+
+@router.get("/{corporate_id}/tickets-export")
+async def export_corporate_sold_tickets(
+    corporate_id: int,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    date_field: str = "ticket",
+    category: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """One corporate's Sold Tickets as the Corporate Billing sheet.
+
+    THE ROWS ARE THE TAB'S ROWS, under the same filters: tickets linked to this corporate
+    AND untagged ones its employees' names reach, billed and unbilled. Unlike the
+    all-corporates download, name matches belong here — this is one corporate, so nothing
+    can appear twice, and leaving them out would make the file disagree with the screen.
+    """
+    corporate = await _get_owned_corporate(corporate_id, db, current_user)
+    tickets, _names = await _sold_tickets(
+        corporate, db, current_user,
+        date_from=date_from, date_to=date_to, date_field=date_field, category=category,
+    )
+    pairs = [(t, corporate) for t in sorted(tickets, key=_booking_order)]
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", corporate.company or "").strip("-").lower() or f"corporate-{corporate.id}"
+    return _xlsx_download(
+        await _export_rows(db, current_user, pairs),
+        f"{slug}-tickets-{date.today().isoformat()}.xlsx",
     )
 
 
@@ -868,7 +1064,7 @@ async def create_billing(
     names = [(f, l) for f, l in emp.all()]
     if corporate.first_name:
         names.append((corporate.first_name, corporate.last_name))
-    foreign = [t.ticket_number or t.pax_name or str(t.id) for t in tickets
+    foreign = [t.ticket_number or t.booking_ref or t.pax_name or str(t.id) for t in tickets
                if not _ticket_matched_by(t, corporate=corporate, names=names)]
     if foreign:
         raise HTTPException(
@@ -877,7 +1073,7 @@ async def create_billing(
                     f"{', '.join(foreign[:5])}{'…' if len(foreign) > 5 else ''}."),
         )
 
-    already = [t.ticket_number or str(t.id) for t in tickets if t.is_billed]
+    already = [t.ticket_number or t.booking_ref or str(t.id) for t in tickets if t.is_billed]
     if already:
         raise HTTPException(status_code=400, detail=f"Already billed: {', '.join(already)}. Refresh and try again.")
 
@@ -890,7 +1086,7 @@ async def create_billing(
     total_cgst = total_sgst = total_igst = 0.0
     for t in tickets:
         base = _f(t.total_amt) if t.total_amt is not None else _f(t.sell_fare)
-        corp_markup = _compute_markup(base, corporate.markup_type, corporate.markup_value)
+        corp_markup, markup_note = _line_markup(base, corporate, t)
         addl = addl_map.get(t.id, 0.0)
         disc = disc_map.get(t.id, 0.0)
         total_mk = corp_markup + addl
@@ -919,6 +1115,8 @@ async def create_billing(
             "passenger": _passenger_name(t),
             "sector": t.sector,
             "ticket_date": t.ticket_date,
+            **_line_identity(t),
+            "markup_note": markup_note,
             "base_amount": round(base, 2),
             "markup_amount": round(corp_markup, 2),
             "additional_markup": round(addl, 2),

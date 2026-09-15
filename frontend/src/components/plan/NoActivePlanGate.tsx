@@ -70,7 +70,7 @@ export default function NoActivePlanGate({ user }: { user: AuthUser | null }) {
     <div className="min-h-screen w-full bg-gray-50 flex flex-col items-center justify-center p-4">
       <div className="w-full max-w-lg bg-white rounded-2xl shadow-xl border border-gray-100 overflow-hidden">
         <div className="px-8 pt-8 pb-6 flex flex-col items-center text-center">
-          <Logo />
+          <Logo className="h-11 w-auto" />
 
           <div className="mt-7 grid h-14 w-14 place-items-center rounded-2xl bg-amber-50 border border-amber-100">
             <Lock className="h-6 w-6 text-amber-500" />

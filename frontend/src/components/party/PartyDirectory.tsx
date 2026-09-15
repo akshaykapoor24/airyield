@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import toast from "react-hot-toast";
 import {
-  AlertTriangle, ArrowRight, ChevronRight, Edit2, Link2, Plus,
+  AlertTriangle, ArrowRight, ChevronRight, Download, Edit2, Link2, Plus,
   ReceiptIndianRupee, RefreshCw, Search, Trash2, Upload, X,
 } from "lucide-react";
 import api from "@/lib/api";
@@ -14,8 +14,8 @@ import PartyModal from "@/components/party/PartyModal";
 import PartyUploadModal from "@/components/party/PartyUploadModal";
 import { PARTY_ICON } from "@/components/party/icons";
 import {
-  PARTY, billingTypeLabel, corporateLabel, corporateTypeLabel,
-  markupTypeLabel, markupValueLabel, partyName,
+  PARTY, billingTypeLabel, corporateLabel, corporateTypeLabel, corporateTypeShortLabel,
+  categoryMarkupLabel, categoryMarkupParts, markupValueLabel, partyName,
   type Party, type PartyKind, type PartyMode,
 } from "@/lib/party";
 
@@ -36,14 +36,50 @@ type RelinkResult = {
 const errText = (e: unknown, fallback: string) =>
   (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail || fallback;
 
-// The first three columns are what a customer and a corporate disagree about: a
-// customer is a person at a company, a corporate is an organisation of some legal
-// form, somewhere. The rest — contact, tax ids, markup, billing — is shared.
+// The lead columns are what a customer and a corporate disagree about: a customer is a
+// person at a company, a corporate is an organisation of some legal form, somewhere.
+// The rest — contact, tax ids, markup, billing — is shared.
+//
+// RELATED FACTS SHARE A CELL, one under the other, so the table fits a laptop screen
+// without scrolling sideways: name over code/title or legal form, email over phone,
+// GSTIN over PAN, default markup over its category overrides. Fifteen single-fact
+// columns pushed ACTIONS off the right edge.
 const LEAD_COLUMNS: Record<PartyKind, string[]> = {
-  customer: ["NAME", "CORPORATE", "TITLE"],
-  corporate: ["CORPORATE NAME", "TYPE", "CITY"],
+  customer: ["NAME", "CORPORATE"],
+  corporate: ["CORPORATE", "LOCATION"],
 };
-const TAIL_COLUMNS = ["EMAIL", "PHONE", "GST NO", "PAN NO", "MARKUP TYPE", "MARKUP VALUE", "BILLING"];
+const TAIL_COLUMNS = ["CONTACT", "GST / PAN", "MARKUP", "BILLING"];
+
+const COLUMN_HINTS: Record<string, string> = {
+  TICKETS: "Unbilled / total tickets linked to this party. Tickets nobody has claimed, which Billing matches by passenger name, are not counted here.",
+  MARKUP: "The default markup, with any per-category overrides under it.",
+};
+
+/** "new delhi" → "New Delhi". Only for text typed all-lowercase; anything else is kept as typed. */
+function tidyPlace(value: string | null | undefined): string {
+  const v = (value ?? "").trim();
+  return v && v === v.toLowerCase() ? v.replace(/\b[a-z]/g, (c) => c.toUpperCase()) : v;
+}
+
+const CELL = "px-3 py-2.5 align-middle";
+const SUBLINE = "text-[10px] text-gray-400 mt-0.5";
+const DASH = <span className="text-[11px] text-gray-300">—</span>;
+
+/** City over state — the state only when it adds something ("Delhi" over "delhi" does not). */
+function LocationCell({ city, state }: { city?: string | null; state?: string | null }) {
+  const c = tidyPlace(city);
+  const s = tidyPlace(state);
+  return (
+    <td className={`${CELL} text-[11px] text-gray-600 whitespace-nowrap`}>
+      {c || s ? (
+        <>
+          <p>{c || s}</p>
+          {c && s && s.toLowerCase() !== c.toLowerCase() && <p className={SUBLINE}>{s}</p>}
+        </>
+      ) : DASH}
+    </td>
+  );
+}
 
 /**
  * The customer / corporate list, in one of two modes:
@@ -87,6 +123,9 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
   const [deleteTarget, setDeleteTarget] = useState<Party | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [relinkOpen, setRelinkOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  // Billing only: every ticket behind the TICKETS column, as one sheet.
+  const canExportTickets = !isMaster;
 
   // Search, filters and paging are all server-side now. They used to run in the browser
   // over a single limit=500 fetch, which meant a workspace's 501st row could not be
@@ -162,6 +201,39 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
     }
   };
 
+  /**
+   * Download the tickets of every party this list is showing — billed and unbilled, all
+   * pages, under the current search and filters. The server builds the sheet
+   * (api/v1/{customers,corporates}.py::export_*_tickets).
+   */
+  const downloadTickets = async () => {
+    setExporting(true);
+    try {
+      const res = await api.get(`/${cfg.resource}/tickets-export`, {
+        params: {
+          ...(debounced.trim() ? { search: debounced.trim() } : {}),
+          ...(ticketState !== "any" ? { ticket_state: ticketState } : {}),
+          ...(!isCorporate && corporate ? { corporate } : {}),
+        },
+        responseType: "blob",
+      });
+      const now = new Date();
+      const stamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+      const url = window.URL.createObjectURL(res.data as Blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${kind}-tickets-${stamp}.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch {
+      toast.error("Could not download the tickets.");
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const colCount = columns.length + (isMaster ? 1 : 0);
 
   const crossLink = isMaster
@@ -202,6 +274,18 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
           </button>
+          {canExportTickets && (
+            <button
+              onClick={downloadTickets}
+              disabled={exporting}
+              className="flex items-center gap-1.5 bg-[#1e3a5f] hover:bg-[#16304f] text-white text-xs font-semibold px-3.5 py-2 rounded-lg shadow-sm disabled:opacity-60"
+              title={`Every ticket of the ${many.toLowerCase()} listed below — billed and unbilled — as an Excel sheet`}
+            >
+              {exporting
+                ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Downloading…</>
+                : <><Download className="w-3.5 h-3.5" /> Download Tickets XLS</>}
+            </button>
+          )}
           {isMaster && (
             <>
               {/* Deliberately NOT folded into Refresh above. Refresh is idempotent and
@@ -300,9 +384,7 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
                   <th
                     key={h}
                     className="px-3 py-2.5 text-left text-[10px] font-semibold text-white uppercase tracking-wider whitespace-nowrap"
-                    title={h === "TICKETS"
-                      ? "Unbilled / total tickets linked to this party. Tickets nobody has claimed, which Billing matches by passenger name, are not counted here."
-                      : undefined}
+                    title={COLUMN_HINTS[h]}
                   >
                     {h}
                   </th>
@@ -377,48 +459,86 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
                     onClick={() => (isMaster ? setEditTarget(p) : router.push(cfg.detailHref(p.id)))}
                     className={`border-b border-gray-50 hover:bg-blue-50/40 transition-colors group cursor-pointer ${idx % 2 === 0 ? "bg-white" : "bg-gray-50/30"}`}
                   >
-                    <td className="px-3 py-2">
+                    <td className={`${CELL} min-w-40`}>
                       <div className="flex items-center gap-1.5">
                         <span className="font-semibold text-[12px] text-gray-800">{partyName(p)}</span>
                         {!isMaster && <ChevronRight className="w-3 h-3 text-gray-300 group-hover:text-[#1e3a5f]" />}
                       </div>
+                      {isCorporate ? (
+                        corporateTypeShortLabel(p.corporate_type) && (
+                          <p className={SUBLINE} title={corporateTypeLabel(p.corporate_type)}>
+                            {corporateTypeShortLabel(p.corporate_type)}
+                          </p>
+                        )
+                      ) : (
+                        (p.employee_code || p.title) && (
+                          <p className={SUBLINE}>
+                            {p.employee_code && <span className="font-mono text-gray-500">{p.employee_code}</span>}
+                            {p.employee_code && p.title && " · "}
+                            {p.title}
+                          </p>
+                        )
+                      )}
                     </td>
                     {isCorporate ? (
-                      <>
-                        <td className="px-3 py-2 text-[11px] text-gray-600">{corporateTypeLabel(p.corporate_type)}</td>
-                        <td className="px-3 py-2 text-[11px] text-gray-500">{p.city ?? "—"}</td>
-                      </>
+                      <LocationCell city={p.city} state={p.state} />
                     ) : (
-                      <>
-                        <td className="px-3 py-2 text-[11px] text-gray-600">
-                          {p.company ? (
-                            p.company
-                          ) : (
-                            // No employer is a real answer here, not missing data.
-                            <span className="text-gray-400">Individual / Direct</span>
-                          )}
-                        </td>
-                        <td className="px-3 py-2 text-[11px] text-gray-500">{p.title ?? "—"}</td>
-                      </>
+                      <td className={`${CELL} text-[11px] text-gray-600`}>
+                        {p.company ? (
+                          p.company
+                        ) : (
+                          // No employer is a real answer here, not missing data.
+                          <span className="text-gray-400">Individual / Direct</span>
+                        )}
+                      </td>
                     )}
-                    <td className="px-3 py-2 text-[11px] text-gray-500">{p.email ?? "—"}</td>
-                    <td className="px-3 py-2 text-[11px] text-gray-500">{p.phone ?? "—"}</td>
-                    <td className="px-3 py-2 text-[11px] font-mono text-gray-600">
-                      {p.gst_registered ? (p.gst_no ?? "—") : <span className="text-gray-400">Unregistered</span>}
+                    <td className={`${CELL} text-[11px] text-gray-600 max-w-56`}>
+                      {p.email || p.phone ? (
+                        <>
+                          {p.email && <p className="truncate" title={p.email}>{p.email}</p>}
+                          {p.phone && <p className={p.email ? SUBLINE : ""}>{p.phone}</p>}
+                        </>
+                      ) : DASH}
                     </td>
-                    <td className="px-3 py-2 text-[11px] font-mono text-gray-600">{p.pan_no ?? "—"}</td>
-                    <td className="px-3 py-2 text-[11px] text-gray-600">{markupTypeLabel(p)}</td>
-                    <td className="px-3 py-2 text-[11px] font-semibold text-gray-700">{markupValueLabel(p)}</td>
-                    <td className="px-3 py-2">
+                    <td className={`${CELL} whitespace-nowrap`}>
+                      {p.gst_registered && p.gst_no ? (
+                        <p className="text-[11px] font-mono text-gray-700">{p.gst_no}</p>
+                      ) : (
+                        <span className="inline-flex px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 text-gray-500">
+                          Unregistered
+                        </span>
+                      )}
+                      {p.pan_no && (
+                        <p className={SUBLINE}>PAN <span className="font-mono text-gray-500">{p.pan_no}</span></p>
+                      )}
+                    </td>
+                    <td className={`${CELL} min-w-36 max-w-68`}>
+                      {/* "5%" and "₹300" already say percentage or fixed, so the type is not
+                          spelled out beside them. */}
+                      <p className="text-[12px] font-semibold text-gray-800">
+                        {markupValueLabel(p) === "—" ? DASH : markupValueLabel(p)}
+                      </p>
+                      {categoryMarkupParts(p).length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-1" title={categoryMarkupLabel(p)}>
+                          {categoryMarkupParts(p).map((part) => (
+                            <span
+                              key={part}
+                              className="inline-flex px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 text-[10px] font-medium whitespace-nowrap"
+                            >
+                              {part}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </td>
+                    <td className={CELL}>
                       {p.billing_type ? (
                         <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-blue-50 text-blue-700 border border-blue-100">
                           {billingTypeLabel(p)}
                         </span>
-                      ) : (
-                        <span className="text-[11px] text-gray-400">—</span>
-                      )}
+                      ) : DASH}
                     </td>
-                    <td className="px-3 py-2 text-[11px] tabular-nums whitespace-nowrap">
+                    <td className={`${CELL} text-[11px] tabular-nums whitespace-nowrap`}>
                       {(p.ticket_count ?? 0) > 0 ? (
                         <>
                           <span className={(p.unbilled_ticket_count ?? 0) > 0
@@ -433,7 +553,7 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
                       )}
                     </td>
                     {isMaster && (
-                      <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
+                      <td className={CELL} onClick={(e) => e.stopPropagation()}>
                         <div className="flex items-center gap-1">
                           <button
                             onClick={() => router.push(cfg.detailHref(p.id))}

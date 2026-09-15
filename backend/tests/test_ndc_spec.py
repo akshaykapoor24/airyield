@@ -352,9 +352,17 @@ class TestOtherTaxes(unittest.TestCase):
         self.assertIn(ndc_spec.DERIVED_FIELD, spec.money_fields(SLUG))
 
     def test_the_registry_hands_out_the_derivation(self):
+        """NDC's own derivation is wired, and no type derives fields by accident.
+
+        `tp-api` is the second deliberate deriver (it folds TBO's three dead pre-GST cesses
+        the way this folds Air India's eleven minor tax codes), so the list is named rather
+        than assumed to be one. Anything NOT on it must still be None: `derive_row` runs on
+        every ingested line of its type, so a stray one is a silent extra field in `data`.
+        """
         self.assertIs(spec.derive_row(SLUG), ndc_spec.derive)
+        derivers = {SLUG, "tp-api"}
         for other in spec.STATEMENT_SPECS:
-            if other != SLUG:
+            if other not in derivers:
                 self.assertIsNone(spec.derive_row(other), f"{other} derives fields too")
 
 
@@ -419,13 +427,20 @@ class TestRowFilterWiring(unittest.TestCase):
     def test_the_registry_hands_out_the_filter(self):
         self.assertIs(spec.drop_row(SLUG), ndc_spec.is_excluded)
 
-    def test_only_ndc_supports_billing(self):
+    def test_only_the_two_billable_types_support_billing(self):
         """Nine slugs share one router and one frontend view. The flag is what stops a
-        Billing column, eight endpoints and a set of `bill_*` columns leaking onto the
-        types that have none of them — `_BillingMixin` is on `Ndc` alone."""
+        Billing column, ten endpoints and a set of `bill_*` columns leaking onto the types
+        that have none of them.
+
+        `tp-api` is the second deliberate opt-in — it carries `_BillingMixin` too, on
+        narrower terms (only its FLIGHT rows become tickets). The list is named rather than
+        assumed to be one; anything NOT on it must still be False, because for those seven
+        there are no `bill_*` columns to write and the endpoints would 500 rather than 404.
+        """
+        billable = {SLUG, "tp-api"}
         self.assertTrue(spec.supports_billing(SLUG))
         for other in spec.STATEMENT_SPECS:
-            if other != SLUG:
+            if other not in billable:
                 self.assertFalse(spec.supports_billing(other), other)
 
     def test_no_other_type_drops_rows(self):

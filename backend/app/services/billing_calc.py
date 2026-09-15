@@ -16,6 +16,7 @@ from dateutil import parser as _du
 from sqlalchemy import and_, or_
 
 from app.models.uploaded_ticket import UploadedTicket
+from app.services.markup_categories import category_slug
 
 GST_RATE = 0.18
 # CGST and SGST are each half of it. An intra-state supply is not taxed twice —
@@ -198,6 +199,42 @@ def passenger_name(t) -> str:
         return t.pax_name
     name = f"{getattr(t, 'first_name', '') or ''} {getattr(t, 'last_name', '') or ''}".strip()
     return name or "—"
+
+
+def line_identity(t) -> dict:
+    """What a billing line IS, beyond an airline ticket — stored on every line item.
+
+    A hotel / train / bus / car line (Third Party API statements) has no ticket number,
+    airline or sector, so the invoice and the billing screens print its booking reference
+    and its one-line description instead. Stored on the line rather than read back from
+    the ticket at print time, for the same reason `taxable_value` is: an issued invoice has
+    to keep saying what it said when it was raised.
+    """
+    details = getattr(t, "service_details", None)
+    pax = getattr(t, "pax_count", None)
+    return {
+        "product_category": getattr(t, "product_category", None) or "air",
+        "booking_ref": getattr(t, "booking_ref", None),
+        "description": details.get("summary") if isinstance(details, dict) else None,
+        # The passengers the line's fixed markup was multiplied by — printed on the invoice.
+        "pax_count": pax if isinstance(pax, int) and pax >= 1 else 1,
+    }
+
+
+def ticket_category_clause(raw: Optional[str]) -> tuple:
+    """The sold-tickets `category` filter as WHERE clauses — none when it is blank.
+
+    Filtered in SQL, not in the browser, so the summary cards over the list total exactly
+    the rows it shows. Any spelling a markup category accepts works ("Flight" is 'air').
+    Raises ValueError for a category that does not exist, which the routers turn into a 400:
+    silently ignoring it would show every category under a filter that says one.
+    """
+    if not (raw or "").strip():
+        return ()
+    slug = category_slug(raw)
+    if slug is None:
+        raise ValueError(f"Unknown category '{raw}'.")
+    return (UploadedTicket.product_category == slug,)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

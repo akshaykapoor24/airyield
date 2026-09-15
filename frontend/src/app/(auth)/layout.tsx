@@ -37,7 +37,7 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
         </div>
 
         <Link href="/" className="relative z-10 w-fit">
-          <Logo light tagline="Revenue Intelligence" />
+          <Logo onDark className="h-11 w-auto" />
         </Link>
 
         <div className="relative z-10 space-y-8">
@@ -146,7 +146,7 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
         >
           <div className="animate-aurora pointer-events-none absolute -right-10 -top-10 h-40 w-40 rounded-full bg-sky-400/25 blur-2xl" />
           <Link href="/" className="relative z-10">
-            <Logo light />
+            <Logo onDark className="h-8 w-auto" />
           </Link>
           <Link
             href="/"

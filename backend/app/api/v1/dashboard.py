@@ -40,6 +40,7 @@ from app.models.plb_accrual import PlbAccrualInput, PlbAccrualSnapshot, PlbAirli
 from app.models.uploaded_ticket import UploadedTicket
 from app.models.user import User
 from app.services import plb_accrual as pa
+from app.services.markup_categories import CATEGORY_AIR
 
 router = APIRouter()
 
@@ -883,6 +884,10 @@ async def get_income_summary(
     filters = [
         UploadedTicket.tenant_id == tid,
         UploadedTicket.created_by_id == current_user.id,
+        # Airline income only. The hotel / train / bus / car lines the Third Party API
+        # projection writes carry their vendor payable in sell_fare and no airline, so
+        # without this they would inflate `total` and land in by_airline as "Unknown".
+        UploadedTicket.product_category == CATEGORY_AIR,
     ]
 
     if airline:

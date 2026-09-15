@@ -101,9 +101,13 @@ USAGE_SOURCES.append(UsageSource("lcc_detailed", "Detailed Statement", LccDetail
 # Every spec-driven vendor statement: TGQ HMPR, NDC, DI, Divided PNR, Flown
 # Report, CTA/BTA, third-party GDS and LCC. Labels come from STATEMENT_SPECS so
 # the console can never drift from the product's own wording — there is no second
-# list to keep in sync. Only the two third-party slugs are qualified, because
-# their bare labels ("GDS", "LCC") are meaningless out of their nav category.
-_LABEL_OVERRIDES = {"tp-gds": "Third Party GDS", "tp-lcc": "Third Party LCC"}
+# list to keep in sync. Only the three third-party slugs are qualified, because
+# their bare labels ("GDS", "LCC", "API") are meaningless out of their nav category.
+_LABEL_OVERRIDES = {
+    "tp-gds": "Third Party GDS",
+    "tp-lcc": "Third Party LCC",
+    "tp-api": "Third Party API",
+}
 
 USAGE_SOURCES += [
     UsageSource(
@@ -148,6 +152,9 @@ EXCLUDED_TABLES: frozenset[str] = frozenset({
     # row and a deal, so counting it would count the same work twice
     "ticket_calculations", "ticket_reconciliation",
     "commission_runs", "commission_calculations",
+    # generated Report download workbooks — a job row and a file rebuilt from uploads
+    # that are already counted, so counting it would count the same data again
+    "report_exports",
     # config / master data owned by the workspace
     "users", "customers", "corporates", "entities", "user_entities",
     "user_login_ids", "login_ids", "agencies", "agency_entities",

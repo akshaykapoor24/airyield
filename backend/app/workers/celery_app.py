@@ -11,6 +11,7 @@ celery_app = Celery(
         "app.workers.bsp_commission_tasks",
         "app.workers.commission_tasks",
         "app.workers.lcc_tasks",
+        "app.workers.report_tasks",
     ],
 )
 

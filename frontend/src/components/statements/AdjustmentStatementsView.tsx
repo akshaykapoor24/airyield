@@ -13,6 +13,7 @@ import { type TenantAirlineOpt, sameAirlineOnly, toOptions } from "@/lib/tenantA
 import LccPartyPicker, { type PartyOption } from "@/components/statements/lcc/LccPartyPicker";
 import StatementUploadWizard from "@/components/statements/StatementUploadWizard";
 import NdcBillingWorklist from "@/components/statements/ndc/NdcBillingWorklist";
+import TpApiBillingWorklist from "@/components/statements/tpapi/TpApiBillingWorklist";
 
 /** One row of GET /suppliers/ — only the fields the picker renders.
  *  `code` is the unique one: 141 of the master's 2,340 names repeat across branches. */
@@ -375,7 +376,7 @@ function SummarySlab({ summary }: { summary: Summary }) {
 
 export default function AdjustmentStatementsView({
   apiBase, slug, title, requiresAirlineId, requiresSupplier, supportsMapping,
-  supportsBilling, doneHint,
+  supportsBilling, billingWorklist, doneHint,
 }: {
   apiBase: string; slug: string; title: string; blurb?: string;
   /** LCC types only — see lib/statements.ts. Drives the mandatory Airline picker in
@@ -388,9 +389,12 @@ export default function AdjustmentStatementsView({
    *  modal. Mirrors `supports_mapping` in the backend spec, which is what actually decides
    *  whether /extract and /confirm answer for this type. */
   supportsMapping?: boolean;
-  /** NDC only — see lib/statements.ts. Drives the BILLING column below and the worklist
-   *  it opens. Every other type renders no column and makes no billing request. */
+  /** NDC and Third Party API — see lib/statements.ts. Drives the BILLING column below and
+   *  the worklist it opens. Every other type renders no column and makes no billing
+   *  request. */
   supportsBilling?: boolean;
+  /** Which of the two worklists to open. Only read when `supportsBilling`. */
+  billingWorklist?: "ndc" | "tp-api";
   /** One line on the wizard's success screen saying where the imported rows went. */
   doneHint?: string;
 }) {
@@ -548,19 +552,22 @@ export default function AdjustmentStatementsView({
   // for a type whose spec declares a billing flow, so the other seven spec-repo types
   // never render it and never call its endpoints.
   if (billingTarget && supportsBilling) {
-    return (
-      <NdcBillingWorklist
-        apiBase={apiBase}
-        batchId={billingTarget.batch_id}
-        fileName={billingTarget.source_file}
-        // "none" is the "Set up billing" case — the only one where opening the worklist is
-        // allowed to run the matcher, since re-matching an upload already in billing could
-        // silently re-point a row billing is using.
-        resolutionStatus={billingTarget.billing?.resolution_status ?? "none"}
-        onBack={() => { setBillingTarget(null); fetchBatches(); }}
-        onChanged={fetchBatches}
-      />
-    );
+    const worklistProps = {
+      apiBase,
+      batchId: billingTarget.batch_id,
+      fileName: billingTarget.source_file,
+      // "none" is the "Set up billing" case — the only one where opening the worklist is
+      // allowed to run the matcher, since re-matching an upload already in billing could
+      // silently re-point a row billing is using.
+      resolutionStatus: billingTarget.billing?.resolution_status ?? "none",
+      onBack: () => { setBillingTarget(null); fetchBatches(); },
+      onChanged: fetchBatches,
+    };
+    // Two worklists, one switch, no default. Guessing would open NDC's screen — with its
+    // Line column and its `?latch=` calls — against a tp-api batch that has neither.
+    return billingWorklist === "tp-api"
+      ? <TpApiBillingWorklist {...worklistProps} rowCount={billingTarget.row_count} />
+      : <NdcBillingWorklist {...worklistProps} />;
   }
 
   // ── Drill-in: one upload's rows ───────────────────────────────────────────
@@ -785,7 +792,9 @@ export default function AdjustmentStatementsView({
                     ) : (
                       <button onClick={() => setBillingTarget(b)} className="text-left group">
                         <span className="text-[11px] tabular-nums text-slate-700 group-hover:underline">
-                          {b.billing.resolved_rows.toLocaleString()} / {b.billing.billable_rows.toLocaleString()} billable
+                          {b.billing.billable_rows === 0
+                            ? <span className="text-amber-600">nothing here can be billed</span>
+                            : <>{b.billing.resolved_rows.toLocaleString()} / {b.billing.billable_rows.toLocaleString()} billable</>}
                         </span>
                         <span className="block text-[10px]">
                           {b.billing.projected_tickets > 0
@@ -796,6 +805,18 @@ export default function AdjustmentStatementsView({
                           {b.billing.unlatched_rows > 0 && (
                             <span className="text-amber-600" title="Ancillary rows with no ticket to attach to">
                               {" · "}{b.billing.unlatched_rows} unattached
+                            </span>
+                          )}
+                          {/* tp-api has no latching, but a multi-product file rarely bills every
+                              line: pending payments, fully refunded cancellations and rows with
+                              no billing category stay out. Saying nothing here would let "1
+                              ticket in billing" read as "all of it". `row_count - billable_rows`
+                              is the excluded count — NOT `billable_rows - resolved_rows`, which
+                              is "billable but has no party yet". */}
+                          {billingWorklist === "tp-api" && b.row_count > b.billing.billable_rows && (
+                            <span className="text-slate-500"
+                              title="Pending payments, cancellations with nothing to bill, refunds to review and rows with no billing category stay on the statement. An upload classified before every category billed needs a Re-match. Open Billing to see each reason.">
+                              {" · "}{(b.row_count - b.billing.billable_rows).toLocaleString()} of {b.row_count.toLocaleString()} not billable
                             </span>
                           )}
                         </span>

@@ -18,7 +18,7 @@ import unittest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.services.lcc_billing_projection import (  # noqa: E402
-    BILLING_STATES, SENDABLE_STATES, billing_state,
+    BILLING_STATES, SENDABLE_STATES, billing_state, file_pax, row_pax,
 )
 
 
@@ -157,6 +157,44 @@ class BillingStateTests(unittest.TestCase):
         """`stale` is NOT "already sent" — it is billing and the row disagreeing
         about the party, and sending is the only thing that reconciles them."""
         self.assertIn("stale", SENDABLE_STATES)
+
+
+class PaxTests(unittest.TestCase):
+    """A fixed markup is charged per passenger, so the pax is a price input."""
+
+    def test_the_statement_figure_is_used(self):
+        self.assertEqual(file_pax(FakeRow(pax_count=3)), 3)
+        self.assertEqual(row_pax(FakeRow(pax_count=3, bill_pax_count=None)), 3)
+
+    def test_a_blank_zero_or_absurd_pax_is_one_passenger(self):
+        """Never 0 — it would zero the fixed markup with nothing on screen to say why."""
+        for raw in (None, 0, -1, 150):
+            with self.subTest(raw=raw):
+                self.assertEqual(row_pax(FakeRow(pax_count=raw, bill_pax_count=None)), 1)
+
+    def test_a_correction_beats_the_statement(self):
+        self.assertEqual(row_pax(FakeRow(pax_count=9, bill_pax_count=2)), 2)
+
+    def test_a_row_with_no_pax_attributes_is_one_passenger(self):
+        self.assertEqual(row_pax(FakeRow()), 1)
+
+    def test_a_ticket_sent_with_a_different_pax_is_stale(self):
+        row = FakeRow(pax_count=3, bill_pax_count=None)
+        self.assertEqual(billing_state(row, FakeTicket(pax_count=1)), "stale")
+        self.assertEqual(billing_state(row, FakeTicket(pax_count=3)), "sent")
+
+    def test_correcting_the_pax_of_a_sent_row_makes_it_stale(self):
+        row = FakeRow(pax_count=3, bill_pax_count=2)
+        self.assertEqual(billing_state(row, FakeTicket(pax_count=3)), "stale")
+
+    def test_every_state_still_has_a_sql_twin(self):
+        from sqlalchemy.orm import aliased
+        from app.models.uploaded_ticket import UploadedTicket
+        from app.services.lcc_billing_projection import billing_state_cond
+        T = aliased(UploadedTicket)
+        for state in (*BILLING_STATES, "sendable"):
+            with self.subTest(state=state):
+                self.assertIsNotNone(billing_state_cond(state, T))
 
 
 if __name__ == "__main__":

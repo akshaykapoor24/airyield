@@ -96,9 +96,12 @@ class _Register:
     be caught at all.
     """
 
-    def __init__(self, existing: dict[tuple, str]):
+    def __init__(self, existing: dict[tuple, str], counts: Optional[dict[tuple, int]] = None):
         self._existing: dict[tuple, str] = existing
         self._claimed: dict[tuple, str] = {}
+        # How many rows hold each key, for facets that MANY rows may legitimately share —
+        # so excusing the row being edited does not also excuse everyone else holding it.
+        self._counts: dict[tuple, int] = counts or {}
 
     def _holder(self, key: tuple, exclude: Optional[tuple]) -> Optional[tuple[str, str]]:
         """`(where, label)` for whoever holds `key` — 'master' or 'file' — else None."""
@@ -116,18 +119,39 @@ class _Register:
 
 
 class CustomerDuplicates(_Register):
-    """The employee identity register: one NAME per EMPLOYER, per workspace.
+    """The employee identity register: one NAME per EMPLOYER, and one EMPLOYEE CODE, per
+    workspace.
+
+    Two facets, like CorporateDuplicates' name + GSTIN, and for the same reason: the message
+    can say WHICH one clashed, because "you already have a Rahul Sharma at Acme" and "that
+    code belongs to Priya" are different mistakes with different fixes.
+
+    THE CODE IS PART OF THE NAME KEY, NOT JUST A FACET OF ITS OWN. That is what makes two
+    genuine namesakes saveable: coded differently, they occupy different person identities.
+    Uncoded, they still collide — which is right, because nothing then tells them apart, and
+    the refusal now names the code as the fix.
+
+    AN UNCODED ROW COLLIDES WITH A CODED NAMESAKE TOO — the third facet, `named`. Without
+    it, "Rahul Sharma (EMP-001)" already on file let a second "Rahul Sharma" with no code
+    straight in: the person keys differ only by the code the new row does not have, so it
+    read as someone new. It is exactly the row that re-imports the same person from a sheet
+    without codes. Every row OCCUPIES `named`; only a row WITHOUT a code is checked against
+    it, because a code is what tells a namesake apart. So the order that works is the one
+    Employee Master's form already suggests: the existing person first, then the new one
+    with a code.
 
     Deliberately NOT keyed on email, phone, GSTIN or PAN. All four are inherited from the
     corporate (services/party_inherit), so every employee of one company legitimately
     carries the same values — keying on any of them would reject the second colleague
-    imported under a company that fills its staff's blanks, which is the normal case.
+    imported under a company that fills its staff's blanks, which is the normal case. The
+    employee code is the opposite: it is never inherited, precisely so it can identify.
     """
 
     @classmethod
     async def load(cls, db: AsyncSession, current_user: User) -> "CustomerDuplicates":
         return cls.from_rows((await db.execute(
-            select(Customer.first_name, Customer.last_name, Customer.corporate_id, Customer.company)
+            select(Customer.first_name, Customer.last_name, Customer.corporate_id,
+                   Customer.company, Customer.employee_code)
             .where(
                 Customer.tenant_id == current_user.tenant_id,
                 Customer.created_by_id == current_user.id,
@@ -139,52 +163,125 @@ class CustomerDuplicates(_Register):
 
     @classmethod
     def from_rows(cls, rows) -> "CustomerDuplicates":
-        """`(first_name, last_name, corporate_id, company)` per employee, oldest first."""
+        """`(first_name, last_name, corporate_id, company[, employee_code])`, oldest first.
+
+        The code is unpacked defensively rather than required: this classmethod is called
+        with four-tuples by tests and by any caller written before the code existed, and a
+        row with no code behaves exactly as it did then.
+        """
         existing: dict[tuple, str] = {}
-        for first_name, last_name, corporate_id, company in rows:
-            key = cls.key(first_name, last_name, corporate_id, company)
-            existing.setdefault(key, _person_label(first_name, last_name))
-        return cls(existing)
+        counts: dict[tuple, int] = {}
+        for row in rows:
+            first_name, last_name, corporate_id, company = row[:4]
+            employee_code = row[4] if len(row) > 4 else None
+            label = _person_label(first_name, last_name)
+            code = code_key(employee_code)
+            for key in cls.keys(first_name, last_name, corporate_id, company, employee_code):
+                # The `named` facet is shared by namesakes, so its label says WHICH one.
+                existing.setdefault(key, f"{label} ({code})" if key[0] == "named" and code else label)
+                counts[key] = counts.get(key, 0) + 1
+        return cls(existing, counts)
 
     @staticmethod
-    def key(first_name, last_name, corporate_id: Optional[int], company) -> tuple:
+    def key(first_name, last_name, corporate_id: Optional[int], company,
+            employee_code=None) -> tuple:
+        """The person identity: who they are, who they work for, and which one they are."""
         return ("person", name_key(f"{first_name or ''} {last_name or ''}"),
+                employer_key(corporate_id, company), code_key(employee_code))
+
+    @staticmethod
+    def named_key(first_name, last_name, corporate_id: Optional[int], company) -> tuple:
+        """The name under an employer, whatever the code — see the class docstring."""
+        return ("named", name_key(f"{first_name or ''} {last_name or ''}"),
                 employer_key(corporate_id, company))
+
+    @classmethod
+    def keys(cls, first_name, last_name, corporate_id: Optional[int], company,
+             employee_code=None) -> list[tuple]:
+        """Every identity this employee occupies. A blank code occupies no code identity."""
+        keys = [cls.key(first_name, last_name, corporate_id, company, employee_code)]
+        code = code_key(employee_code)
+        if code:
+            # Workspace-wide, not per employer: a code that means two people in one
+            # workspace is not an identifier, and searching it would return both.
+            keys.append(("emp_code", code))
+        keys.append(cls.named_key(first_name, last_name, corporate_id, company))
+        return keys
 
     def check(
         self,
         first_name, last_name,
         corporate_id: Optional[int],
         company,
+        employee_code=None,
         *,
-        exclude: Optional[tuple] = None,
+        exclude=None,
         claim: bool = True,
     ) -> Optional[str]:
-        """Why this employee cannot be saved, or None — and on None, the identity is taken.
+        """Why this employee cannot be saved, or None — and on None, the identities are taken.
 
-        `exclude` is the key the row being edited already holds, so an edit that does not
-        move the person is not read as a clash with themselves. `claim=False` is for the
-        checks that run before a row is known to be saveable for other reasons.
+        `exclude` is what the row being edited already holds, so an edit that does not move
+        the person is not read as a clash with themselves. It takes either the single person
+        key (what every caller passed before the code existed) or the full list, and each
+        facet is excused independently — so changing a code while keeping the name works, and
+        so does the reverse. `claim=False` is for the checks that run before a row is known
+        to be saveable for other reasons.
         """
-        key = self.key(first_name, last_name, corporate_id, company)
-        held = self._holder(key, exclude)
-        if held is None:
-            if claim:
-                self._claim([key], _person_label(first_name, last_name))
+        excluded = set(exclude if isinstance(exclude, (list, set, tuple)) and
+                       exclude and isinstance(exclude[0], tuple) else
+                       ([exclude] if exclude else []))
+        # A caller excusing just the person key (the form before `named` existed) is
+        # excusing that person's name-under-employer too.
+        excluded |= {("named", k[1], k[2]) for k in list(excluded) if k and k[0] == "person"}
+        keys = self.keys(first_name, last_name, corporate_id, company, employee_code)
+        who = _person_label(first_name, last_name)
+        coded = bool(code_key(employee_code))
+
+        # AN EDIT THAT MOVES NOTHING CANNOT CREATE A DUPLICATE. The form resends the name
+        # on every save, so without this an employee already sharing a name with a coded
+        # colleague — a state this rule did not always refuse — could not be edited at all.
+        if excluded and set(keys) <= excluded:
             return None
 
-        where, _ = held
-        who = _person_label(first_name, last_name)
-        where_phrase = _employer_phrase(company)
-        if where == "file":
+        for key in keys:
+            if key[0] == "named":
+                if coded:
+                    continue                  # the code is what tells this one apart
+                others = self._counts.get(key, 0) - (1 if key in excluded else 0)
+                where_phrase = _employer_phrase(company)
+                if others > 0:
+                    return (f"{who} already exists in Employee Master {where_phrase}, as "
+                            f"{self._existing[key]}. Give this one an Employee Code of its "
+                            "own to tell the two apart.")
+                if key in self._claimed:
+                    return (f"{who} is listed more than once in this file {where_phrase}. "
+                            "Give each of them an Employee Code to tell them apart.")
+                continue
+            held = self._holder(key, key if key in excluded else None)
+            if held is None:
+                continue
+            where, other = held
+            in_file = where == "file"
+            if key[0] == "emp_code":
+                code = key[1]
+                if in_file:
+                    return (f"Employee Code {code} is used more than once in this file — "
+                            f"on {other} as well. Only the first one is saved.")
+                return (f"Employee Code {code} is already used in Employee Master, on "
+                        f"{other}. A code identifies one person, so it cannot be shared.")
+            where_phrase = _employer_phrase(company)
+            if in_file:
+                return (f"{who} is listed more than once in this file {where_phrase}. "
+                        "Only the first one is saved.")
             return (
-                f"{who} is listed more than once in this file {where_phrase}. "
-                "Only the first one is saved."
+                f"{who} already exists in Employee Master {where_phrase}. "
+                "Give each of them an Employee Code — or a last name, or a different "
+                "employer — to tell the two apart."
             )
-        return (
-            f"{who} already exists in Employee Master {where_phrase}. "
-            "Give them a last name, or a different employer, to tell the two apart."
-        )
+
+        if claim:
+            self._claim(keys, who)
+        return None
 
 
 class CorporateDuplicates(_Register):

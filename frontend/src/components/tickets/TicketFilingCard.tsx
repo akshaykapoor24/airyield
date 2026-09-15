@@ -5,7 +5,7 @@ import { Building2, Calendar, ChevronDown, FilePlus, Layers, Lock, Search, Tag, 
 import { AIRLINE_AGENCIES, type StatementType } from "@/lib/ticketFields";
 import api from "@/lib/api";
 import { agencyLabel, type AgencyRow } from "@/lib/counterparty";
-import { corporateLabel, partyName, type Party } from "@/lib/party";
+import { corporateLabel, customerLabel, partyName, type Party } from "@/lib/party";
 import { CUSTOMER_TYPES, CUSTOMER_TYPE_LABEL, CUSTOMER_TYPE_MASTER, type CustomerTag } from "@/lib/customerType";
 
 export type StatementOption = {
@@ -232,13 +232,13 @@ function CustomerPartySelect({
   const options =
       kind === "agency"    ? agencies.map(agencyLabel)
     : kind === "corporate" ? corporates.map(corporateLabel)
-    : kind === "direct"    ? customers.map(partyName)
+    : kind === "direct"    ? customers.map(customerLabel)
     : [];
 
   const current =
       kind === "agency"    ? (agencies.find(a => a.id === tag.agencyId)    ? agencyLabel(agencies.find(a => a.id === tag.agencyId)!) : "")
     : kind === "corporate" ? (corporates.find(c => c.id === tag.corporateId) ? corporateLabel(corporates.find(c => c.id === tag.corporateId)!) : "")
-    : kind === "direct"    ? (customers.find(c => c.id === tag.customerId)  ? partyName(customers.find(c => c.id === tag.customerId)!)  : tag.partyName)
+    : kind === "direct"    ? (customers.find(c => c.id === tag.customerId)  ? customerLabel(customers.find(c => c.id === tag.customerId)!)  : tag.partyName)
     : "";
 
   const pick = (v: string) => {
@@ -249,7 +249,7 @@ function CustomerPartySelect({
       const c = corporates.find(x => corporateLabel(x) === v);
       setTag({ ...tag, corporateId: c?.id ?? null, partyName: c ? ((c.company || "").trim() || partyName(c)) : v });
     } else {
-      const c = customers.find(x => partyName(x) === v);
+      const c = customers.find(x => customerLabel(x) === v);
       setTag({ ...tag, customerId: c?.id ?? null, partyName: v });
     }
   };

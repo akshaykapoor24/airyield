@@ -37,6 +37,17 @@ class BillingLineItem(BaseModel):
     passenger: Optional[str] = None
     sector: Optional[str] = None
     ticket_date: Optional[str] = None
+    # What the line is, for a hotel / train / bus / car line from a Third Party API statement:
+    # the markup category, the booking reference that stands in for a ticket number, and the
+    # one-line description that stands in for the airline and sector. Absent on every bill
+    # raised before these lines existed, which then reads as an air line — which it was.
+    product_category: Optional[str] = None
+    booking_ref: Optional[str] = None
+    description: Optional[str] = None
+    # The passengers a fixed markup was multiplied by, and how the markup was reached. 1 and
+    # None on every bill raised before pax counts existed — which is what they billed.
+    pax_count: int = 1
+    markup_note: Optional[str] = None
     base_amount: float
     markup_amount: float
     additional_markup: float

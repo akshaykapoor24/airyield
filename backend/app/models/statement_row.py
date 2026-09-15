@@ -9,7 +9,7 @@ supported with no fixed Tax1..Tax20 columns). Slug → dedicated model via
 """
 from datetime import datetime
 
-from sqlalchemy import String, DateTime, Integer, Boolean, ForeignKey, Numeric, text
+from sqlalchemy import String, DateTime, Integer, Boolean, ForeignKey, Numeric, SmallInteger, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -60,19 +60,25 @@ class _SplitMixin:
 
 
 class _BillingMixin:
-    """Party resolution + the roll-up verdict + the projection back-link.
+    """Party resolution + the row's own settled figure + the projection back-link.
 
-    ON `Ndc` ALONE, and that is the point. `_StatementBase` is shared by eight tables; these
-    thirteen columns on all of them would be 24 foreign keys and a model layer claiming every
-    statement type is billable while `statement_spec.supports_billing` says one is. A second
-    type opts in by adding this mixin to its class and one `add_column` migration.
+    On `Ndc` and `ThirdPartyApi`. NOT on `_StatementBase`: eight tables share that, and these
+    ten columns on all of them would be a model layer claiming every statement type is
+    billable while `statement_spec.supports_billing` says two are. A third type opts in by
+    adding this mixin to its class and one `add_column` migration.
 
-    IF A SECOND CLASS EVER ADOPTS THIS, every column carrying a `ForeignKey` must first
-    become a `@declared_attr`: a single `mapped_column` instance cannot be shared between
-    two mappers, and SQLAlchemy fails at import time rather than at runtime. It is a
-    single-user mixin today by design, not by accident.
+    AN EARLIER NOTE HERE CLAIMED a second class must first convert every `ForeignKey` column
+    to `@declared_attr`, because "a single `mapped_column` instance cannot be shared between
+    two mappers". That is NOT true for the four below, and the correction matters because the
+    conversion buys nothing and costs readability. SQLAlchemy COPIES a mixin's columns per
+    mapper — `orm/decl_base.py:1445`, `column_copies[obj] = obj._copy()` — foreign keys
+    included, so `Ndc` and `ThirdPartyApi` each get their own column object pointing at
+    `customers.id`. The one shape that genuinely needs `@declared_attr` is a ForeignKey naming
+    a Column OBJECT rather than a `"table.column"` STRING (decl_base.py:1425-1443), which
+    raises at import; all four here are strings. Verified on SQLAlchemy 2.0.49.
 
-    See services/ndc_billing_projection.py for what writes each column.
+    See services/ndc_billing_projection.py and services/tp_api_billing_projection.py for what
+    writes each column.
     """
 
     # ── who this row is billed to ────────────────────────────────────────────
@@ -83,28 +89,43 @@ class _BillingMixin:
     bill_corporate_id:  Mapped[int | None] = mapped_column(Integer, ForeignKey("corporates.id", ondelete="SET NULL"), nullable=True)
     bill_match_reason:  Mapped[str | None] = mapped_column(String(300), nullable=True)
 
-    # ── the roll-up: which ticket this row's money belongs to ────────────────
-    # An NDC export writes ancillaries as their own document-less lines. `bill_group_key`
-    # is "D:<document no>" for a real ticket or "O:<row id>" for a line that could not be
-    # attached to one; exactly one row per group carries `bill_is_anchor`.
-    bill_group_key:     Mapped[str | None] = mapped_column(String(64), nullable=True)
-    bill_is_anchor:     Mapped[bool]       = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
-    bill_latch_status:  Mapped[str | None] = mapped_column(String(12), nullable=True)   # anchor|latched|orphan|ambiguous|unidentified
-    # This row's own signed settled figure. NO LCC COUNTERPART, and it earns its place: NDC
-    # amounts are verbatim STRINGS in `data`, so without it the worklist's amount column,
-    # the summary totals and the projection would each re-parse `data->>'payment_amount'`
-    # through a CASE guard and could disagree. NULL means the cell would not parse — which
-    # is visible on screen, rather than silently 0.
+    # This row's own signed settled figure. NO LCC COUNTERPART, and it earns its place on the
+    # two types that have it: their amounts are verbatim STRINGS in `data`, so without it the
+    # worklist's amount column, the summary totals and the projection would each re-parse
+    # `data->>'…'` through a CASE guard and could disagree. NULL means the cell would not
+    # parse — which is visible on screen, rather than silently 0.
     bill_amount:        Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
 
     # ── the projection ───────────────────────────────────────────────────────
-    # THE idempotency key. Every row in a group carries the SAME ticket id, read off the
-    # anchor — re-sending syncs rather than duplicating. Not the ticket number: re-uploading
-    # one file legitimately repeats it, and a natural key would merge two uploads.
+    # THE idempotency key. On NDC every row in a group carries the SAME ticket id, read off
+    # the anchor; on Third Party API a row IS its own ticket. Either way, re-sending syncs
+    # rather than duplicating. Not the ticket number: re-uploading one file legitimately
+    # repeats it, and a natural key would merge two uploads.
     projected_ticket_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("uploaded_tickets.id", ondelete="SET NULL"), nullable=True)
 
     resolved_at:    Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     resolved_by_id: Mapped[int | None]      = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+
+
+class _RollUpMixin:
+    """Which ticket a row's money belongs to, when a row is NOT its own ticket.
+
+    ON `Ndc` ALONE, and unlike `_BillingMixin` this one should stay there. An NDC export
+    writes ancillaries — a paid seat, excess baggage, a meal — as their own document-less
+    lines that have to be attached to the flight line before either can be invoiced.
+    `bill_group_key` is "D:<document no>" for a real ticket or "O:<row id>" for a line that
+    could not be attached to one; exactly one row per group carries `bill_is_anchor`.
+
+    Split out of `_BillingMixin` when `ThirdPartyApi` adopted the billing columns. An
+    aggregator booking IS one line and one ticket — MakeMyTrip and TBO bill a hotel night or
+    a train berth on the booking's own row and issue no separate ancillary line — so these
+    three would be NULL on every `third_party_api` row forever, and a
+    `ck_*_bill_latch_status` CHECK there would police a vocabulary the table never uses.
+    """
+
+    bill_group_key:     Mapped[str | None] = mapped_column(String(64), nullable=True)
+    bill_is_anchor:     Mapped[bool]       = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    bill_latch_status:  Mapped[str | None] = mapped_column(String(12), nullable=True)   # anchor|latched|orphan|ambiguous|unidentified
 
 
 class TgqHmpr(_SplitMixin, _StatementBase, Base):
@@ -112,7 +133,7 @@ class TgqHmpr(_SplitMixin, _StatementBase, Base):
     __tablename__ = "tgq_hmpr"
 
 
-class Ndc(_BillingMixin, _SplitMixin, _StatementBase, Base):
+class Ndc(_RollUpMixin, _BillingMixin, _SplitMixin, _StatementBase, Base):
     """NDC statement rows — one row per transaction line (splitting available, not yet
     enabled in statement_spec.STATEMENT_SPECS["ndc"]).
 
@@ -170,6 +191,37 @@ class ThirdPartyLcc(_NormalizedBase, Base):
     __tablename__ = "third_party_lcc"
 
 
+class ThirdPartyApi(_BillingMixin, _NormalizedBase, Base):
+    """Third Party API Statement — an aggregator's booking export (MakeMyTrip, TBO).
+    See services/tp_api_spec.py (tp-api).
+
+    THE ONLY MULTI-PRODUCT TABLE HERE. Every other type on this router is one row per
+    airline ticket; one of these files carries hotel, flight, train, bus and car bookings
+    side by side, and `data->>'product_type'` is what tells them apart. Products are NOT
+    split into a table each: `data` is JSONB, so a train row simply has no `no_of_rooms`
+    key and costs nothing for it — whereas five tables would make every total, filter,
+    facet and delete on this router a five-way UNION, and would be the first place a batch
+    is not one table's rows.
+
+    `source_format` carries the vendor (`mmt-bookings-v1` / `tbo-statement-v1`), detected
+    from the header row — the same use `lcc_di` makes of it for its two deposit formats.
+
+    `_BillingMixin` BUT NOT `_RollUpMixin`: one booking is one row is one ticket here, so
+    there is nothing to latch. Every CATEGORY is projected into billing, each ticket carrying
+    its `product_category` — see services/tp_api_billing_projection.py, where `bill_kind`
+    also records why a row is out (`no_category`, `pending`, `cancelled`, `needs_review`,
+    `no_amount`) so the worklist can say so with the amount attached, rather than dropping
+    it silently."""
+    __tablename__ = "third_party_api"
+
+    # ── pax: how many passengers this booking bills for ─────────────────────
+    # Here and not in `_BillingMixin`: an NDC line is one passenger's document, so NDC has no
+    # use for it. Stamped from `data.pax_count` at resolve time, or corrected by hand on the
+    # worklist — `bill_pax_source='user'` is what lets that correction survive a Re-match.
+    bill_pax_count:  Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    bill_pax_source: Mapped[str | None] = mapped_column(String(8), nullable=True)   # file|default|user
+
+
 # slug → its dedicated table/model. Add a new type here (+ a spec entry + a migration).
 STATEMENT_MODELS: dict[str, type] = {
     "tgq-hmpr": TgqHmpr,
@@ -182,4 +234,5 @@ STATEMENT_MODELS: dict[str, type] = {
     "lcc-cta-bta": LccCtaBta,
     "tp-gds": ThirdPartyGds,
     "tp-lcc": ThirdPartyLcc,
+    "tp-api": ThirdPartyApi,
 }

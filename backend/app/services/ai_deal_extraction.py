@@ -17,13 +17,12 @@ document is split into chunks that each fit comfortably inside the ceiling.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import random
 import re
 
 from fastapi import UploadFile
 
+from app.services import ai_client as _ai
 from app.services.pdf_table_rows import (
     Chunk,
     DocLayout,
@@ -553,62 +552,13 @@ def _manual_placeholder(row: DocRow, cm) -> dict:
 # JSON SALVAGE
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _repair_truncated_json(content: str, key: str = "rows") -> list[dict]:
-    """Extract all complete objects from potentially truncated JSON."""
-    match = re.search(r'"' + re.escape(key) + r'"\s*:\s*\[', content)
-    if match:
-        array_content = content[match.end():]
-    else:
-        bare = re.search(r"\[", content)
-        if not bare:
-            return []
-        array_content = content[bare.end():]
-
-    # Walk through characters to find the boundary of each complete object
-    depth = 0
-    in_string = False
-    escape_next = False
-    last_complete_end = -1
-
-    for i, ch in enumerate(array_content):
-        if escape_next:
-            escape_next = False
-            continue
-        if ch == "\\" and in_string:
-            escape_next = True
-            continue
-        if ch == '"':
-            in_string = not in_string
-            continue
-        if in_string:
-            continue
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                last_complete_end = i
-
-    if last_complete_end == -1:
-        return []
-
-    try:
-        return json.loads("[" + array_content[: last_complete_end + 1] + "]")
-    except json.JSONDecodeError:
-        return []
-
-
-def _salvage_or_parse(raw: str) -> list[dict]:
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        return _repair_truncated_json(raw)
-    if isinstance(parsed, list):
-        return parsed
-    rows = parsed.get("rows")
-    if isinstance(rows, list):
-        return rows
-    return []
+# Both live in services/ai_client.py now — a second AI feature (statement narration
+# parsing) needed the same brace walker, and the salvage path is exercised only when the
+# model runs out of tokens mid-object, which is exactly the code a second copy would drift
+# from. Aliased rather than renamed at the call sites so this module and its tests read
+# unchanged.
+_repair_truncated_json = _ai.repair_truncated_json
+_salvage_or_parse = _ai.salvage_or_parse
 
 
 def _row_shape_ok(obj) -> bool:
@@ -623,98 +573,28 @@ def _row_shape_ok(obj) -> bool:
 # MODEL CALLS
 # ══════════════════════════════════════════════════════════════════════════════
 
-class _FatalExtractionError(Exception):
-    """Auth/permission problems — retrying every chunk reaches the same answer
-    three minutes later, so fail the whole request at once."""
+# Shared with services/ai_statement_narration.py — see services/ai_client.py.
+_FatalExtractionError = _ai.FatalAIError
+_build_client = _ai.build_client
 
 
 def _max_tokens_for(row_count: int) -> int:
     from app.config import settings
-    return min(16000, 400 + settings.AI_EXTRACT_OUT_TOK_PER_ROW * max(row_count, 1))
-
-
-def _build_client():
-    import httpx
-    from openai import AsyncOpenAI
-    from app.config import settings
-
-    # The old client had neither a timeout nor a retry override, so one hung TCP
-    # connection could wedge a worker indefinitely. max_retries=0 because the
-    # ladder below is ours; the SDK's silent retries would corrupt attempt
-    # accounting and re-spend tokens invisibly.
-    return AsyncOpenAI(
-        api_key=settings.OPENAI_API_KEY,
-        timeout=httpx.Timeout(settings.OPENAI_TIMEOUT_SECONDS, connect=10.0),
-        max_retries=0,
-    )
+    return _ai.max_tokens_for(row_count, settings.AI_EXTRACT_OUT_TOK_PER_ROW)
 
 
 async def _one_call(client, user_content: str, row_count: int, strict: bool = True) -> str:
-    from openai import (
-        APIConnectionError, APITimeoutError, AuthenticationError, BadRequestError,
-        InternalServerError, PermissionDeniedError, RateLimitError,
+    """This module's prompt and schema, on the shared retry ladder (services/ai_client.py)."""
+    return await _ai.call_json(
+        client,
+        system_prompt=SYSTEM_PROMPT,
+        user_content=user_content,
+        schema=EXTRACT_SCHEMA,
+        max_tokens=_max_tokens_for(row_count),
+        label="ai-extract",
+        row_count=row_count,
+        strict=strict,
     )
-    from app.config import settings
-
-    if strict:
-        response_format = {"type": "json_schema", "json_schema": EXTRACT_SCHEMA}
-    else:
-        response_format = {"type": "json_object"}
-
-    max_tokens = _max_tokens_for(row_count)
-    attempt = 0
-    while True:
-        try:
-            # Deliberately chat.completions.create() and not .parse(): .parse()
-            # raises LengthFinishReasonError on a truncated response, which would
-            # make the salvage path below unreachable.
-            response = await client.chat.completions.create(
-                model=settings.OPENAI_MODEL,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_content},
-                ],
-                response_format=response_format,
-                temperature=0,
-                seed=settings.AI_EXTRACT_SEED,
-                max_tokens=max_tokens,
-            )
-        except (AuthenticationError, PermissionDeniedError) as exc:
-            raise _FatalExtractionError(str(exc)) from exc
-        except (RateLimitError, APITimeoutError, APIConnectionError, InternalServerError) as exc:
-            attempt += 1
-            if attempt >= settings.AI_EXTRACT_MAX_ATTEMPTS:
-                logger.warning("chunk call giving up after %s attempts: %s", attempt, exc)
-                raise
-            delay = min(2 ** attempt * 2, 60) * random.uniform(0.5, 1.0)
-            retry_after = getattr(getattr(exc, "response", None), "headers", {}) or {}
-            try:
-                delay = max(delay, float(retry_after.get("retry-after", 0)))
-            except (TypeError, ValueError):
-                pass
-            logger.info("retrying chunk in %.1fs (attempt %s): %s", delay, attempt, exc)
-            await asyncio.sleep(delay)
-            continue
-        except BadRequestError:
-            if strict:
-                logger.warning("strict schema rejected; retrying chunk in json_object mode")
-                return await _one_call(client, user_content, row_count, strict=False)
-            raise
-
-        choice = response.choices[0]
-        usage = getattr(response, "usage", None)
-        completion_tokens = getattr(usage, "completion_tokens", None)
-        logger.info(
-            "ai-extract chunk rows=%s finish=%s completion_tokens=%s max_tokens=%s fingerprint=%s",
-            row_count, choice.finish_reason, completion_tokens, max_tokens,
-            getattr(response, "system_fingerprint", None),
-        )
-        if completion_tokens and completion_tokens > 0.8 * max_tokens:
-            logger.warning(
-                "chunk used %s of %s output tokens — AI_EXTRACT_OUT_TOK_PER_ROW may be "
-                "mis-calibrated for this layout", completion_tokens, max_tokens,
-            )
-        return choice.message.content or "{}"
 
 
 async def _extract_rows(client, header, cm, rows: list[DocRow], stats: Stats,

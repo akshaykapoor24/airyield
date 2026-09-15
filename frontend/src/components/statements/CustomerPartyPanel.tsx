@@ -17,7 +17,7 @@ import Link from "next/link";
 import { Calendar, CheckCircle, FileText, Lock, Tag, Users } from "lucide-react";
 import api from "@/lib/api";
 import { agencyLabel, type AgencyRow } from "@/lib/counterparty";
-import { corporateLabel, partyName, type Party } from "@/lib/party";
+import { corporateLabel, customerLabel, partyName, type Party } from "@/lib/party";
 import { AgencyDropdown } from "@/components/tickets/StatementFormPanel";
 import {
   CUSTOMER_TYPES, CUSTOMER_TYPE_MASTER, isTagComplete,
@@ -75,7 +75,7 @@ export default function CustomerPartyPanel({
   const partyOptions =
     tag.customerType === "agency"    ? agencies.map(agencyLabel)
   : tag.customerType === "corporate" ? corporates.map(corporateLabel)
-  : tag.customerType === "direct"    ? customers.map(partyName)
+  : tag.customerType === "direct"    ? customers.map(customerLabel)
   : [];
 
   const pickParty = (label: string) => {
@@ -86,7 +86,7 @@ export default function CustomerPartyPanel({
       const c = corporates.find(x => corporateLabel(x) === label);
       setTag({ ...tag, corporateId: c?.id ?? null, partyName: c ? corpName(c) : label });
     } else {
-      const c = customers.find(x => partyName(x) === label);
+      const c = customers.find(x => customerLabel(x) === label);
       setTag({ ...tag, customerId: c?.id ?? null, partyName: label });
     }
   };
@@ -97,7 +97,7 @@ export default function CustomerPartyPanel({
   : tag.customerType === "corporate"
       ? (corporates.find(c => c.id === tag.corporateId) ? corporateLabel(corporates.find(c => c.id === tag.corporateId)!) : "")
   : tag.customerType === "direct"
-      ? (customers.find(c => c.id === tag.customerId) ? partyName(customers.find(c => c.id === tag.customerId)!) : tag.partyName)
+      ? (customers.find(c => c.id === tag.customerId) ? customerLabel(customers.find(c => c.id === tag.customerId)!) : tag.partyName)
       : "";
 
   const derivedName = tag.partyName && validFrom

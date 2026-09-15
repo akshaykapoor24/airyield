@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from sqlalchemy import String, DateTime, ForeignKey, Numeric, Integer, Text, Boolean
+from sqlalchemy import String, DateTime, ForeignKey, Numeric, Integer, SmallInteger, Text, Boolean
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
@@ -9,7 +9,9 @@ from typing import Any
 
 
 class UploadedTicket(Base):
-    """One row from a supplier statement XLS upload.
+    """One billable line — an airline ticket, or (from Third Party API statements) a hotel,
+    train, bus or car booking. `product_category` says which; every column grouped under
+    "Airline:" below is written for 'air' lines only and stays NULL on the rest.
     All XLS columns are stored as-is for audit; numerics are nullable (dash rows → None).
     """
     __tablename__ = "uploaded_tickets"
@@ -21,6 +23,15 @@ class UploadedTicket(Base):
     created_by_id:  Mapped[int]      = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     created_at:     Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     statement_type: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    # WHAT the line is — a services/markup_categories slug: air | hotel | train | bus | car.
+    # Not statement_type (which file it came from). Picks the party's category markup
+    # (party_markup.category_of) and keeps non-air lines out of airline-only readers.
+    # 'air' by default because every writer except the Third Party API projection is a flight.
+    product_category: Mapped[str] = mapped_column(String(12), nullable=False, default="air", server_default="air")
+    # How many passengers this line covers. A FIXED markup is charged per passenger
+    # (party_markup.line_markup); a percentage one is not, since the base covers them all.
+    # 1 for every writer except the Third Party API projection, which reads it off the statement.
+    pax_count: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=1, server_default="1")
 
     # ── XLS columns ───────────────────────────────────────────────────────
     booking_ref:         Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -146,6 +157,10 @@ class UploadedTicket(Base):
     tax_breakup:           Mapped[dict | None]  = mapped_column(JSONB, nullable=True)
     segments:              Mapped[list | None]  = mapped_column(JSONB, nullable=True)
     raw_data:              Mapped[dict | None]  = mapped_column(JSONB, nullable=True)
+    # Non-air lines only: what the booking is (hotel property/city/check-in/out/nights,
+    # train name/number/class/route/journey date, bus operator/route/seat). Built by
+    # services/tp_api_itinerary. Display only — never calculated on.
+    service_details:       Mapped[dict | None]  = mapped_column(JSONB, nullable=True)
 
     # ── Derived / calculation columns ─────────────────────────────────────────
     airline_name:          Mapped[str | None]   = mapped_column(String(200), nullable=True)

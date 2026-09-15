@@ -26,6 +26,7 @@ import {
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import LccPartyPicker, { PartyOption } from "./LccPartyPicker";
+import PaxCell from "@/components/statements/PaxCell";
 
 // This screen bills to a customer or a corporate only — never to an agency, which is a
 // VENDOR here. Naming the two kinds explicitly keeps the picker's generic narrow, so the
@@ -70,6 +71,14 @@ type Row = {
   /** The party currently ON the ticket. Sent only for a stale row, where it differs. */
   billed_party_name: string | null;
   sendable: boolean;
+  /** Passengers on the booking — a fixed markup is charged per passenger. The export repeats
+   *  the PNR's count on each of its transaction rows (sale, refund, change fee). */
+  pax_count: number;
+  /** "file", "default" (the file said nothing usable → 1) or "user" (corrected here). */
+  pax_source: string;
+  pax_in_file: number;
+  /** The pax on the ticket already in billing, or null when not sent. */
+  ticket_pax_count: number | null;
 };
 
 type Gap = { status: string; reason: string | null; count: number; sample_passengers: string[] };
@@ -147,6 +156,10 @@ const inBilling = (r: Row) => r.projected_ticket_id != null;
 function billingHint(r: Row): string | undefined {
   switch (r.billing_state) {
     case "stale":
+      if (r.ticket_pax_count != null && r.ticket_pax_count !== r.pax_count && !r.billed_party_name) {
+        return `Sent to billing with ${r.ticket_pax_count} pax, but this row now says ${r.pax_count}. `
+          + "Send it again so the markup is charged for the right number of passengers.";
+      }
       return `Sent to billing as ${r.billed_party_name || "another party"}, but this row now says `
         + `${r.party_name || "nobody"}. Send it again so billing catches up.`;
     case "invoiced":
@@ -380,6 +393,14 @@ export default function LccBillingWorklist({
       ? { customer_type: "corporate", customer_id: opt.value, corporate_id: employer.id }
       : { customer_type: "direct", customer_id: opt.value };
   }, [employerOf]);
+
+  /** A number corrects the row's pax; null puts it back on the statement's own figure. */
+  const setRowPax = async (row: Row, pax: number | null) => {
+    try {
+      await api.patch(`${apiBase}/rows/${row.id}/pax-count`, { pax_count: pax });
+      await load(offset);
+    } catch (e) { toast.error(errText(e, "Could not change the pax count.")); }
+  };
 
   const setRowParty = async (row: Row, opt: BillingParty | null, direct = false) => {
     try {
@@ -757,6 +778,8 @@ export default function LccBillingWorklist({
                     className="w-3.5 h-3.5 accent-blue-600 cursor-pointer disabled:cursor-not-allowed" />
                 </th>
                 <th className="text-left px-3 py-2.5 font-semibold">Passenger</th>
+                <th className="text-left px-3 py-2.5 font-semibold"
+                    title="Passengers on the booking. A fixed markup is charged per passenger.">Pax</th>
                 <th className="text-left px-3 py-2.5 font-semibold">PNR</th>
                 <th className="text-left px-3 py-2.5 font-semibold">Date</th>
                 <th className="text-left px-3 py-2.5 font-semibold">Kind</th>
@@ -770,9 +793,9 @@ export default function LccBillingWorklist({
             {/* Dim rather than blank, so typing in the search box does not strobe. */}
             <tbody className={`divide-y divide-slate-100 ${loading && rows.length > 0 ? "opacity-50 transition-opacity" : ""}`}>
               {loading && rows.length === 0 ? (
-                <tr><td colSpan={10} className="px-3 py-10 text-center text-slate-400">Loading…</td></tr>
+                <tr><td colSpan={11} className="px-3 py-10 text-center text-slate-400">Loading…</td></tr>
               ) : rows.length === 0 ? (
-                <tr><td colSpan={10} className="px-3 py-10 text-center text-slate-400">
+                <tr><td colSpan={11} className="px-3 py-10 text-center text-slate-400">
                   {hasFilters ? "No rows match what you are looking for." : "No rows in this bucket."}
                 </td></tr>
               ) : rows.map((r) => {
@@ -786,6 +809,14 @@ export default function LccBillingWorklist({
                       className="w-3.5 h-3.5 accent-blue-600 cursor-pointer disabled:cursor-not-allowed" />
                   </td>
                   <td className="px-3 py-2 text-slate-700 truncate max-w-[180px]" title={r.passenger ?? undefined}>{r.passenger || "—"}</td>
+                  {/* Editable exactly where the party picker is: a billable row not yet in billing. */}
+                  <td className="px-3 py-2">
+                    <PaxCell key={`${r.id}-${r.pax_count}-${r.pax_source}`}
+                      pax={r.pax_count} source={r.pax_source} inFile={r.pax_in_file}
+                      label={r.passenger || "this row"}
+                      editable={r.bill_kind !== "payment" && !inBilling(r)}
+                      onSave={(pax) => setRowPax(r, pax)} />
+                  </td>
                   <td className="px-3 py-2 text-slate-500 font-mono text-[11px]">{r.record_locator || "—"}</td>
                   <td className="px-3 py-2 text-slate-500 whitespace-nowrap">{fmtDate(r.transaction_date)}</td>
                   <td className="px-3 py-2 text-slate-500">{KIND_LABEL[r.bill_kind ?? ""] ?? "—"}</td>

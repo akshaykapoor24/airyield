@@ -1,5 +1,6 @@
 from datetime import datetime
-from sqlalchemy import String, DateTime, Boolean, Numeric, Integer, ForeignKey
+from sqlalchemy import String, DateTime, Boolean, Numeric, Integer, ForeignKey, Index, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
 
@@ -24,6 +25,22 @@ class Customer(Base):
     A row with a `company` but no `corporate_id` is a pre-link free-text value.
     """
     __tablename__ = "customers"
+    __table_args__ = (
+        # The first constraint this table has ever carried beyond its primary key. Partial,
+        # because the code is optional and Postgres would otherwise treat every NULL as
+        # distinct anyway; workspace-scoped rather than per-corporate, because a code that
+        # means two people in one workspace is not an identifier — searching it would
+        # return both, which is the ambiguity it exists to remove.
+        #
+        # The app-level register (services/party_dedupe) is the RULE and produces a sentence;
+        # this is the backstop that catches a concurrent insert the register cannot see.
+        Index(
+            "uq_customers_employee_code",
+            "tenant_id", "created_by_id", "employee_code",
+            unique=True,
+            postgresql_where=text("employee_code IS NOT NULL"),
+        ),
+    )
 
     id:            Mapped[int]      = mapped_column(primary_key=True)
     tenant_id:     Mapped[int | None] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=True, index=True)
@@ -34,6 +51,13 @@ class Customer(Base):
     # Deleting a corporate does not delete its people — they become individuals.
     corporate_id:  Mapped[int | None] = mapped_column(Integer, ForeignKey("corporates.id", ondelete="SET NULL"), nullable=True, index=True)
     company:       Mapped[str | None] = mapped_column(String(255), nullable=True)   # mirror of corporates.company — see docstring
+    # The customer's own identifier for this person — a payroll id, a staff number. Optional,
+    # and the ONLY thing that can tell two employees of one name apart: everything else on
+    # this row is either the name itself or inherited from the corporate (phone, email,
+    # gst_no, pan_no), so two colleagues legitimately share it. Stored trimmed and uppercased
+    # like gst_no/pan_no, which is what makes the unique index case-insensitive in effect.
+    # See services/party_dedupe.CustomerDuplicates.
+    employee_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
     title:         Mapped[str | None] = mapped_column(String(100), nullable=True)
     phone:         Mapped[str | None] = mapped_column(String(50),  nullable=True)
     email:         Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -49,8 +73,14 @@ class Customer(Base):
     gst_no:        Mapped[str | None] = mapped_column(String(30),  nullable=True)   # only set when gst_registered
     pan_no:        Mapped[str | None] = mapped_column(String(20),  nullable=True)   # optional
 
+    # The DEFAULT markup — what a line is charged unless its category overrides it below.
     markup_type:   Mapped[str | None]   = mapped_column(String(20), nullable=True)   # 'percentage' | 'fixed'
     markup_value:  Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    # Per-category overrides: {"hotel": {"type": "percentage", "value": 5}}, keyed by
+    # services/markup_categories.CATEGORY_SLUGS. NULL means "no overrides" — and NULL, not
+    # {}, so the two are never separate spellings of one state (services/party_markup and
+    # services/party_inherit.is_blank both rely on that). Resolved by party_markup.markup_for.
+    category_markups: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     billing_type:  Mapped[str | None]   = mapped_column(String(20), nullable=True)   # 'reseller' | 'agency'
 
     is_active:     Mapped[bool]     = mapped_column(Boolean, default=True)

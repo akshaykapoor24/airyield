@@ -58,6 +58,37 @@ async def upload_bytes(content: bytes, blob_name: str, content_type: str, bucket
     return await loop.run_in_executor(None, _do)
 
 
+# Resumable-upload chunk for upload_file. A generated report can run to hundreds of MB; the
+# library default (100 MB per request) would need a minute-long request per chunk on a slow
+# link, so smaller chunks keep each request well inside its timeout. Must be a multiple of
+# 256 KiB (a GCS rule).
+_UPLOAD_CHUNK_BYTES = 16 * 1024 * 1024
+_UPLOAD_TIMEOUT_SECONDS = 120
+
+
+async def upload_file(path: str, blob_name: str, content_type: str, bucket_name: str) -> str:
+    """Upload a file from disk to GCS, streaming it in chunks. Returns blob_name.
+
+    The bytes-based upload_bytes holds the whole object in memory; report workbooks are
+    built on disk precisely so the worker never has to.
+    """
+    logger.info("[GCS] Uploading file | bucket=%s | blob=%s | path=%s", bucket_name, blob_name, path)
+
+    loop = asyncio.get_event_loop()
+
+    def _do() -> str:
+        try:
+            blob = _bucket(bucket_name).blob(blob_name, chunk_size=_UPLOAD_CHUNK_BYTES)
+            blob.upload_from_filename(path, content_type=content_type, timeout=_UPLOAD_TIMEOUT_SECONDS)
+            logger.info("[GCS] Upload SUCCESS | bucket=%s | blob=%s", bucket_name, blob_name)
+            return blob_name
+        except Exception as e:
+            logger.error("[GCS] Upload FAILED | bucket=%s | blob=%s | error: %s", bucket_name, blob_name, e, exc_info=True)
+            raise
+
+    return await loop.run_in_executor(None, _do)
+
+
 async def download_bytes(blob_name: str, bucket_name: str) -> bytes:
     """Download a blob's bytes from GCS. Used by the BSP worker to fetch the
     uploaded PDF for parsing."""

@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.bsp_statement import BspStatementRow, BspTaxBreakup
 from app.models.ticket_reconciliation import TicketReconciliation
 from app.models.uploaded_ticket import UploadedTicket
+from app.services.markup_categories import CATEGORY_AIR
 
 Q = Decimal("0.01")
 ZERO = Decimal("0")
@@ -210,7 +211,15 @@ class BspReconciliationService:
         reconciled_at = datetime.utcnow()
         commission_source = "iata" if commission_source == "iata" else "reported"
 
-        scope = (UploadedTicket.tenant_id == tenant_id, UploadedTicket.created_by_id == created_by_id)
+        # Air lines only. uploaded_tickets also holds the hotel / train / bus / car bookings
+        # the Third Party API projection sends to billing; none of them is ever settled
+        # through BSP, so letting them in would file every one as a critical missing_bsp
+        # row (and, with no ticket_number, they could never match anyway).
+        scope = (
+            UploadedTicket.tenant_id == tenant_id,
+            UploadedTicket.created_by_id == created_by_id,
+            UploadedTicket.product_category == CATEGORY_AIR,
+        )
         tickets = (await db.execute(select(UploadedTicket).where(*scope))).scalars().all()
 
         bsp_scope = (BspStatementRow.tenant_id == tenant_id, BspStatementRow.created_by_id == created_by_id)

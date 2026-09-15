@@ -14,7 +14,10 @@
 // works; it is what this replaces in the UI, and it keeps serving the templates.
 
 import * as XLSX from "xlsx";
-import { CORPORATE_TYPES, GSTIN_RE, PAN_RE, type Party, type PartyKind } from "@/lib/party";
+import {
+  CORPORATE_TYPES, GSTIN_RE, MARKUP_CATEGORIES, PAN_RE,
+  type CategoryMarkups, type MarkupCategory, type MarkupType, type Party, type PartyKind,
+} from "@/lib/party";
 
 // ── Field spec ───────────────────────────────────────────────────────────────
 
@@ -35,6 +38,8 @@ export type ImportField = {
   options?: { value: string; label: string }[];
   /** Shown under the field name in the mapping step. */
   hint?: string;
+  /** Starts a titled section in the mapping step when it differs from the field before. */
+  group?: string;
 };
 
 const MARKUP_TYPE_OPTIONS = [
@@ -66,10 +71,44 @@ const TAX_AND_BILLING_FIELDS: ImportField[] = [
   },
 ];
 
+/**
+ * The optional per-category markup, as a TYPE + VALUE pair per category — the same shape as
+ * the default Markup Type / Markup Value above, and the same column names the server's
+ * template writes (party_markup.CATEGORY_COLUMNS): AIR_MARKUP_TYPE, AIR_MARKUP_VALUE, ….
+ * A pair rather than one "5%" cell, because Excel turns a typed "5%" into 0.05.
+ *
+ * These are flat here so the mapping and review steps need nothing new; toPayload folds
+ * them into the `category_markups` object the API takes. Files from before these columns
+ * existed simply leave them unmapped.
+ */
+export const CATEGORY_FIELD_KEYS = MARKUP_CATEGORIES.map(({ value, label }) => ({
+  slug: value, label, typeKey: `${value}_markup_type`, valueKey: `${value}_markup_value`,
+}));
+
+const CATEGORY_ALIASES: Partial<Record<MarkupCategory, string[]>> = {
+  air: ["flight", "airline"],
+  car: ["cab"],
+};
+
+const CATEGORY_MARKUP_FIELDS: ImportField[] = CATEGORY_FIELD_KEYS.flatMap(({ slug, label, typeKey, valueKey }) => [
+  {
+    key: typeKey, label: `${label} Markup Type`, type: "choice" as const, options: MARKUP_TYPE_OPTIONS,
+    group: "Markup by category — optional, blank uses the default markup",
+    aliases: (CATEGORY_ALIASES[slug] ?? []).map((a) => `${a}_markup_type`),
+  },
+  {
+    key: valueKey, label: `${label} Markup Value`, type: "number" as const,
+    group: "Markup by category — optional, blank uses the default markup",
+    aliases: (CATEGORY_ALIASES[slug] ?? []).map((a) => `${a}_markup_value`),
+  },
+]);
+
 export const IMPORT_FIELDS: Record<PartyKind, ImportField[]> = {
   customer: [
     { key: "first_name", label: "First Name", type: "text", required: true, aliases: ["firstname", "fname", "given_name", "name"] },
     { key: "last_name", label: "Last Name", type: "text", aliases: ["lastname", "lname", "surname"] },
+  { key: "employee_code", label: "Employee Code", type: "text",
+    aliases: ["emp_code", "employee_id", "staff_code", "emp_id", "payroll_id"] },
     {
       key: "company", label: "Company", type: "text",
       aliases: ["corporate", "employer", "organisation", "organization", "firm", "company_name"],
@@ -79,6 +118,7 @@ export const IMPORT_FIELDS: Record<PartyKind, ImportField[]> = {
     { key: "phone", label: "Phone / Contact", type: "text", aliases: ["contact", "mobile", "phone_no", "contact_no", "telephone"] },
     { key: "email", label: "Email", type: "text", aliases: ["email_id", "mail", "email_address"] },
     ...TAX_AND_BILLING_FIELDS,
+    ...CATEGORY_MARKUP_FIELDS,
   ],
   corporate: [
     {
@@ -93,10 +133,12 @@ export const IMPORT_FIELDS: Record<PartyKind, ImportField[]> = {
     { key: "email", label: "Email", type: "text", aliases: ["email_id", "mail", "email_address"] },
     { key: "address", label: "Address", type: "text", aliases: ["address_1", "address_line_1", "street", "registered_address"] },
     { key: "city", label: "City", type: "text", aliases: ["town"] },
-    { key: "state", label: "State", type: "text", aliases: ["region"] },
+    // Required: for an Unregistered corporate it is all place of supply has to go on.
+    { key: "state", label: "State", type: "text", required: true, aliases: ["region"] },
     { key: "pincode", label: "Pincode", type: "text", aliases: ["pin", "pin_code", "postal_code", "zip", "zipcode"] },
     { key: "country", label: "Country", type: "text" },
     ...TAX_AND_BILLING_FIELDS,
+    ...CATEGORY_MARKUP_FIELDS,
   ],
 };
 
@@ -286,6 +328,12 @@ export function applyMapping(
       const col = mapping[field.key];
       values[field.key] = col ? normalizeCell(field, row[col] ?? "") : "";
     }
+    // No registration given but a GSTIN is: that row is registered. Left blank it would be
+    // sent as Unregistered and toPayload would throw the GSTIN away. Mirrors
+    // corporates.py::_is_registered.
+    if ("gst_registered" in values && !values.gst_registered && values.gst_no?.trim()) {
+      values.gst_registered = "true";
+    }
     return { sheetRow: sheet.rowNumbers[i], values, included: true };
   });
 }
@@ -313,6 +361,15 @@ export function validateRow(fields: ImportField[], values: Record<string, string
   const gstNo = (values.gst_no ?? "").trim().toUpperCase();
   if (registered && !GSTIN_RE.test(gstNo)) {
     errors.gst_no = "A registered party needs a valid 15-character GSTIN (e.g. 27ABCDE1234F1Z5).";
+  }
+  // Each category is a pair too. Half of one would be saved as nothing at all, and the
+  // category would quietly bill at the default — so it is flagged rather than dropped.
+  for (const { label, typeKey, valueKey } of CATEGORY_FIELD_KEYS) {
+    if (!(typeKey in values) && !(valueKey in values)) continue;
+    const type = (values[typeKey] ?? "").trim();
+    const value = (values[valueKey] ?? "").trim();
+    if (value && !type) errors[typeKey] = `Pick Percentage or Fixed for the ${label} markup.`;
+    if (type && !value) errors[valueKey] = `Enter the ${label} markup value, or clear its type.`;
   }
   return errors;
 }
@@ -356,14 +413,40 @@ function employerKey(corporateId: number | null | undefined, company: string | n
   return corporateId != null ? `corp:${corporateId}` : `name:${nameKey(company)}`;
 }
 
+/**
+ * The person identity — party_dedupe.CustomerDuplicates.key. The EMPLOYEE CODE is part of
+ * it, which is what lets two genuine namesakes at one employer both save once each has a
+ * code; without it this flagged a file the server would have accepted.
+ */
 function customerKey(
   firstName: string | null | undefined,
   lastName: string | null | undefined,
   corporateId: number | null | undefined,
   company: string | null | undefined,
+  employeeCode: string | null | undefined,
 ): string {
-  return ["person", nameKey(`${firstName ?? ""} ${lastName ?? ""}`), employerKey(corporateId, company)]
-    .join(KEY_SEP);
+  return ["person", nameKey(`${firstName ?? ""} ${lastName ?? ""}`), employerKey(corporateId, company),
+    codeKey(employeeCode)].join(KEY_SEP);
+}
+
+/**
+ * The name under an employer, whatever the code — party_dedupe.CustomerDuplicates.named_key.
+ * Every employee holds it; only a row WITHOUT a code is checked against it, so an uncoded
+ * row cannot slip in beside a coded namesake.
+ */
+function namedKey(
+  firstName: string | null | undefined,
+  lastName: string | null | undefined,
+  corporateId: number | null | undefined,
+  company: string | null | undefined,
+): string {
+  return ["named", nameKey(`${firstName ?? ""} ${lastName ?? ""}`), employerKey(corporateId, company)].join(KEY_SEP);
+}
+
+/** An Employee Code is its own identity, workspace-wide. "" when there is no code. */
+function employeeCodeKey(employeeCode: string | null | undefined): string {
+  const code = codeKey(employeeCode);
+  return code ? `emp_code${KEY_SEP}${code}` : "";
 }
 
 type CorporateFacet = { facet: "name" | "gstin"; field: string; key: string; value: string };
@@ -416,8 +499,13 @@ export function buildDuplicateContext(
   const existing = new Map<string, string>();
   for (const p of [...master].sort((a, b) => a.id - b.id)) {
     if (kind === "customer") {
-      const key = customerKey(p.first_name, p.last_name, p.corporate_id, p.company);
-      if (!existing.has(key)) existing.set(key, `${p.first_name ?? ""} ${p.last_name ?? ""}`.trim());
+      const label = `${p.first_name ?? ""} ${p.last_name ?? ""}`.trim();
+      const key = customerKey(p.first_name, p.last_name, p.corporate_id, p.company, p.employee_code);
+      if (!existing.has(key)) existing.set(key, label);
+      const codeK = employeeCodeKey(p.employee_code);
+      if (codeK && !existing.has(codeK)) existing.set(codeK, label);
+      const namedK = namedKey(p.first_name, p.last_name, p.corporate_id, p.company);
+      if (!existing.has(namedK)) existing.set(namedK, codeK ? `${label} (${codeKey(p.employee_code)})` : label);
     } else {
       const label = (p.company ?? "").trim() || "an unnamed corporate";
       for (const { key } of corporateFacets(p.company, p.gst_no)) {
@@ -456,19 +544,52 @@ export function duplicateRowErrors(
     if (kind === "customer") {
       const company = (row.values.company ?? "").trim();
       const corporateId = ctx.corporateIds.get(nameKey(company)) ?? null;
-      const key = customerKey(row.values.first_name, row.values.last_name, corporateId, company);
+      const code = codeKey(row.values.employee_code);
+      const key = customerKey(row.values.first_name, row.values.last_name, corporateId, company, code);
+      const codeK = employeeCodeKey(code);
+      // Person first, then code — the order CustomerDuplicates.check reports them in.
       const heldBy = claimed.get(key);
       if (heldBy != null) {
-        out[i].first_name = `Same name and employer as row ${heldBy} of this file.`;
-      } else if (ctx.existing.has(key)) {
-        out[i].first_name = `Already in Employee Master ${employerPhrase(company)}.`;
-      } else {
-        claimed.set(key, row.sheetRow);
+        out[i].first_name = `Same name and employer as row ${heldBy} of this file. ` +
+          "If they are different people, give each an Employee Code.";
+        return;
       }
+      if (ctx.existing.has(key)) {
+        out[i].first_name = `Already in Employee Master ${employerPhrase(company)}. ` +
+          "If this is a different person, give them an Employee Code.";
+        return;
+      }
+      if (codeK && claimed.has(codeK)) {
+        out[i].employee_code = `Employee Code ${code} is also on row ${claimed.get(codeK)} of this file.`;
+        return;
+      }
+      if (codeK && ctx.existing.has(codeK)) {
+        out[i].employee_code = `Employee Code ${code} is already used in Employee Master, on ${ctx.existing.get(codeK)}.`;
+        return;
+      }
+      const namedK = namedKey(row.values.first_name, row.values.last_name, corporateId, company);
+      if (!code && ctx.existing.has(namedK)) {
+        out[i].first_name = `Already in Employee Master ${employerPhrase(company)}, as ${ctx.existing.get(namedK)}. ` +
+          "Give this one an Employee Code of its own.";
+        return;
+      }
+      if (!code && claimed.has(namedK)) {
+        out[i].first_name = `Same name and employer as row ${claimed.get(namedK)} of this file. ` +
+          "Give each of them an Employee Code.";
+        return;
+      }
+      claimed.set(key, row.sheetRow);
+      if (codeK) claimed.set(codeK, row.sheetRow);
+      if (!claimed.has(namedK)) claimed.set(namedK, row.sheetRow);
       return;
     }
 
-    const facets = corporateFacets(row.values.company, row.values.gst_no);
+    // An Unregistered row's GSTIN is dropped before it is saved (toPayload), so it
+    // occupies no identity and cannot be anyone's duplicate.
+    const facets = corporateFacets(
+      row.values.company,
+      row.values.gst_registered === "true" ? row.values.gst_no : null,
+    );
     for (const { facet, field, key } of facets) {
       const heldBy = claimed.get(key);
       if (heldBy != null) {
@@ -508,5 +629,17 @@ export function toPayload(fields: ImportField[], values: Record<string, string>)
   // Unregistered never carries a GST number, matching the Add/Edit form and the
   // server, which clears it either way.
   if (payload.gst_registered !== true) payload.gst_no = null;
+  // The flat category pairs → the one object the API stores. null, not {}, when none.
+  const categoryMarkups: CategoryMarkups = {};
+  for (const { slug, typeKey, valueKey } of CATEGORY_FIELD_KEYS) {
+    const type = payload[typeKey];
+    const value = payload[valueKey];
+    delete payload[typeKey];
+    delete payload[valueKey];
+    if ((type === "percentage" || type === "fixed") && typeof value === "number" && !Number.isNaN(value)) {
+      categoryMarkups[slug] = { type: type as MarkupType, value };
+    }
+  }
+  payload.category_markups = Object.keys(categoryMarkups).length ? categoryMarkups : null;
   return payload;
 }

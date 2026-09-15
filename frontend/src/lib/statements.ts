@@ -46,9 +46,19 @@ export type StatementType = {
    *  decides whether the /statements/ndc/**\/billing-* endpoints answer.
    *
    *  Opt-in per type, like the two flags above, because eight statement types share this
-   *  one view — and only NDC has the columns (`_BillingMixin` is on `Ndc` alone) or the
-   *  semantics for it. A commission ledger is not an invoice. */
+   *  one view — and only NDC and Third Party API have the columns (`_BillingMixin` is on
+   *  those two models alone) or the semantics for it. A commission ledger is not an
+   *  invoice. */
   supportsBilling?: boolean;
+  /** WHICH billing worklist this type opens. `supportsBilling` says a type HAS one; this
+   *  says which of the two. They are deliberate copies rather than one configurable
+   *  component — see the note at the top of NdcBillingWorklist.tsx — because they ask
+   *  different questions: NDC has a Line column for its ancillary roll-up, Third Party API
+   *  has a Category column because one file carries five products and only flights bill.
+   *
+   *  Not derivable from `slug`, which is the NAV slug ("api" here, not "tp-api"), and not
+   *  from `apiBase`, which is a string this component has no business parsing. */
+  billingWorklist?: "ndc" | "tp-api";
   /** One line on the wizard's success screen telling the user where the rows went. */
   doneHint?: string;
 };
@@ -90,6 +100,7 @@ export const STATEMENT_NAV: StatementCategory[] = [
       {
         slug: "ndc", label: "NDC", kind: "spec-repo", status: "ready",
         apiBase: "/statements/ndc", supportsMapping: true, supportsBilling: true,
+        billingWorklist: "ndc",
         blurb: "NDC statements — the airline's own sales export, one row per transaction.",
         doneHint: "Open Billing on the upload to bill them, or price them in Commission income.",
       },
@@ -113,6 +124,11 @@ export const STATEMENT_NAV: StatementCategory[] = [
     types: [
       { slug: "gds", label: "GDS", kind: "spec-repo", status: "ready", apiBase: "/statements/tp-gds", requiresSupplier: true, supportsMapping: true, blurb: "Third-party GDS statement from your consolidator, normalized.", doneHint: "Price it under Vendors data → Commission income → Third Party." },
       { slug: "lcc", label: "LCC", kind: "spec-repo", status: "ready", apiBase: "/statements/tp-lcc", requiresSupplier: true, supportsMapping: true, blurb: "Third-party LCC statement from your consolidator, normalized.", doneHint: "Price it under Vendors data → Commission income → Third Party." },
+      // The only multi-product type: one aggregator file carries hotel, flight, train, bus
+      // and car bookings side by side, told apart by Category inside the upload. No
+      // doneHint pointing at Commission income — an aggregator's hotel and train lines have
+      // no airline deal to price against, so it deliberately does not feed that screen.
+      { slug: "api", label: "API", kind: "spec-repo", status: "ready", apiBase: "/statements/tp-api", requiresSupplier: true, supportsMapping: true, supportsBilling: true, billingWorklist: "tp-api", blurb: "Aggregator booking statement (MakeMyTrip, TBO) — hotel, flight, train, bus and car in one file.", doneHint: "Open Billing on the upload to bill it — flight, hotel, train, bus and car rows each bill at the party's markup for that category." },
     ],
   },
 ];
