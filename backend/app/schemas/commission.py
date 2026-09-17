@@ -110,6 +110,10 @@ class CommissionRowRead(BaseModel):
     issue_date: Optional[date] = None
     travel_date: Optional[date] = None
     segment_type: Optional[str] = None
+    # The same segment as BSP's STAT letter ('I'/'D'), derived from segment_type. The
+    # grid's STAT column is shared with BSP, which carries the letter natively; without
+    # this every non-BSP row renders an empty cell on a segment it does know.
+    stat: Optional[str] = None
     booking_class: Optional[str] = None
     sector: Optional[str] = None
 

@@ -741,13 +741,21 @@ def derive_ticket_row(row: dict[str, Any], is_airline: bool) -> dict[str, Any]:
         row["doc_date"] = _normalize_date(row["doc_date"])
 
     # ── Ticket number: accounting code + document serial ──────────
-    # A consolidator prints "607 5808583279" — the airline's 3-digit IATA
-    # accounting code, then the document serial. Joining them gives the 13-digit
-    # canonical form, and the prefix is kept because it identifies the carrier on
-    # a statement whose airline column is blank.
+    # A consolidator prints "607 5808583279" — the airline's 3-digit IATA accounting code,
+    # then the document serial. They are KEPT APART, each in its own column.
+    #
+    # They used to be joined back into a 13-digit value here, which left this the only
+    # table in the schema holding a ticket that way: `third_party_gds` stores the serial
+    # with `ticket_prefix` beside it, and every one of the 15,204 BSP settlement rows
+    # carries the bare serial. A joined value therefore matched neither side, which is why
+    # a ticket bought through a consolidator and sold to a customer could not be paired.
+    #
+    # `split_ticket_no` fails closed — an unrecognised cell ("157 ABC") is left whole with
+    # no prefix — and is idempotent, so re-running against an already-split value is a
+    # no-op rather than a second split.
     code, serial = sector_split.split_ticket_no(row.get("ticket_number"))
     if code:
-        row["ticket_number"] = f"{code}{serial}"
+        row["ticket_number"] = serial
         row.setdefault("ticket_prefix", code)
         if not row.get("airlines_code"):
             row["airlines_code"] = code      # resolved to the 2-letter code at confirm

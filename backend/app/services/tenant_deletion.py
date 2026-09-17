@@ -84,9 +84,14 @@ DELETION_GROUPS: tuple[DeletionGroup, ...] = (
          "deal_rule_conditions", "deal_approvals", "deal_approval_steps"),
     ),
     DeletionGroup(
-        "tickets", "Tickets", "Uploaded tickets, their calculation runs and reconciliation cache.",
+        "tickets", "Tickets", "Uploaded tickets, their calculation runs and reconciliation caches.",
         GroupCategory.RECORDS,
-        ("uploaded_tickets", "ticket_calculations", "ticket_reconciliation", "ticket_adjustments"),
+        # `sell_reconciliations` sits here rather than with the statements it also reads:
+        # it points at a vendor statement row by bare id with no FK, so it must not outlive
+        # the tickets it does have an FK to, and the buy/sell answer is meaningless once
+        # either side is gone.
+        ("uploaded_tickets", "ticket_calculations", "ticket_reconciliation", "ticket_adjustments",
+         "sell_reconciliations", "sell_reconciliation_runs"),
     ),
     DeletionGroup(
         # Ordered BEFORE the statement groups: a calculation points at a statement row by

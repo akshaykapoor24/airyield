@@ -150,9 +150,16 @@ class TestTicketNumberClassification(unittest.TestCase):
     def test_the_prefix_is_split_off_and_kept(self):
         self.assertEqual(sector_split.split_ticket_no("607 5808583279"), ("607", "5808583279"))
 
-    def test_derive_joins_the_number_and_records_the_carrier_prefix(self):
+    def test_derive_keeps_the_serial_and_the_carrier_prefix_apart(self):
+        """They used to be joined back into a 13-digit value here.
+
+        That left `uploaded_tickets` the only table in the schema holding a ticket that
+        way — `third_party_gds` stores the serial with the code beside it, and every BSP
+        settlement row carries the bare serial — so the joined value matched neither, and
+        a ticket bought through a consolidator could not be paired with its own sale.
+        """
         row = derive_ticket_row({"ticket_number": "607 5808583279"}, is_airline=False)
-        self.assertEqual(row["ticket_number"], "6075808583279")
+        self.assertEqual(row["ticket_number"], "5808583279")
         self.assertEqual(row["ticket_prefix"], "607")
         # With no AL column, the accounting code is the only carrier evidence there is.
         self.assertEqual(row["airlines_code"], "607")

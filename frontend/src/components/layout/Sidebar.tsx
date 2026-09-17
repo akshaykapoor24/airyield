@@ -271,12 +271,6 @@ export default function Sidebar() {
           <>
             <div className="flex min-w-0 flex-1 flex-col justify-center">
               <Logo className="h-auto w-full" />
-              {/* A platform admin runs a different console on the same shell; say so. */}
-              {platform && (
-                <p className="mt-0.5 text-[9px] font-semibold uppercase leading-none tracking-widest text-purple-600">
-                  Platform Console
-                </p>
-              )}
             </div>
             <button
               onClick={() => dispatch(toggleSidebar())}

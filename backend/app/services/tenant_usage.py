@@ -152,6 +152,9 @@ EXCLUDED_TABLES: frozenset[str] = frozenset({
     # row and a deal, so counting it would count the same work twice
     "ticket_calculations", "ticket_reconciliation",
     "commission_runs", "commission_calculations",
+    # the same reasoning for the buy-vs-sell answer: it is recomputed from a vendor
+    # statement row and the tickets already counted on both sides
+    "sell_reconciliations", "sell_reconciliation_runs",
     # generated Report download workbooks — a job row and a file rebuilt from uploads
     # that are already counted, so counting it would count the same data again
     "report_exports",

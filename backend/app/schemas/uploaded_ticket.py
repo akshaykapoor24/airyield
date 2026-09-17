@@ -23,6 +23,8 @@ class TicketRow(BaseModel):
     gds_pnr:             Optional[str] = None
     airlines_code:       Optional[str] = None
     ticket_number:       Optional[str] = None
+    # The airline's 3-digit IATA accounting code, split out of the ticket cell.
+    ticket_prefix:       Optional[str] = None
     sell_fare:           Optional[float] = None
     sell_tax:            Optional[float] = None
     sell_tax_yq:         Optional[float] = None
@@ -333,6 +335,7 @@ class BatchRunCalculationResult(BaseModel):
 class UploadedTicketUpdate(BaseModel):
     """Partial update payload — all fields optional."""
     ticket_number:        Optional[str]   = None
+    ticket_prefix:        Optional[str]   = None
     booking_ref:          Optional[str]   = None
     last_name:            Optional[str]   = None
     first_name:           Optional[str]   = None

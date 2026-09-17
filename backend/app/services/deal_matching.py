@@ -204,6 +204,32 @@ def _class_is_restrictive(plb_class: str | None) -> bool:
 
 # ── Filter helpers ─────────────────────────────────────────────────────────
 
+# The vocabulary a statement may write a segment in. One set, shared by the matcher and
+# by whatever displays a STAT letter, so the grid can never show "I" on a row the matcher
+# treated as unreadable.
+_INT_SEGMENTS = {"INTERNATIONAL", "INTL", "INTER", "INT"}
+_DOM_SEGMENTS = {"DOMESTIC", "DOM"}
+
+
+def segment_letter(segment_type: str | None) -> str | None:
+    """A segment as BSP's own STAT letter — 'I', 'D', or None when unreadable.
+
+    BSP settlement rows carry this letter natively; every other source prints a word
+    ("INTERNATIONAL") or nothing. Mapping them onto the same letter is what lets one
+    grid column, and one STAT_LABEL lookup, serve all of them. None for a vocabulary
+    neither set recognises, which is exactly the case _flight_type_matches refuses to
+    match on — the two must not disagree.
+    """
+    if not segment_type:
+        return None
+    seg = segment_type.strip().upper()
+    if seg in _INT_SEGMENTS:
+        return "I"
+    if seg in _DOM_SEGMENTS:
+        return "D"
+    return None
+
+
 def _flight_type_matches(segment_type: str | None, plb_flight_type: str | None) -> bool:
     """DOM/INT segment vs PLB flightType (Domestic / International / Both / null).
 
@@ -215,16 +241,13 @@ def _flight_type_matches(segment_type: str | None, plb_flight_type: str | None) 
         return True
     if not segment_type:
         return True  # can't determine, allow
-    seg = segment_type.strip().upper()
-    # Normalise full names / aliases → standard abbreviations
-    if seg in ("INTERNATIONAL", "INTL", "INTER"):
-        seg = "INT"
-    elif seg in ("DOMESTIC",):
-        seg = "DOM"
+    letter = segment_letter(segment_type)
+    if letter is None:
+        return False  # a vocabulary we do not recognise matches no flight type
     ft = plb_flight_type.strip().lower()
-    if seg == "DOM" and ft in ("domestic", "dom"):
+    if letter == "D" and ft in ("domestic", "dom"):
         return True
-    if seg == "INT" and ft in ("international", "int"):
+    if letter == "I" and ft in ("international", "int"):
         return True
     return False
 
