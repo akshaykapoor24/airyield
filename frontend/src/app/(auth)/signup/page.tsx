@@ -171,19 +171,19 @@ export default function SignupPage() {
   };
 
   const field =
-    "peer w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-10 pr-4 text-sm text-slate-900 shadow-sm outline-none transition-all duration-200 placeholder:text-slate-400 hover:border-slate-300 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/12";
+    "peer w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-10 pr-4 text-sm text-slate-900 shadow-sm outline-none transition-all duration-200 placeholder:text-slate-400 hover:border-slate-300 focus:-translate-y-px focus:border-brand-500 focus:ring-4 focus:ring-brand-500/12";
   const bad = "border-red-300 focus:border-red-400 focus:ring-red-500/12";
   const icon =
-    "pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400 transition-colors peer-focus:text-blue-600";
+    "pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400 transition-colors peer-focus:text-brand-700";
 
   // ── post-signup: verification email sent ─────────────────────────────────
   if (sent) {
     return (
       <div className="animate-scale-in text-center sm:text-left">
         <div className="relative mx-auto mb-6 grid h-16 w-16 place-items-center sm:mx-0">
-          <span className="animate-pulse-ring absolute inset-0 rounded-full bg-blue-400/40" />
-          <span className="relative grid h-16 w-16 place-items-center rounded-full bg-blue-50 ring-1 ring-blue-200">
-            <MailCheck className="h-8 w-8 text-blue-600" />
+          <span className="animate-pulse-ring absolute inset-0 rounded-full bg-brand-400/40" />
+          <span className="relative grid h-16 w-16 place-items-center rounded-full bg-brand-50 ring-1 ring-brand-200">
+            <MailCheck className="h-8 w-8 text-brand-700" />
           </span>
         </div>
 
@@ -197,7 +197,7 @@ export default function SignupPage() {
         <div className="mt-7 space-y-3">
           <Link
             href="/login"
-            className="group flex w-full items-center justify-center gap-2 rounded-xl py-3 text-sm font-semibold text-white shadow-lg shadow-blue-500/25 transition-all hover:-translate-y-0.5 hover:shadow-xl hover:shadow-blue-500/35"
+            className="group flex w-full items-center justify-center gap-2 rounded-xl py-3 text-sm font-semibold text-white shadow-lg shadow-brand-500/25 transition-all hover:-translate-y-0.5 hover:shadow-xl hover:shadow-brand-500/35"
             style={{ background: "var(--brand-grad)" }}
           >
             Go to sign in
@@ -231,12 +231,19 @@ export default function SignupPage() {
         </p>
       </div>
 
-      {/* account-type segmented toggle */}
+      {/* Account-type segmented control. The white pill is one element that slides
+          between the two options — animating a shared element reads as a single control
+          changing state, where restyling two buttons reads as two things blinking. */}
       <div
-        className="animate-fade-up mt-6 grid grid-cols-2 gap-2 rounded-2xl bg-slate-100 p-1.5"
+        className="animate-fade-up relative mt-5 grid grid-cols-2 gap-2 rounded-2xl bg-slate-100 p-1.5"
         style={{ animationDelay: "60ms" }}
         role="tablist"
       >
+        <span
+          aria-hidden="true"
+          className="absolute inset-y-1.5 left-1.5 w-[calc(50%-0.625rem)] rounded-xl bg-white shadow-md shadow-slate-900/5 ring-1 ring-slate-200 transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]"
+          style={{ transform: isIndividual ? "translateX(calc(100% + 0.5rem))" : "none" }}
+        />
         {([
           { t: "corporate" as const,  label: "Corporate",  sub: "Work email",     Icon: Building2 },
           { t: "individual" as const, label: "Individual", sub: "Personal email", Icon: User },
@@ -249,20 +256,21 @@ export default function SignupPage() {
               role="tab"
               aria-selected={active}
               onClick={() => switchType(t)}
-              className={`flex flex-col items-start gap-0.5 rounded-xl px-3.5 py-2.5 text-left transition-all duration-300 ${
-                active
-                  ? "bg-white shadow-md shadow-slate-900/5 ring-1 ring-slate-200"
-                  : "text-slate-500 hover:bg-white/60"
-              }`}
+              className="relative z-10 flex flex-col items-start gap-0.5 rounded-xl px-3.5 py-2 text-left"
+
             >
               <span
-                className={`flex items-center gap-1.5 text-sm font-semibold ${
-                  active ? "text-blue-700" : "text-slate-600"
+                className={`flex items-center gap-1.5 text-sm font-semibold transition-colors duration-300 ${
+                  active ? "text-brand-800" : "text-slate-500"
                 }`}
               >
                 <Icon className="h-4 w-4" /> {label}
               </span>
-              <span className={`text-[11px] ${active ? "text-slate-500" : "text-slate-400"}`}>
+              <span
+                className={`text-[11px] transition-colors duration-300 ${
+                  active ? "text-slate-500" : "text-slate-400"
+                }`}
+              >
                 {sub}
               </span>
             </button>
@@ -272,7 +280,7 @@ export default function SignupPage() {
 
       {/* context banner */}
       <div
-        className="animate-fade-up mt-4"
+        className="animate-fade-up mt-3.5"
         style={{ animationDelay: "110ms" }}
         key={accountType}
       >
@@ -285,9 +293,9 @@ export default function SignupPage() {
             </p>
           </div>
         ) : (
-          <div className="flex items-start gap-2.5 rounded-xl border border-blue-200 bg-blue-50 px-3.5 py-2.5">
-            <Building2 className="mt-0.5 h-4 w-4 shrink-0 text-blue-500" />
-            <p className="text-[11px] leading-snug text-blue-700">
+          <div className="flex items-start gap-2.5 rounded-xl border border-brand-200 bg-brand-50 px-3.5 py-2.5">
+            <Building2 className="mt-0.5 h-4 w-4 shrink-0 text-brand-600" />
+            <p className="text-[11px] leading-snug text-brand-800">
               <span className="font-semibold">One admin per company.</span> The first
               person from your work domain becomes the admin. Teammates are added later
               from User Management.
@@ -296,13 +304,15 @@ export default function SignupPage() {
         )}
       </div>
 
-      <form onSubmit={handleSignup} className="mt-5 space-y-4" noValidate>
+      {/* One field to a row. `.stagger` runs the entrance, and each field's wrapper
+          carries `field-ring` for the focus underline. */}
+      <form onSubmit={handleSignup} className="stagger mt-4 space-y-3" noValidate>
         {/* full name */}
         <div>
           <label htmlFor="fullName" className="mb-1.5 block text-xs font-semibold text-slate-700">
             Full name <span className="text-red-500">*</span>
           </label>
-          <div className="relative">
+          <div className="field-ring relative">
             <input
               id="fullName"
               type="text"
@@ -321,7 +331,7 @@ export default function SignupPage() {
           <label htmlFor="email" className="mb-1.5 block text-xs font-semibold text-slate-700">
             {isIndividual ? "Email" : "Work email"} <span className="text-red-500">*</span>
           </label>
-          <div className="relative">
+          <div className="field-ring relative">
             <input
               id="email"
               type="email"
@@ -349,11 +359,11 @@ export default function SignupPage() {
 
         {/* company name — corporate only */}
         {!isIndividual && (
-          <div className="animate-fade-up">
+          <div>
             <label htmlFor="company" className="mb-1.5 block text-xs font-semibold text-slate-700">
               Company name <span className="font-normal text-slate-400">(optional)</span>
             </label>
-            <div className="relative">
+            <div className="field-ring relative">
               <input
                 id="company"
                 type="text"
@@ -378,7 +388,7 @@ export default function SignupPage() {
               <span className="font-normal text-slate-400">(optional)</span>
             )}
           </label>
-          <div className="relative">
+          <div className="field-ring relative">
             <input
               id="pan"
               type="text"
@@ -394,7 +404,7 @@ export default function SignupPage() {
         </div>
 
         {/* GST registered toggle */}
-        <div className="rounded-xl border border-slate-200 bg-slate-50/60 px-3.5 py-3">
+        <div className="rounded-xl border border-slate-200 bg-slate-50/60 px-3.5 py-2.5">
           <label className="flex cursor-pointer select-none items-center gap-2.5">
             <input
               type="checkbox"
@@ -403,7 +413,7 @@ export default function SignupPage() {
                 setGstRegistered(e.target.checked);
                 if (!e.target.checked) { setGst(""); setGstError(""); }
               }}
-              className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500/30"
+              className="h-4 w-4 rounded border-slate-300 text-brand-700 focus:ring-brand-500/30"
             />
             <span className="flex items-center gap-1.5 text-xs font-semibold text-slate-700">
               <ReceiptText className="h-3.5 w-3.5 text-slate-400" />
@@ -411,14 +421,14 @@ export default function SignupPage() {
             </span>
           </label>
           {gstRegistered && (
-            <div className="animate-fade-up mt-3">
+            <div className="animate-fade-up field-ring relative mt-2.5">
               <input
                 type="text"
                 value={gst}
                 onChange={(e) => handleGstChange(e.target.value)}
                 placeholder="GSTIN — e.g. 22ABCDE1234F1Z5"
                 maxLength={15}
-                className={`w-full rounded-xl border border-slate-200 bg-white px-4 py-2.5 font-mono text-sm uppercase tracking-wider shadow-sm outline-none transition-all placeholder:font-sans placeholder:tracking-normal placeholder:text-slate-400 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/12 ${
+                className={`w-full rounded-xl border border-slate-200 bg-white px-4 py-2.5 font-mono text-sm uppercase tracking-wider shadow-sm outline-none transition-all placeholder:font-sans placeholder:tracking-normal placeholder:text-slate-400 focus:-translate-y-px focus:border-brand-500 focus:ring-4 focus:ring-brand-500/12 ${
                   gstError ? bad : ""
                 }`}
               />
@@ -453,7 +463,7 @@ export default function SignupPage() {
         <button
           type="submit"
           disabled={loading}
-          className="group flex w-full items-center justify-center gap-2 rounded-xl py-3.5 text-sm font-semibold text-white shadow-lg shadow-blue-500/25 transition-all hover:-translate-y-0.5 hover:shadow-xl hover:shadow-blue-500/35 disabled:translate-y-0 disabled:opacity-60 disabled:shadow-none"
+          className="btn-sheen group flex w-full items-center justify-center gap-2 rounded-xl py-3.5 text-sm font-semibold text-white shadow-lg shadow-brand-700/25 transition-all hover:-translate-y-0.5 hover:shadow-xl hover:shadow-brand-700/35 disabled:translate-y-0 disabled:opacity-60 disabled:shadow-none"
           style={{ background: "var(--brand-grad)" }}
         >
           {loading ? (
@@ -470,9 +480,9 @@ export default function SignupPage() {
         </button>
       </form>
 
-      <p className="mt-6 text-center text-sm text-slate-600">
+      <p className="mt-5 text-center text-sm text-slate-600">
         Already have an account?{" "}
-        <Link href="/login" className="font-semibold text-blue-600 hover:underline">
+        <Link href="/login" className="font-semibold text-brand-700 hover:underline">
           Sign in
         </Link>
       </p>

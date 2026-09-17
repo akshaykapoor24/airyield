@@ -16,10 +16,10 @@ export default function HeroVisual() {
   return (
     <div className="relative mx-auto w-full max-w-[440px]" aria-hidden="true">
       {/* glow behind the card */}
-      <div className="animate-aurora absolute -inset-8 rounded-[3rem] bg-gradient-to-tr from-blue-400/25 via-sky-300/20 to-orange-300/20 blur-3xl" />
+      <div className="animate-aurora absolute -inset-8 rounded-[3rem] bg-gradient-to-tr from-brand-400/25 via-brand-300/20 to-accent-400/25 blur-3xl" />
 
       <div className="animate-float-slow relative">
-        <div className="animate-scale-in overflow-hidden rounded-[26px] border border-white/60 bg-white shadow-2xl shadow-blue-900/20 ring-1 ring-slate-900/5">
+        <div className="animate-scale-in overflow-hidden rounded-[26px] border border-white/60 bg-white shadow-2xl shadow-brand-900/25 ring-1 ring-slate-900/5">
           {/* ── Boarding-pass header ─────────────────────────────────── */}
           <div
             className="relative overflow-hidden px-5 pt-5 pb-14"
@@ -27,11 +27,11 @@ export default function HeroVisual() {
           >
             <div className="relative z-10 flex items-start justify-between">
               <div>
-                <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-blue-200">
+                <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-brand-200">
                   BSP Statement
                 </p>
                 <p className="mt-1 text-[15px] font-bold text-white">14-3 0950 3</p>
-                <p className="mt-0.5 text-[11px] text-blue-200/80">
+                <p className="mt-0.5 text-[11px] text-brand-200/80">
                   01 Jul → 07 Jul 2026
                 </p>
               </div>
@@ -49,7 +49,7 @@ export default function HeroVisual() {
             <div className="relative z-10 mt-5 flex items-end justify-between">
               <div>
                 <p className="text-2xl font-bold leading-none text-white">DEL</p>
-                <p className="mt-1 text-[10px] text-blue-200/70">Delhi</p>
+                <p className="mt-1 text-[10px] text-brand-200/70">Delhi</p>
               </div>
               <div className="mx-3 flex-1">
                 <svg viewBox="0 0 200 46" className="h-11 w-full overflow-visible">
@@ -85,7 +85,7 @@ export default function HeroVisual() {
               </div>
               <div className="text-right">
                 <p className="text-2xl font-bold leading-none text-white">DXB</p>
-                <p className="mt-1 text-[10px] text-blue-200/70">Dubai</p>
+                <p className="mt-1 text-[10px] text-brand-200/70">Dubai</p>
               </div>
             </div>
 
@@ -117,7 +117,7 @@ export default function HeroVisual() {
                   className="animate-fade-up flex items-center gap-2.5 rounded-xl border border-slate-100 bg-slate-50/70 px-2.5 py-2"
                   style={{ animationDelay: `${380 + i * 130}ms` }}
                 >
-                  <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-white text-[10px] font-bold text-blue-700 ring-1 ring-slate-200">
+                  <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-white text-[10px] font-bold text-brand-800 ring-1 ring-slate-200">
                     {r.iata}
                   </span>
                   <div className="min-w-0 flex-1">
@@ -179,7 +179,7 @@ export default function HeroVisual() {
           style={{ animationDelay: "0.4s" }}
         >
           <div className="flex items-center gap-2">
-            <span className="grid h-8 w-8 place-items-center rounded-xl bg-blue-50 text-blue-600">
+            <span className="grid h-8 w-8 place-items-center rounded-xl bg-brand-50 text-brand-600">
               <Plane className="h-4 w-4 -rotate-45" />
             </span>
             <div>

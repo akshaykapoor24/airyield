@@ -54,10 +54,12 @@ export default function LoginPage() {
     }
   };
 
+  // `focus:-translate-y-px` is the whole trick behind the field feeling responsive: the
+  // ring says "selected", the one-pixel lift says "and it moved when you touched it".
   const field =
-    "peer w-full rounded-xl border border-slate-200 bg-white py-3 pl-11 pr-4 text-sm text-slate-900 shadow-sm outline-none transition-all duration-200 placeholder:text-slate-400 hover:border-slate-300 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/12";
+    "peer w-full rounded-xl border border-slate-200 bg-white py-3 pl-11 pr-4 text-sm text-slate-900 shadow-sm outline-none transition-all duration-200 placeholder:text-slate-400 hover:border-slate-300 focus:-translate-y-px focus:border-brand-500 focus:ring-4 focus:ring-brand-500/12";
   const icon =
-    "pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400 transition-colors peer-focus:text-blue-600";
+    "pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400 transition-colors peer-focus:text-brand-700";
 
   return (
     <div>
@@ -68,13 +70,13 @@ export default function LoginPage() {
         </p>
       </div>
 
-      <form onSubmit={handleLogin} className="mt-8 space-y-4" noValidate>
+      <form onSubmit={handleLogin} className="stagger mt-8 space-y-4" noValidate>
         {/* email */}
-        <div className="animate-fade-up" style={{ animationDelay: "60ms" }}>
+        <div>
           <label htmlFor="email" className="mb-1.5 block text-xs font-semibold text-slate-700">
             Email address
           </label>
-          <div className="relative">
+          <div className="field-ring relative">
             <input
               id="email"
               type="email"
@@ -89,16 +91,16 @@ export default function LoginPage() {
         </div>
 
         {/* password */}
-        <div className="animate-fade-up" style={{ animationDelay: "120ms" }}>
+        <div>
           <div className="mb-1.5 flex items-center justify-between">
             <label htmlFor="password" className="text-xs font-semibold text-slate-700">
               Password
             </label>
-            <Link href="/forgot-password" className="text-xs font-medium text-blue-600 hover:underline">
+            <Link href="/forgot-password" className="text-xs font-medium text-brand-700 hover:underline">
               Forgot password?
             </Link>
           </div>
-          <div className="relative">
+          <div className="field-ring relative">
             <input
               id="password"
               type={showPw ? "text" : "password"}
@@ -132,7 +134,7 @@ export default function LoginPage() {
                     type="button"
                     onClick={handleResend}
                     disabled={resending}
-                    className="text-xs font-semibold text-blue-600 underline underline-offset-2 hover:opacity-80 disabled:opacity-60"
+                    className="text-xs font-semibold text-brand-700 underline underline-offset-2 hover:opacity-80 disabled:opacity-60"
                   >
                     {resending ? "Sending…" : "Resend verification email"}
                   </button>
@@ -147,8 +149,8 @@ export default function LoginPage() {
         <button
           type="submit"
           disabled={loading}
-          className="group animate-fade-up flex w-full items-center justify-center gap-2 rounded-xl py-3.5 text-sm font-semibold text-white shadow-lg shadow-blue-500/25 transition-all hover:-translate-y-0.5 hover:shadow-xl hover:shadow-blue-500/35 disabled:translate-y-0 disabled:opacity-60 disabled:shadow-none"
-          style={{ background: "var(--brand-grad)", animationDelay: "180ms" }}
+          className="btn-sheen group flex w-full items-center justify-center gap-2 rounded-xl py-3.5 text-sm font-semibold text-white shadow-lg shadow-brand-700/25 transition-all hover:-translate-y-0.5 hover:shadow-xl hover:shadow-brand-700/35 disabled:translate-y-0 disabled:opacity-60 disabled:shadow-none"
+          style={{ background: "var(--brand-grad)" }}
         >
           {loading ? (
             <>
@@ -172,7 +174,7 @@ export default function LoginPage() {
 
       <p className="text-center text-sm text-slate-600">
         New to FareQube?{" "}
-        <Link href="/signup" className="font-semibold text-blue-600 hover:underline">
+        <Link href="/signup" className="font-semibold text-brand-700 hover:underline">
           Create an account
         </Link>
       </p>

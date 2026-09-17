@@ -17,6 +17,13 @@ const subscribeAuth = (onChange: () => void) => {
 const getAuthSnapshot = () => isAuthenticated();
 const getAuthServerSnapshot = () => false;
 
+/** Section anchors on the home page. The ids live on the <section> elements in page.tsx. */
+const LINKS = [
+  { href: "#pipeline", label: "How it works" },
+  { href: "#features", label: "Features" },
+  { href: "#reconciliation", label: "Reconciliation" },
+];
+
 export default function SiteNav() {
   const authed = useSyncExternalStore(subscribeAuth, getAuthSnapshot, getAuthServerSnapshot);
   const [scrolled, setScrolled] = useState(false);
@@ -37,7 +44,7 @@ export default function SiteNav() {
     };
   }, [open]);
 
-  const cta = "text-white shadow-md shadow-blue-500/25 hover:shadow-lg hover:shadow-blue-500/30";
+  const cta = "text-white shadow-md shadow-brand-700/25 hover:shadow-lg hover:shadow-brand-700/30";
 
   return (
     <header
@@ -47,16 +54,30 @@ export default function SiteNav() {
           : "border-b border-transparent bg-transparent"
       }`}
     >
-      <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-5 sm:px-6">
-        <Link href="/" aria-label="fareqube.com home">
-          <Logo preload className="h-11 w-auto" />
+      {/* Full-bleed: the header spans the page, while the content below sits in a
+          narrower column. Only the horizontal padding holds the logo off the edge. */}
+      <div className="flex h-20 w-full items-center justify-between gap-6 px-5 sm:px-8 lg:px-12">
+        <Link href="/" aria-label="fareqube.com home" className="shrink-0">
+          <Logo eager className="h-12 w-auto sm:h-14" />
         </Link>
+
+        <nav className="hidden items-center gap-1 lg:flex" aria-label="Sections">
+          {LINKS.map((l) => (
+            <a
+              key={l.href}
+              href={l.href}
+              className="rounded-lg px-3.5 py-2 text-[15px] font-medium text-slate-600 transition-colors hover:bg-brand-50 hover:text-brand-800"
+            >
+              {l.label}
+            </a>
+          ))}
+        </nav>
 
         <div className="flex items-center gap-2">
           {authed ? (
             <Link
               href="/dashboard"
-              className={`group hidden items-center gap-1.5 rounded-xl px-4 py-2 text-[15px] font-semibold transition-all sm:inline-flex ${cta}`}
+              className={`group hidden items-center gap-1.5 rounded-xl px-5 py-2.5 text-[15px] font-semibold transition-all sm:inline-flex ${cta}`}
               style={{ background: "var(--brand-grad)" }}
             >
               Go to Dashboard
@@ -66,13 +87,13 @@ export default function SiteNav() {
             <>
               <Link
                 href="/login"
-                className="hidden rounded-xl px-4 py-2 text-[15px] font-semibold text-slate-700 transition-colors hover:bg-slate-100 sm:inline-flex"
+                className="hidden rounded-xl px-4 py-2.5 text-[15px] font-semibold text-slate-700 transition-colors hover:bg-slate-100 sm:inline-flex"
               >
                 Log in
               </Link>
               <Link
                 href="/signup"
-                className={`group hidden items-center gap-1.5 rounded-xl px-4 py-2 text-[15px] font-semibold transition-all sm:inline-flex ${cta}`}
+                className={`group hidden items-center gap-1.5 rounded-xl px-5 py-2.5 text-[15px] font-semibold transition-all sm:inline-flex ${cta}`}
                 style={{ background: "var(--brand-grad)" }}
               >
                 Sign up
@@ -86,19 +107,32 @@ export default function SiteNav() {
             onClick={() => setOpen((o) => !o)}
             aria-label={open ? "Close menu" : "Open menu"}
             aria-expanded={open}
-            className="grid h-10 w-10 place-items-center rounded-xl border border-slate-200 bg-white/70 text-slate-700 transition-colors hover:bg-slate-50 sm:hidden"
+            className="grid h-10 w-10 place-items-center rounded-xl border border-slate-200 bg-white/70 text-slate-700 transition-colors hover:bg-slate-50 lg:hidden"
           >
             {open ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
           </button>
         </div>
       </div>
 
-      {/* Mobile sheet — the inline auth buttons appear from `sm` up, so this only
-          has to cover the narrowest widths. */}
+      {/* Mobile sheet — carries the section links at every width below `lg`, and the auth
+          buttons only below `sm`, where they drop out of the bar. */}
       {open && (
-        <div className="animate-fade-in border-t border-slate-200/70 bg-white/95 backdrop-blur sm:hidden">
-          <nav className="mx-auto max-w-6xl px-5 py-4">
-            <div className="grid gap-2">
+        <div className="animate-fade-in border-t border-slate-200/70 bg-white/95 backdrop-blur lg:hidden">
+          <nav className="w-full px-5 py-4 sm:px-8">
+            <div className="grid gap-1">
+              {LINKS.map((l) => (
+                <a
+                  key={l.href}
+                  href={l.href}
+                  onClick={() => setOpen(false)}
+                  className="rounded-xl px-4 py-3 text-sm font-semibold text-slate-700 transition-colors hover:bg-brand-50 hover:text-brand-800"
+                >
+                  {l.label}
+                </a>
+              ))}
+            </div>
+
+            <div className="mt-3 grid gap-2 border-t border-slate-200/70 pt-3 sm:hidden">
               {authed ? (
                 <Link
                   href="/dashboard"

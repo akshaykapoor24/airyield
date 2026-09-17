@@ -261,8 +261,10 @@ export default function Sidebar() {
       style={{ scrollbarWidth: "none" }}
     >
       {/* Logo. Open: the full logo, as wide as the bar allows — its tagline is part of the
-          artwork, so width is the only thing keeping it readable. Collapsed: the mark alone,
-          which is also the button that opens the sidebar again. */}
+          artwork, so width is the only thing keeping it readable — but capped in height so it
+          doesn't fill the 64px header edge to edge (`object-left` keeps it flush with the nav
+          below once the cap bites). Collapsed: the mark alone, which is also the button that
+          opens the sidebar again. */}
       <div className={cn(
         "flex items-center h-16 border-b border-[#e6ebf2] shrink-0",
         open ? "gap-2 px-3" : "justify-center px-2"
@@ -270,7 +272,7 @@ export default function Sidebar() {
         {open ? (
           <>
             <div className="flex min-w-0 flex-1 flex-col justify-center">
-              <Logo className="h-auto w-full" />
+              <Logo className="h-auto max-h-10 w-full object-contain object-left" />
             </div>
             <button
               onClick={() => dispatch(toggleSidebar())}
