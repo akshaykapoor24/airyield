@@ -45,17 +45,17 @@ export default function ForgotPasswordPage() {
   };
 
   const field =
-    "peer w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-10 pr-4 text-sm text-slate-900 shadow-sm outline-none transition-all duration-200 placeholder:text-slate-400 hover:border-slate-300 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/12";
+    "peer w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-10 pr-4 text-sm text-slate-900 shadow-sm outline-none transition-all duration-200 placeholder:text-slate-400 hover:border-slate-300 focus:border-brand-500 focus:ring-4 focus:ring-brand-500/12";
   const icon =
-    "pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400 transition-colors peer-focus:text-blue-600";
+    "pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400 transition-colors peer-focus:text-brand-700";
 
   if (sent) {
     return (
       <div className="animate-scale-in text-center sm:text-left">
         <div className="relative mx-auto mb-6 grid h-16 w-16 place-items-center sm:mx-0">
-          <span className="animate-pulse-ring absolute inset-0 rounded-full bg-blue-400/40" />
-          <span className="relative grid h-16 w-16 place-items-center rounded-full bg-blue-50 ring-1 ring-blue-200">
-            <MailCheck className="h-8 w-8 text-blue-600" />
+          <span className="animate-pulse-ring absolute inset-0 rounded-full bg-brand-400/40" />
+          <span className="relative grid h-16 w-16 place-items-center rounded-full bg-brand-50 ring-1 ring-brand-200">
+            <MailCheck className="h-8 w-8 text-brand-700" />
           </span>
         </div>
 
@@ -68,7 +68,7 @@ export default function ForgotPasswordPage() {
         <div className="mt-7 space-y-3">
           <Link
             href="/login"
-            className="group flex w-full items-center justify-center gap-2 rounded-xl py-3 text-sm font-semibold text-white shadow-lg shadow-blue-500/25 transition-all hover:-translate-y-0.5"
+            className="group flex w-full items-center justify-center gap-2 rounded-xl py-3 text-sm font-semibold text-white shadow-lg shadow-brand-500/25 transition-all hover:-translate-y-0.5"
             style={{ background: "var(--brand-grad)" }}
           >
             Back to sign in
@@ -126,7 +126,7 @@ export default function ForgotPasswordPage() {
 
         <button
           type="submit" disabled={sending}
-          className="group animate-fade-up flex w-full items-center justify-center gap-2 rounded-xl py-3.5 text-sm font-semibold text-white shadow-lg shadow-blue-500/25 transition-all hover:-translate-y-0.5 disabled:translate-y-0 disabled:opacity-60"
+          className="group animate-fade-up flex w-full items-center justify-center gap-2 rounded-xl py-3.5 text-sm font-semibold text-white shadow-lg shadow-brand-500/25 transition-all hover:-translate-y-0.5 disabled:translate-y-0 disabled:opacity-60"
           style={{ background: "var(--brand-grad)", animationDelay: "120ms" }}
         >
           {sending ? (
@@ -139,7 +139,7 @@ export default function ForgotPasswordPage() {
 
       <p className="mt-7 text-center text-sm text-slate-600">
         Remembered it?{" "}
-        <Link href="/login" className="font-semibold text-blue-600 hover:underline">Sign in</Link>
+        <Link href="/login" className="font-semibold text-brand-700 hover:underline">Sign in</Link>
       </p>
     </div>
   );

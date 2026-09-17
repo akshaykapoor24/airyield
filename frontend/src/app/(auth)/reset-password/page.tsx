@@ -68,13 +68,13 @@ function ResetPasswordInner() {
         </p>
         <Link
           href="/forgot-password"
-          className="mt-6 flex w-full items-center justify-center gap-2 rounded-xl py-3 text-sm font-semibold text-white shadow-lg shadow-blue-500/25 transition-all hover:-translate-y-0.5"
+          className="mt-6 flex w-full items-center justify-center gap-2 rounded-xl py-3 text-sm font-semibold text-white shadow-lg shadow-brand-500/25 transition-all hover:-translate-y-0.5"
           style={{ background: "var(--brand-grad)" }}
         >
           Request a reset link <ArrowRight className="h-4 w-4" />
         </Link>
         <p className="mt-6 text-center text-sm text-slate-600">
-          <Link href="/login" className="font-semibold text-blue-600 hover:underline">Back to sign in</Link>
+          <Link href="/login" className="font-semibold text-brand-700 hover:underline">Back to sign in</Link>
         </p>
       </div>
     );
@@ -92,7 +92,7 @@ function ResetPasswordInner() {
         </p>
         <Link
           href="/login"
-          className="group mt-6 flex w-full items-center justify-center gap-2 rounded-xl py-3 text-sm font-semibold text-white shadow-lg shadow-blue-500/25 transition-all hover:-translate-y-0.5"
+          className="group mt-6 flex w-full items-center justify-center gap-2 rounded-xl py-3 text-sm font-semibold text-white shadow-lg shadow-brand-500/25 transition-all hover:-translate-y-0.5"
           style={{ background: "var(--brand-grad)" }}
         >
           Continue to sign in
@@ -137,7 +137,7 @@ function ResetPasswordInner() {
             <div className="min-w-0">
               <p className="text-xs leading-relaxed text-red-700">{error}</p>
               {error.toLowerCase().includes("invalid or has expired") && (
-                <Link href="/forgot-password" className="mt-1 inline-block text-xs font-semibold text-blue-600 underline underline-offset-2">
+                <Link href="/forgot-password" className="mt-1 inline-block text-xs font-semibold text-brand-700 underline underline-offset-2">
                   Request a new link
                 </Link>
               )}
@@ -147,7 +147,7 @@ function ResetPasswordInner() {
 
         <button
           type="submit" disabled={saving}
-          className="group flex w-full items-center justify-center gap-2 rounded-xl py-3.5 text-sm font-semibold text-white shadow-lg shadow-blue-500/25 transition-all hover:-translate-y-0.5 disabled:translate-y-0 disabled:opacity-60"
+          className="group flex w-full items-center justify-center gap-2 rounded-xl py-3.5 text-sm font-semibold text-white shadow-lg shadow-brand-500/25 transition-all hover:-translate-y-0.5 disabled:translate-y-0 disabled:opacity-60"
           style={{ background: "var(--brand-grad)" }}
         >
           {saving ? (
@@ -159,7 +159,7 @@ function ResetPasswordInner() {
       </form>
 
       <p className="mt-7 text-center text-sm text-slate-600">
-        <Link href="/login" className="font-semibold text-blue-600 hover:underline">Back to sign in</Link>
+        <Link href="/login" className="font-semibold text-brand-700 hover:underline">Back to sign in</Link>
       </p>
     </div>
   );
