@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 
 from app.api.v1 import auth, users, subscriptions, airlines, suppliers, airports, routes, deals, tickets, income, documents, reports, classes, approval_workflows, dashboard, customers, corporates, entities, login_ids, tenant_airlines, iata_commissions, gst_configurations, user_entities, user_login_ids, agencies, agency_account, agency_entities, agency_login_ids, agency_billing, adjustments, airline_adjustments, statements, ndc_billing, tp_api_billing, bsp, bsp_summary, bsp_reconciliation, bsp_commission, commission, customer_statements, lcc_detailed, ticket_details, series_contracts
-from app.api.v1 import report_download
+from app.api.v1 import report_download, sell_reconciliation
 
 router = APIRouter()
 
@@ -54,6 +54,9 @@ router.include_router(bsp_commission.router, prefix="/bsp-commission", tags=["Ve
 # keeps its own router and storage, so the flagship screen does not depend on this
 # one being right. The frontend picks a base URL per source tab.
 router.include_router(commission.router, prefix="/commission/vendor", tags=["Vendors - Commission Income"])
+# Buy-vs-sell reconciliation for the non-BSP sources, on the same terms: /bsp-reconciliation
+# answers a different question against different storage and is left untouched.
+router.include_router(sell_reconciliation.router, prefix="/reconciliation/vendor", tags=["Vendors - Reconciliation"])
 router.include_router(customer_statements.router, prefix="/customer-statements", tags=["Customer Statements"])
 router.include_router(series_contracts.router, prefix="/series-contracts", tags=["Vendors - Series/SIT/MICE Contracts"])
 # Its own literal prefix, never under /statements (see the ordering note above).

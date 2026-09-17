@@ -46,7 +46,15 @@ class UploadedTicket(Base):
     departure_datetime:  Mapped[str | None] = mapped_column(String(100), nullable=True)
     gds_pnr:             Mapped[str | None] = mapped_column(String(50),  nullable=True)
     airlines_code:       Mapped[str | None] = mapped_column(String(20),  nullable=True)
+    # THE DOCUMENT SERIAL ALONE, with the airline's 3-digit IATA accounting code in
+    # `ticket_prefix` beside it. A statement prints the two together — "607 5808583279" —
+    # and they used to be stored joined, which left this column disagreeing with every
+    # other table that holds a ticket: `third_party_gds` splits them, and BSP settlement
+    # rows carry the bare serial (all 15,204 of them), so a joined value matched neither.
     ticket_number:       Mapped[str | None] = mapped_column(String(50),  nullable=True)
+    # None when the cell did not parse as code + serial — `sector_split.split_ticket_no`
+    # fails closed and leaves the value whole rather than guessing at it.
+    ticket_prefix:       Mapped[str | None] = mapped_column(String(4),   nullable=True)
 
     # ── Fare / Charge columns ──────────────────────────────────────────────
     sell_fare:           Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)

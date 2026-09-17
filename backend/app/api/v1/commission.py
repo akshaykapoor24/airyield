@@ -38,6 +38,7 @@ from app.schemas.commission import (
 )
 from app.services import commission_core as core
 from app.services import statement_spec as spec
+from app.services.deal_matching import segment_letter
 from app.services.commission import CommissionRunner, get_adapter
 
 router = APIRouter()
@@ -383,7 +384,8 @@ def _row_read(r: Calc) -> CommissionRowRead:
         document_number=r.document_number, ticket_number=r.ticket_number, pnr=r.pnr,
         passenger_name=r.passenger_name, transaction_type=r.transaction_type,
         airline_name=r.airline_name, issue_date=r.issue_date, travel_date=r.travel_date,
-        segment_type=r.segment_type, booking_class=r.booking_class, sector=r.sector,
+        segment_type=r.segment_type, stat=segment_letter(r.segment_type),
+        booking_class=r.booking_class, sector=r.sector,
         fare_amount=_f(r.fare_amount), yq=_f(r.yq), yr=_f(r.yr),
         ancillary_amount=_f(r.ancillary_amount),
         matched_deal_id=r.matched_deal_id, matched_deal_type=r.matched_deal_type,
@@ -596,7 +598,7 @@ async def match_diagnosis(
         "raw_airline_code": None,
         "airline_resolved": calc.airline_name,
         "issue_date": calc.issue_date,
-        "stat": calc.segment_type,
+        "stat": segment_letter(calc.segment_type),
         "segment_type": calc.segment_type,
         "fare_amount": _f(calc.fare_amount),
         "sell_tax_yq": _f(calc.yq),

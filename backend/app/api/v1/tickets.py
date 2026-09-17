@@ -442,6 +442,7 @@ async def _build_uploaded_tickets(
             gds_pnr=row.gds_pnr,
             airlines_code=resolved_airline_code,
             ticket_number=row.ticket_number,
+            ticket_prefix=row.ticket_prefix,
             sell_fare=row.sell_fare,
             sell_tax=row.sell_tax,
             sell_tax_yq=row.sell_tax_yq,
@@ -1192,6 +1193,11 @@ async def list_uploaded_tickets_paged(
         like = f"%{search.strip()}%"
         filters.append(or_(
             UploadedTicket.ticket_number.ilike(like),
+            # The accounting code and the serial live in separate columns, but a ticket is
+            # READ off the coupon as one number — "2354848358656". Without this, pasting
+            # what is printed finds nothing while typing half of it works.
+            (func.coalesce(UploadedTicket.ticket_prefix, "")
+             + func.coalesce(UploadedTicket.ticket_number, "")).ilike(like),
             UploadedTicket.gds_pnr.ilike(like),
             UploadedTicket.air_pnr.ilike(like),
             UploadedTicket.pax_name.ilike(like),

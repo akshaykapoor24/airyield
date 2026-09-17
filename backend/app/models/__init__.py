@@ -47,6 +47,7 @@ from app.models.statement_batch_airline_id import StatementBatchAirlineId
 from app.models.bsp_statement import BspStatement, BspStatementRow, BspTaxBreakup, BspParseError
 from app.models.bsp_summary import BspSummaryStatement, BspSummaryRow
 from app.models.ticket_reconciliation import TicketReconciliation
+from app.models.sell_reconciliation import SellReconciliation, SellReconciliationRun
 from app.models.deal_batch import DealBatch
 from app.models.agency import Agency
 from app.models.agency_entity import AgencyEntity
