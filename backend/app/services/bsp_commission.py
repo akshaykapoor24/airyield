@@ -27,6 +27,7 @@ row — ``[]`` when nothing was skipped — rather than a fixed constant.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Iterable
@@ -52,6 +53,8 @@ from app.services.commission_core import (
     apply_payout_rules,
     needs_data_reason,
 )
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "BSP_SKIP_CRITERIA",
@@ -910,6 +913,29 @@ class BspCommissionService:
         # divided by it: "Enriched from TGQ — 5 of 0".
         stmt.commission_total_rows = rows or 0
         stmt.commission_calculated_at = datetime.utcnow()
+
+        # Refresh this statement's rows on the income board. Hooked here rather than
+        # at the three callers: the queued path and the inline per-row path both land
+        # in this roll-up, so one hook covers both and cannot be forgotten by a fourth.
+        #
+        # BEST EFFORT. A projection failure must never fail a commission run — the
+        # figures above are already correct, and the board is derived from them. It is
+        # not silent either: GET /dashboard/income/freshness compares this statement's
+        # commission_calculated_at against its last projection, and the page blocks
+        # with a Rebuild button when they disagree.
+        try:
+            from app.services.income_board import project_batch
+
+            await project_batch(
+                db, tenant_id=stmt.tenant_id, user_id=stmt.created_by_id,
+                source="bsp", batch_id=stmt.batch_id,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "income_board: projection failed for bsp/%s; commission figures are "
+                "unaffected and /dashboard/income/freshness will report it stale",
+                stmt.batch_id,
+            )
 
     @staticmethod
     def summarise(rows: Iterable[BspStatementRow]) -> dict:

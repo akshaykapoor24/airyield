@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import String, DateTime, Boolean, Integer, Text, ForeignKey, UniqueConstraint
+from sqlalchemy import String, DateTime, Boolean, Integer, Numeric, Text, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
 
@@ -177,6 +177,51 @@ class Agency(Base):
     # than an equality test. What open_channel will NOT do is widen a row onto a
     # channel a sibling row already covers — that would bill the same tickets twice.
     channels:      Mapped[str]        = mapped_column(String(10), nullable=False)
+
+    # ── Service charge / service fee ─────────────────────────────────────────
+    # TWO DIRECTIONS, BECAUSE THIS ROW IS READ FROM BOTH SIDES OF THE BUSINESS.
+    # The same agency reaches us as a VENDOR (`deals.supplier_agency_id` — we buy
+    # from them, so what they charge is a COST) and as a CUSTOMER (`deals.agency_id`,
+    # `billings.agency_id` — we sell to them, so what we charge is INCOME). The
+    # migration deal_supplier_agency_01 already names that opposition. One pair of
+    # columns would be read as a cost on one screen and as income on another with
+    # nothing saying which was meant, and the rate we pay Lords is not the rate we
+    # charge Lords — so each direction is stored separately.
+    #
+    # PER CHANNEL FOR FREE. One row is one branch on ONE channel (see the class
+    # docstring), so Lords Delhi GDS and Lords Delhi LCC already carry their own
+    # rates without any extra modelling.
+    #
+    # NOT IN `agency_terms`, even though these are commercial terms: a terms period
+    # may only be closed and reopened at a cycle boundary with a settled, zero
+    # balance (services/agency_account.switch_blockers). That is right for a credit
+    # limit and absurd for a fee rate. The shape follows `customers.markup_type` /
+    # `markup_value` — one Numeric column holding either a percentage or a rupee
+    # amount, with `*_type` saying which.
+    #
+    # `*_gst` IS 'inclusive' | 'exclusive' AND IS NOT COSMETIC. Exclusive means the
+    # value is net and tax is added on top; inclusive means the value already
+    # contains it and must be divided out. A ₹1,000 fee differs by ₹180 between the
+    # two on every line, so it is stored beside the value, never inferred from it.
+    # NULL reads as exclusive — see service_fee.DEFAULT_GST_TREATMENT for why that
+    # is the safe default rather than the other way round.
+    #
+    # ALL SIX ARE NULLABLE AND NOTHING BACKFILLED THEM. NULL means "nobody has been
+    # asked", which is honest for every row created before this existed; a stored 0
+    # means "we deliberately charge nothing". Resolve them through
+    # services/service_fee.py (vendor_service_charge / customer_service_fee) rather
+    # than reading the columns directly — it prunes a half-set rate, which would
+    # otherwise bill as zero and leak revenue silently.
+    #
+    # NOTHING BILLS FROM THESE YET: api/v1/agency_billing.py still hardcodes its
+    # markup at 0.0. They are collected and stored; the wiring is a separate pass.
+    vendor_service_charge_type:   Mapped[str | None]   = mapped_column(String(20), nullable=True)   # percentage | fixed
+    vendor_service_charge_value:  Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    vendor_service_charge_gst:    Mapped[str | None]   = mapped_column(String(20), nullable=True)   # inclusive | exclusive
+
+    customer_service_fee_type:    Mapped[str | None]   = mapped_column(String(20), nullable=True)   # percentage | fixed
+    customer_service_fee_value:   Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    customer_service_fee_gst:     Mapped[str | None]   = mapped_column(String(20), nullable=True)   # inclusive | exclusive
 
     is_active:     Mapped[bool]       = mapped_column(Boolean, default=True)
     created_at:    Mapped[datetime]   = mapped_column(DateTime, default=datetime.utcnow)

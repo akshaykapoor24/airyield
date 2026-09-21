@@ -19,6 +19,21 @@ PasswordStr = Annotated[str, AfterValidator(validate_password)]
 # that the Agency Master forms verify a GSTIN against.
 
 
+class AssignedEntity(BaseModel):
+    """One entity a member is assigned to, as User management shows it.
+
+    THE CODE AND THE LOGIN IDs ARE PART OF IT, not extras: a group's entities routinely
+    share a name (three of them called "yatra"), so a list of names alone cannot say which
+    ones a member actually works on — the code is what tells them apart. And a member's
+    access really means the entity AND the login IDs / IATA numbers under it, which is what
+    they will see in My Profile, so the admin screen shows the same thing.
+    """
+    id: int
+    name: str
+    code: str
+    login_ids: list[str] = []
+
+
 class UserCreate(BaseModel):
     email: EmailStr
     full_name: str
@@ -73,6 +88,9 @@ class UserRead(BaseModel):
     # empty elsewhere (e.g. /users/me) since it needs a separate lookup.
     entity_ids: list[int] = []
     entity_names: list[str] = []
+    # The same assignments with their code and login IDs. `entity_ids` / `entity_names`
+    # stay: the Add User form posts ids, and older clients read the names.
+    entities: list[AssignedEntity] = []
 
     model_config = {"from_attributes": True}
 

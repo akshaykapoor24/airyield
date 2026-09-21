@@ -41,6 +41,7 @@ from app.models.lcc_detailed_batch_file import LccDetailedBatchFile
 from app.models.lcc_batch_airline_id import LccBatchAirlineId
 from app.models.commission_calculation import CommissionCalculation
 from app.models.commission_run import CommissionRun
+from app.models.income_board import IncomeBoardRow
 from app.models.statement_batch_supplier import StatementBatchSupplier
 from app.models.statement_batch_billing import StatementBatchBilling
 from app.models.statement_batch_airline_id import StatementBatchAirlineId
@@ -125,6 +126,7 @@ __all__ = [
     "LccDetailed", "LccDetailedBatch", "LccBatchAirlineId", "StatementBatchAirlineId",
     "StatementBatchSupplier", "StatementBatchBilling",
     "CommissionRun", "CommissionCalculation",
+    "IncomeBoardRow",
     "BspStatement", "BspStatementRow", "BspTaxBreakup", "BspParseError",
     "BspSummaryStatement", "BspSummaryRow",
     "TicketReconciliation",

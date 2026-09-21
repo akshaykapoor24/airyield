@@ -1,12 +1,34 @@
 from datetime import date
 from typing import List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+
+from app.services.service_fee import GST_TREATMENTS, SERVICE_FEE_TYPES
 
 # How the agency pays, and how often. Lower-case, unlike the GDS/LCC channel
 # vocabulary in app.models.agency — these predate it and are stored lower-case.
 AGENCY_TYPES   = {"cash", "credit"}
 BILLING_CYCLES = {"weekly", "fortnightly", "monthly"}
+
+
+def _one_of(value: Optional[str], allowed, label: str) -> Optional[str]:
+    """Normalise a choice column to its canonical lowercase slug, or 422.
+
+    RAISES RATHER THAN COERCING, unlike `_norm_choice` in api/v1/customers.py. That
+    one serves a spreadsheet import, where "a miss here is a blank the user fills in
+    at review, never a wrong value that gets saved". These four fields come from
+    <select> boxes, so an unrecognised value is a client bug rather than a typo, and
+    silently blanking it would drop a rate somebody believes they just saved. Same
+    call, and the same helper, as schemas/gst_configuration.py.
+    """
+    if value is None:
+        return None
+    v = str(value).strip().lower()
+    if not v:
+        return None
+    if v not in allowed:
+        raise ValueError(f"{label} must be one of: {', '.join(sorted(allowed))}")
+    return v
 
 
 class AgencyTermsInput(BaseModel):
@@ -62,7 +84,51 @@ class AgencyBase(BaseModel):
     contact_phone: Optional[str] = None
     contact_email: Optional[str] = None
     notes: Optional[str] = None
+    # ── Service charge / service fee, one triple per DIRECTION ────────────────
+    # An agency is a vendor on the Vendors data screens and a customer on the
+    # Customer data ones, and the same money means opposite things there: what they
+    # charge us is a COST, what we charge them is INCOME. See models/agency.py and
+    # services/service_fee.py — the rate we pay Lords is not the rate we charge
+    # Lords, so neither field may stand in for the other.
+    #
+    # Declared on the BASE so create, update AND read all carry them: unlike
+    # `channels` or the terms, a fee rate IS an ordinary field edit (it opens no
+    # commercial period and settles no balance), so PATCH accepts it.
+    vendor_service_charge_type: Optional[str] = None      # percentage | fixed
+    vendor_service_charge_value: Optional[float] = None
+    vendor_service_charge_gst: Optional[str] = None       # inclusive | exclusive
+
+    customer_service_fee_type: Optional[str] = None       # percentage | fixed
+    customer_service_fee_value: Optional[float] = None
+    customer_service_fee_gst: Optional[str] = None        # inclusive | exclusive
+
     is_active: Optional[bool] = True
+
+    @field_validator("vendor_service_charge_type", "customer_service_fee_type")
+    @classmethod
+    def _fee_type(cls, v):
+        return _one_of(v, SERVICE_FEE_TYPES, "service charge/fee type")
+
+    @field_validator("vendor_service_charge_gst", "customer_service_fee_gst")
+    @classmethod
+    def _fee_gst(cls, v):
+        return _one_of(v, GST_TREATMENTS, "GST treatment")
+
+    @field_validator("vendor_service_charge_value", "customer_service_fee_value")
+    @classmethod
+    def _fee_value(cls, v):
+        """Non-negative, and that is the only bound.
+
+        A negative service charge is a discount wearing the wrong name, and neither
+        side of the business would read it as one. Deliberately NOT capped at 100 for
+        a percentage: `markup_value`, the closest thing this schema already has, is
+        uncapped, and `agency_terms.usage_percent` documents that a percentage here
+        "may exceed 100 by design". Inventing a ceiling nobody asked for would refuse
+        a real arrangement at the form.
+        """
+        if v is not None and v < 0:
+            raise ValueError("Service charge/fee cannot be negative.")
+        return v
 
 
 class AgencyCreate(AgencyBase):

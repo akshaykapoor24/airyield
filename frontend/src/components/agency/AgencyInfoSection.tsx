@@ -82,6 +82,15 @@ export type AgencyRow = {
   contact_phone: string | null;
   contact_email: string | null;
   notes: string | null;
+  // The two service rates, one per direction — see SERVICE_FEE_DIRECTIONS. Null
+  // means nobody has been asked; a stored 0 means "we deliberately charge nothing",
+  // so the two must not be collapsed into one falsy check.
+  vendor_service_charge_type: ServiceFeeType | null;
+  vendor_service_charge_value: number | null;
+  vendor_service_charge_gst: GstTreatment | null;
+  customer_service_fee_type: ServiceFeeType | null;
+  customer_service_fee_value: number | null;
+  customer_service_fee_gst: GstTreatment | null;
   is_active: boolean;
   terms: AgencyTerms[];
   // Where this agency stands with the shared supplier master. `supplier_id` set
@@ -152,6 +161,57 @@ const BILLING_CYCLES = [
   { value: "monthly", label: "Monthly" },
 ] as const;
 
+// ── Service charge / service fee ──────────────────────────────────────────────
+//
+// TWO DIRECTIONS, BECAUSE THIS AGENCY IS BOTH A VENDOR AND A CUSTOMER. The same
+// row is reached from Vendors data (we buy from them — what they charge is a COST)
+// and from Customer data (we sell to them — what we charge is INCOME). The rate we
+// pay Lords is not the rate we charge Lords, so the form asks twice and the two are
+// stored in separate columns. See backend services/service_fee.py.
+export type ServiceFeeType = "percentage" | "fixed";
+export type GstTreatment = "inclusive" | "exclusive";
+
+const SERVICE_FEE_TYPES = [
+  { value: "percentage", label: "Percentage" },
+  { value: "fixed", label: "Fixed" },
+] as const;
+
+// EXCLUSIVE IS FIRST AND IS THE DEFAULT. On a ₹1,000 fee the two differ by ₹180 —
+// exclusive is ₹1,000 of service with ₹180 of tax on top, inclusive is ₹847.46 of
+// service with ₹152.54 already inside — so the question has to be asked rather than
+// guessed, and the safe guess when it is skipped is that tax is added.
+const GST_TREATMENTS = [
+  { value: "exclusive", label: "Exclusive — GST added on top" },
+  { value: "inclusive", label: "Inclusive — GST already included" },
+] as const;
+
+/** The two directions, in the order the form asks them. `prefix` is the column stem
+ *  shared by the API, so a field name is never spelt out twice. */
+const SERVICE_FEE_DIRECTIONS = [
+  {
+    prefix: "vendor_service_charge",
+    heading: "As vendor — they charge us",
+    label: "Service Charge",
+    hint: "What this agency adds when WE BUY from them. A cost to us — read on the Vendors data screens.",
+  },
+  {
+    prefix: "customer_service_fee",
+    heading: "As customer — we charge them",
+    label: "Service Fee",
+    hint: "What WE add when we sell to them. Income to us — read on the Customer data screens.",
+  },
+] as const;
+
+/** "2% · GST extra" / "₹250 · incl. GST" — one direction in a cell. Mirrors the
+ *  backend's service_fee.describe so a list and an export read identically. */
+export function serviceFeeLabel(
+  type: string | null, value: number | null, gst: string | null,
+): string {
+  if (!type || value == null) return "";
+  const shown = type === "percentage" ? `${value}%` : `₹${value}`;
+  return `${shown} · ${gst === "inclusive" ? "incl. GST" : "GST extra"}`;
+}
+
 /** Which single channels a declared scope needs terms for. Still handles "BOTH",
  *  because rows created before the split carry it even though nothing makes one. */
 const channelsOf = (scope: ChannelScope): Channel[] =>
@@ -186,6 +246,33 @@ function TermsCell({ t }: { t: AgencyTerms | undefined }) {
         )}
       </span>
       <span className="text-[10px] text-gray-400">{titleCase(t.billing_cycle)}</span>
+    </div>
+  );
+}
+
+/** Both directions in one cell, stacked and labelled BUY / SELL.
+ *
+ *  ONE COLUMN, TWO LINES, rather than two columns: the table is already wide, and
+ *  the pair is only meaningful read together — "2%" on its own does not say who is
+ *  charging whom, which is the exact confusion these two columns exist to prevent.
+ *  The labels are the direction, not the field name, because that is what a reader
+ *  scanning the list actually needs to know. */
+function ServiceRatesCell({ r }: { r: AgencyRow }) {
+  const buy = serviceFeeLabel(r.vendor_service_charge_type, r.vendor_service_charge_value, r.vendor_service_charge_gst);
+  const sell = serviceFeeLabel(r.customer_service_fee_type, r.customer_service_fee_value, r.customer_service_fee_gst);
+  if (!buy && !sell) return <span className="text-[11px] text-gray-300">—</span>;
+  return (
+    <div className="flex flex-col gap-0.5 whitespace-nowrap">
+      {buy && (
+        <span className="text-[10px] text-gray-600">
+          <span className="font-bold text-rose-600">BUY</span> {buy}
+        </span>
+      )}
+      {sell && (
+        <span className="text-[10px] text-gray-600">
+          <span className="font-bold text-emerald-600">SELL</span> {sell}
+        </span>
+      )}
     </div>
   );
 }
@@ -258,7 +345,7 @@ export default function AgencyInfoSection({
     finally { setRequesting(null); }
   };
 
-  const COLUMNS = ["AGENCY", "BRANCH", "CHANNELS", "GDS TERMS", "LCC TERMS", "GST", "PAN", "PHONE", "MASTER", "STATUS", "ACTIONS"];
+  const COLUMNS = ["AGENCY", "BRANCH", "CHANNELS", "GDS TERMS", "LCC TERMS", "SERVICE RATES", "GST", "PAN", "PHONE", "MASTER", "STATUS", "ACTIONS"];
 
   return (
     <div className="space-y-3">
@@ -302,6 +389,7 @@ export default function AgencyInfoSection({
                           : <span className="text-[11px] text-gray-300">—</span>}
                       </td>
                     ))}
+                    <td className="px-3 py-2"><ServiceRatesCell r={r} /></td>
                     {/* "Unregistered" and "—" say different things: the first is an
                         answer, the second is a blank nobody has filled in yet. */}
                     <td className="px-3 py-2 text-[11px] text-gray-600">
@@ -465,6 +553,17 @@ function AgencyModal({
     contact_phone: agency?.contact_phone ?? "",
     contact_email: agency?.contact_email ?? "",
     notes: agency?.notes ?? "",
+    // Both service rates, held as strings like every other input here. A stored 0
+    // must survive the round-trip as "0" and not become "" — `?? ""` on the value
+    // rather than `|| ""`, because a deliberate zero rate is a real answer.
+    vendor_service_charge_type: agency?.vendor_service_charge_type ?? "",
+    vendor_service_charge_value:
+      agency?.vendor_service_charge_value != null ? String(agency.vendor_service_charge_value) : "",
+    vendor_service_charge_gst: agency?.vendor_service_charge_gst ?? "",
+    customer_service_fee_type: agency?.customer_service_fee_type ?? "",
+    customer_service_fee_value:
+      agency?.customer_service_fee_value != null ? String(agency.customer_service_fee_value) : "",
+    customer_service_fee_gst: agency?.customer_service_fee_gst ?? "",
     is_active: agency?.is_active ?? true,
   });
   const set = (k: keyof typeof form, v: string | boolean) => setForm(p => ({ ...p, [k]: v }));
@@ -662,6 +761,30 @@ function AgencyModal({
     const bad = taxProblem();
     if (bad) { setError(bad); return; }
 
+    // Both directions' rates, validated here rather than on the server so the
+    // message names the side that is wrong. A direction with no type sends three
+    // nulls: the server drops a half-set rate either way, but a rate silently
+    // dropped after the user typed it is the one outcome worth catching first.
+    const feeFields: Record<string, string | number | null> = {};
+    for (const d of SERVICE_FEE_DIRECTIONS) {
+      const kind = form[`${d.prefix}_type` as keyof typeof form] as string;
+      const raw = String(form[`${d.prefix}_value` as keyof typeof form] ?? "").trim();
+      if (!kind) {
+        feeFields[`${d.prefix}_type`] = null;
+        feeFields[`${d.prefix}_value`] = null;
+        feeFields[`${d.prefix}_gst`] = null;
+        continue;
+      }
+      if (!raw) { setError(`${d.heading}: enter the ${d.label.toLowerCase()} amount, or set the type back to None.`); return; }
+      if (!Number.isFinite(Number(raw))) { setError(`${d.heading}: ${d.label} must be a number.`); return; }
+      if (Number(raw) < 0) { setError(`${d.heading}: ${d.label} cannot be negative.`); return; }
+      feeFields[`${d.prefix}_type`] = kind;
+      feeFields[`${d.prefix}_value`] = Number(raw);
+      // Blank means the select was never touched, and its own default is exclusive.
+      feeFields[`${d.prefix}_gst`] =
+        (form[`${d.prefix}_gst` as keyof typeof form] as string) || "exclusive";
+    }
+
     // An unregistered agency posts no GSTIN at all rather than whatever is still
     // sitting in the hidden box — the two facts have to agree, and "unregistered"
     // is the one just asserted.
@@ -680,6 +803,8 @@ function AgencyModal({
           name: form.name.trim(), address: form.address || null, ...taxFields,
           city: form.city || null, region_chapter: form.region_chapter || null,
           contact_phone: form.contact_phone || null, contact_email: form.contact_email || null,
+          // Editable here, unlike the terms — see the form's own note on why.
+          ...feeFields,
           notes: form.notes || null, is_active: form.is_active,
         });
         onSaved();
@@ -735,6 +860,7 @@ function AgencyModal({
         region_chapter: form.region_chapter || null,
         contact_phone: form.contact_phone || null,
         contact_email: form.contact_email || null,
+        ...feeFields,
         notes: form.notes || null,
         is_active: form.is_active,
         channels,
@@ -839,6 +965,60 @@ function AgencyModal({
     );
   };
 
+  /** One direction's rate — Type, then Value, then the GST question.
+   *
+   *  IN THAT ORDER FOR A REASON, the same one the tax block above is ordered by:
+   *  each answer decides how the next box reads. The type decides whether the value
+   *  is a % or a ₹ amount, and there is nothing to ask about GST until there is an
+   *  amount to tax — so both later fields stay hidden until the type is picked,
+   *  rather than sitting there inviting a half-filled rate the server would drop.
+   */
+  const serviceFeeBlock = (d: (typeof SERVICE_FEE_DIRECTIONS)[number]) => {
+    const typeKey = `${d.prefix}_type` as keyof typeof form;
+    const valueKey = `${d.prefix}_value` as keyof typeof form;
+    const gstKey = `${d.prefix}_gst` as keyof typeof form;
+    const kind = form[typeKey] as string;
+
+    return (
+      <div key={d.prefix} className="rounded-lg border border-gray-200 bg-gray-50/50 p-3 space-y-3">
+        <div>
+          <p className="text-[11px] font-bold text-gray-700 uppercase tracking-wide">{d.heading}</p>
+          <p className="text-[10px] text-gray-400 mt-0.5">{d.hint}</p>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div><label className={LABEL}>{d.label} Type</label>
+            <select value={kind} onChange={e => set(typeKey, e.target.value)} className={INPUT}>
+              <option value="">— None —</option>
+              {SERVICE_FEE_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+            </select>
+          </div>
+          {kind && (
+            <div><label className={LABEL}>{kind === "percentage" ? "Value (%)" : "Value (₹)"} *</label>
+              <input type="number" min="0" step="any" value={form[valueKey] as string}
+                onChange={e => set(valueKey, e.target.value)}
+                placeholder={kind === "percentage" ? "e.g. 2" : "e.g. 250"} className={INPUT} />
+            </div>
+          )}
+        </div>
+
+        {kind && (
+          <div><label className={LABEL}>GST on this {d.label.toLowerCase()} *</label>
+            <select value={(form[gstKey] as string) || "exclusive"}
+              onChange={e => set(gstKey, e.target.value)} className={INPUT}>
+              {GST_TREATMENTS.map(g => <option key={g.value} value={g.value}>{g.label}</option>)}
+            </select>
+            <p className="text-[10px] text-gray-400 mt-1">
+              {(form[gstKey] as string) === "inclusive"
+                ? "The amount above already contains GST — it is divided out, so ₹1,000 is ₹847.46 plus ₹152.54 tax."
+                : "GST is added on top of the amount above — ₹1,000 becomes ₹1,180."}
+            </p>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   // ── after a successful create ──────────────────────────────────────────
   // The channel this branch is NOT yet on, if there is one. Null for a legacy
   // BOTH row, which already covers everything.
@@ -852,7 +1032,13 @@ function AgencyModal({
    *  A hand-entered vendor carries its master request across rather than filing a
    *  second one. It is ONE vendor being added to the master; the fact that we hold
    *  it as two agency rows is our own bookkeeping, and the admin should not be
-   *  asked to approve the same company twice. */
+   *  asked to approve the same company twice.
+   *
+   *  THE SERVICE RATES CARRY ACROSS, unlike the terms — they live in `form`, which
+   *  is left alone here. That is the useful default (it is the same vendor, and the
+   *  rate usually is too) and it stays correct because they are still saved onto
+   *  the new row, per channel; anyone whose LCC rate differs edits the two boxes
+   *  before saving, which is less work than retyping both. */
   const addOnOtherChannel = () => {
     if (!otherChannel) return;
     setReuseRequestId(created?.supplier_request_id ?? null);
@@ -1126,6 +1312,27 @@ function AgencyModal({
           </p>
         </div>
       )}
+
+      {/* ── Service charge / service fee, one block per DIRECTION ───────────
+          ON EDIT TOO, unlike the terms block above. A fee rate opens no
+          commercial period and settles no balance, so it is an ordinary field
+          edit that PATCH accepts — it does not belong behind the Account page's
+          switch flow.
+
+          Its own section rather than folded into the channel terms: this is not
+          a payment term, and putting it beside Cash/Credit/Cycle/Deposit would
+          imply it moves with them. It is still per channel, because one agency
+          row is already one branch on one channel. */}
+      <div className="border-t border-gray-100 pt-3 space-y-3">
+        <div>
+          <p className="text-xs font-bold text-gray-700">Service charge &amp; fee</p>
+          <p className="text-[10px] text-gray-400 mt-0.5">
+            Optional, and asked twice because this agency sits on both sides of your books — what they
+            charge you is a cost, what you charge them is income. Leave a side blank if it does not apply.
+          </p>
+        </div>
+        {SERVICE_FEE_DIRECTIONS.map(serviceFeeBlock)}
+      </div>
 
       <div><label className={LABEL}>Notes</label>
         <input value={form.notes} onChange={e => set("notes", e.target.value)} placeholder="Remarks" className={INPUT} /></div>

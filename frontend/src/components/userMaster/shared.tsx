@@ -104,17 +104,33 @@ export async function downloadTemplate(resource: BulkResource, filename: string)
 }
 
 // ── shared UI ──────────────────────────────────────────────────────────────
-export function ActiveBadge({ active, onClick }: { active: boolean; onClick: () => void }) {
+/** Active / Inactive pill. With `onClick` it is the toggle; without, a plain label —
+ *  for read-only views, where a clickable-looking badge would promise a change the
+ *  viewer is not allowed to make. */
+export function ActiveBadge({ active, onClick }: { active: boolean; onClick?: () => void }) {
+  const tone = active
+    ? "bg-green-50 text-green-700 border-green-200"
+    : "bg-gray-50 text-gray-500 border-gray-200";
+  const content = (
+    <>
+      <span className={`w-1.5 h-1.5 rounded-full ${active ? "bg-green-500" : "bg-gray-400"}`} />
+      {active ? "Active" : "Inactive"}
+    </>
+  );
+  if (!onClick) {
+    return (
+      <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border ${tone}`}>
+        {content}
+      </span>
+    );
+  }
   return (
     <button
       onClick={onClick}
-      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border cursor-pointer transition-colors ${
-        active
-          ? "bg-green-50 text-green-700 border-green-200 hover:bg-green-100"
-          : "bg-gray-50 text-gray-500 border-gray-200 hover:bg-gray-100"
+      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border cursor-pointer transition-colors ${tone} ${
+        active ? "hover:bg-green-100" : "hover:bg-gray-100"
       }`}>
-      <span className={`w-1.5 h-1.5 rounded-full ${active ? "bg-green-500" : "bg-gray-400"}`} />
-      {active ? "Active" : "Inactive"}
+      {content}
     </button>
   );
 }
@@ -220,7 +236,8 @@ export function Toolbar({
   count: number;
   search: string;
   setSearch: (v: string) => void;
-  onAdd: () => void;
+  /** Omit to hide the Add button — for a read-only view of the list. */
+  onAdd?: () => void;
   onRefresh: () => void;
   loading: boolean;
 }) {
@@ -236,10 +253,12 @@ export function Toolbar({
         className="flex items-center gap-1.5 bg-white border border-gray-200 text-gray-600 px-3 py-2 rounded-lg text-xs font-medium hover:bg-gray-50 disabled:opacity-50">
         <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
       </button>
-      <button onClick={onAdd}
-        className="flex items-center gap-1.5 text-white px-3.5 py-2 rounded-lg text-xs font-medium" style={{ background: "#1e3a5f" }}>
-        <Plus className="w-3.5 h-3.5" /> Add {label}
-      </button>
+      {onAdd && (
+        <button onClick={onAdd}
+          className="flex items-center gap-1.5 text-white px-3.5 py-2 rounded-lg text-xs font-medium" style={{ background: "#1e3a5f" }}>
+          <Plus className="w-3.5 h-3.5" /> Add {label}
+        </button>
+      )}
     </div>
   );
 }

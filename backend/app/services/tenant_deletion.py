@@ -100,7 +100,11 @@ DELETION_GROUPS: tuple[DeletionGroup, ...] = (
         "commission", "Commission income",
         "Every commission run and the per-row figures it produced.",
         GroupCategory.RECORDS,
-        ("commission_calculations", "commission_runs"),
+        # `income_board_rows` belongs here and not with the statements it also reads:
+        # it points at a BSP row or a calculation by bare id with no FK, and a projected
+        # income line is meaningless once the figure it projected is gone. It is also
+        # the one member of this group that can simply be rebuilt afterwards.
+        ("commission_calculations", "commission_runs", "income_board_rows"),
     ),
     DeletionGroup(
         "bsp", "BSP statements", "BSP settlement and summary uploads with every row and tax breakup.",

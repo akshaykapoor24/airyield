@@ -15,6 +15,8 @@ from app.database import get_db
 from app.dependencies import get_current_user, is_platform_admin, require_role
 # Approving a NEW supplier back-links the agencies that were waiting on it.
 from app.models.agency import Agency
+# Approving a supplier also back-links the incoming deals signed with those agencies.
+from app.models.deal import Deal
 from app.models.supplier import Supplier
 from app.models.supplier_approval import SupplierApproval
 from app.models.user import User, UserRole
@@ -549,6 +551,25 @@ async def approve_supplier(
         .where(
             Agency.supplier_request_id == approval.id,
             Agency.supplier_id.is_(None),
+        )
+        .values(supplier_id=supplier.id)
+    )
+
+    # And the incoming B2B deals already signed with those agencies. A deal picked from
+    # Agency Master copies `supplier_id` from the agency at save time — which, for an
+    # agency typed in by hand, was NULL, so the deal has been matching statements by
+    # NAME alone. Without this it would stay name-only forever, even though the vendor
+    # now has a master row a statement can be attributed to. Only NULLs are filled: a
+    # deal that already names a supplier row was linked deliberately and is left alone.
+    # ck_deals_supplier is satisfied by construction — vendor_agency_id only ever sits on
+    # an inbound B2B deal (ck_deals_vendor_agency).
+    await db.execute(
+        update(Deal)
+        .where(
+            Deal.vendor_agency_id.in_(
+                select(Agency.id).where(Agency.supplier_request_id == approval.id)
+            ),
+            Deal.supplier_id.is_(None),
         )
         .values(supplier_id=supplier.id)
     )

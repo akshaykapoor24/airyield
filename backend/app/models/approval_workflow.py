@@ -12,6 +12,21 @@ class WorkflowModule(str, enum.Enum):
     TICKETS = "tickets"
 
 
+# What a DEALS workflow does with a new deal. Plain strings, like every other choice
+# column in this schema, and named here so the signup default, the API and the deal
+# approval path all mean the same thing by them.
+#
+#   proprietary → no approval steps at all; a deal is approved the moment it is created.
+#   enterprise  → the deal waits on the workflow's steps, in order.
+#
+# PROPRIETARY IS WHAT A NEW WORKSPACE GETS (services/auth_service.signup). Without a
+# workflow at all, creating a deal fails outright — "Deals approval workflow is not
+# configured" — so the useful default is the one that lets someone work on day one, and
+# a Super Admin who wants sign-offs switches to Enterprise and adds the steps.
+DEAL_CATEGORY_PROPRIETARY = "proprietary"
+DEAL_CATEGORY_ENTERPRISE = "enterprise"
+
+
 class ApprovalActionStatus(str, enum.Enum):
     PENDING = "pending"
     APPROVED = "approved"

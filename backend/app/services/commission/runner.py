@@ -47,6 +47,34 @@ CHUNK = 200
 MATCHED_STATUSES = ("calculated", "reversed")
 
 
+async def _project_income_board(db: AsyncSession, run) -> None:
+    """Refresh this batch's rows on the income board.
+
+    Hooked here, next to the money, rather than in the API layer: this runner has both
+    a Celery caller and an inline one, and a hook per caller is a hook someone forgets.
+
+    BEST EFFORT, DELIBERATELY. A projection failure must never fail a commission run —
+    the figures are already committed and correct, and the board is derived from them.
+    The consequence is not silent: GET /dashboard/income/freshness compares each
+    batch's last projection against its run's completed_at, and the page shows a
+    blocking banner with a Rebuild button when they disagree.
+    """
+    try:
+        from app.services.income_board import project_batch
+
+        await project_batch(
+            db, tenant_id=run.tenant_id, user_id=run.created_by_id,
+            source=run.source, batch_id=run.batch_id,
+            engine_version=run.engine_version,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "income_board: projection failed for %s/%s; commission figures are "
+            "unaffected and /dashboard/income/freshness will report this batch stale",
+            run.source, run.batch_id,
+        )
+
+
 def _pct(raw) -> float:
     """A deal's IATA commission cell ('2', '2%', ' 2.5 ') as a number."""
     if not raw:
@@ -328,6 +356,7 @@ class CommissionRunner:
             await db.commit()
 
             await self.refresh_totals(db, run)
+            await _project_income_board(db, run)
             run.status = "completed"
             run.completed_at = datetime.utcnow()
             await db.commit()

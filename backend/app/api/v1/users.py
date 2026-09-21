@@ -13,8 +13,12 @@ from app.models.tenant import Tenant, TenantType
 from app.models.user import User, UserRole
 from app.models.user_entity import UserEntity
 from app.models.user_entity_access import UserEntityAccess
+# The Super Admin manages the workspace — its company details, logo, entities and login
+# IDs. The same check decides all of them (services/entity_access).
+from app.services.entity_access import can_manage_entities
+from app.models.user_login_id import UserLoginId
 from app.schemas.user import (
-    UserRead, UserUpdate, UserCreate, UserRoleUpdate, UserEntitiesUpdate,
+    AssignedEntity, UserRead, UserUpdate, UserCreate, UserRoleUpdate, UserEntitiesUpdate,
     ProfileRead, ProfileUpdate,
 )
 
@@ -60,27 +64,55 @@ async def _require_team_workspace(db: AsyncSession, current_user: User) -> None:
         )
 
 
-async def _entity_map(db: AsyncSession, user_ids: list[int]) -> dict[int, list[UserEntity]]:
-    """{user_id: [assigned entities]} for a set of members, in one query."""
+async def _entity_map(db: AsyncSession, user_ids: list[int]) -> dict[int, list[AssignedEntity]]:
+    """{user_id: [assigned entities, each with its code and login IDs]}.
+
+    Two queries for the whole page, not two per member: the grants (joined to their
+    entities), then every login ID under the entities those grants name.
+    """
     if not user_ids:
         return {}
     rows = (await db.execute(
         select(UserEntityAccess.user_id, UserEntity)
         .join(UserEntity, UserEntity.id == UserEntityAccess.entity_id)
         .where(UserEntityAccess.user_id.in_(user_ids))
-        .order_by(UserEntity.name)
+        .order_by(UserEntity.name, UserEntity.code)
     )).all()
-    out: dict[int, list[UserEntity]] = {}
+    if not rows:
+        return {}
+
+    logins: dict[int, list[str]] = {}
+    for entity_id, login_id in (await db.execute(
+        select(UserLoginId.entity_id, UserLoginId.login_id)
+        .where(UserLoginId.entity_id.in_({e.id for _uid, e in rows}))
+        .order_by(UserLoginId.login_id)
+    )).all():
+        logins.setdefault(entity_id, []).append(login_id)
+
+    out: dict[int, list[AssignedEntity]] = {}
     for uid, entity in rows:
-        out.setdefault(uid, []).append(entity)
+        out.setdefault(uid, []).append(AssignedEntity(
+            id=entity.id, name=entity.name, code=entity.code,
+            login_ids=logins.get(entity.id, []),
+        ))
     return out
 
 
-def _with_entities(user: User, entities: list[UserEntity]) -> UserRead:
+def _with_entities(user: User, entities: list[AssignedEntity]) -> UserRead:
     read = UserRead.model_validate(user)
+    read.entities = entities
     read.entity_ids = [e.id for e in entities]
     read.entity_names = [e.name for e in entities]
     return read
+
+
+async def _read_with_entities(db: AsyncSession, user: User) -> UserRead:
+    """One member, with their assignments read back from the database.
+
+    Re-read rather than serialising what was just written: the login IDs under each entity
+    are not part of the grant, so only a fresh look has them.
+    """
+    return _with_entities(user, (await _entity_map(db, [user.id])).get(user.id, []))
 
 
 async def _resolve_admin_entities(
@@ -165,14 +197,44 @@ async def get_my_profile(current_user: User = Depends(get_current_user)):
     return _profile_read(current_user)
 
 
+# The fields of ProfileUpdate that belong to the TENANT rather than the user.
+_TENANT_PROFILE_FIELDS = frozenset({
+    "company_name", "pan_number", "gst_number", "gst_scheme",
+    "address", "city", "state", "pincode", "country", "phone",
+})
+
+
+def _require_workspace_admin(current_user: User) -> None:
+    """The logo is the workspace's letterhead — the Super Admin's to change."""
+    if not can_manage_entities(current_user):
+        raise HTTPException(
+            status_code=403,
+            detail="The company logo is managed by your Super Admin.",
+        )
+
+
 @router.patch("/me/profile", response_model=ProfileRead)
 async def update_my_profile(
     payload: ProfileUpdate,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Update editable user + tenant fields. Email and account type are read-only."""
+    """Update editable user + tenant fields. Email and account type are read-only.
+
+    THE TENANT FIELDS ARE THE SUPER ADMIN'S. Company name, PAN, GSTIN, GST scheme, address
+    and phone describe the WORKSPACE — they head every invoice it prints and decide how it
+    charges GST — so only the Super Admin may change them. Anyone else may change their own
+    Full Name and nothing more; sending any tenant field is refused rather than silently
+    dropped, so a caller never believes a change was saved when it was not.
+    """
     data = payload.model_dump(exclude_unset=True)
+
+    tenant_fields = sorted(_TENANT_PROFILE_FIELDS & data.keys())
+    if tenant_fields and not can_manage_entities(current_user):
+        raise HTTPException(
+            status_code=403,
+            detail="Company details are managed by your Super Admin — you can change your own name only.",
+        )
 
     if "full_name" in data:
         new_name = (data["full_name"] or "").strip()
@@ -259,6 +321,7 @@ async def upload_my_logo(
     """Replace the workspace's logo. Returns the profile, so the caller need not re-fetch."""
     from app.services import file_store
 
+    _require_workspace_admin(current_user)
     tenant = _logo_tenant(current_user)
     content = await file.read()
     if not content:
@@ -334,6 +397,7 @@ async def delete_my_logo(
 ):
     from app.services import file_store
 
+    _require_workspace_admin(current_user)
     tenant = _logo_tenant(current_user)
     previous = tenant.logo_path
     tenant.logo_path = tenant.logo_name = tenant.logo_mime = None
@@ -434,7 +498,7 @@ async def create_user(
     if entities:
         await _set_entity_access(db, user, current_user, entities)
         await db.commit()
-    return _with_entities(user, entities)
+    return await _read_with_entities(db, user)
 
 
 # ── Admin: replace a member's entity assignments ──────────────────────────
@@ -455,7 +519,7 @@ async def update_user_entities(
     entities = await _resolve_admin_entities(db, current_user, payload.entity_ids)
     await _set_entity_access(db, user, current_user, entities)
     await db.commit()
-    return _with_entities(user, entities)
+    return await _read_with_entities(db, user)
 
 
 # ── Admin: get single user (same tenant only) ──────────────────────────────
@@ -471,7 +535,7 @@ async def get_user(
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    return user
+    return await _read_with_entities(db, user)
 
 
 # ── Admin: update user role (same tenant only) ─────────────────────────────
@@ -498,7 +562,7 @@ async def update_user_role(
     user.role = payload.role
     await db.commit()
     await db.refresh(user)
-    return user
+    return await _read_with_entities(db, user)
 
 
 # ── Admin: toggle active/inactive (same tenant only) ──────────────────────
@@ -519,7 +583,7 @@ async def toggle_user_active(
     user.is_active = not user.is_active
     await db.commit()
     await db.refresh(user)
-    return user
+    return await _read_with_entities(db, user)
 
 
 # ── Admin: delete user (same tenant only) ─────────────────────────────────

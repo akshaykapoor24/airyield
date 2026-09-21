@@ -10,6 +10,9 @@ from sqlalchemy.orm import selectinload
 from app.config import settings
 from app.models.user import User, UserRole
 from app.models.tenant import Tenant, TenantType
+from app.models.approval_workflow import (
+    ApprovalWorkflow, WorkflowModule, DEAL_CATEGORY_PROPRIETARY,
+)
 from app.schemas.user import UserCreate, SignupPayload, LoginPayload, TokenWithUser, SignupResult
 from app.core.email_domains import extract_domain, is_public_domain
 from app.core.password_policy import password_problem
@@ -61,18 +64,37 @@ async def _get_or_create_tenant(
     return tenant
 
 
-async def _needs_onboarding(db: AsyncSession, tenant_id: int | None) -> bool:
-    """Whether a new user of this tenant should see the first-login wizard.
+async def _ensure_default_deal_workflow(db: AsyncSession, tenant: Tenant, creator: User) -> None:
+    """Give a brand-new workspace the Proprietary deals workflow — deals auto-approved.
 
-    Only CORPORATE workspaces do: entities and airline login IDs are company
-    setup. An individual account is a private single-person workspace with
-    nothing to configure up front, so it starts already onboarded and adds those
-    from My Profile whenever it wants.
+    WITHOUT ONE, NOTHING CAN BE CREATED. api/v1/deals.py refuses every deal with "Deals
+    approval workflow is not configured", so a workspace with no workflow is not a neutral
+    starting point — it is a blocked one. Proprietary is the arrangement that asks nothing
+    of the user; Admin → Approval workflow is where a Super Admin turns on sign-offs by
+    switching to Enterprise and adding steps.
+
+    Both account types get it. An individual workspace is one person, who would otherwise
+    have to approve their own deals; a corporate one starts simple and tightens later.
+
+    Skipped when the tenant already has one: a corporate signup can adopt a tenant row that
+    already exists (_get_or_create_tenant), and uq_approval_workflows_tenant_module allows
+    exactly one per module.
     """
-    if tenant_id is None:
-        return False
-    tenant = (await db.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one_or_none()
-    return bool(tenant and tenant.tenant_type == TenantType.CORPORATE)
+    existing = (await db.execute(
+        select(ApprovalWorkflow.id).where(
+            ApprovalWorkflow.tenant_id == tenant.id,
+            ApprovalWorkflow.module == WorkflowModule.DEALS,
+        )
+    )).first()
+    if existing:
+        return
+    db.add(ApprovalWorkflow(
+        tenant_id=tenant.id,
+        module=WorkflowModule.DEALS,
+        is_active=True,
+        deal_category=DEAL_CATEGORY_PROPRIETARY,
+        created_by_id=creator.id,
+    ))
 
 
 class AuthService:
@@ -91,10 +113,13 @@ class AuthService:
             role=payload.role,
             department=payload.department,
             tenant_id=tenant_id,
-            # admin-created teammates are trusted (no email verification needed),
-            # but still run the first-login onboarding when it applies to them.
+            # Admin-created teammates are trusted (no email verification needed) and
+            # skip the first-login wizard entirely. Its steps — company info, entities,
+            # login IDs — are the Super Admin's to set up, and a teammate can change none
+            # of them (services/entity_access); the Super Admin has already chosen which
+            # entities they work on in User management.
             is_verified=True,
-            onboarding_complete=not await _needs_onboarding(db, tenant_id),
+            onboarding_complete=True,
         )
         db.add(user)
         await db.commit()
@@ -125,12 +150,18 @@ class AuthService:
             role=UserRole.SUPER_ADMIN,
             department=payload.company_name or None,
             is_verified=False,
-            # Only corporate workspaces run the first-login setup wizard; an
-            # individual account is born onboarded (see _needs_onboarding).
+            # Only a corporate workspace's Super Admin runs the first-login setup
+            # wizard; an individual account has nothing to set up first and is born
+            # onboarded, and teammates added later never see it (see register).
             onboarding_complete=not is_corporate,
             tenant=tenant,                      # set relationship so tenant_type serialises
         )
         db.add(user)
+        # Flushed, not committed: the workflow needs user.id for created_by_id, and both
+        # rows should land together — a workspace whose owner exists but whose workflow
+        # does not is the state that blocks every deal.
+        await db.flush()
+        await _ensure_default_deal_workflow(db, tenant, user)
         await db.commit()
         await db.refresh(user)
 

@@ -9,6 +9,7 @@ from app.dependencies import get_current_user
 from app.models.user import User, UserRole
 from app.models.approval_workflow import (
     ApprovalWorkflow,
+    DEAL_CATEGORY_PROPRIETARY,
     ApprovalWorkflowStep,
     ApprovalWorkflowStepApprover,
     WorkflowModule,
@@ -119,7 +120,7 @@ async def create_or_replace_workflow(
     current_user: User = Depends(_require_super_admin),
 ):
     module = _parse_module(payload.module)
-    is_proprietary = payload.deal_category == "proprietary" and module == WorkflowModule.DEALS
+    is_proprietary = payload.deal_category == DEAL_CATEGORY_PROPRIETARY and module == WorkflowModule.DEALS
     if not is_proprietary and not payload.steps:
         raise HTTPException(status_code=400, detail="At least one step is required")
 
@@ -198,7 +199,7 @@ async def update_workflow(
     if _parse_module(payload.module) != workflow.module:
         raise HTTPException(status_code=400, detail="Module cannot be changed")
 
-    is_proprietary = payload.deal_category == "proprietary" and workflow.module == WorkflowModule.DEALS
+    is_proprietary = payload.deal_category == DEAL_CATEGORY_PROPRIETARY and workflow.module == WorkflowModule.DEALS
     if not is_proprietary and not payload.steps:
         raise HTTPException(status_code=400, detail="At least one step is required")
 
