@@ -17,7 +17,7 @@
 //
 // Read-only. Changing the scheme is the dropdown's job; this only explains it.
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import { Calculator, MapPin, Globe, AlertTriangle, RefreshCw } from "lucide-react";
 import api from "@/lib/api";
 import { LABEL, apiError } from "@/components/userMaster/shared";
@@ -143,7 +143,12 @@ function RuleBlock({
   );
 }
 
-export default function GstSchemePreview({ scheme }: { scheme: string }) {
+export default function GstSchemePreview({ scheme, bare = false }: {
+  scheme: string;
+  /** Inside a container that already frames and titles it (the "How GST is calculated"
+   *  popup on My Profile): drop this panel's own border, background and heading. */
+  bare?: boolean;
+}) {
   const [rows, setRows] = useState<GstConfig[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
@@ -193,11 +198,13 @@ export default function GstSchemePreview({ scheme }: { scheme: string }) {
   const missing = spec.subs.filter(sub => !rules.some(r => r.sub_category === sub));
 
   return (
-    <div className="rounded-xl border border-gray-200 bg-gray-50/60 p-3 space-y-3">
-      <div className="flex items-center gap-1.5">
-        <Calculator className="w-3.5 h-3.5 text-violet-500" />
-        <p className="text-[11px] font-semibold text-gray-700">How this is calculated</p>
-      </div>
+    <div className={bare ? "space-y-3" : "rounded-xl border border-gray-200 bg-gray-50/60 p-3 space-y-3"}>
+      {!bare && (
+        <div className="flex items-center gap-1.5">
+          <Calculator className="w-3.5 h-3.5 text-violet-500" />
+          <p className="text-[11px] font-semibold text-gray-700">How this is calculated</p>
+        </div>
+      )}
 
       {loading ? (
         <p className="flex items-center gap-1.5 text-[11px] text-gray-400">
@@ -212,6 +219,11 @@ export default function GstSchemePreview({ scheme }: { scheme: string }) {
         </p>
       ) : (
         <>
+          {bare && (
+            <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">
+              Sample ticket — change the amounts to see the tax move
+            </p>
+          )}
           <div className="grid grid-cols-3 gap-2">
             {([
               ["basic_fare", "Basic Fare"],

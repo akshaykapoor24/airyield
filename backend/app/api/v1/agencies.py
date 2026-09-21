@@ -37,6 +37,9 @@ from app.services.supplier_master_request import (
     can_submit_master_request, create_or_request_supplier, supplier_values_from_agency,
 )
 from app.services import spreadsheet
+# What they charge us (vendor) and what we charge them (customer) — two directions,
+# never one field. See services/service_fee.py for why.
+from app.services.service_fee import norm_service_fee, service_fee_from_cells
 
 router = APIRouter()
 
@@ -270,6 +273,37 @@ def _validated_tax_ids(state: str, pan_raw, gst_raw, registered_raw) -> tuple[bo
     if problem:
         raise HTTPException(status_code=400, detail=problem)
     return registered, gst, pan
+
+
+# The two directions an agency's service rate can point in, and the column prefix
+# each one is stored under. Iterated rather than written out four times so create,
+# update and the XLS import cannot drift apart on which fields exist.
+SERVICE_FEE_DIRECTIONS = ("vendor_service_charge", "customer_service_fee")
+
+
+def _service_fee_columns(read, prefixes=SERVICE_FEE_DIRECTIONS) -> dict:
+    """The named directions' rates → the columns to write (three per direction).
+
+    `read(field)` returns whatever the caller has for one field name, so the same
+    helper serves a Pydantic payload, a PATCH dict and a spreadsheet row. `prefixes`
+    narrows it to one direction, which is what PATCH needs: an edit naming only the
+    vendor charge must not re-save the customer fee.
+
+    EACH DIRECTION IS RESOLVED AS A WHOLE, never field by field. A type with no
+    value bills nothing and a value with no type falls through `compute_markup` to
+    0.0, so a half-set rate is a line silently priced at zero — `norm_service_fee`
+    drops all three rather than storing one, and this writes all three back so a
+    cleared rate actually clears instead of leaving an orphaned value behind.
+    """
+    out: dict = {}
+    for prefix in prefixes:
+        kind, value, gst = norm_service_fee(
+            read(f"{prefix}_type"), read(f"{prefix}_value"), read(f"{prefix}_gst"),
+        )
+        out[f"{prefix}_type"] = kind
+        out[f"{prefix}_value"] = Decimal(str(value)) if value is not None else None
+        out[f"{prefix}_gst"] = gst
+    return out
 
 
 async def _current_terms_map(db: AsyncSession, agency_ids: list[int]) -> dict[int, list[AgencyTermsSummary]]:
@@ -658,6 +692,9 @@ async def create_agency(
         notes=(payload.notes or "").strip() or None,
         channels=scope,
         is_active=payload.is_active if payload.is_active is not None else True,
+        # Both directions, or neither half of either. The vocabulary was already
+        # checked by the schema; this is where a half-filled pair is dropped.
+        **_service_fee_columns(lambda f: getattr(payload, f, None)),
     )
     db.add(agency)
     await db.flush()   # need agency.id before the opening terms rows
@@ -933,6 +970,22 @@ async def bulk_upload_agencies(
                 for ch in required_channels
             ])
 
+            # Both directions' rates, if the sheet carries them. A file made before
+            # these columns existed has neither and imports exactly as it always
+            # did. UNLIKE THE FORM, a half-filled pair fails the ROW rather than
+            # being dropped: a form cannot produce one, a spreadsheet easily can,
+            # and somebody who typed 250 and forgot the type must hear about it.
+            service_fees: dict = {}
+            for prefix in SERVICE_FEE_DIRECTIONS:
+                (kind, value, gst), problem = service_fee_from_cells(
+                    lambda col: _cell(row.get(col)) or None, prefix.upper(),
+                )
+                if problem:
+                    raise HTTPException(status_code=400, detail=problem)
+                service_fees[f"{prefix}_type"] = kind
+                service_fees[f"{prefix}_value"] = Decimal(str(value)) if value is not None else None
+                service_fees[f"{prefix}_gst"] = gst
+
             agency = Agency(
                 user_id=current_user.id,
                 tenant_id=current_user.tenant_id,
@@ -951,6 +1004,7 @@ async def bulk_upload_agencies(
                 notes=_cell(row.get("NOTES")) or None,
                 channels=scope,
                 is_active=is_active,
+                **service_fees,
             )
             db.add(agency)
             await db.flush()
@@ -990,45 +1044,77 @@ async def download_agency_template():
     # STATE IS REQUIRED on every row — the GSTIN's first two characters are checked
     # against it (07 is Delhi, 27 is Maharashtra), and characters 3-12 against PAN.
     # GST_REGISTERED may be left blank: a row with a GST is taken as registered.
+    #
+    # THE TWO SERVICE-RATE BLOCKS POINT IN OPPOSITE DIRECTIONS and are both optional.
+    #   VENDOR_SERVICE_CHARGE_*    what this agency charges US when we buy from them
+    #                              — a COST, read on the Vendors data screens
+    #   CUSTOMER_SERVICE_FEE_*     what WE charge them when we sell to them
+    #                              — INCOME, read on the Customer data screens
+    # An agency that trades with us both ways fills both; most fill one or neither.
+    # _TYPE is percentage or fixed, _VALUE is the % or the ₹ amount that goes with
+    # it, and _GST says whether that amount ALREADY CONTAINS the tax (inclusive) or
+    # has it added on top (exclusive) — ₹1,000 differs by ₹180 between the two, so
+    # a blank _GST is taken as exclusive. Filling a _VALUE without its _TYPE fails
+    # the row rather than being ignored.
     ws.append([
         "NAME", "BRANCH_CODE", "BRANCH_NAME", "ADDRESS", "STATE", "CITY", "REGION",
         "PAN", "GST_REGISTERED", "GST",
         "PHONE", "EMAIL", "NOTES", "CHANNELS",
         "GDS_TYPE", "GDS_LIMIT", "GDS_DEPOSIT", "GDS_USAGE_PCT", "GDS_BILLING_CYCLE",
         "LCC_TYPE", "LCC_LIMIT", "LCC_DEPOSIT", "LCC_USAGE_PCT", "LCC_BILLING_CYCLE",
+        "VENDOR_SERVICE_CHARGE_TYPE", "VENDOR_SERVICE_CHARGE_VALUE", "VENDOR_SERVICE_CHARGE_GST",
+        "CUSTOMER_SERVICE_FEE_TYPE", "CUSTOMER_SERVICE_FEE_VALUE", "CUSTOMER_SERVICE_FEE_GST",
         "ACTIVE",
     ])
     # The same branch twice — cash on GDS (it books on our IATA stock, so it pays
     # first) and credit on LCC. Identical identity, two agencies, two balances.
+    #
+    # This row also shows BOTH service-rate directions on one agency: Lords charges
+    # us 2% when we buy from them, and we charge Lords ₹250 a ticket when we sell to
+    # them. The two are unrelated numbers pointing opposite ways, which is exactly
+    # why they are separate columns.
     ws.append([
         "Lords Travels", "DEL", "Delhi", "12 Connaught Place", "Delhi", "NEW DELHI", "NORTHERN REGION",
         "AAPFU0939F", "yes", "07AAPFU0939F1ZX", "9876543210", "ops@lords.com", "", "GDS",
         "cash", "", "10000000", "90", "monthly",
         "", "", "", "", "",
+        "percentage", "2", "exclusive",
+        "fixed", "250", "inclusive",
         "yes",
     ])
+    # The same branch on the other channel, and the rates differ from its GDS row —
+    # one agency row is one channel, so each carries its own.
     ws.append([
         "Lords Travels", "DEL", "Delhi", "12 Connaught Place", "Delhi", "NEW DELHI", "NORTHERN REGION",
         "AAPFU0939F", "yes", "07AAPFU0939F1ZX", "9876543210", "ops@lords.com", "", "LCC",
         "", "", "", "", "",
         "credit", "5000000", "", "", "fortnightly",
+        "", "", "",
+        "percentage", "1.5", "exclusive",
         "yes",
     ])
     # The same vendor's other branch — a different state, so a different GSTIN
     # against the same PAN. One legal entity, one GSTIN per state it registers in.
+    # Both service-rate blocks left blank: they are optional, and a blank means
+    # nobody has been asked rather than "we charge nothing".
     ws.append([
         "Lords Travels", "BOM", "Mumbai", "4 Nariman Point", "Maharashtra", "MUMBAI", "WESTERN REGION",
         "AAPFU0939F", "yes", "27AAPFU0939F1ZV", "9876500001", "bom@lords.com", "", "GDS",
         "credit", "3000000", "", "", "monthly",
         "", "", "", "", "",
+        "", "", "",
+        "", "", "",
         "yes",
     ])
     # Not GST registered — GST_REGISTERED is "no" and the GST column stays empty.
+    # We only ever buy from this one, so it carries a vendor charge and no customer fee.
     ws.append([
         "Aadesh Travels", "MAIN", "", "", "Delhi", "NEW DELHI", "NORTHERN REGION",
         "AACCA1234K", "no", "", "9876500000", "ops@aadesh.com", "", "LCC",
         "", "", "", "", "",
         "credit", "5000000", "", "", "weekly",
+        "fixed", "150", "exclusive",
+        "", "", "",
         "yes",
     ])
 
@@ -1117,6 +1203,22 @@ async def update_agency(
             registered,
         )
 
+    # A SERVICE RATE IS RESOLVED PER DIRECTION, for the same reason the tax ids are
+    # resolved as a set: its three fields are only meaningful together. A PATCH that
+    # mentions any one of a direction's fields has that whole direction recomputed
+    # from sent-or-stored values, so clearing the type clears the value and the GST
+    # treatment with it rather than leaving a rate that bills zero.
+    #
+    # A PATCH that mentions NEITHER direction touches neither — an edit of a phone
+    # number must not re-save a rate, let alone drop one.
+    for prefix in SERVICE_FEE_DIRECTIONS:
+        fields = {f"{prefix}_type", f"{prefix}_value", f"{prefix}_gst"}
+        if fields & data.keys():
+            data.update(_service_fee_columns(
+                lambda f: data[f] if f in data else getattr(obj, f, None),
+                (prefix,),
+            ))
+
     for field, value in data.items():
         setattr(obj, field, value)
 
@@ -1158,10 +1260,21 @@ async def delete_agency(
                    "Close or re-scope those deals first, or mark the agency inactive.",
         )
 
-    # NOTE: a third-party statement's consolidator and an incoming B2B deal's supplier are
-    # BOTH rows in the platform-admin `suppliers` master, not here — see
-    # models/statement_batch_supplier.py. Deleting an agency therefore cannot orphan either
-    # of them, and no guard for those belongs on this endpoint.
+    # deals.vendor_agency_id — the agency an INCOMING B2B deal was picked from — is RESTRICT
+    # too, for the same readable-409 reason. What the deal is MATCHED by is still
+    # `deals.supplier_id` → the platform-admin `suppliers` master (models/statement_batch_supplier.py
+    # attributes a third-party statement there too), so deleting an agency could never
+    # break pricing. It would detach the contract from the agency whose terms and vendor
+    # service charge it was agreed on, which is worth refusing on its own.
+    incoming_named = (await db.execute(
+        select(func.count()).select_from(Deal).where(Deal.vendor_agency_id == agency_id)
+    )).scalar() or 0
+    if incoming_named:
+        raise HTTPException(
+            status_code=409,
+            detail=f"This agency is the supplier on {incoming_named} incoming deal(s) and cannot be "
+                   "deleted. Mark it inactive instead — the deals keep their supplier either way.",
+        )
 
     await db.delete(obj)
     await db.commit()

@@ -50,7 +50,9 @@ export default function ReconciliationTabs() {
   return (
     <div>
       <div className="mb-4">
-        <h1 className="text-base font-bold text-slate-900">Reconciliation</h1>
+        {/* Named for its side: the sidebar's Reconciliation group holds both this and
+            Customer Reconciliation, and the heading should match the entry clicked. */}
+        <h1 className="text-base font-bold text-slate-900">Vendor Reconciliation</h1>
         <p className="text-xs text-slate-400 mt-0.5">{source.blurb}</p>
       </div>
 

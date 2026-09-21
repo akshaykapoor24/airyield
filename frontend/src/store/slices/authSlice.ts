@@ -1,5 +1,6 @@
 import { createSlice, createAsyncThunk, type PayloadAction } from "@reduxjs/toolkit";
 import { setToken, setUser, getToken, getUser, clearAuth, type AuthUser } from "@/lib/auth";
+import { clearCompanyLogo } from "@/lib/companyLogo";
 import api from "@/lib/api";
 
 interface AuthState {
@@ -36,6 +37,9 @@ export const login = createAsyncThunk(
 
 export const logout = createAsyncThunk("auth/logout", async () => {
   clearAuth();
+  // The logo is workspace-private: the next person to sign in on this browser must not
+  // see the previous workspace's letterhead while their own loads.
+  clearCompanyLogo();
 });
 
 export const fetchMe = createAsyncThunk("auth/fetchMe", async () => {

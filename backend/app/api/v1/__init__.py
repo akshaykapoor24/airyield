@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 
 from app.api.v1 import auth, users, subscriptions, airlines, suppliers, airports, routes, deals, tickets, income, documents, reports, classes, approval_workflows, dashboard, customers, corporates, entities, login_ids, tenant_airlines, iata_commissions, gst_configurations, user_entities, user_login_ids, agencies, agency_account, agency_entities, agency_login_ids, agency_billing, adjustments, airline_adjustments, statements, ndc_billing, tp_api_billing, bsp, bsp_summary, bsp_reconciliation, bsp_commission, commission, customer_statements, lcc_detailed, ticket_details, series_contracts
-from app.api.v1 import report_download, sell_reconciliation
+from app.api.v1 import report_download, sell_reconciliation, income_board
 
 router = APIRouter()
 
@@ -19,6 +19,12 @@ router.include_router(documents.router, prefix="/documents", tags=["Documents"])
 router.include_router(reports.router, prefix="/reports", tags=["Reports"])
 router.include_router(classes.router, prefix="/classes", tags=["Classes"])
 router.include_router(approval_workflows.router, prefix="/approval-workflows", tags=["Approval Workflows"])
+# Before `dashboard`, which owns the rest of the /dashboard tree. The paths do not
+# actually collide today (`/dashboard/income/...` vs `/dashboard/income-summary`), but
+# the literal-before-general ordering is the house rule here — see the note further
+# down about ndc_billing preceding the statements catch-all.
+router.include_router(income_board.router, prefix="/dashboard/income",
+                      tags=["Dashboard - Income"])
 router.include_router(dashboard.router, prefix="/dashboard", tags=["Dashboard"])
 router.include_router(customers.router, prefix="/customers", tags=["Customers"])
 router.include_router(corporates.router, prefix="/corporates", tags=["Corporate Billing"])

@@ -19,6 +19,7 @@ from app.schemas.airline_deal import AirlineDealCreate, AirlineDealResponse
 from app.schemas.b2b_deal import B2BDealCreate, B2BDealResponse
 from app.models.approval_workflow import (
     ApprovalWorkflow,
+    DEAL_CATEGORY_PROPRIETARY,
     ApprovalWorkflowStep,
     DealApproval,
     DealApprovalStep,
@@ -200,6 +201,62 @@ async def _resolve_supplier(
                    f"consolidator from the list, or ask your platform admin to add them.",
         )
     return supplier.id
+
+
+async def _resolve_vendor_agency(
+    db: AsyncSession,
+    current_user: User,
+    direction: DealDirection,
+    deal_type: str,
+    vendor_agency_id: Optional[int],
+) -> Optional[Agency]:
+    """The Agency Master row an INCOMING B2B deal was picked from, authorised, or None.
+
+    The Supplier Name on an incoming B2B deal is now picked from the user's own Agency
+    Master rather than the global supplier master. What comes back is the whole row,
+    because the caller derives three things from it and must derive them together:
+
+        vendor_agency_id  = agency.id            which branch, on which channel
+        supplier_name     = agency.name          what the repository shows and searches
+        supplier_id       = agency.supplier_id   what the commission matcher compares
+
+    THE LAST ONE IS WHY THIS DOES NOT DISTURB PRICING. A third-party statement is
+    attributed to a SUPPLIER row and `_supplier_guard` compares supplier ids; an agency
+    records the supplier row it was copied from, so passing that through leaves the
+    matcher exactly where tp_supplier_link_01 put it. An agency typed in by hand has no
+    supplier row yet — its deal gets supplier_id None and matches by name, as any unlinked
+    deal always has, until the platform admin approves it (see approve_supplier, which
+    back-fills these deals then).
+
+    OWNERSHIP IS CHECKED, unlike `_resolve_supplier`. `suppliers` is global; `agencies` is
+    private to the user who onboarded them, so an id belonging to somebody else is refused
+    with the same message as one that does not exist — the same rule `_resolve_scope`
+    applies to an outgoing deal's agency.
+
+    Silently None for anything that is not an incoming B2B deal, for the reason
+    `_resolve_supplier` gives: ck_deals_vendor_agency forbids the column there, and a
+    client that sends it on an airline deal is confused, not malicious.
+    """
+    if vendor_agency_id is None:
+        return None
+    if direction != DealDirection.INBOUND or deal_type != "b2b":
+        return None
+    agency = (await db.execute(
+        select(Agency).where(Agency.id == vendor_agency_id, Agency.user_id == current_user.id)
+    )).scalar_one_or_none()
+    if not agency:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Agency id {vendor_agency_id} is not in your Agency Master. Pick the "
+                   f"supplier from the list, or onboard them in User master → Agency Master.",
+        )
+    return agency
+
+
+def _same_vendor(a: Optional[str], b: Optional[str]) -> bool:
+    """Do two supplier names name the same vendor? Case- and padding-blind, the same
+    comparison `_supplier_guard` falls back to when a deal has no supplier_id."""
+    return (a or "").strip().lower() == (b or "").strip().lower()
 
 
 class UploadConfirmResult(BaseModel):
@@ -1034,7 +1091,7 @@ async def _seed_approval_unified(
             detail="Deals approval workflow is not configured. Ask Super Admin to configure it first.",
         )
 
-    if workflow.deal_category == "proprietary":
+    if workflow.deal_category == DEAL_CATEGORY_PROPRIETARY:
         deal.status = DealStatusType.APPROVED
         deal.deal_lifecycle_status = DealLifecycleType.ACTIVE
         await _close_matching_unified_deals(deal, db)
@@ -1164,6 +1221,22 @@ async def confirm_upload(
     if direction == DealDirection.OUTBOUND:
         supplier_name = scope.supplier_label
 
+    # Incoming B2B: the supplier picked from Agency Master. Its name replaces the query
+    # param for the batch and statement labels, so the repository reads the agency the
+    # user chose rather than whatever string the client assembled.
+    vendor_agency = await _resolve_vendor_agency(
+        db, current_user, direction, "b2b" if use_b2b else "airline", payload.vendor_agency_id,
+    )
+    if vendor_agency is not None:
+        supplier_name = vendor_agency.name
+
+    # Do Entity + Login IDs come from that agency? Exactly when Create Deal says they do:
+    # an incoming B2B deal — Standard AND Adhoc — takes them from the supplier's own Agency
+    # Master entities and credentials (deals/new/page.tsx::agencyParty). Every other
+    # incoming deal keeps `entity` meaning the user's own filing entity, applied to every
+    # row as before. `vendor_agency` is already None for anything that is not incoming B2B.
+    party_from_agency = vendor_agency is not None
+
     # Keep DealBatch for /batches endpoint backward compat
     batch = DealBatch(
         batch_id=batch_id,
@@ -1229,6 +1302,56 @@ async def confirm_upload(
         effective_vf = row_vf or vf_deal
         effective_vt = row_vt or vt_deal
 
+        # Which supplier this ROW names. An incoming sheet may still carry its own supplier
+        # cell, and it has always won over the one picked for the upload — kept, because a
+        # row naming a different vendor is data, not a mistake to overwrite. So the picked
+        # agency's LINK is attached only to rows that name it (or name nobody): a row naming
+        # another vendor must not be matched by the picked agency's supplier_id, or its
+        # statement would price against the wrong contract. Such rows keep name-only
+        # matching, which is exactly what every uploaded deal had before.
+        row_supplier = (
+            supplier_name if direction == DealDirection.OUTBOUND
+            else ((r.supplier_name or supplier_name) if use_b2b else None)
+        )
+        row_vendor = (
+            vendor_agency
+            if vendor_agency is not None and _same_vendor(row_supplier, vendor_agency.name)
+            else None
+        )
+
+        # The deal's entity and credentials, per row.
+        #
+        # OUTBOUND is unchanged: picked once from the scoped agency, and a free-text sheet
+        # cell must not override a real selection.
+        #
+        # INBOUND FROM AN AGENCY follows row_vendor, for the reason given there. The entity
+        # and login IDs picked in step 1 belong to the picked agency, and `login_ids` is what
+        # a deal's credentials are matched on — so a row naming ANOTHER vendor gets none of
+        # them (only its own sheet cell, if it has one), rather than the picked agency's
+        # credentials silently pricing someone else's tickets. On the agency's own rows a
+        # sheet Login ID still wins, as it always has inbound; the picked list then stays off
+        # that row so `login_id` and `login_ids` cannot disagree.
+        #
+        # EVERY OTHER INBOUND DEAL is exactly as before: the step-1 entity on every row, a
+        # sheet Login ID winning over the deal-level one, and no picked list (the form never
+        # sent one inbound until now).
+        if direction == DealDirection.OUTBOUND:
+            row_entity = payload.entity or None
+            row_login_id = (payload.login_id or r.login_id) or None
+            row_login_ids = payload.login_ids or None
+        elif party_from_agency and row_vendor is None:
+            row_entity = None
+            row_login_id = r.login_id or None
+            row_login_ids = None
+        elif party_from_agency:
+            row_entity = payload.entity or None
+            row_login_id = (r.login_id or payload.login_id) or None
+            row_login_ids = None if r.login_id else (payload.login_ids or None)
+        else:
+            row_entity = payload.entity or None
+            row_login_id = (r.login_id or payload.login_id) or None
+            row_login_ids = payload.login_ids or None
+
         ie_types = (r.incl_excl_types if r.incl_excl_types else None) or payload.incl_excl_types or []
         ie_data  = (r.incl_excl_data  if r.incl_excl_data  else None) or payload.incl_excl_data  or {}
         ie_vv    = (r.vice_versa      if r.vice_versa       else None) or payload.vice_versa      or {}
@@ -1251,10 +1374,11 @@ async def confirm_upload(
             # Outbound ignores any per-row supplier cell: the counterparty is the
             # scope, picked once for the whole upload. Letting a stray sheet column
             # win would name a different party on some rows than on others.
-            supplier_name=(
-                supplier_name if direction == DealDirection.OUTBOUND
-                else ((r.supplier_name or supplier_name) if use_b2b else None)
-            ),
+            supplier_name=row_supplier,
+            # The first time an UPLOADED deal carries a supplier id at all — see
+            # row_vendor above for which rows get it.
+            supplier_id=row_vendor.supplier_id if row_vendor is not None else None,
+            vendor_agency_id=row_vendor.id if row_vendor is not None else None,
             remark=(r.remarks or payload.remark) or None,
             airline_type=(r.airline_type or payload.airline_type) or None,
             # The master's canonical name when the row resolved, the
@@ -1267,19 +1391,14 @@ async def confirm_upload(
             valid_to=effective_vt,
             trigger_type=None if use_b2b else (r.trigger_type or payload.trigger_type or None),
             payout_type=None if use_b2b else (r.payout_type or payload.payout_type or None),
-            entity=payload.entity or None,
+            entity=row_entity,
             iata_number=(r.iata_code or payload.iata_number) or None,
             iata_commission=(r.iata_commission or payload.iata_commission) or None,
             business_type=(r.business_type or payload.business_type) or None,
             entity_lcc=(r.entity_lcc or payload.entity_lcc) or None,
-            # Row-wins everywhere except outbound, where the login IDs are picked
-            # once from the scoped agency's own credentials — a free-text per-row
-            # cell must not silently override a real selection.
-            login_id=(
-                (payload.login_id or r.login_id) if direction == DealDirection.OUTBOUND
-                else (r.login_id or payload.login_id)
-            ) or None,
-            login_ids=payload.login_ids or None,
+            # Per row — see row_entity / row_login_id / row_login_ids above.
+            login_id=row_login_id,
+            login_ids=row_login_ids,
             status=DealStatusType.PENDING_APPROVAL,
             deal_lifecycle_status=DealLifecycleType.DRAFT,
             created_by_id=current_user.id,
@@ -1459,6 +1578,16 @@ async def create_b2b_deal(
     )
     supplier_id = await _resolve_supplier(db, direction, "b2b", payload.supplier_id)
 
+    # Picked from Agency Master: the agency is authoritative for BOTH the name and the id
+    # the deal is matched by, so they cannot drift from the row the user chose. A client
+    # that sends no agency keeps the supplier_name / supplier_id it sent, as before.
+    vendor_agency = await _resolve_vendor_agency(
+        db, current_user, direction, "b2b", payload.vendor_agency_id,
+    )
+    if vendor_agency is not None:
+        supplier_name = vendor_agency.name
+        supplier_id = vendor_agency.supplier_id
+
     batch = DealBatch(
         batch_id=batch_id,
         tenant_id=current_user.tenant_id,
@@ -1503,6 +1632,7 @@ async def create_b2b_deal(
         deal_maker_name=payload.deal_maker_name or None,
         supplier_name=supplier_name,
         supplier_id=supplier_id,
+        vendor_agency_id=vendor_agency.id if vendor_agency is not None else None,
         remark=payload.remark or None,
         airline_type=payload.airline_type or None,
         airline_name=payload.airline_name or None,
@@ -1545,6 +1675,7 @@ async def create_b2b_deal(
         "deal_maker_name": deal.deal_maker_name,
         "supplier_name": deal.supplier_name,
         "supplier_id": deal.supplier_id,
+        "vendor_agency_id": deal.vendor_agency_id,
         "remark": deal.remark,
         "airline_type": deal.airline_type,
         "airline_name": deal.airline_name,
@@ -1700,6 +1831,10 @@ async def get_deal_form(
         "supplier_name": deal.supplier_name,
         # Read back so the edit form can pre-select the Branch it was signed with.
         "supplier_id": deal.supplier_id,
+        # And the Agency Master row it was picked from, which is what the edit form's
+        # Supplier Name field now selects. NULL on a deal made before the field listed
+        # agencies — the form then matches the saved name instead.
+        "vendor_agency_id": deal.vendor_agency_id,
         "remark": deal.remark,
         "deal_maker_name": deal.deal_maker_name,
         "incentive_types": inc_types,
@@ -1959,6 +2094,9 @@ async def _update_unified_deal(
     normalized_keys = {
         "incentive_types", "incentive_data", "incl_excl_types", "incl_excl_data", "vice_versa",
         "scope_type", "agency_id", "corporate_id", "agency_entity_id",
+        # Resolved in step 1c: it is ownership-checked and re-derives two other columns,
+        # so the raw id must never reach the deal through the generic setattr.
+        "vendor_agency_id",
     }
     update_data = payload.model_dump(exclude_none=True)
     for field, value in update_data.items():
@@ -2002,6 +2140,23 @@ async def _update_unified_deal(
         deal.supplier_id = await _resolve_supplier(
             db, deal.direction, deal.deal_type.value, payload.supplier_id,
         )
+
+    # 1c. The Agency Master row an incoming B2B deal was picked from. AFTER 1b on purpose:
+    #     when an agency is named it is authoritative, and re-derives the name and the
+    #     supplier id from itself — so a stale supplier_id sent alongside cannot leave the
+    #     deal matched against a different vendor than the one it now names.
+    #
+    #     Same model_fields_set rule as 1b. Sent as null clears ONLY the link: the deal
+    #     keeps its supplier_name and supplier_id and goes on matching exactly as a deal
+    #     made before this column existed.
+    if "vendor_agency_id" in payload.model_fields_set:
+        vendor_agency = await _resolve_vendor_agency(
+            db, current_user, deal.direction, deal.deal_type.value, payload.vendor_agency_id,
+        )
+        deal.vendor_agency_id = vendor_agency.id if vendor_agency is not None else None
+        if vendor_agency is not None:
+            deal.supplier_name = vendor_agency.name
+            deal.supplier_id = vendor_agency.supplier_id
 
     # 2. Rebuild incentive/slab/rule rows only when the edit touched them.
     touches_relations = (

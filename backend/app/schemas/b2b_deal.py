@@ -25,6 +25,12 @@ class B2BDealCreate(DealScopeFields):
     # matcher falls back to the name. Ignored on an outgoing deal, where the counterparty
     # is the scope block instead.
     supplier_id: Optional[int] = None
+    # WHICH AGENCY MASTER ROW the incoming deal was picked from. When sent, it is
+    # AUTHORITATIVE: the server derives `supplier_name` and `supplier_id` from the agency
+    # and ignores whatever the client sent for those two, so the name on the deal and the
+    # id it is matched by cannot disagree with the agency the user picked. Optional so a
+    # client that still sends only supplier_name / supplier_id keeps working unchanged.
+    vendor_agency_id: Optional[int] = None
     remark: Optional[str] = None
     # See AirlineDealCreate — bare `str` accepted "" and stored NULL.
     airline_type: RequiredStr
@@ -60,6 +66,9 @@ class B2BDealResponse(BaseModel):
     # picked — a response_model silently drops anything it does not declare, and "the name
     # was saved but the link was not" is exactly the failure this column exists to prevent.
     supplier_id: Optional[int] = None
+    # Echoed for the same reason as supplier_id — a response_model drops what it does not
+    # declare, and "the name was saved but the agency link was not" must be visible.
+    vendor_agency_id: Optional[int] = None
     remark: Optional[str]
     airline_type: Optional[str]
     airline_name: Optional[str]

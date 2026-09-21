@@ -557,6 +557,57 @@ async def edit_iata_commission_approval(
     return fresh.scalar_one()
 
 
+@router.get("/lookup", response_model=Optional[IataCommissionRead])
+async def lookup_iata_commission(
+    airline_name: str,
+    on: Optional[date] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The one IATA commission row that applies to this airline on this date, or null.
+
+    Used by Create Deal to fill IATA Commission (%) from the master when an airline is
+    picked, instead of the user typing it. Here rather than in the browser so "which row
+    applies" is decided once, on the server, by the same scoping the list uses.
+
+    `on` is the date the commission must be in force — the deal's Contract Valid From — and
+    defaults to today. A row applies when it is active and its window covers `on`; either
+    end may be open (NULL). The airline is matched by NAME, case- and padding-blind: the
+    deal form picks names from the Airline master, and this master copies its names from
+    the same place.
+
+    WHEN SEVERAL APPLY, the GLOBAL row wins over a tenant's own: this is a Master
+    Governance master now, and per `_scope` a tenant row is a leftover from before the
+    move, kept visible but no longer the authority. Then the latest `valid_from`, so a rate
+    revision beats the one it replaced. Null — not a 404 — when nothing applies, because
+    "no commission on record for this airline" is an ordinary answer the form shows as such.
+
+    DECLARED BEFORE `/{pk}`: a path parameter matches any segment, and FastAPI would try to
+    read "lookup" as an int and answer 422 rather than fall through to this route.
+    """
+    name = (airline_name or "").strip().lower()
+    if not name:
+        return None
+    day = on or date.today()
+    q = (
+        select(IataCommission)
+        .where(
+            _scope(current_user),
+            IataCommission.is_active.is_(True),
+            func.lower(func.trim(IataCommission.airline_name)) == name,
+            or_(IataCommission.valid_from.is_(None), IataCommission.valid_from <= day),
+            or_(IataCommission.valid_to.is_(None), IataCommission.valid_to >= day),
+        )
+        .order_by(
+            IataCommission.tenant_id.is_not(None),          # global (NULL) first
+            IataCommission.valid_from.desc().nulls_last(),
+            IataCommission.id.desc(),
+        )
+        .limit(1)
+    )
+    return (await db.execute(q)).scalar_one_or_none()
+
+
 @router.get("/{pk}", response_model=IataCommissionRead)
 async def get_iata_commission(
     pk: int,

@@ -1,4 +1,4 @@
-// Vendors data → Reconciliation.
+// Reconciliation → Vendor Reconciliation (it used to sit under Vendors data).
 //
 // The route keeps its original `bsp-reconciliation` segment so existing links and the
 // sidebar entry (components/layout/Sidebar.tsx) keep working; the screen behind it now

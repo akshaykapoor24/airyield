@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState, useRef, useEffect } from "react";
+import { useCallback, useState, useRef, useEffect, useMemo } from "react";
 import {
   Upload, FileText, FileSpreadsheet, File, Check,
   ChevronRight, AlertTriangle, X, RefreshCw, Save,
@@ -17,6 +17,7 @@ import {
   TabBar, IncentiveTabContent, InclExclTabContent,
 } from "@/components/deals/IncentiveInclExclShared";
 import OutgoingScopeFields, { type ScopeSelection } from "@/components/deals/OutgoingScopeFields";
+import { loadVendorAgencies, vendorAgencyOptions, type VendorAgency } from "@/lib/vendorAgency";
 import {
   OUTGOING_DEAL_KINDS, KIND_BUSINESS_TYPE, buildScopePayload, dealsHref, scopeLabel, toScopeType,
   type DealScopeType, type OutgoingDealKind,
@@ -26,7 +27,8 @@ import { missingFields, missingMessage, notifyRequired } from "@/lib/requiredFie
 // ═══════════════════════════════════════════════════════════════════════════════
 // CONSTANTS
 // ═══════════════════════════════════════════════════════════════════════════════
-// Supplier names are fetched live from the supplier master API
+// An incoming B2B upload's Supplier Name is picked from the user's own Agency Master —
+// see lib/vendorAgency.ts, shared with Create Deal.
 const ENTITIES       = ["ATB", "TSI", "YOL"];
 const CONTRACT_YEARS = ["Calendar year", "Financial year"];
 const TRIGGER_TYPES  = ["Flown", "Sales"];
@@ -1498,10 +1500,23 @@ export default function UploadDealPage(){
   const [direction,     setDirection]     = useState("inbound");    // "inbound" (received) | "outbound" (floated)
   const [dealTag,       setDealTag]       = useState("standard");   // "standard" | "adhoc"
   const [supplierName,  setSupplierName]  = useState("");
-  const [supplierOptions, setSupplierOptions] = useState<string[]>([]);
-  // Entity the deal is signed under — the user's own entities from My Profile.
+  // The Agency Master row an incoming B2B upload is signed with. The server derives the
+  // deals' supplier name AND supplier-master id from it, which also gives an uploaded deal
+  // a supplier id for the first time — before this an upload carried only the name.
+  const [agencies,       setAgencies]       = useState<VendorAgency[]>([]);
+  const [vendorAgencyId, setVendorAgencyId] = useState<number | null>(null);
+  const vendorOptions = useMemo(() => vendorAgencyOptions(agencies), [agencies]);
+  const vendorAgency = vendorAgencyId != null ? agencies.find(a => a.id === vendorAgencyId) ?? null : null;
+  // Entity the deal is signed under — the user's own entities from My Profile, EXCEPT on an
+  // incoming B2B deal, where it is one of the picked supplier's entities from Agency Master
+  // (see `agencyParty` below).
   const [entity,        setEntity]        = useState("");
   const [entityOptions, setEntityOptions] = useState<string[]>([]);
+  // The picked supplier agency's own entities and credentials (User master → Agency Master
+  // → Agency Entities / Agency Login IDs), and the credentials chosen for this upload.
+  const [agencyEntities, setAgencyEntities] = useState<{id:number;name:string;code:string}[]>([]);
+  const [agencyLoginIds, setAgencyLoginIds] = useState<{id:number;login_id:string;entity_id:number|null}[]>([]);
+  const [loginIds,       setLoginIds]       = useState<string[]>([]);
   const [validFromDate, setValidFromDate] = useState("");
   const [file,          setFile]          = useState<File|null>(null);
   const [dragging,     setDragging]     = useState(false);
@@ -1526,6 +1541,48 @@ export default function UploadDealPage(){
     || scopeType==="all"
     || (scopeType==="agency"    && scopeSel.agencyId    != null)
     || (scopeType==="corporate" && scopeSel.corporateId != null);
+
+  // Do Entity + Login ID / IATA come from the picked supplier's Agency Master records?
+  // EXACTLY when Create Deal says so (deals/new/page.tsx::agencyParty): every incoming B2B
+  // deal, Standard and Adhoc alike. The server applies the same rule
+  // (api/v1/deals.py::confirm_upload, `party_from_agency`), so the two cannot disagree about
+  // which rows the picked credentials land on.
+  const agencyParty = !outbound && dealType==="b2b";
+  const agencyEntityId = agencyParty ? (agencyEntities.find(e=>e.name===entity)?.id ?? null) : null;
+
+  // A different supplier (or leaving B2B Standard) means a different set of entities, so
+  // the entity and credentials picked for the old one are dropped rather than carried
+  // across onto a supplier they do not belong to.
+  useEffect(()=>{
+    setEntity("");
+    setLoginIds([]);
+    setAgencyLoginIds([]);
+    if(!agencyParty||vendorAgencyId==null){ setAgencyEntities([]); return; }
+    api.get<{id:number;name:string;code:string}[]>("/agency-entities/",{params:{agency_id:vendorAgencyId,limit:1000}})
+      .then(r=>setAgencyEntities(r.data))
+      .catch(()=>setAgencyEntities([]));
+  },[agencyParty,vendorAgencyId]);
+
+  // Credentials belong to an ENTITY, so they are loaded for the one picked — the same
+  // agency_id + entity_id pair Create Deal asks for.
+  useEffect(()=>{
+    setLoginIds([]);
+    if(!agencyParty||vendorAgencyId==null||agencyEntityId==null){ setAgencyLoginIds([]); return; }
+    api.get<{id:number;login_id:string;entity_id:number|null}[]>("/agency-login-ids/",{params:{agency_id:vendorAgencyId,entity_id:agencyEntityId,limit:1000}})
+      .then(r=>setAgencyLoginIds(r.data))
+      .catch(()=>setAgencyLoginIds([]));
+  },[agencyParty,vendorAgencyId,agencyEntityId]);
+
+  const agencyEntityNames = Array.from(new Set(agencyEntities.map(e=>e.name).filter(Boolean)));
+  const agencyLoginIdOptions = Array.from(new Set(agencyLoginIds.map(l=>l.login_id).filter(Boolean)));
+  const agencyEntityPlaceholder =
+      vendorAgencyId==null         ? "Select a supplier first"
+    : agencyEntities.length===0    ? "No entities for this agency"
+    :                                "Search entity…";
+  const agencyLoginPlaceholder =
+      !entity                      ? "Select an entity first"
+    : agencyLoginIds.length===0    ? "No login IDs for this entity"
+    :                                "Select…";
 
   // Direction is fixed by the entry point (Incoming vs Outgoing repo) — read it from
   // the ?direction query param instead of asking. Outgoing deals are B2B only at the
@@ -1621,9 +1678,8 @@ export default function UploadDealPage(){
   },[uploading]);
 
   useEffect(()=>{
-    api.get<{id:number;name:string}[]>("/suppliers/?limit=5000")
-      .then(r=>setSupplierOptions(r.data.map(s=>s.name)))
-      .catch(()=>{});
+    // User master → Agency Master: the Supplier Name options for an incoming B2B upload.
+    loadVendorAgencies().then(setAgencies).catch(()=>{});
     // My Profile → Entities. Names only; the deal stores the name in deals.entity.
     api.get<{id:number;name:string;is_active:boolean}[]>("/user-entities/",{params:{limit:1000}})
       .then(r=>setEntityOptions(
@@ -2010,6 +2066,10 @@ export default function UploadDealPage(){
         {
           source_agent:    sourceAgent,
           source_type:     "upload",
+          // Incoming B2B only. The server resolves it (ownership-checked) and derives the
+          // supplier name and supplier-master id from it; null everywhere else, where
+          // ck_deals_vendor_agency would refuse it anyway.
+          vendor_agency_id: !outbound&&dealType==="b2b"?vendorAgencyId:null,
           deal_tag:        dealTag,
           direction:       direction,
           airline_type:    getContractVal("c__airline_type")||null,
@@ -2024,8 +2084,15 @@ export default function UploadDealPage(){
           entity:          (outbound?scopeSel.entity:entity)||null,
           entity_lcc:      getContractVal("c__entity_lcc")||null,
           business_type:   (outbound?(getContractVal("c__business_type")||KIND_BUSINESS_TYPE[scopeKind]):getContractVal("c__business_type"))||null,
-          login_id:        (outbound?scopeSel.loginIds.join(", "):getContractVal("c__login_id"))||null,
-          login_ids:       outbound&&scopeSel.loginIds.length?scopeSel.loginIds:null,
+          // Outgoing: the scoped agency's credentials. Incoming B2B: the picked
+          // supplier's credentials from Agency Master — the server puts them only on rows
+          // attributed to that supplier. Otherwise: the sheet's own Login ID, as before.
+          login_id:        (outbound?scopeSel.loginIds.join(", ")
+                            :agencyParty&&loginIds.length?loginIds.join(", ")
+                            :getContractVal("c__login_id"))||null,
+          login_ids:       outbound&&scopeSel.loginIds.length?scopeSel.loginIds
+                            :agencyParty&&loginIds.length?loginIds
+                            :null,
           iata_commission: getContractVal("c__iata_commission")||null,
           // Mirrors the server's own re-derivation, so a stale id left by a scope
           // change can never travel attached to the wrong scope.
@@ -2142,7 +2209,7 @@ export default function UploadDealPage(){
           <button onClick={()=>router.push(`/deals/${savedBatchId}`)} className="bg-[#1e3a5f] text-white px-5 py-2 rounded-lg text-sm font-medium hover:bg-[#16304f]">View Batch</button>
         )}
         <button onClick={()=>router.push(dealsHref(direction))} className="border border-[#1e3a5f] text-[#1e3a5f] px-5 py-2 rounded-lg text-sm font-medium hover:bg-blue-50">View All Deals</button>
-        <button onClick={()=>{setStep(1);setFile(null);setPreview(null);setRows([]);setDealType(outbound?"b2b":"");setSupplierName("");setValidFromDate("");setColumnMap({});setSelectedIncentives([]);setSelectedInclExcl([]);setRowInclExcl({});setAiMode(false);setAiFileName("");setAiConfidence(0);setSavedBatchId(null);setFileStoreError("");setCopyPrevInclExcl(true);setIsMultiTab(false);
+        <button onClick={()=>{setStep(1);setFile(null);setPreview(null);setRows([]);setDealType(outbound?"b2b":"");setSupplierName("");setVendorAgencyId(null);setEntity("");setLoginIds([]);setValidFromDate("");setColumnMap({});setSelectedIncentives([]);setSelectedInclExcl([]);setRowInclExcl({});setAiMode(false);setAiFileName("");setAiConfidence(0);setSavedBatchId(null);setFileStoreError("");setCopyPrevInclExcl(true);setIsMultiTab(false);
           // The scope is Step-1 state too — leaving it set would silently float the
           // next upload to the previous upload's agency. dealType stays "b2b" on an
           // outgoing upload, since the query param effect only runs on mount.
@@ -2249,16 +2316,71 @@ export default function UploadDealPage(){
                       placeholder="Select deal type…"
                       options={["Airline","B2B"]}
                       value={dealType==="airline"?"Airline":dealType==="b2b"?"B2B":""}
-                      onChange={v=>{ setDealType(v==="Airline"?"airline":v==="B2B"?"b2b":""); setSupplierName(""); }}
+                      onChange={v=>{ setDealType(v==="Airline"?"airline":v==="B2B"?"b2b":""); setSupplierName(""); setVendorAgencyId(null); }}
                     />
                     {dealType==="b2b"&&(
-                      <SearchSelectField
-                        label="Supplier Name *"
-                        placeholder="Search supplier…"
-                        options={supplierOptions}
-                        value={supplierName}
-                        onChange={setSupplierName}
-                      />
+                      <div>
+                        {/* From the user's own Agency Master, labelled by branch AND channel
+                            — one vendor is onboarded once per each, and the pick has to say
+                            which. Still MATCHED on the supplier-master row the agency was
+                            copied from; see lib/vendorAgency.ts. */}
+                        <SearchSelectField
+                          label="Supplier Name *"
+                          placeholder={agencies.length?"Search agency…":"No agencies in your Agency Master yet"}
+                          options={vendorOptions.labels}
+                          value={vendorOptions.labelOf(vendorAgencyId)}
+                          onChange={v=>{
+                            const picked=vendorOptions.byLabel.get(v)??null;
+                            setVendorAgencyId(picked?.id??null);
+                            setSupplierName(picked?.name??"");
+                          }}
+                        />
+                        {agencies.length===0&&(
+                          <p className="text-[10px] text-gray-400 mt-1">
+                            Onboard the agencies you buy from in{" "}
+                            <Link href="/user-master/agency-master" className="font-semibold text-sky-600 hover:underline">User master → Agency Master</Link>
+                            {" "}and they appear here.
+                          </p>
+                        )}
+                        {vendorAgency&&vendorAgency.supplier_id==null&&(
+                          <p className="text-[10px] text-amber-600 mt-1">
+                            Not in the supplier master yet — statements will match these deals by name until
+                            the platform admin approves it, then by its supplier record automatically.
+                          </p>
+                        )}
+                      </div>
+                    )}
+                    {/* The picked supplier's own Entity and Login ID / IATA Number, from
+                        User master → Agency Master — the same two fields, same source and
+                        same order as Create Deal for an incoming B2B Standard deal. Only
+                        what that agency actually has is offered; login IDs follow the
+                        entity, because a credential belongs to one. */}
+                    {agencyParty&&(
+                      <>
+                        <SearchSelectField
+                          label="Entity"
+                          placeholder={agencyEntityPlaceholder}
+                          options={agencyEntityNames}
+                          value={entity}
+                          onChange={setEntity}
+                        />
+                        <MultiSelectDropdown
+                          label="Login ID / IATA Number"
+                          options={agencyLoginIdOptions}
+                          selected={loginIds}
+                          onChange={setLoginIds}
+                        />
+                        {/* MultiSelectDropdown has no placeholder of its own, so the
+                            reason the list is empty is said underneath instead. */}
+                        {agencyLoginIdOptions.length===0&&(
+                          <p className="text-[10px] text-gray-400 -mt-2">{agencyLoginPlaceholder}</p>
+                        )}
+                        {loginIds.length>0&&(
+                          <p className="text-[10px] text-blue-600 -mt-2">
+                            Applied to every row of this supplier; a Login ID in the sheet still wins on its own row.
+                          </p>
+                        )}
+                      </>
                     )}
                   </>
                 )}
@@ -2296,7 +2418,9 @@ export default function UploadDealPage(){
                     Showing this too offers a second control over the same column
                     that the save silently ignores. Mirrors /deals/new, which
                     hides it on `outboundScoped` for the same reason. */}
-                {!outbound&&(
+                {/* Also hidden on an incoming B2B deal, whose Entity is the supplier
+                    agency's and is asked right under Supplier Name instead. */}
+                {!outbound&&!agencyParty&&(
                   <>
                     <SearchSelectField
                       label="Entity"

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
@@ -16,6 +16,9 @@ import {
 } from "@/components/deals/IncentiveInclExclShared";
 import OutgoingScopeFields, { type ScopeSelection } from "@/components/deals/OutgoingScopeFields";
 import {
+  loadVendorAgencies, matchSavedVendor, vendorAgencyOptions, type VendorAgency,
+} from "@/lib/vendorAgency";
+import {
   OUTGOING_DEAL_KINDS, KIND_BUSINESS_TYPE, buildScopePayload, dealsHref, directionLabel,
   fromScopeType, toScopeType,
   type DealScopeType, type OutgoingDealKind,
@@ -27,8 +30,10 @@ const TRIGGER_TYPES  = ["Flown", "Sales"];
 const PAYOUT_TYPES   = ["Flown", "Sales"];
 const BUSINESS_TYPES = ["B2B", "B2C", "B2E", "MICE"];
 
-/** An onboarded agency, as matched from the chosen Supplier name. */
-type AgencyMatch = { id: number; name: string; branch_name: string | null; branch_code: string; channels: string };
+
+/** The IATA Commission master row that applies to an airline on a date — the subset of
+ *  GET /iata-commissions/lookup this form reads. */
+type IataMasterRow = { iata_commission_pct: number | null; valid_from: string | null; valid_to: string | null };
 
 // Entity codes and Login IDs / IATA come from the User Master. Login IDs are
 // filtered by airline name + vendor (supplier) + LoB (= business type).
@@ -61,6 +66,44 @@ const INCL_EXCL_META: Record<string, { suffix: string; isExclusion: boolean }> =
   "Inclusion For Payout":  { suffix: "for Inclusion", isExclusion: false },
   "Exclusion For Payout":  { suffix: "for Exclusion", isExclusion: true  },
 };
+
+/** The line under IATA Commission (%) saying where its value came from.
+ *
+ *  Three states, because each asks something different of the user: the master has no rate
+ *  (type one in), the box shows the master's rate (nothing to do), or the box shows
+ *  something else — an edited deal's saved rate, or a hand-typed one — in which case the
+ *  master's rate is offered back rather than silently applied. */
+function IataSourceNote({ airlineName, onContractStart, master, value, onUseMaster }: {
+  airlineName: string;
+  onContractStart: boolean;
+  master: IataMasterRow | null;
+  value: string;
+  onUseMaster: (pct: number) => void;
+}) {
+  const pct = master?.iata_commission_pct;
+  if (pct == null) {
+    return (
+      <p className="text-[10px] text-gray-400 mt-1">
+        No rate in the IATA Commission master for {airlineName}{onContractStart ? " on the contract start date" : ""} —
+        enter it here, or ask your platform admin to add it.
+      </p>
+    );
+  }
+  // dd-mm-yyyy, the way every date field on this form reads; an open end says so.
+  const validity = [master?.valid_from, master?.valid_to]
+    .map(d => (d ? d.split("-").reverse().join("-") : "open")).join(" → ");
+  if (value.trim() !== "" && Number(value) === Number(pct)) {
+    return <p className="text-[10px] text-emerald-600 mt-1">From the IATA Commission master · valid {validity}</p>;
+  }
+  return (
+    <p className="text-[10px] text-amber-600 mt-1">
+      The IATA Commission master has {pct}% for {airlineName} (valid {validity}).{" "}
+      <button type="button" onClick={() => onUseMaster(pct)} className="font-semibold underline hover:text-amber-700">
+        Use {pct}%
+      </button>
+    </p>
+  );
+}
 
 // ── deal type selection screen ───────────────────────────────────────────────
 function DealTypeSelector({ direction, onSelect }: {
@@ -235,6 +278,19 @@ export default function NewDealPage() {
   const [entity, setEntity]             = useState("");
   const [businessType, setBusinessType] = useState("");
   const [iataCommission, setIataCommission] = useState("");   // IATA commission %
+  // The IATA Commission master row for the picked airline on the contract start date
+  // (GET /iata-commissions/lookup), and whether that lookup has answered for the current
+  // airline. It FILLS the field rather than locking it — the same as Airline Type, which
+  // fills from the class master and stays editable — so a deal can still be saved for an
+  // airline the master has no rate for.
+  const [iataMaster, setIataMaster]     = useState<IataMasterRow | null>(null);
+  const [iataLookedUp, setIataLookedUp] = useState(false);
+  // Does the value in the box currently come FROM the master? Lets a later lookup replace
+  // a master-filled value (new airline, new date) without ever overwriting one the user typed.
+  const iataFromMasterRef = useRef(false);
+  // Edit mode: keep the rate the deal was SAVED with until the user changes the airline or
+  // the contract start — reopening a deal must not silently re-price it to today's master.
+  const keepSavedIataRef = useRef(false);
   // Login ID / IATA — multi-select from the User Master, shared by Airline and B2B.
   const [loginIds, setLoginIds]         = useState<string[]>([]);
   const [supplierName, setSupplierName] = useState("");
@@ -271,29 +327,31 @@ export default function NewDealPage() {
   const [airlineOptions, setAirlineOptions]           = useState<string[]>([]);
   const [airlines, setAirlines]                       = useState<{airline_name:string;airline_type:string}[]>([]);
   const [loadingAirlines, setLoadingAirlines]         = useState(false);
-  const [supplierOptions, setSupplierOptions]         = useState<string[]>([]);
   // The full rows behind those names — the picker stores a name, but the deal stores the
   // BRANCH's id, so both are needed.
-  const [supplierRows, setSupplierRows]               = useState<{ id: number; name: string; code?: string | null; branch?: string | null; city?: string | null }[]>([]);
-  const [supplierBranch, setSupplierBranch]           = useState<number | null>(null);
+  // The Agency Master row an INCOMING B2B deal is signed with — see lib/vendorAgency.ts.
+  // One pick names the vendor, its branch AND its channel, so the two Branch pickers this
+  // form used to need (one for the supplier master, one for the agency) are gone.
+  const [vendorAgencyId, setVendorAgencyId]           = useState<number | null>(null);
+  // A deal saved BEFORE this field listed agencies, whose name matched no single agency.
+  // Kept so an edit re-saves exactly what it had (name + supplier id) instead of blanking
+  // the supplier, until the user picks an agency for it.
+  const [legacySupplier, setLegacySupplier]           = useState<{ name: string; supplierId: number | null } | null>(null);
   const [entityOptions, setEntityOptions]             = useState<string[]>([]);
   const [allLoginIds, setAllLoginIds]                 = useState<LoginIdMaster[]>([]);
   const [continentOptions, setContinentOptions]       = useState<string[]>(CONTINENTS);
   const [countryGroupOptions, setCountryGroupOptions] = useState<string[]>(COUNTRY_GROUPS);
 
-  // Agency Onboarding sources. For a B2B Standard deal, Entity + Login ID come
-  // from the user's Agency Profile (the agency whose name matches the chosen
-  // Supplier) rather than the User Master. Agency names are copied from the
-  // Supplier master, so Supplier → Agency is a name match.
+  // Agency Onboarding sources. An incoming B2B deal's Supplier Name IS an agency from
+  // the user's Agency Master (lib/vendorAgency.ts), and for a B2B Standard deal its
+  // Entity + Login ID come from that same agency rather than the User Master.
   //
-  // That match can now return SEVERAL agencies: a vendor is onboarded once per
-  // branch AND once per channel, so Lords Delhi GDS, Lords Delhi LCC and Lords
-  // Mumbai are three rows with different entities and credentials. When it
-  // returns more than one, a Branch field appears and picking one is what
-  // resolves the agency — silently taking the first would load the wrong
-  // entities and put the wrong login IDs on the deal.
-  const [agencies, setAgencies]             = useState<AgencyMatch[]>([]);
-  const [agencyBranch, setAgencyBranch]     = useState<number | null>(null);
+  // It used to be a supplier-master NAME, matched to agencies by name — which returns
+  // several rows for a vendor onboarded per branch and per channel (Lords Delhi GDS,
+  // Lords Delhi LCC, Lords Mumbai), with a Branch field needed to choose between them.
+  // Picking the agency row itself removes that second step: the pick IS the branch and
+  // the channel.
+  const [agencies, setAgencies]             = useState<VendorAgency[]>([]);
   const [agencyEntities, setAgencyEntities] = useState<{ id: number; name: string; code: string }[]>([]);
   const [agencyLoginIds, setAgencyLoginIds] = useState<{ id: number; login_id: string; entity_id: number | null }[]>([]);
   const [agencyEntityId, setAgencyEntityId] = useState<number | null>(null);   // selected agency entity (drives login ids)
@@ -318,53 +376,82 @@ export default function NewDealPage() {
   // would quietly change the incentive form for outgoing adhoc deals. This one
   // only governs which party fields render and where entity/logins come from.
   const outboundScoped = direction === "outbound";
-  // Every onboarded branch of the chosen Supplier, by name — used for the B2B Standard
-  // entity and login-ID lists, which come from Agency Onboarding.
   const isInboundB2b = !outboundScoped && dealType === "b2b";
-  const agencyMatches = isB2bStandard
-    ? agencies.filter(a => (a.name ?? "").trim().toLowerCase() === supplierName.trim().toLowerCase())
-    : [];
+  // Entity + Login ID / IATA for an incoming B2B deal — Standard AND Adhoc — come from the
+  // picked supplier's own records in User master → Agency Master (its Agency Entities, then
+  // that entity's Agency Login IDs). Every other deal keeps the User Master lists.
+  //
+  // DELIBERATELY NOT `isB2bStandard`. That flag also drives the incentive tab (date-wise
+  // slabs, the incl/excl class list), which stays Standard-only; widening it would change
+  // the Adhoc incentive form as a side effect of changing where Entity comes from.
+  const agencyParty = isInboundB2b;
 
-  // Every SUPPLIER MASTER row bearing the chosen name. This is what the deal is MATCHED
-  // by: `deals.supplier_id` is compared against the supplier a third-party statement was
-  // uploaded against, and 141 of the master's names cover more than one branch — "Riya
-  // Travel & Tours" is fourteen rows, each its own contract. One match resolves itself;
-  // several need the Branch field below.
-  const supplierMatches = isInboundB2b
-    ? supplierRows.filter(s => (s.name ?? "").trim().toLowerCase() === supplierName.trim().toLowerCase())
-    : [];
-  const resolvedSupplierId = supplierMatches.length === 1
-    ? supplierMatches[0].id
-    : (supplierBranch != null && supplierMatches.some(s => s.id === supplierBranch) ? supplierBranch : null);
-  // One match resolves itself; several need the Branch field below.
-  const agencyId = agencyMatches.length === 1
-    ? agencyMatches[0].id
-    : (agencyBranch != null && agencyMatches.some(a => a.id === agencyBranch) ? agencyBranch : null);
+  // The Supplier Name picker's options. The saved agency is kept even if it has since been
+  // deactivated, so opening an old deal never blanks its supplier.
+  const vendorOptions = useMemo(
+    () => vendorAgencyOptions(agencies, vendorAgencyId),
+    [agencies, vendorAgencyId],
+  );
+  const vendorAgency = vendorAgencyId != null
+    ? agencies.find(a => a.id === vendorAgencyId) ?? null
+    : null;
+  // A legacy deal's saved supplier, shown as its own option so the field reads what the
+  // deal actually has rather than looking empty. Never an agency: picking it changes nothing.
+  const legacyLabel = legacySupplier && vendorAgencyId == null
+    ? `${legacySupplier.name} (saved — not in your Agency Master)`
+    : "";
+  const supplierFieldOptions = legacyLabel ? [legacyLabel, ...vendorOptions.labels] : vendorOptions.labels;
+  const supplierFieldValue = vendorAgencyId != null ? vendorOptions.labelOf(vendorAgencyId) : legacyLabel;
 
+  // The agency whose entities and login IDs a B2B Standard deal offers. Incoming only —
+  // an outgoing deal takes its agency from the scope block (OutgoingScopeFields), and
+  // this stayed null there before too.
+  const agencyId = isInboundB2b ? vendorAgencyId : null;
+
+  // The user's own agencies (User master → Agency Master) — the Supplier Name options.
   useEffect(() => {
-    api.get<{ id: number; name: string; code?: string | null; branch?: string | null; city?: string | null }[]>("/suppliers/?limit=5000")
-      .then(r => { setSupplierRows(r.data); setSupplierOptions(r.data.map(s => s.name)); })
-      .catch(() => {});
+    loadVendorAgencies().then(setAgencies).catch(() => {});
   }, []);
 
-  // The user's own agencies (Agency Profile → Agency Onboarding). Used to map the
-  // chosen Supplier to an agency for the B2B Standard Entity/Login ID lists.
+  // IATA Commission (%) from the IATA Commission master: whenever the airline or the
+  // contract start changes, ask the server which master row applies on that date. The
+  // server owns the rule (global over a tenant's legacy row, then the latest revision),
+  // so the form never has to reproduce it.
   useEffect(() => {
-    api.get<AgencyMatch[]>("/agencies/", { params: { limit: 1000 } })
-      .then(r => setAgencies(r.data))
-      .catch(() => {});
-  }, []);
+    if (!airlineName) { setIataMaster(null); setIataLookedUp(false); return; }
+    let live = true;
+    api.get<IataMasterRow | null>(
+      "/iata-commissions/lookup", { params: { airline_name: airlineName, on: validFrom || undefined } },
+    )
+      .then(r => {
+        if (!live) return;
+        const row = r.data ?? null;
+        setIataMaster(row);
+        setIataLookedUp(true);
+        if (keepSavedIataRef.current) return;
+        if (row?.iata_commission_pct != null) {
+          setIataCommission(String(row.iata_commission_pct));
+          iataFromMasterRef.current = true;
+        } else if (iataFromMasterRef.current) {
+          // The previous airline's master rate must not stay on this one.
+          setIataCommission("");
+          iataFromMasterRef.current = false;
+        }
+      })
+      .catch(() => { if (live) { setIataMaster(null); setIataLookedUp(false); } });
+    return () => { live = false; };
+  }, [airlineName, validFrom]);
 
-  // A different Supplier means a different set of branches — drop the old pick. Skipped
-  // while an edit is prefilling, exactly like the entity/login resets below: the prefill
-  // sets supplierName and the saved branch together, and without this the branch (which is
-  // now what the deal is MATCHED by) would be cleared on every edit and silently unlinked
-  // on save.
+  // A deal saved before the Supplier Name listed agencies names a supplier-master vendor,
+  // not an agency. Once the agencies are in, link it when EXACTLY ONE fits
+  // (lib/vendorAgency.ts::matchSavedVendor); otherwise it stays as the legacy option and
+  // saves back unchanged. The entity/login resets stay suppressed while this runs, the
+  // same as for the rest of the prefill, so a matched deal keeps its saved Entity/Login.
   useEffect(() => {
-    if (suppressAgencyResetRef.current) return;
-    setAgencyBranch(null);
-    setSupplierBranch(null);
-  }, [supplierName]);
+    if (!legacySupplier || vendorAgencyId != null || agencies.length === 0) return;
+    const hit = matchSavedVendor(agencies, legacySupplier.name, legacySupplier.supplierId);
+    if (hit) { setVendorAgencyId(hit.id); setLegacySupplier(null); }
+  }, [agencies, legacySupplier, vendorAgencyId]);
 
   // Edit mode — read ?editId once and pre-fill the whole form from the deal.
   useEffect(() => {
@@ -399,12 +486,21 @@ export default function NewDealPage() {
         setEntity((data.entity as string) ?? "");
         setBusinessType((data.business_type as string) ?? "");
         setIataCommission((data.iata_commission as string) ?? "");
+        keepSavedIataRef.current = true;   // see keepSavedIataRef
         const savedLoginIds = Array.isArray(data.login_ids) ? (data.login_ids as string[]) : [];
         setLoginIds(savedLoginIds);
         setSupplierName((data.supplier_name as string) ?? "");
-        // The Supplier master branch this incoming B2B deal was signed with, so re-saving
-        // an edited deal keeps its link instead of dropping to name-only matching.
-        setSupplierBranch((data.supplier_id as number) ?? null);
+        // The Agency Master row this incoming B2B deal was picked from. A deal saved before
+        // the field listed agencies has none — it keeps its saved name and supplier id as a
+        // legacy value (resolved to an agency by the effect above when exactly one fits), so
+        // re-saving an edit never drops it to an empty supplier or loses its match link.
+        const savedVendorAgencyId = (data.vendor_agency_id as number) ?? null;
+        setVendorAgencyId(savedVendorAgencyId);
+        setLegacySupplier(
+          savedVendorAgencyId == null && data.direction !== "outbound" && data.deal_type === "b2b" && data.supplier_name
+            ? { name: data.supplier_name as string, supplierId: (data.supplier_id as number) ?? null }
+            : null,
+        );
         // Outgoing scope. Without this the form re-opened on the Incoming branch
         // with no party, and saving would have re-scoped the deal to whatever the
         // default happened to be.
@@ -469,11 +565,11 @@ export default function NewDealPage() {
       .finally(() => setLoadingAirlines(false));
   }, []);
 
-  // B2B Standard: whenever the resolved agency changes (i.e. the Supplier changed),
-  // reset the entity/login selection and reload the agency's entities. During an edit
-  // prefill the reset is suppressed so the prefilled Entity/Login survives.
+  // Incoming B2B: whenever the picked supplier agency changes, reset the entity/login
+  // selection and reload that agency's entities. During an edit prefill the reset is
+  // suppressed so the prefilled Entity/Login survives.
   useEffect(() => {
-    if (!isB2bStandard) return;
+    if (!agencyParty) return;
     if (!suppressAgencyResetRef.current) {
       setEntity("");
       setAgencyEntityId(null);
@@ -484,26 +580,26 @@ export default function NewDealPage() {
     api.get<{ id: number; name: string; code: string }[]>("/agency-entities/", { params: { agency_id: agencyId, limit: 1000 } })
       .then(r => setAgencyEntities(r.data))
       .catch(() => setAgencyEntities([]));
-  }, [isB2bStandard, agencyId]);
+  }, [agencyParty, agencyId]);
 
-  // B2B Standard edit prefill: the form endpoint gives the entity NAME, not its id.
+  // Incoming B2B edit prefill: the form endpoint gives the entity NAME, not its id.
   // Once the agency's entities load, resolve the id so the login ids can be fetched.
   useEffect(() => {
-    if (!isB2bStandard || !entity || agencyEntityId != null) return;
+    if (!agencyParty || !entity || agencyEntityId != null) return;
     const match = agencyEntities.find(e => e.name === entity);
     if (match) setAgencyEntityId(match.id);
-  }, [isB2bStandard, entity, agencyEntities, agencyEntityId]);
+  }, [agencyParty, entity, agencyEntities, agencyEntityId]);
 
-  // B2B Standard: whenever the selected agency entity changes, reload that entity's
-  // login ids from Agency Onboarding (reset suppressed during an edit prefill).
+  // Incoming B2B: whenever the selected agency entity changes, reload that entity's
+  // login ids from Agency Master (reset suppressed during an edit prefill).
   useEffect(() => {
-    if (!isB2bStandard) return;
+    if (!agencyParty) return;
     if (!suppressAgencyResetRef.current) setLoginIds([]);
     if (!agencyId || !agencyEntityId) { setAgencyLoginIds([]); return; }
     api.get<{ id: number; login_id: string; entity_id: number | null }[]>("/agency-login-ids/", { params: { agency_id: agencyId, entity_id: agencyEntityId, limit: 1000 } })
       .then(r => setAgencyLoginIds(r.data))
       .catch(() => setAgencyLoginIds([]));
-  }, [isB2bStandard, agencyId, agencyEntityId]);
+  }, [agencyParty, agencyId, agencyEntityId]);
 
   const selectedIncentives = INCENTIVE_TYPES.filter(t => incentives[t]);
 
@@ -528,20 +624,20 @@ export default function NewDealPage() {
   // Entity + Login ID sources swap to Agency Onboarding data for B2B Standard.
   // Entity options are the matched agency's entity names; Login ID options are the
   // login ids under the chosen entity. Everything else keeps the User Master list.
-  const entityFieldOptions = isB2bStandard
+  const entityFieldOptions = agencyParty
     ? Array.from(new Set(agencyEntities.map(e => e.name).filter(Boolean)))
     : entityOptions;
-  const loginIdFieldOptions = isB2bStandard
+  const loginIdFieldOptions = agencyParty
     ? Array.from(new Set(agencyLoginIds.map(l => l.login_id).filter(Boolean)))
     : loginIdOptions;
-  const entityPlaceholder = !isB2bStandard
+  const entityPlaceholder = !agencyParty
     ? "Search and select"
     : !supplierName            ? "Select a supplier first"
-    : agencyMatches.length > 1 && agencyId == null ? "Select a branch first"
-    : agencyId == null         ? "No matching agency for this supplier"
+    // Only a legacy deal gets here: its saved supplier is not linked to an agency yet.
+    : agencyId == null         ? "Pick the supplier from your Agency Master"
     : agencyEntities.length === 0 ? "No entities for this agency"
     :                            "Search and select";
-  const loginIdPlaceholder = !isB2bStandard
+  const loginIdPlaceholder = !agencyParty
     ? "Search and select"
     : !entity                    ? "Select an entity first"
     : agencyLoginIds.length === 0 ? "No login IDs for this entity"
@@ -550,6 +646,7 @@ export default function NewDealPage() {
   // Set the deal-level contract dates and mirror them into every selected
   // incentive that has its own from/to date fields (all except Ancillary and DI).
   const setContractDates = (from: string, to: string) => {
+    keepSavedIataRef.current = false;   // a new contract start may mean a different IATA rate
     setValidFrom(from);
     setValidTo(to);
     setIncentiveData(prev => {
@@ -706,10 +803,19 @@ export default function NewDealPage() {
       // Outgoing derives supplier_name server-side from the scope, so the label
       // reads "All Agencies" rather than blank on a common deal.
       payload.supplier_name = outboundScoped ? null : (supplierName || null);
-      // The Supplier master branch this deal was signed with. Sent unconditionally (as
-      // null when there is none) so an edit that clears the supplier also clears the link —
-      // the backend keys on whether the field was present, not on truthiness.
-      payload.supplier_id = isInboundB2b ? resolvedSupplierId : null;
+      // The Agency Master row this incoming deal was picked from. The server treats it as
+      // authoritative and re-derives supplier_name AND supplier_id from it — supplier_id
+      // being the supplier-master row the agency was copied from, which is still what a
+      // statement is matched against. Both keys are sent unconditionally (null when there
+      // is none) because the backend keys on presence, not truthiness: that is how an
+      // edit clears a link rather than leaving a stale one.
+      payload.vendor_agency_id = isInboundB2b ? vendorAgencyId : null;
+      // A legacy deal left unlinked re-saves the supplier id it already had, so opening
+      // and saving it cannot drop its match link. With an agency picked the server
+      // overrides this from the agency anyway.
+      payload.supplier_id = !isInboundB2b ? null
+        : vendorAgency ? vendorAgency.supplier_id
+        : legacySupplier?.supplierId ?? null;
     }
     if (outboundScoped) {
       // buildScopePayload mirrors the server's own re-derivation, so a stale id
@@ -861,44 +967,58 @@ export default function NewDealPage() {
                   touched={submitAttempted}
                 />
               ) : dealType === "b2b" && (
-                <SearchSelectField
-                  label="Supplier Name"
-                  required
-                  options={supplierOptions}
-                  value={supplierName}
-                  onChange={v => { suppressAgencyResetRef.current = false; setSupplierName(v); }}
-                  placeholder={supplierOptions.length ? "Search and select supplier" : "Loading suppliers..."}
-                />
-              )}
-
-              {/* [1b] Branch — only when this supplier is onboarded more than once.
-                  Entities and login IDs belong to a BRANCH, so without this the
-                  form would load one branch's and attach them to the other's deal.
-                  Outgoing never needs it: the agency picker already names the exact
-                  branch + channel row. */}
-              {isInboundB2b && supplierMatches.length > 1 && (
                 <div>
-                  <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">
-                    Branch <span className="text-red-500">*</span>
-                  </label>
-                  <select
-                    value={supplierBranch ?? ""}
-                    onChange={e => { suppressAgencyResetRef.current = false; setSupplierBranch(e.target.value ? Number(e.target.value) : null); }}
-                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-400 bg-gray-50"
-                  >
-                    <option value="">— Select branch —</option>
-                    {/* The code as well as the branch: it is the unique one, and two
-                        branches of a vendor can share a city. */}
-                    {supplierMatches.map(s => (
-                      <option key={s.id} value={s.id}>
-                        {s.branch || s.city || "—"} · {s.code}
-                      </option>
-                    ))}
-                  </select>
-                  <p className="text-[10px] text-gray-400 mt-1">
-                    This vendor has {supplierMatches.length} branches in the Supplier master and each is its own
-                    contract. Picking one is what lets a third-party statement from that branch find this deal.
-                  </p>
+                  {/* Picked from the user's own Agency Master, not the global supplier
+                      master: these are the agencies they onboarded, each one a branch on
+                      a channel, so the label says both and no separate Branch field is
+                      needed. The deal is still MATCHED on the supplier-master row the
+                      agency was copied from — see lib/vendorAgency.ts. */}
+                  <SearchSelectField
+                    label="Supplier Name"
+                    required
+                    options={supplierFieldOptions}
+                    value={supplierFieldValue}
+                    onChange={v => {
+                      suppressAgencyResetRef.current = false;
+                      const picked = vendorOptions.byLabel.get(v) ?? null;
+                      if (picked) {
+                        setVendorAgencyId(picked.id);
+                        setSupplierName(picked.name);
+                        setLegacySupplier(null);
+                      } else if (!v) {
+                        setVendorAgencyId(null);
+                        setSupplierName("");
+                        setLegacySupplier(null);
+                      }
+                      // Re-picking the legacy label itself changes nothing.
+                    }}
+                    placeholder={agencies.length ? "Search and select agency" : "No agencies in your Agency Master yet"}
+                  />
+                  {agencies.length === 0 && (
+                    <p className="text-[10px] text-gray-400 mt-1">
+                      Onboard the agencies you buy from in{" "}
+                      <Link href="/user-master/agency-master" className="font-semibold text-sky-600 hover:underline">
+                        User master → Agency Master
+                      </Link>
+                      {" "}and they appear here.
+                    </p>
+                  )}
+                  {/* An agency typed in by hand has no supplier-master row until the
+                      platform admin approves it, so there is nothing for a statement to be
+                      matched against by id yet. The deal still saves; say what that means
+                      rather than let it look fully linked. */}
+                  {vendorAgency && vendorAgency.supplier_id == null && (
+                    <p className="text-[10px] text-amber-600 mt-1">
+                      Not in the supplier master yet — statements will match this deal by name until
+                      the platform admin approves it, then by its supplier record automatically.
+                    </p>
+                  )}
+                  {legacySupplier && vendorAgencyId == null && (
+                    <p className="text-[10px] text-amber-600 mt-1">
+                      Saved before suppliers came from Agency Master, and no single agency matches it.
+                      It saves back unchanged; pick an agency to link it.
+                    </p>
+                  )}
                 </div>
               )}
 
@@ -909,6 +1029,7 @@ export default function NewDealPage() {
                 options={airlineNameOptions}
                 value={airlineName}
                 onChange={name => {
+                  keepSavedIataRef.current = false;   // a different airline has its own IATA rate
                   setAirlineName(name);
                   // Auto-fill the type from the class/RBD master; if this airline has
                   // no type there, clear it (don't keep the previous airline's type).
@@ -952,9 +1073,10 @@ export default function NewDealPage() {
 
               {/* Entity + Login ID/IATA — single fixed fields shown for both Airline
                    and B2B. Not gated by Airline Type, and unaffected when other
-                   fields (Airline Type, Contract Year, …) change. For B2B Standard
-                   these come from Agency Onboarding (agency-by-supplier → entities →
-                   login ids); otherwise from the User Master.
+                   fields (Airline Type, Contract Year, …) change. For an incoming B2B
+                   deal (Standard and Adhoc) these come from Agency Master (the picked
+                   supplier → its entities → that entity's login ids); otherwise from
+                   the User Master.
                    Hidden on an outgoing deal: OutgoingScopeFields renders its own
                    Agency Entity / Agency Login ID above, sourced from the picked
                    agency, and two sets of the same field would disagree. */}
@@ -968,8 +1090,8 @@ export default function NewDealPage() {
                 onChange={name => {
                   suppressAgencyResetRef.current = false;   // user picked an entity → allow login reset
                   setEntity(name);
-                  // Track the agency entity id so its login ids can be loaded (B2B Standard).
-                  if (isB2bStandard) setAgencyEntityId(agencyEntities.find(e => e.name === name)?.id ?? null);
+                  // Track the agency entity id so its login ids can be loaded (incoming B2B).
+                  if (agencyParty) setAgencyEntityId(agencyEntities.find(e => e.name === name)?.id ?? null);
                 }}
               />
               <MultiSearchSelectField
@@ -982,7 +1104,10 @@ export default function NewDealPage() {
               </>
               )}
 
-              {/* IATA Commission (%) — free numeric input, after Login ID / IATA */}
+              {/* IATA Commission (%) — filled from the IATA Commission master (Master
+                  Governance) for the picked airline on the contract start date. Stays
+                  editable, like Airline Type; the line underneath says where the value
+                  came from, and offers the master rate back if the box no longer shows it. */}
               <div>
                 <label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">IATA Commission (%)</label>
                 <div className="relative">
@@ -991,12 +1116,21 @@ export default function NewDealPage() {
                     inputMode="decimal"
                     min="0"
                     value={iataCommission}
-                    onChange={e => setIataCommission(e.target.value)}
-                    placeholder="e.g. 5"
+                    onChange={e => { iataFromMasterRef.current = false; setIataCommission(e.target.value); }}
+                    placeholder={airlineName ? "e.g. 5" : "Pick an airline first"}
                     className="w-full border border-gray-200 rounded-md px-2.5 py-1.5 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 pr-6"
                   />
                   <span className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 text-xs pointer-events-none">%</span>
                 </div>
+                {airlineName && iataLookedUp && (
+                  <IataSourceNote
+                    airlineName={airlineName}
+                    onContractStart={!!validFrom}
+                    master={iataMaster}
+                    value={iataCommission}
+                    onUseMaster={pct => { keepSavedIataRef.current = false; iataFromMasterRef.current = true; setIataCommission(String(pct)); }}
+                  />
+                )}
               </div>
             </div>
           </SectionCard>

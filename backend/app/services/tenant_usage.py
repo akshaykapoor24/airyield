@@ -155,6 +155,10 @@ EXCLUDED_TABLES: frozenset[str] = frozenset({
     # the same reasoning for the buy-vs-sell answer: it is recomputed from a vendor
     # statement row and the tickets already counted on both sides
     "sell_reconciliations", "sell_reconciliation_runs",
+    # the income board is a projection of rows already counted above — one line per
+    # priced settlement document, rebuilt by POST /dashboard/income/rebuild — so
+    # counting it would count every statement a second time
+    "income_board_rows",
     # generated Report download workbooks — a job row and a file rebuilt from uploads
     # that are already counted, so counting it would count the same data again
     "report_exports",

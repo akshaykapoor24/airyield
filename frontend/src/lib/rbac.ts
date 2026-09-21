@@ -18,6 +18,15 @@ export function canManageTenantUsers(role?: string | null): boolean {
   return role === "super_admin";
 }
 
+/** Who manages the workspace itself: its company details, logo, GST scheme, entities and
+ *  login IDs / IATA numbers — the Super Admin. Everyone else sees the company details and
+ *  the entities granted to them in User management, read-only, and may change only their
+ *  own name. Mirrors backend services/entity_access.can_manage_entities, which enforces
+ *  it; this only decides what the screens offer. */
+export function canManageWorkspace(role?: string | null): boolean {
+  return role === "super_admin";
+}
+
 export function canAccessTenantWorkspace(role?: string | null): boolean {
   return !!role && role !== "platform_admin";
 }

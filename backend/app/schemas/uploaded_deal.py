@@ -174,6 +174,10 @@ class DealUpdatePayload(DealScopeFields):
     # the client actually sends the key (model_fields_set), so an edit that omits it
     # cannot silently unlink a deal — sending it as null IS how you clear it.
     supplier_id: Optional[int] = None
+    # The Agency Master row an INCOMING B2B deal was picked from. Same model_fields_set rule
+    # as supplier_id: omitted leaves the link alone, null clears it. When it names an
+    # agency it wins — supplier_name and supplier_id are re-derived from that agency.
+    vendor_agency_id: Optional[int] = None
     incentive_types: Optional[list] = None
     incentive_data:  Optional[dict] = None
     incl_excl_types: Optional[list] = None
@@ -289,6 +293,12 @@ class ConfirmUploadPayload(DealScopeFields):
     login_ids:       Optional[list] = None
     # deal maker
     deal_maker_name: Optional[str]  = None
+    # The Agency Master row an INCOMING B2B upload was picked against — see
+    # B2BDealCreate.vendor_agency_id. Also what gives an uploaded deal a `supplier_id`
+    # at all: the upload path only ever carried a supplier NAME, so every uploaded B2B
+    # deal matched by name alone. Ignored on an outgoing upload, whose counterparty is
+    # the scope block.
+    vendor_agency_id: Optional[int] = None
     # incentives (same as new deal form)
     incentive_types: list[str]      = []     # ["PLB", "Super PLB"]
     incentive_data:  dict           = {}     # {PLB: {validFrom: ..., frequency: ...}}

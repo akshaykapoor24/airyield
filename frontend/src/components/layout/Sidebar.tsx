@@ -18,6 +18,7 @@ import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { toggleSidebar } from "@/store/slices/uiSlice";
 import { logout as logoutThunk } from "@/store/slices/authSlice";
 import { getUser } from "@/lib/auth";
+import { useCompanyLogo } from "@/lib/companyLogo";
 import { canManageTenantUsers, canSubmitMasterRequest, isPlatformAdmin } from "@/lib/rbac";
 import ChangePasswordModal from "@/components/layout/ChangePasswordModal";
 import Logo from "@/components/marketing/Logo";
@@ -38,6 +39,10 @@ const TENANT_NAV: NavItem[] = [
     id: "dashboard", label: "Dashboard", icon: BarChart2,
     children: [
       { label: "Overview", href: "/dashboard", icon: LayoutGrid },
+      // Realized commission: what the loaded statements have actually earned, by
+      // carrier and by consolidator. Deliberately separate from PLB Accrual below —
+      // one is money the statements prove, the other is money we expect.
+      { label: "Commission income", href: "/dashboard/income", icon: DollarSign },
       // The PLB accrual board — supplier income earned on flown revenue, before
       // the airline pays it. The number finance books as a receivable.
       { label: "PLB Accrual", href: "/dashboard/accrual", icon: TrendingUp },
@@ -52,7 +57,7 @@ const TENANT_NAV: NavItem[] = [
       { label: "Statements", href: "/vendors/statements", icon: FileText },
       { label: "Series/SIT/MICE", href: "/vendors/series-sit-mice", icon: Layers },
       { label: "Ticket Search", href: "/ticket-details", icon: Search },
-      { label: "Reconciliation", href: "/tickets/bsp-reconciliation", icon: GitMerge },
+      // Reconciliation moved to its own group below.
       { label: "Commission income", href: "/vendors/commission-income", icon: DollarSign },
     ],
   },
@@ -70,9 +75,26 @@ const TENANT_NAV: NavItem[] = [
       // URLs still work and still read the same rows, they are just no longer a
       // separate destination.
       { label: "Statement", href: "/customers/statements", icon: FileText },
-      { label: "Reconciliation", href: "/customers/reconciliation", icon: GitMerge },
+      // Reconciliation moved to its own group below.
       { label: "Income Statement", href: "/customers/income-statement", icon: DollarSign },
       // { label: "Billing and invoices", href: "/billing/agency", icon: DollarSign },
+    ],
+  },
+
+  {
+    // Reconciliation, both sides in one place. Each used to sit inside its own group
+    // (Vendors data / Customer data); they are one activity — checking a statement
+    // against what was booked — so they now share a group, and each label says which
+    // side it is, since two items both called "Reconciliation" would be ambiguous here.
+    //
+    // THE URLS ARE UNCHANGED on purpose. Existing links and bookmarks keep working, and
+    // isActive's generic prefix rule already matches both routes, so this group expands
+    // and highlights on either page with no special case. The child icons repeat their
+    // side's group icon (Vendors data / Customer data) so the pairing still reads.
+    id: "reconciliation", label: "Reconciliation", icon: GitMerge,
+    children: [
+      { label: "Vendor Reconciliation", href: "/tickets/bsp-reconciliation", icon: FolderOpen },
+      { label: "Customer Reconciliation", href: "/customers/reconciliation", icon: Contact },
     ],
   },
 
@@ -194,6 +216,9 @@ export default function Sidebar() {
   const email = user?.email || "";
   const initials =
     displayName.split(" ").filter(Boolean).map((n) => n[0]).join("").toUpperCase().slice(0, 2) || "U";
+  // The workspace's logo from My Profile, shown in place of the initials once one is
+  // uploaded. Null until then — and for a platform admin, who has no workspace.
+  const companyLogo = useCompanyLogo();
   const router = useRouter();
   const [showProfileMenu, setShowProfileMenu] = useState(false);
   const [showChangePw, setShowChangePw] = useState(false);
@@ -226,8 +251,9 @@ export default function Sidebar() {
           !pathname.startsWith("/tickets/bsp") &&
           !pathname.startsWith("/tickets/adjustments"))
     // "/customers" is Customer Billing: the picker plus the /customers/{id}
-    // billing workspace. Its siblings (directory / statements / reconciliation)
-    // are separate entries under "Customer data" and must not light this up.
+    // billing workspace. Its siblings (directory / statements under "Customer data",
+    // reconciliation under "Reconciliation") are separate entries and must not light
+    // this up.
     : href === "/customers"
       ? pathname === "/customers" || /^\/customers\/\d+$/.test(pathname)
     : pathname === href || pathname.startsWith(href + "/");
@@ -453,14 +479,24 @@ export default function Sidebar() {
           )}
         >
           <div
-            className="w-8 h-8 rounded-xl flex items-center justify-center text-white text-xs font-bold shadow-sm shrink-0"
-            style={{
+            className={cn(
+              "w-8 h-8 rounded-xl flex items-center justify-center text-white text-xs font-bold shadow-sm shrink-0 overflow-hidden",
+              companyLogo && "bg-white border border-slate-200",
+            )}
+            style={companyLogo ? undefined : {
               background: platform
                 ? "linear-gradient(135deg, #c084fc 0%, #9333ea 100%)"
                 : "linear-gradient(135deg, #38bdf8 0%, #2563eb 100%)",
             }}
+            title={displayName}
           >
-            {initials}
+            {companyLogo ? (
+              // A blob: URL from an auth-gated fetch — next/image cannot optimise or load it.
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={companyLogo} alt="Company logo" className="w-full h-full object-contain p-0.5" />
+            ) : (
+              initials
+            )}
           </div>
           {open && (
             <>

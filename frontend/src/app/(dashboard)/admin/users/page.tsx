@@ -3,14 +3,16 @@
 import { useState, useEffect, useCallback } from "react";
 import {
   Plus, Search, Edit2, MoreVertical,
-  Shield, User, ChevronDown, X, Check, RefreshCw,
+  Shield, User, ChevronDown, X, Check, RefreshCw, Users, KeyRound, Building2, SlidersHorizontal,
 } from "lucide-react";
 import api from "@/lib/api";
 import MultiSelectDropdown from "@/components/ui/MultiSelectDropdown";
+import ConfirmDialog from "@/components/ui/ConfirmDialog";
 
 // Entities come from the admin's own My Profile → Entities list — the ones they
 // captured during onboarding. Assigning them here says which the member works on.
 type AssignableEntity = { id: number; name: string; code: string };
+type AssignedEntity = AssignableEntity & { login_ids: string[] };
 
 // ── Role definitions ───────────────────────────────────────────────────────
 const ROLES = [
@@ -83,6 +85,9 @@ type UserRow = {
   created_at: string;
   entity_ids?: number[];
   entity_names?: string[];
+  /** The assignments with what tells them apart: the code, and the login IDs / IATA
+   *  numbers under each entity — the same ones this member sees in their My Profile. */
+  entities?: AssignedEntity[];
 };
 
 // ── role badge ─────────────────────────────────────────────────────────────
@@ -274,6 +279,98 @@ function UserModal({
   );
 }
 
+/** "16 Sep 2026" — a readable date instead of the raw timestamp the API sends.
+ *  Safe against a bad value: an unparseable date is shown as it arrived. */
+function formatDate(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? iso
+    : d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+}
+
+/** Which entities this member works on — by NAME and CODE.
+ *
+ *  The code is not decoration: a group's entities routinely share a name (three called
+ *  "yatra"), so the name alone cannot say which ones were assigned. */
+function EntitiesCell({ user }: { user: UserRow }) {
+  // An older response carried names only; still show something rather than a dash.
+  const list: AssignedEntity[] = user.entities?.length
+    ? user.entities
+    : (user.entity_names ?? []).map((name, i) => ({ id: -i - 1, name, code: "", login_ids: [] }));
+
+  if (!list.length) return <span className="text-xs text-gray-300">—</span>;
+  return (
+    <div className="flex flex-col items-start gap-1">
+      {list.map(e => (
+        <span key={e.id}
+          className="inline-flex items-center gap-1 rounded-md border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-semibold text-blue-800 whitespace-nowrap">
+          <Building2 className="w-2.5 h-2.5 text-blue-400" />
+          {e.name}
+          {e.code && <span className="font-mono text-blue-500">· {e.code}</span>}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/** The login IDs / IATA numbers that come with those entities.
+ *
+ *  A column of its own, because it answers a different question from Entities — "what can
+ *  this person actually book on" — and because one entity can hold many. They are not
+ *  assigned separately: they follow the entity, so this column is always a consequence of
+ *  the one before it. Each chip carries its entity's code when the member has more than
+ *  one entity, so a number is never ambiguous. */
+function LoginIdsCell({ user }: { user: UserRow }) {
+  const entities = user.entities ?? [];
+  if (!entities.length) return <span className="text-xs text-gray-300">—</span>;
+
+  const all = entities.flatMap(e => e.login_ids.map(login => ({ login, code: e.code })));
+  if (!all.length) {
+    return <span className="text-[10px] text-gray-400">No login IDs yet</span>;
+  }
+
+  const SHOWN = 4;
+  const extra = all.length - SHOWN;
+  const showCode = entities.length > 1;
+  return (
+    <div className="flex flex-wrap gap-1 max-w-64"
+      title={all.map(a => `${a.code}: ${a.login}`).join("\n")}>
+      {all.slice(0, SHOWN).map(a => (
+        <span key={`${a.code}-${a.login}`}
+          className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] font-mono text-slate-700 whitespace-nowrap">
+          {showCode && <span className="font-sans text-[9px] font-semibold text-slate-400">{a.code}</span>}
+          {a.login}
+        </span>
+      ))}
+      {extra > 0 && (
+        <span className="inline-flex items-center rounded-md border border-slate-200 bg-white px-1.5 py-0.5 text-[10px] font-medium text-slate-500">
+          +{extra} more
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** One role tile above the table — also the filter for that role. */
+function RoleStat({ label, count, dot, active, onClick }: {
+  label: string; count: number; dot: string; active: boolean; onClick: () => void;
+}) {
+  return (
+    <button onClick={onClick}
+      className={`rounded-xl border px-3 py-2.5 text-left transition-all ${
+        active
+          ? "border-[#1e3a5f] bg-[#1e3a5f]/[0.04] ring-1 ring-[#1e3a5f]"
+          : "border-gray-200 bg-white hover:border-gray-300 hover:shadow-sm"
+      }`}>
+      <div className="flex items-center gap-1.5 min-w-0">
+        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dot}`} />
+        <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide truncate">{label}</p>
+      </div>
+      <p className="text-xl font-bold text-gray-900 mt-1 leading-none">{count}</p>
+    </button>
+  );
+}
+
 // ── main page ──────────────────────────────────────────────────────────────
 export default function UserManagementPage() {
   const [users, setUsers]           = useState<UserRow[]>([]);
@@ -284,6 +381,8 @@ export default function UserManagementPage() {
   const [statusFilter, setStatus]   = useState<"all" | "active" | "inactive">("all");
   const [modal, setModal]           = useState<Partial<UserRow> | null | false>(false);
   const [menuOpen, setMenuOpen]     = useState<number | null>(null);
+  // The member awaiting delete confirmation — the app's popup, not the browser's.
+  const [pendingDelete, setPendingDelete] = useState<UserRow | null>(null);
   const [entities, setEntities]     = useState<AssignableEntity[]>([]);
   const [entitiesLoading, setEntitiesLoading] = useState(true);
 
@@ -342,15 +441,12 @@ export default function UserManagementPage() {
   };
 
   // ── delete user ───────────────────────────────────────────────────────
-  const deleteUser = async (id: number) => {
-    if (!confirm("Delete this user? This cannot be undone.")) return;
-    setMenuOpen(null);
-    try {
-      await api.delete(`/users/${id}`);
-      setUsers(p => p.filter(u => u.id !== id));
-    } catch {
-      alert("Failed to delete user.");
-    }
+  /** Runs inside the popup: it stays open and shows the error if the delete fails. */
+  const confirmDelete = async () => {
+    if (!pendingDelete) return;
+    const id = pendingDelete.id;
+    await api.delete(`/users/${id}`);
+    setUsers(p => p.filter(u => u.id !== id));
   };
 
   // ── create / update user ──────────────────────────────────────────────
@@ -398,18 +494,23 @@ export default function UserManagementPage() {
     count: users.filter(u => u.role === r.value).length,
   }));
 
+  const filtersOn = roleFilter !== "all" || statusFilter !== "all" || search.trim() !== "";
+  const COLUMNS = ["User", "Role", "Department", "Entities", "Login IDs / IATA", "Status", "Created", "Actions"];
+
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
 
       {/* ── Header ─────────────────────────────────────────────────────── */}
-      <div className="flex items-start justify-between">
+      <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-0.5">Admin</p>
           <h1 className="text-xl font-bold text-gray-900">User Management</h1>
-          <p className="text-xs text-gray-500 mt-0.5">Manage system users, assign roles and control access</p>
+          <p className="text-xs text-gray-500 mt-0.5">
+            Add people to this workspace, give them a role, and choose which entities they work on.
+          </p>
         </div>
-        <div className="flex gap-2">
-          <button onClick={fetchUsers} disabled={loading}
+        <div className="flex items-center gap-2">
+          <button onClick={fetchUsers} disabled={loading} title="Refresh"
             className="flex items-center gap-1.5 bg-white border border-gray-200 text-gray-600 px-3 py-2 rounded-lg text-xs font-medium hover:bg-gray-50 disabled:opacity-50">
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`}/>
           </button>
@@ -419,122 +520,130 @@ export default function UserManagementPage() {
             </span>
           ) : (
             <button onClick={() => setModal(null)}
-              className="flex items-center gap-1.5 bg-[#1e3a5f] text-white px-3.5 py-2 rounded-lg text-xs font-medium hover:bg-[#16304f]">
+              className="flex items-center gap-1.5 text-white px-4 py-2 rounded-lg text-xs font-semibold shadow-sm"
+              style={{ background: "linear-gradient(135deg, #1e4d8c, #16304f)" }}>
               <Plus className="w-3.5 h-3.5"/> Add User
             </button>
           )}
         </div>
       </div>
 
-      {/* ── Role stats ─────────────────────────────────────────────────── */}
-      <div className="grid grid-cols-6 gap-2">
+      {/* ── Role tiles — also the role filter ──────────────────────────── */}
+      <div className="grid gap-2 grid-cols-2 sm:grid-cols-4 xl:grid-cols-7">
+        <RoleStat label="All users" count={users.length} dot="bg-slate-400"
+          active={roleFilter === "all"} onClick={() => setRoleFilter("all")} />
         {stats.map(r => (
-          <button key={r.value} onClick={() => setRoleFilter(roleFilter === r.value ? "all" : r.value)}
-            className={`rounded-xl border px-3 py-2.5 text-center transition-all ${
-              roleFilter === r.value ? "ring-2 ring-[#1e3a5f] ring-offset-1" : "hover:shadow-sm"
-            } ${r.color}`}>
-            <p className="text-xl font-bold">{r.count}</p>
-            <p className="text-[10px] font-medium mt-0.5 leading-snug">{r.label}</p>
-          </button>
+          <RoleStat key={r.value} label={r.label} count={r.count} dot={r.dot}
+            active={roleFilter === r.value}
+            onClick={() => setRoleFilter(roleFilter === r.value ? "all" : r.value)} />
         ))}
       </div>
 
-      {/* ── Filters + table ─────────────────────────────────────────────── */}
-      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+      {/* ── Toolbar + table ─────────────────────────────────────────────── */}
+      <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
 
-        {/* toolbar */}
-        <div className="px-4 py-3 border-b border-gray-100 flex items-center gap-2 flex-wrap">
-          <div className="relative flex-1 min-w-48">
+        <div className="px-4 py-3 border-b border-gray-100 flex flex-wrap items-center gap-2">
+          <div className="relative flex-1 min-w-56">
             <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400"/>
-            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by name or email..."
-              className="w-full pl-8 pr-3 py-1.5 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-1 focus:ring-blue-400"/>
+            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by name or email…"
+              className="w-full pl-8 pr-3 py-2 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-sky-400"/>
           </div>
 
+          <SlidersHorizontal className="w-3.5 h-3.5 text-gray-400" />
           <select value={roleFilter} onChange={e => setRoleFilter(e.target.value as RoleValue | "all")}
-            className="border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs text-gray-700 bg-white focus:outline-none focus:ring-1 focus:ring-blue-400">
-            <option value="all">All Roles</option>
+            className="border border-gray-200 rounded-lg px-2.5 py-2 text-xs text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-sky-400">
+            <option value="all">All roles</option>
             {ROLES.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
           </select>
 
           <select value={statusFilter} onChange={e => setStatus(e.target.value as typeof statusFilter)}
-            className="border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs text-gray-700 bg-white focus:outline-none focus:ring-1 focus:ring-blue-400">
-            <option value="all">All Status</option>
+            className="border border-gray-200 rounded-lg px-2.5 py-2 text-xs text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-sky-400">
+            <option value="all">All status</option>
             <option value="active">Active</option>
             <option value="inactive">Inactive</option>
           </select>
 
-          <span className="text-[11px] text-gray-400 ml-auto">{filtered.length} user{filtered.length !== 1 ? "s" : ""}</span>
+          <div className="ml-auto flex items-center gap-2">
+            {filtersOn && (
+              <button onClick={() => { setSearch(""); setRoleFilter("all"); setStatus("all"); }}
+                className="flex items-center gap-1 text-[11px] font-semibold text-gray-500 hover:text-gray-700">
+                <X className="w-3 h-3" /> Clear filters
+              </button>
+            )}
+            <span className="text-[11px] text-gray-400 whitespace-nowrap">
+              {filtered.length} of {users.length} user{users.length !== 1 ? "s" : ""}
+            </span>
+          </div>
         </div>
 
-        {/* table */}
         <div className="overflow-x-auto">
-          <table className="w-full">
+          <table className="w-full min-w-[1100px]">
             <thead>
               <tr style={{ background: "#1e3a5f" }}>
-                {["User", "Role", "Department", "Entities", "Status", "Created", "Actions"].map(h => (
-                  <th key={h} className="px-4 py-2.5 text-left text-[10px] font-semibold text-white uppercase tracking-wider whitespace-nowrap">
+                {COLUMNS.map(h => (
+                  <th key={h} className="px-4 py-3 text-left text-[10px] font-semibold text-white/90 uppercase tracking-wider whitespace-nowrap">
                     {h}
                   </th>
                 ))}
               </tr>
             </thead>
-            <tbody>
+            <tbody className="divide-y divide-gray-100">
               {loading ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-12 text-center text-xs text-gray-400">
+                  <td colSpan={COLUMNS.length} className="px-4 py-14 text-center text-xs text-gray-400">
                     <RefreshCw className="w-4 h-4 animate-spin mx-auto mb-2 text-gray-300"/>
-                    Loading users...
+                    Loading users…
                   </td>
                 </tr>
               ) : apiError ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-12 text-center text-xs text-red-400">{apiError}</td>
+                  <td colSpan={COLUMNS.length} className="px-4 py-14 text-center text-xs text-red-500">{apiError}</td>
                 </tr>
               ) : filtered.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-12 text-center text-xs text-gray-400">No users found.</td>
+                  <td colSpan={COLUMNS.length} className="px-4 py-14 text-center">
+                    <Users className="w-7 h-7 mx-auto mb-2 text-gray-200" />
+                    <p className="text-xs text-gray-500 font-medium">
+                      {filtersOn ? "No users match these filters." : "No users yet."}
+                    </p>
+                    {filtersOn
+                      ? <button onClick={() => { setSearch(""); setRoleFilter("all"); setStatus("all"); }}
+                          className="mt-1 text-[11px] font-semibold text-sky-600 hover:text-sky-800">Clear filters</button>
+                      : !isIndividual && (
+                          <p className="text-[11px] text-gray-400 mt-1">Use <span className="font-semibold">Add User</span> to invite your team.</p>
+                        )}
+                  </td>
                 </tr>
-              ) : filtered.map((u, idx) => (
-                <tr key={u.id}
-                  className={`border-b border-gray-100 hover:bg-gray-50/60 transition-colors ${idx % 2 === 0 ? "bg-white" : "bg-gray-50/30"}`}>
+              ) : filtered.map(u => (
+                <tr key={u.id} className="hover:bg-sky-50/40 transition-colors">
 
                   {/* user */}
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-2.5">
-                      <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 ${roleInfo(u.role).color}`}>
+                      <div className={`w-9 h-9 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0 border ${roleInfo(u.role).color}`}>
                         {u.full_name.split(" ").map(n => n[0]).join("").slice(0, 2).toUpperCase()}
                       </div>
-                      <div>
-                        <p className="text-[12px] font-semibold text-gray-800">{u.full_name}</p>
-                        <p className="text-[10px] text-gray-400">{u.email}</p>
+                      <div className="min-w-0">
+                        <p className="text-[12px] font-semibold text-gray-900 truncate">{u.full_name}</p>
+                        <p className="text-[10px] text-gray-400 truncate">{u.email}</p>
                       </div>
                     </div>
                   </td>
 
-                  {/* role */}
-                  <td className="px-4 py-3">
-                    <RoleBadge role={u.role}/>
-                  </td>
+                  <td className="px-4 py-3"><RoleBadge role={u.role}/></td>
 
-                  {/* department */}
-                  <td className="px-4 py-3 text-xs text-gray-600">{u.department || "—"}</td>
+                  <td className="px-4 py-3 text-xs text-gray-600 whitespace-nowrap">{u.department || "—"}</td>
 
-                  {/* entities */}
-                  <td className="px-4 py-3">
-                    {u.entity_names?.length ? (
-                      <div className="flex flex-wrap gap-1 max-w-56">
-                        {u.entity_names.map(n => (
-                          <span key={n} className="inline-flex items-center bg-blue-50 text-blue-700 border border-blue-200 rounded px-1.5 py-0.5 text-[10px] font-medium">
-                            {n}
-                          </span>
-                        ))}
-                      </div>
-                    ) : <span className="text-xs text-gray-300">—</span>}
-                  </td>
+                  {/* which entities they work on … */}
+                  <td className="px-4 py-3"><EntitiesCell user={u} /></td>
+
+                  {/* … and the credentials those entities carry */}
+                  <td className="px-4 py-3"><LoginIdsCell user={u} /></td>
 
                   {/* status */}
                   <td className="px-4 py-3">
                     <button onClick={() => toggleActive(u.id)}
+                      title={u.is_active ? "Deactivate this user" : "Activate this user"}
                       className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border cursor-pointer transition-colors ${
                         u.is_active
                           ? "bg-green-50 text-green-600 border-green-200 hover:bg-green-100"
@@ -545,8 +654,7 @@ export default function UserManagementPage() {
                     </button>
                   </td>
 
-                  {/* created */}
-                  <td className="px-4 py-3 text-[11px] text-gray-500">{u.created_at}</td>
+                  <td className="px-4 py-3 text-[11px] text-gray-500 whitespace-nowrap">{formatDate(u.created_at)}</td>
 
                   {/* actions */}
                   <td className="px-4 py-3">
@@ -558,18 +666,18 @@ export default function UserManagementPage() {
                       </button>
                       <div className="relative">
                         <button onClick={() => setMenuOpen(menuOpen === u.id ? null : u.id)}
-                          className="p-1.5 hover:bg-gray-100 rounded-lg text-gray-400 transition-colors">
+                          className="p-1.5 hover:bg-gray-100 rounded-lg text-gray-400 transition-colors" title="More">
                           <MoreVertical className="w-3.5 h-3.5"/>
                         </button>
                         {menuOpen === u.id && (
-                          <div className="absolute right-0 mt-0.5 w-36 bg-white border border-gray-200 rounded-lg shadow-lg z-20 overflow-hidden">
+                          <div className="absolute right-0 mt-0.5 w-40 bg-white border border-gray-200 rounded-lg shadow-lg z-20 overflow-hidden">
                             <button onClick={() => { toggleActive(u.id); setMenuOpen(null); }}
                               className="w-full text-left px-3 py-2 text-xs text-gray-700 hover:bg-gray-50">
                               {u.is_active ? "Deactivate" : "Activate"}
                             </button>
-                            <button onClick={() => deleteUser(u.id)}
+                            <button onClick={() => { setPendingDelete(u); setMenuOpen(null); }}
                               className="w-full text-left px-3 py-2 text-xs text-red-500 hover:bg-red-50">
-                              Delete User
+                              Delete user
                             </button>
                           </div>
                         )}
@@ -581,26 +689,38 @@ export default function UserManagementPage() {
             </tbody>
           </table>
         </div>
+
+        {/* Entities and login IDs are assigned, not typed — say where they come from. */}
+        <div className="px-4 py-2.5 border-t border-gray-100 bg-gray-50/60 flex items-center gap-1.5">
+          <KeyRound className="w-3 h-3 text-gray-400 shrink-0" />
+          <p className="text-[10px] text-gray-500">
+            Login IDs / IATA numbers follow the entity — assign an entity and its credentials come with it.
+            Both are managed in <span className="font-semibold">My Profile</span> and are read-only for everyone else.
+          </p>
+        </div>
       </div>
 
-      {/* ── Role reference card ──────────────────────────────────────────── */}
-      <div className="bg-white rounded-xl border border-gray-200 px-4 py-3">
-        <div className="flex items-center gap-2 mb-3">
-          <Shield className="w-4 h-4 text-[#1e3a5f]"/>
-          <h2 className="text-xs font-bold text-gray-800 uppercase tracking-wide">Role Permissions Reference</h2>
-        </div>
-        <div className="grid grid-cols-3 gap-2">
+      {/* ── Role reference — folded away until asked for ─────────────────── */}
+      <details className="group bg-white rounded-2xl border border-gray-200 shadow-sm">
+        <summary className="flex items-center justify-between gap-2 px-4 py-3 cursor-pointer list-none">
+          <span className="flex items-center gap-2">
+            <Shield className="w-4 h-4 text-[#1e3a5f]"/>
+            <span className="text-xs font-bold text-gray-800 uppercase tracking-wide">Role permissions reference</span>
+          </span>
+          <ChevronDown className="w-4 h-4 text-gray-400 transition-transform group-open:rotate-180"/>
+        </summary>
+        <div className="px-4 pb-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
           {ROLES.map(r => (
-            <div key={r.value} className={`rounded-lg border px-3 py-2.5 ${r.color}`}>
+            <div key={r.value} className="rounded-xl border border-gray-200 bg-gray-50/60 px-3 py-2.5">
               <div className="flex items-center gap-1.5 mb-1">
                 <span className={`w-2 h-2 rounded-full ${r.dot}`}/>
-                <span className="text-[11px] font-bold">{r.label}</span>
+                <span className="text-[11px] font-bold text-gray-800">{r.label}</span>
               </div>
-              <p className="text-[10px] leading-snug opacity-80">{r.description}</p>
+              <p className="text-[10px] leading-snug text-gray-500">{r.description}</p>
             </div>
           ))}
         </div>
-      </div>
+      </details>
 
       {/* ── Modal ───────────────────────────────────────────────────────── */}
       {modal !== false && (
@@ -612,6 +732,24 @@ export default function UserManagementPage() {
           entities={entities}
           entitiesLoading={entitiesLoading}
         />
+      )}
+
+      {pendingDelete && (
+        <ConfirmDialog
+          title="Delete user"
+          confirmLabel="Delete user"
+          onConfirm={confirmDelete}
+          onClose={() => setPendingDelete(null)}
+        >
+          <p>
+            Delete <span className="font-semibold text-gray-900">{pendingDelete.full_name}</span>{" "}
+            <span className="text-gray-400">({pendingDelete.email})</span>? They lose access immediately.
+            This cannot be undone.
+          </p>
+          <p className="text-gray-400">
+            Their entity assignments go with them. The entities and login IDs themselves are not affected.
+          </p>
+        </ConfirmDialog>
       )}
 
       {/* close menus on outside click */}

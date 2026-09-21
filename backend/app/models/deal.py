@@ -170,6 +170,11 @@ class Deal(Base):
             "supplier_id IS NULL OR (deal_type = 'b2b' AND direction = 'inbound')",
             name="ck_deals_supplier",
         ),
+        # Mirrored from migration deal_vendor_agency_01 — same shape, same reason.
+        CheckConstraint(
+            "vendor_agency_id IS NULL OR (deal_type = 'b2b' AND direction = 'inbound')",
+            name="ck_deals_vendor_agency",
+        ),
     )
 
     id           : Mapped[int]       = mapped_column(BigInteger, primary_key=True)
@@ -246,6 +251,27 @@ class Deal(Base):
     # backstop against direct SQL. SET NULL would quietly unlink a live contract.
     supplier_id : Mapped[int | None] = mapped_column(
         Integer, ForeignKey("suppliers.id", ondelete="RESTRICT"), nullable=True, index=True,
+    )
+    # WHICH AGENCY MASTER ROW an inbound B2B deal was picked from — the agency as our
+    # VENDOR. The Supplier Name field now lists the user's own agencies (User master →
+    # Agency Master) rather than the global supplier master.
+    #
+    # THIS IS NOT WHAT THE DEAL IS MATCHED BY. `supplier_id` above still is, unchanged: the
+    # API copies it through from `agencies.supplier_id` when the agency is picked, so the
+    # commission matcher keeps comparing supplier to supplier and never sees this column.
+    # What this adds is the thing a name cannot say — which BRANCH ON WHICH CHANNEL. Lords
+    # Delhi GDS and Lords Delhi LCC share a name and a supplier_id but are two rows, each with
+    # its own terms and its own `vendor_service_charge_*`.
+    #
+    # NOT `agency_id` either: that is the OUTGOING scope ("we sell TO them"). This is the
+    # opposite direction, and ck_deals_vendor_agency keeps it on inbound B2B deals only.
+    #
+    # NULLABLE: deals written before this, and deals on a supplier no agency matches, keep
+    # working on `supplier_name` + `supplier_id` exactly as before. RESTRICT, like
+    # `agency_id`: DELETE /agencies/{id} answers a readable 409 instead of detaching a
+    # live contract from the agency it was agreed with.
+    vendor_agency_id : Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("agencies.id", ondelete="RESTRICT"), nullable=True, index=True,
     )
 
     # ── LCC fields (airline or B2B can be LCC) ───────────────────────────────
