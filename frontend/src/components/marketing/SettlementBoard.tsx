@@ -1,5 +1,5 @@
 import FlipText from "./FlipText";
-import { Counter, Reveal } from "./Reveal";
+import { Reveal } from "./Reveal";
 
 type Row = {
   carrier: string;
@@ -15,13 +15,6 @@ const ROWS: Row[] = [
   { carrier: "QR 157", doc: "BSP 14-3", cycle: "01-07 JUL", status: "RECONCILED", tone: "text-emerald-300" },
   { carrier: "AI 098", doc: "LCC Q3", cycle: "01-07 JUL", status: "MATCHING", tone: "text-accent-300" },
   { carrier: "ET 071", doc: "BSP 14-3", cycle: "01-07 JUL", status: "RECONCILED", tone: "text-emerald-300" },
-];
-
-const STATS = [
-  { value: 200, suffix: "+", label: "Airline codes" },
-  { value: 2000, suffix: "+", label: "Pages per statement" },
-  { value: 99.9, suffix: "%", decimals: 1, label: "Reconciliation accuracy" },
-  { value: 0, prefix: "₹", label: "Variance, when it's right" },
 ];
 
 const CELL = "h-6 w-[0.92rem] text-[11px] sm:h-7 sm:w-[1.08rem] sm:text-[13px]";
@@ -112,22 +105,6 @@ export default function SettlementBoard() {
         ))}
       </div>
 
-      {/* the numbers under the board */}
-      <div className="mt-7 grid grid-cols-2 gap-x-6 gap-y-6 border-t border-white/15 pt-6 lg:grid-cols-4">
-        {STATS.map((s) => (
-          <div key={s.label}>
-            <p className="text-2xl font-bold tracking-tight text-white sm:text-3xl">
-              <Counter
-                value={s.value}
-                prefix={s.prefix}
-                suffix={s.suffix}
-                decimals={s.decimals ?? 0}
-              />
-            </p>
-            <p className="mt-1 text-[11px] leading-relaxed text-brand-200/70">{s.label}</p>
-          </div>
-        ))}
-      </div>
     </Reveal>
   );
 }

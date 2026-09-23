@@ -57,14 +57,14 @@ export default function LoginPage() {
   // `focus:-translate-y-px` is the whole trick behind the field feeling responsive: the
   // ring says "selected", the one-pixel lift says "and it moved when you touched it".
   const field =
-    "peer w-full rounded-xl border border-slate-200 bg-white py-3 pl-11 pr-4 text-sm text-slate-900 shadow-sm outline-none transition-all duration-200 placeholder:text-slate-400 hover:border-slate-300 focus:-translate-y-px focus:border-brand-500 focus:ring-4 focus:ring-brand-500/12";
+    "peer w-full rounded-lg border border-line bg-white py-3 pl-11 pr-4 text-sm text-slate-900 shadow-sm outline-none transition-all duration-200 placeholder:text-slate-400 hover:border-brand-200 focus:-translate-y-px focus:border-brand-500 focus:ring-4 focus:ring-brand-500/12";
   const icon =
     "pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400 transition-colors peer-focus:text-brand-700";
 
   return (
     <div>
       <div className="animate-fade-up">
-        <h1 className="text-[1.75rem] font-bold tracking-tight text-slate-900">Welcome back</h1>
+        <h1 className="text-[1.75rem] font-semibold tracking-tight text-brand-900">Welcome back</h1>
         <p className="mt-1.5 text-sm text-slate-500">
           Sign in to pick up where your last statement left off.
         </p>
@@ -124,7 +124,7 @@ export default function LoginPage() {
 
         {/* error */}
         {error && (
-          <div className="animate-shake flex items-start gap-2.5 rounded-xl border border-red-200 bg-red-50 px-3.5 py-3">
+          <div className="animate-shake flex items-start gap-2.5 rounded-lg border border-red-200 bg-red-50 px-3.5 py-3">
             <TriangleAlert className="mt-px h-4 w-4 shrink-0 text-red-500" />
             <div className="min-w-0">
               <p className="text-xs leading-relaxed text-red-700">{error}</p>
@@ -149,7 +149,7 @@ export default function LoginPage() {
         <button
           type="submit"
           disabled={loading}
-          className="btn-sheen group flex w-full items-center justify-center gap-2 rounded-xl py-3.5 text-sm font-semibold text-white shadow-lg shadow-brand-700/25 transition-all hover:-translate-y-0.5 hover:shadow-xl hover:shadow-brand-700/35 disabled:translate-y-0 disabled:opacity-60 disabled:shadow-none"
+          className="btn-sheen group flex w-full items-center justify-center gap-2 rounded-lg py-3.5 text-sm font-semibold text-white shadow-lg shadow-brand-700/25 transition-all hover:-translate-y-0.5 hover:shadow-xl hover:shadow-brand-700/35 disabled:translate-y-0 disabled:opacity-60 disabled:shadow-none"
           style={{ background: "var(--brand-grad)" }}
         >
           {loading ? (

@@ -1,4 +1,17 @@
-"""Every priced line, from every source, in the shape the income board reads.
+"""Every statement line, from every source, in the shape the dashboards read.
+
+TWO BOARDS, ONE TABLE. `/dashboard/income` asks what the PRICED statements earned;
+`/dashboard/revenue` asks what every loaded statement SOLD and what that sale earned.
+They are the same rows seen through two predicates, so they share this table rather than
+two projections that would drift:
+
+  * the income board filters `priced = TRUE`, and its counts keep meaning priced lines;
+  * the revenue board filters `counts_in_net = TRUE`, which is what stops a statement
+    that merely restates another one from being added to a sale total twice.
+
+A row is written whether or not commission has ever been run on it. `priced=False` with
+a NULL `incentive` says "not costed yet", which is a different claim from an unmatched
+row, and both are different from a confirmed zero — see invariant 1.
 
 WHY THIS TABLE EXISTS. Commission is already calculated correctly, but two structural
 facts make a dashboard impossible to write without projecting it first:
@@ -22,7 +35,7 @@ the engines, which is why the dimension ids carry NO foreign keys: a derived rep
 must never be the reason a supplier or an airline cannot be deleted. `tenant_id` and
 `created_by_id` keep theirs, because those are the scope, not a dimension.
 
-THE FIVE INVARIANTS THIS TABLE EXISTS TO ENFORCE
+THE SEVEN INVARIANTS THIS TABLE EXISTS TO ENFORCE
 
   1. `incentive` is NULL, never 0, when `status='needs_data'`. NULL means a deal
      matched but pays on something the document does not print, so nothing is claimed;
@@ -46,13 +59,36 @@ THE FIVE INVARIANTS THIS TABLE EXISTS TO ENFORCE
      id. 141 of 2,340 supplier names repeat across branches, so grouping on the name
      merges branches that bill separately; and BSP's carrier name is free text, so
      grouping on it splits one airline across several rows.
+  6. `txn_class` is read through EACH SOURCE'S OWN vocabulary, never through one. This
+     one was learned the hard way: dimensions.txn_class_sql was generated from BSP's
+     transaction types alone, while commission_calculations.transaction_type holds a
+     ticket STATUS for tp-gds/tp-lcc ("CONFIRMED", "REFUNDED") and a bill_kind for
+     lcc-detailed ("sale", "refund"). None of those is in BSP's set, so every non-BSP
+     row classified as 'other' and `gross_revenue()` — which filters on sale|refund —
+     silently returned BSP-only figures from the day the table shipped. Nothing errored.
+     Each arm now derives its CASE from its own engine's constants, and a test feeds the
+     Python classifier and the compiled SQL the same literals per source.
+  7. `counts_in_net` is the Report Download's rule set, not a second opinion. The
+     vocabulary and the reasons are services/report_download/columns.COUNTS_IN_NET_RULES,
+     rendered into SQL here. Two independently-written definitions of "does this line
+     count" would give finance two authoritative sale figures and no way to tell which
+     is right; a reconciliation test runs both over one batch for that reason.
 
-SIGN IS NOT STORED. `direction` is a discriminator, never a multiplier, and no measure
-is negated on the way in. The customer side's `incentive` is a commission we PAY, but
-it is stored exactly as the ticket screen shows it so that a drill-through matches byte
-for byte. The sign is applied once, in the aggregate, in services/income_board/
-measures.py. A stored `net_income` or `direction_sign` column would be applied twice by
-the first person who forgot it already had been.
+THE DIRECTION SIGN IS NOT STORED. `direction` is a discriminator, never a multiplier,
+and no measure is negated on the way in for it. The customer side's `incentive` is a
+commission we PAY, but it is stored exactly as the ticket screen shows it so that a
+drill-through matches byte for byte. That sign is applied once, in the aggregate, in
+services/income_board/measures.py. A stored `net_income` or `direction_sign` column
+would be applied twice by the first person who forgot it already had been.
+
+THE TRANSACTION SIGN IS A DIFFERENT THING AND IT *IS* NORMALISED HERE. A refund must
+reduce gross, and the sources disagree about how they say so: BSP and LCC Detailed print
+a negative, while NDC, TGQ, the memos and every third-party type print a magnitude and
+leave the direction to the transaction type — that is exactly the `sign_mode`
+`native`/`type_signed` split in services/report_download/registry.py. The projection
+applies `columns.TYPE_SIGN` to the type-signed arms so that every row reaching this table
+is signed the same way. Not doing so is not a cosmetic bug: a refund would ADD to the
+sale total, and the total would still look plausible.
 
 NOT STORED, DELIBERATELY: any rate (non-additive), any accrual figure (services/
 plb_accrual.py remains the accrual authority), and any `ticket_id`. The vendor/customer
@@ -66,7 +102,7 @@ from datetime import date, datetime
 
 from sqlalchemy import (
     BigInteger, Boolean, Date, DateTime, ForeignKey, Index, Integer, Numeric,
-    SmallInteger, String, UniqueConstraint, func,
+    SmallInteger, String, UniqueConstraint, func, text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -84,14 +120,30 @@ KIND_AIRLINE = "airline"      # bsp, lcc-detailed: the carrier IS the counterpar
 KIND_SUPPLIER = "supplier"    # tp-gds, tp-lcc: a consolidator we bought through
 KIND_CUSTOMER = "customer"    # the selling side (phase 2)
 
-# `source` — which store the row was projected from.
+# `source` — which store the row was projected from. Spelled identically to
+# services/report_download/registry.SOURCES[].key, so the two registries can be asserted
+# equal rather than kept equal by hand; `test_income_board` does exactly that.
 SOURCE_BSP = "bsp"
+SOURCE_NDC = "ndc"
 SOURCE_TP_GDS = "tp-gds"
 SOURCE_TP_LCC = "tp-lcc"
+SOURCE_TP_API = "tp-api"
 SOURCE_LCC_DETAILED = "lcc-detailed"
 SOURCE_TICKETS = "uploaded-ticket"
 
-VENDOR_SOURCES = (SOURCE_BSP, SOURCE_TP_GDS, SOURCE_TP_LCC, SOURCE_LCC_DETAILED)
+VENDOR_SOURCES = (SOURCE_BSP, SOURCE_NDC, SOURCE_TP_GDS, SOURCE_TP_LCC,
+                  SOURCE_TP_API, SOURCE_LCC_DETAILED)
+
+# The six statement types whose gross IS the agency's sale. Everything else a tenant
+# uploads — TGQ HMPR, ADM/ACM/RA, the four LCC ledgers — restates one of these six: a TGQ
+# line is the same ticket as its BSP row, a memo counts through the BSP ADMA row, a flown
+# report line is the same booking as its LCC Detailed row. Those are projected too (so
+# they can be read airline-wise) but always with `counts_in_net=False`, which is what
+# keeps them out of every sale total. The rule set is
+# services/report_download/columns.COUNTS_IN_NET_RULES, and this tuple is the same
+# decision expressed as the sources that survive it.
+SALE_SOURCES = (SOURCE_BSP, SOURCE_NDC, SOURCE_LCC_DETAILED,
+                SOURCE_TP_GDS, SOURCE_TP_LCC, SOURCE_TP_API)
 
 # `txn_class` — what kind of event the line is. Derived from the transaction-type sets
 # in services/bsp_commission.py, which services/plb_accrual.py already imports the same
@@ -112,7 +164,14 @@ MATCHED_STATUSES = ("calculated", "reversed")
 
 # Bumped when the projection's arithmetic changes, so a half-reprojected table is
 # visible rather than quietly inconsistent.
-PROJECTION_VERSION = "1.0"
+#
+# 2.0 — the table stopped being "every priced line" and became every statement line.
+# Three things changed at once and none of them is backward compatible: `source_row_id`
+# now points at the STATEMENT row rather than the calculation row for tp-gds / tp-lcc /
+# lcc-detailed; unpriced rows are projected, carrying `priced=False` and a NULL
+# incentive; and ndc / tp-api joined the arms. The migration empties the table for that
+# reason — every row is derived, so the cost is one Rebuild.
+PROJECTION_VERSION = "2.0"
 
 
 class IncomeBoardRow(Base):
@@ -124,26 +183,54 @@ class IncomeBoardRow(Base):
         UniqueConstraint("tenant_id", "created_by_id", "source", "source_row_id",
                          name="uq_income_board_source_row"),
 
-        # Per-user reads (the default scope, matching every other screen).
+        # ── The income board's six, all PARTIAL on `priced` ───────────────────
+        # Every one of these exists for /dashboard/income, and every read there now
+        # carries `priced = TRUE`. Partial rather than adding the column to the key: the
+        # table roughly doubles once unpriced statements land in it, and an index that
+        # only ever serves priced reads should not carry the other half.
         Index("ix_income_board_airline",
-              "tenant_id", "created_by_id", "direction", "issue_ym", "airline_id"),
+              "tenant_id", "created_by_id", "direction", "issue_ym", "airline_id",
+              postgresql_where=text("priced")),
         Index("ix_income_board_supplier",
-              "tenant_id", "created_by_id", "direction", "issue_ym", "supplier_id"),
+              "tenant_id", "created_by_id", "direction", "issue_ym", "supplier_id",
+              postgresql_where=text("priced")),
         Index("ix_income_board_travel",
-              "tenant_id", "created_by_id", "direction", "travel_ym"),
+              "tenant_id", "created_by_id", "direction", "travel_ym",
+              postgresql_where=text("priced")),
         Index("ix_income_board_status",
-              "tenant_id", "created_by_id", "direction", "status"),
+              "tenant_id", "created_by_id", "direction", "status",
+              postgresql_where=text("priced")),
 
         # Whole-agency reads. A composite leading with created_by_id cannot serve a
         # query that omits it, so the tenant-wide mode needs its own pair. Only the two
         # dimensions the board actually groups by get one; travel and status fall back
         # to the scope index, which is acceptable on the rarer path.
         Index("ix_income_board_tenant_airline",
-              "tenant_id", "direction", "issue_ym", "airline_id"),
+              "tenant_id", "direction", "issue_ym", "airline_id",
+              postgresql_where=text("priced")),
         Index("ix_income_board_tenant_supplier",
-              "tenant_id", "direction", "issue_ym", "supplier_id"),
+              "tenant_id", "direction", "issue_ym", "supplier_id",
+              postgresql_where=text("priced")),
 
-        # Re-projection and the orphan sweep delete by this.
+        # ── The revenue board's two, PARTIAL on `counts_in_net` ───────────────
+        # Sale by statement type and month, and sale by carrier. Partial for the mirror
+        # of the reason above: a revenue read never wants a row that restates another
+        # one, and the restating sources (TGQ, the memos, the LCC ledgers) are bulky.
+        # No `created_by_id`: this board defaults to agency scope.
+        Index("ix_income_board_sale",
+              "tenant_id", "direction", "issue_ym", "source",
+              postgresql_where=text("counts_in_net")),
+        Index("ix_income_board_sale_airline",
+              "tenant_id", "direction", "airline_id", "issue_ym",
+              postgresql_where=text("counts_in_net")),
+
+        # The NDC-settled-through-BSP join. Both columns NULL on a document that cannot
+        # be linked, and Postgres leaves NULLs out of the scan, so the index is only as
+        # big as the rows that can actually match.
+        Index("ix_income_board_doc", "tenant_id", "doc_code", "doc_serial"),
+
+        # Re-projection and the orphan sweep delete by this. NOT partial: it has to find
+        # every row of a batch, priced or not, counted or not.
         Index("ix_income_board_batch", "tenant_id", "source", "batch_id"),
     )
 
@@ -217,10 +304,38 @@ class IncomeBoardRow(Base):
     txn_type: Mapped[str | None] = mapped_column(String(24), nullable=True)
     txn_class: Mapped[str] = mapped_column(
         String(12), nullable=False, server_default=TXN_OTHER)
+    # Air | Hotel | Train | Bus | Car. NULL means air, and only tp-api ever sets it:
+    # one aggregator file carries five products side by side and a hotel night has no
+    # carrier, so an airline-wise view has to be able to say "not carrier-attributed"
+    # rather than bucket it beside a genuine resolution failure.
+    product: Mapped[str | None] = mapped_column(String(12), nullable=True)
+
+    # ── May this row enter a sale total? ─────────────────────────────────────
+    # PER ROW, NOT PER SOURCE, and that is the whole reason it is a column. An LCC
+    # payment movement with no fare, a cancelled aggregator booking and the statement's
+    # own footer line all sit in the same table beside real sales, and an NDC ticket
+    # that also settled through BSP is counted once on the BSP side. The rule set is
+    # services/report_download/columns.COUNTS_IN_NET_RULES; `counts_in_net_reason` holds
+    # whichever NET_* string applied, so the screen can say WHY a row is out instead of
+    # silently omitting it. Default TRUE: a row is money until something says otherwise.
+    counts_in_net: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="true")
+    counts_in_net_reason: Mapped[str | None] = mapped_column(String(60), nullable=True)
 
     # ── Money ────────────────────────────────────────────────────────────────
-    # Signed, as the document prints it: a refund is negative. 'printed' when the
-    # source stated a total, 'derived' when it was assembled from components.
+    # TOTALS ARE PER CURRENCY AND ARE NEVER CONVERTED OR ADDED ACROSS THEM — the rule
+    # services/report_download/summary.py already holds every report to. Without the
+    # column a board cannot honour it, and the failure is silent: two currencies simply
+    # add. BSP rows carry no currency of their own (theirs is on the summary header), so
+    # they are stamped 'INR' the way mappers/bsp.py already assumes, and `gross_source`
+    # records that it was assumed rather than read.
+    currency: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    # Signed so that a refund subtracts. Sources differ in how they say so and the
+    # projection normalises it: BSP, LCC Detailed and the LCC ledgers print their own
+    # sign, while NDC, TGQ, the memos and every third-party type print a magnitude and
+    # leave the direction to the transaction type (registry.sign_mode='type_signed').
+    # Both arrive here already signed. 'printed' when the source stated a total,
+    # 'derived' when it was assembled from components.
     gross_amount: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
     gross_source: Mapped[str | None] = mapped_column(String(12), nullable=True)
     fare_amount: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
@@ -233,6 +348,13 @@ class IncomeBoardRow(Base):
     incentive: Mapped[float | None] = mapped_column(Numeric(18, 2), nullable=True)
     # Invariant 2. Never added to `incentive`.
     iata_commission: Mapped[float | None] = mapped_column(Numeric(18, 2), nullable=True)
+    # {incentive_type: amount}, carried verbatim off commission_calculations /
+    # bsp_statement_rows. It is the only way "how much PLB did this airline earn" is a
+    # GROUP BY rather than a loop over every priced row in Python, and the keys are open
+    # on purpose — deal_incentives.incentive_type is a String, so a new incentive type
+    # must show up on the board without a code change. Its values always sum to
+    # `incentive` for a claimable row; it is NULL wherever `incentive` is.
+    incentive_breakdown: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     # Phase 2: the markup actually charged, off billings.line_items[] per line. NOT off
     # the invoice total — one invoice covers many tickets, and spreading its total onto
     # each would book the markup once per ticket.
@@ -251,6 +373,12 @@ class IncomeBoardRow(Base):
     variance_total: Mapped[float | None] = mapped_column(Numeric(18, 2), nullable=True)
 
     # ── Why the figure is what it is ─────────────────────────────────────────
+    # Has the commission engine ever seen this row? FALSE means the statement is loaded
+    # but has not been costed, so `incentive` is NULL for a reason that has nothing to
+    # do with the deal — which is a third thing, distinct from 'unmatched' (ran, matched
+    # no deal) and from a confirmed zero. The income board filters on it so its "priced
+    # lines" counts keep meaning what they meant before unpriced rows existed.
+    priced: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="pending")
     reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
     skipped_criteria: Mapped[list | None] = mapped_column(JSONB, nullable=True)
@@ -271,6 +399,20 @@ class IncomeBoardRow(Base):
     # norm_tn() materialised once. The column is free — the value is already in hand —
     # but it stays unindexed until phase 3 gives it a join to serve.
     ticket_key: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    # The document identity, split the way report_download/normalize.doc_key splits it:
+    # a 3-digit accounting code and a 10-digit serial, WITH the leading zeros kept.
+    #
+    # NOT `ticket_key`, and the difference is the whole point of the pair. `norm_tn`
+    # strips leading zeros, which is harmless when joining BSP to internal tickets but
+    # wrong for linking two vendor documents — "098 0123456789" and "098 123456789" are
+    # different documents, and normalize.py's header says so. The NDC-settled-through-BSP
+    # test joins on this pair; joining on `ticket_key` would over-match and zero out NDC
+    # sale that BSP never settled.
+    #
+    # NULL where the printed number is neither 13 digits nor a bare serial with a known
+    # carrier code — a document that cannot be linked, rather than one linked wrongly.
+    doc_code: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    doc_serial: Mapped[str | None] = mapped_column(String(10), nullable=True)
     pnr: Mapped[str | None] = mapped_column(String(40), nullable=True)
     pax_count: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default="1")
 

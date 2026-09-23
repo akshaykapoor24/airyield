@@ -303,5 +303,19 @@ async def _ingest(batch_id: str, tenant_id: int, user_id: int):
                 )
             logger.info("LCC batch %s completed: %d source lines, %d rows inserted, %d skipped",
                         batch_id, source_rows, inserted, skipped)
+
+            # The board's only hook for this type. `confirm` answers 202 and the ingest
+            # happens here, so a hook placed in the router would fire before a single row
+            # existed. Best effort, in its own transaction: the statement is committed and
+            # correct either way, and /dashboard/income/freshness reports a batch this
+            # missed.
+            from app.models.income_board import SOURCE_LCC_DETAILED
+            from app.services import income_board
+
+            async with db.begin():
+                await income_board.refresh(
+                    db, tenant_id=tenant_id, user_id=user_id,
+                    source=SOURCE_LCC_DETAILED, batch_id=batch_id,
+                )
     finally:
         await engine.dispose()

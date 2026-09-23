@@ -34,7 +34,7 @@ from app.models.ticket_adjustment import TicketAdjustment
 from app.models.airline_adjustment import AirlineADM, AirlineACM, AirlineRA, ADJUSTMENT_MODELS
 from app.models.statement_row import (
     TgqHmpr, Ndc, LccDi, LccDividedPnr, LccFlownReport, LccCtaBta,
-    ThirdPartyGds, ThirdPartyLcc, STATEMENT_MODELS,
+    ThirdPartyGds, ThirdPartyLcc, ThirdPartyApi, STATEMENT_MODELS,
 )
 from app.models.lcc_detailed import LccDetailed, LccDetailedBatch
 from app.models.lcc_detailed_batch_file import LccDetailedBatchFile
@@ -122,7 +122,7 @@ __all__ = [
     "TicketAdjustment",
     "AirlineADM", "AirlineACM", "AirlineRA", "ADJUSTMENT_MODELS",
     "TgqHmpr", "Ndc", "LccDi", "LccDividedPnr", "LccFlownReport", "LccCtaBta",
-    "ThirdPartyGds", "ThirdPartyLcc", "STATEMENT_MODELS",
+    "ThirdPartyGds", "ThirdPartyLcc", "ThirdPartyApi", "STATEMENT_MODELS",
     "LccDetailed", "LccDetailedBatch", "LccBatchAirlineId", "StatementBatchAirlineId",
     "StatementBatchSupplier", "StatementBatchBilling",
     "CommissionRun", "CommissionCalculation",

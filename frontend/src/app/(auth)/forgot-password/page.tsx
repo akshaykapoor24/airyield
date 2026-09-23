@@ -45,7 +45,7 @@ export default function ForgotPasswordPage() {
   };
 
   const field =
-    "peer w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-10 pr-4 text-sm text-slate-900 shadow-sm outline-none transition-all duration-200 placeholder:text-slate-400 hover:border-slate-300 focus:border-brand-500 focus:ring-4 focus:ring-brand-500/12";
+    "peer w-full rounded-lg border border-line bg-white py-2.5 pl-10 pr-4 text-sm text-slate-900 shadow-sm outline-none transition-all duration-200 placeholder:text-slate-400 hover:border-brand-200 focus:border-brand-500 focus:ring-4 focus:ring-brand-500/12";
   const icon =
     "pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400 transition-colors peer-focus:text-brand-700";
 
@@ -59,7 +59,7 @@ export default function ForgotPasswordPage() {
           </span>
         </div>
 
-        <h1 className="text-[1.75rem] font-bold tracking-tight text-slate-900">Check your email</h1>
+        <h1 className="text-[1.75rem] font-semibold tracking-tight text-brand-900">Check your email</h1>
         <p className="mt-2 text-sm leading-relaxed text-slate-500">{message}</p>
         <p className="mt-3 text-xs leading-relaxed text-slate-400">
           Didn&apos;t get it? Check your spam folder — the message comes from our system address.
@@ -68,7 +68,7 @@ export default function ForgotPasswordPage() {
         <div className="mt-7 space-y-3">
           <Link
             href="/login"
-            className="group flex w-full items-center justify-center gap-2 rounded-xl py-3 text-sm font-semibold text-white shadow-lg shadow-brand-500/25 transition-all hover:-translate-y-0.5"
+            className="group flex w-full items-center justify-center gap-2 rounded-lg py-3 text-sm font-semibold text-white shadow-lg shadow-brand-500/25 transition-all hover:-translate-y-0.5"
             style={{ background: "var(--brand-grad)" }}
           >
             Back to sign in
@@ -77,7 +77,7 @@ export default function ForgotPasswordPage() {
           <button
             onClick={() => { setSent(false); setError(""); }}
             disabled={cooldown > 0}
-            className="w-full rounded-xl border border-slate-200 py-3 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-60"
+            className="w-full rounded-lg border border-line py-3 text-sm font-semibold text-slate-700 transition-colors hover:bg-paper disabled:opacity-60"
           >
             {cooldown > 0 ? `Try another email in ${cooldown}s` : "Use a different email"}
           </button>
@@ -96,7 +96,7 @@ export default function ForgotPasswordPage() {
       </Link>
 
       <div className="animate-fade-up">
-        <h1 className="text-[1.75rem] font-bold tracking-tight text-slate-900">Forgot your password?</h1>
+        <h1 className="text-[1.75rem] font-semibold tracking-tight text-brand-900">Forgot your password?</h1>
         <p className="mt-1.5 text-sm text-slate-500">
           Enter the email you sign in with and we&apos;ll send you a link to choose a new password.
         </p>
@@ -118,7 +118,7 @@ export default function ForgotPasswordPage() {
         </div>
 
         {error && (
-          <div className="animate-shake flex items-start gap-2.5 rounded-xl border border-red-200 bg-red-50 px-3.5 py-3">
+          <div className="animate-shake flex items-start gap-2.5 rounded-lg border border-red-200 bg-red-50 px-3.5 py-3">
             <TriangleAlert className="mt-px h-4 w-4 shrink-0 text-red-500" />
             <p className="text-xs leading-relaxed text-red-700">{error}</p>
           </div>
@@ -126,7 +126,7 @@ export default function ForgotPasswordPage() {
 
         <button
           type="submit" disabled={sending}
-          className="group animate-fade-up flex w-full items-center justify-center gap-2 rounded-xl py-3.5 text-sm font-semibold text-white shadow-lg shadow-brand-500/25 transition-all hover:-translate-y-0.5 disabled:translate-y-0 disabled:opacity-60"
+          className="group animate-fade-up flex w-full items-center justify-center gap-2 rounded-lg py-3.5 text-sm font-semibold text-white shadow-lg shadow-brand-500/25 transition-all hover:-translate-y-0.5 disabled:translate-y-0 disabled:opacity-60"
           style={{ background: "var(--brand-grad)", animationDelay: "120ms" }}
         >
           {sending ? (

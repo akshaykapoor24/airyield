@@ -68,7 +68,7 @@ function ResetPasswordInner() {
         </p>
         <Link
           href="/forgot-password"
-          className="mt-6 flex w-full items-center justify-center gap-2 rounded-xl py-3 text-sm font-semibold text-white shadow-lg shadow-brand-500/25 transition-all hover:-translate-y-0.5"
+          className="mt-6 flex w-full items-center justify-center gap-2 rounded-lg py-3 text-sm font-semibold text-white shadow-lg shadow-brand-500/25 transition-all hover:-translate-y-0.5"
           style={{ background: "var(--brand-grad)" }}
         >
           Request a reset link <ArrowRight className="h-4 w-4" />
@@ -92,7 +92,7 @@ function ResetPasswordInner() {
         </p>
         <Link
           href="/login"
-          className="group mt-6 flex w-full items-center justify-center gap-2 rounded-xl py-3 text-sm font-semibold text-white shadow-lg shadow-brand-500/25 transition-all hover:-translate-y-0.5"
+          className="group mt-6 flex w-full items-center justify-center gap-2 rounded-lg py-3 text-sm font-semibold text-white shadow-lg shadow-brand-500/25 transition-all hover:-translate-y-0.5"
           style={{ background: "var(--brand-grad)" }}
         >
           Continue to sign in
@@ -105,13 +105,13 @@ function ResetPasswordInner() {
   return (
     <div>
       <div className="animate-fade-up">
-        <h1 className="text-[1.75rem] font-bold tracking-tight text-slate-900">Choose a new password</h1>
+        <h1 className="text-[1.75rem] font-semibold tracking-tight text-brand-900">Choose a new password</h1>
         <p className="mt-1.5 text-sm text-slate-500">
           Pick something you haven&apos;t used before. This link works only once.
         </p>
       </div>
 
-      <div className="mt-5 flex items-start gap-2.5 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5">
+      <div className="mt-5 flex items-start gap-2.5 rounded-lg border border-line bg-paper px-3.5 py-2.5">
         <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-slate-500" />
         <p className="text-[11px] leading-snug text-slate-600">
           At least {MIN_PASSWORD_LENGTH} characters and at most {MAX_PASSWORD_BYTES} bytes, using
@@ -132,7 +132,7 @@ function ResetPasswordInner() {
         />
 
         {error && (
-          <div className="animate-shake flex items-start gap-2.5 rounded-xl border border-red-200 bg-red-50 px-3.5 py-3">
+          <div className="animate-shake flex items-start gap-2.5 rounded-lg border border-red-200 bg-red-50 px-3.5 py-3">
             <TriangleAlert className="mt-px h-4 w-4 shrink-0 text-red-500" />
             <div className="min-w-0">
               <p className="text-xs leading-relaxed text-red-700">{error}</p>
@@ -147,7 +147,7 @@ function ResetPasswordInner() {
 
         <button
           type="submit" disabled={saving}
-          className="group flex w-full items-center justify-center gap-2 rounded-xl py-3.5 text-sm font-semibold text-white shadow-lg shadow-brand-500/25 transition-all hover:-translate-y-0.5 disabled:translate-y-0 disabled:opacity-60"
+          className="group flex w-full items-center justify-center gap-2 rounded-lg py-3.5 text-sm font-semibold text-white shadow-lg shadow-brand-500/25 transition-all hover:-translate-y-0.5 disabled:translate-y-0 disabled:opacity-60"
           style={{ background: "var(--brand-grad)" }}
         >
           {saving ? (
