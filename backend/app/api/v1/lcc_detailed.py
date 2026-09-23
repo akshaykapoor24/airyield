@@ -40,8 +40,10 @@ from app.models.lcc_detailed import LccDetailed, LccDetailedBatch
 from app.models.lcc_detailed_batch_file import LccDetailedBatchFile
 from app.models.tenant_airline import TenantAirline
 from app.models.user import User
+from app.models.income_board import SOURCE_LCC_DETAILED
 from app.services import customer_resolver as cres
 from app.services import gcs
+from app.services import income_board
 from app.services import employee_from_passenger as emp
 from app.services import lcc_billing_projection as proj
 from app.services import lcc_merge
@@ -2209,6 +2211,13 @@ async def delete_batch(
         stored.append(batch.file_url)
 
     await db.delete(batch)
+    # The row cascade stops at this schema: `income_board_rows.source_row_id` carries no
+    # foreign key, so its projected sale and income survive a deleted upload unless they
+    # are dropped by hand.
+    await income_board.forget(
+        db, tenant_id=current_user.tenant_id, user_id=current_user.id,
+        source=SOURCE_LCC_DETAILED, batch_id=batch_id,
+    )
     await db.commit()
     for file_url in stored:
         # The old folder-derived preview name is still tried, so previews cached
@@ -2233,5 +2242,13 @@ async def delete_record(
     )
     if not obj:
         raise HTTPException(status_code=404, detail="Record not found.")
+    batch_id = obj.batch_id
     await db.delete(obj)
+    # The batch survives, so this is a re-project: the orphan sweep is what removes the
+    # row that just went. Without it the deleted line keeps its sale on the board.
+    await db.flush()
+    await income_board.refresh(
+        db, tenant_id=current_user.tenant_id, user_id=current_user.id,
+        source=SOURCE_LCC_DETAILED, batch_id=batch_id,
+    )
     await db.commit()

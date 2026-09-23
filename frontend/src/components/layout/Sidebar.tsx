@@ -39,6 +39,12 @@ const TENANT_NAV: NavItem[] = [
     id: "dashboard", label: "Dashboard", icon: BarChart2,
     children: [
       { label: "Overview", href: "/dashboard", icon: LayoutGrid },
+      // What the loaded statements SOLD, across every type, and what that sale earned.
+      // Second because the group reads as a progression: what we sold, then what that
+      // sale earned, then what we expect to earn. Deliberately distinct from Commission
+      // income below — this one counts a statement the moment it is uploaded, that one
+      // counts only the lines a commission run has priced.
+      { label: "Total Revenue", href: "/dashboard/revenue", icon: Receipt },
       // Realized commission: what the loaded statements have actually earned, by
       // carrier and by consolidator. Deliberately separate from PLB Accrual below —
       // one is money the statements prove, the other is money we expect.

@@ -30,8 +30,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models.airline import Airline
-from app.models.commission_run import CommissionRun
-from app.models.bsp_statement import BspStatement
 from app.models.income_board import (
     DIRECTION_INBOUND, TXN_CREDIT_MEMO, TXN_DEBIT_MEMO, IncomeBoardRow as R,
 )
@@ -40,8 +38,11 @@ from app.schemas.income_board import (
     AirlinePoint, FilterOptions, FreshnessResponse, IncomeSummaryResponse, IncomeTotals,
     MonthPoint, SourceFreshness, SourcePoint, SupplierPoint,
 )
-from app.services.income_board import COMMISSION_SOURCES, measures, project_batch
-from app.models.income_board import SOURCE_BSP
+from app.services.income_board import (
+    PROJECTED_SOURCES, measures, project_batch, stamp_bsp_ndc_overlap,
+)
+from app.services.income_board.project import batch_changes
+from app.services.report_download.registry import SOURCE_BY_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -54,15 +55,15 @@ AGENCY_SCOPE_ROLES = (UserRole.SUPER_ADMIN, UserRole.COMPANY_ADMIN)
 # Who may trigger a rebuild. It is a write over the whole workspace's projection.
 REBUILD_ROLES = (UserRole.SUPER_ADMIN, UserRole.COMPANY_ADMIN)
 
+# Derived from the report registry, not retyped beside it. The hand-written copy this
+# replaced had already drifted — "Third party (GDS)" here against "Third Party GDS"
+# there — so the same upload was called two different things on two screens.
 _SOURCE_LABELS = {
-    "bsp": "BSP",
-    "tp-gds": "Third party (GDS)",
-    "tp-lcc": "Third party (LCC)",
-    "lcc-detailed": "LCC",
+    **{key: src.sheet_title for key, src in SOURCE_BY_KEY.items()},
+    # The one source the report has no entry for: the selling side, which is not a
+    # vendor statement at all.
     "uploaded-ticket": "Sell book",
 }
-
-_ALL_SOURCES = (SOURCE_BSP, *COMMISSION_SOURCES)
 
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
@@ -95,9 +96,18 @@ def _filters(
     `basis` picks which date the period means. An airline consolidator reads these
     differently on purpose: sales basis is when the ticket was issued, travel basis is
     when it flew, and the same month holds different money under each.
+
+    `priced` IS NOT OPTIONAL AND IS NOT A NARROWING. `income_board_rows` stopped being
+    "every priced line" and became every statement line, priced or not, so that
+    /dashboard/revenue can answer what was SOLD. Without this predicate every count on
+    this board silently absorbs the unpriced half: `rows` stops meaning priced lines,
+    `unattributed_airline_rows` picks up every Third Party API row (which has no carrier
+    by nature), and the airline ranking fills with carriers that earned nothing because
+    nobody has costed them yet. It lives here, at the bottom of the funnel every query
+    in this module builds its WHERE from, rather than in each of them.
     """
     col = R.travel_date if basis == "travel" else R.issue_date
-    conds = [R.direction == direction]
+    conds = [R.direction == direction, R.priced.is_(True)]
     if date_from:
         conds.append(col >= date_from)
     if date_to:
@@ -290,8 +300,13 @@ async def get_filters(
 
     Read off the projection, not off the airline and supplier masters: a picker offering
     2,340 suppliers of which four appear on the board is a worse picker.
+
+    `priced` again, and separately, because these four queries do not go through
+    `_filters`. Offering a carrier, a consolidator, a source or a month that exists only
+    on unpriced rows is the same failure in a different shape: the user picks it and the
+    board comes back empty, which reads as "nothing earned" rather than "nothing priced".
     """
-    where = _scope(current_user, scope)
+    where = (*_scope(current_user, scope), R.priced.is_(True))
 
     airlines = [
         {"id": r[0], "name": r[1] or "Unattributed carrier"}
@@ -329,60 +344,58 @@ async def get_filters(
 async def get_freshness(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    scope: str = Query(default="mine", pattern="^(mine|agency)$"),
 ):
-    """Is the board current with the statements that have actually been priced?
+    """Is the board current with the statements that have been LOADED, and priced?
 
-    Rendered as a blocking banner, not a footnote. This table is filled by hooks on the
-    commission runs; a write path nobody hooked leaves the board quietly out of date,
-    and a wrong income board is worse than no income board. `never` is every priced
-    batch on day one, because the migration ships the table empty on purpose.
+    Rendered as a blocking banner, not a footnote. The table is filled by hooks — on
+    every ingest path now, not only on the commission runs — and a write path nobody
+    hooked leaves it quietly out of date. A wrong board is worse than no board.
+    `never` is every batch on day one, because the migration ships the table empty on
+    purpose.
+
+    TWO REASONS A BATCH CAN BE BEHIND, and conflating them was the old version's blind
+    spot: it asked `commission_runs` alone, so a statement uploaded and never priced
+    was not merely unprojected, it was invisible to the check. `batch_changes` takes the
+    later of the two timestamps instead — when the statement landed, and when it was
+    last priced — so an uncosted upload counts as work the board owes.
+
+    `scope=agency` matches the revenue board's default. Without it a Company Admin
+    reading a board that sums the whole workspace would be told it was current on the
+    strength of their own uploads alone.
     """
-    tid, uid = current_user.tenant_id, current_user.id
+    tid = current_user.tenant_id
+    uid = None if (scope == "agency" and can_view_agency(current_user)) else current_user.id
     out: list[SourceFreshness] = []
     stale_total = never_total = 0
 
-    # Non-BSP: the run header knows when pricing finished.
-    run_rows = (await db.execute(
-        select(CommissionRun.source, CommissionRun.batch_id,
-               func.max(CommissionRun.completed_at))
-        .where(CommissionRun.tenant_id == tid, CommissionRun.created_by_id == uid,
-               CommissionRun.status == "completed",
-               CommissionRun.batch_id.isnot(None))
-        .group_by(CommissionRun.source, CommissionRun.batch_id)
-    )).all()
-    bsp_rows = (await db.execute(
-        select(BspStatement.batch_id, BspStatement.commission_calculated_at)
-        .where(BspStatement.tenant_id == tid, BspStatement.created_by_id == uid,
-               BspStatement.commission_calculated_at.isnot(None))
-    )).all()
-
-    priced: dict[str, list[tuple[str, object]]] = {}
-    for src, batch, done in run_rows:
-        priced.setdefault(src, []).append((batch, done))
-    for batch, done in bsp_rows:
-        priced.setdefault(SOURCE_BSP, []).append((batch, done))
-
+    proj_where = [R.tenant_id == tid]
+    if uid is not None:
+        proj_where.append(R.created_by_id == uid)
     projected = {
         (r[0], r[1]): r[2]
         for r in (await db.execute(
             select(R.source, R.batch_id, func.max(R.projected_at))
-            .where(R.tenant_id == tid, R.created_by_id == uid)
-            .group_by(R.source, R.batch_id)
+            .where(*proj_where).group_by(R.source, R.batch_id)
         )).all()
     }
 
-    for src in _ALL_SOURCES:
-        batches = priced.get(src, [])
+    for src in PROJECTED_SOURCES:
+        # EVERY batch, not just the priced ones. An uploaded statement is sale the
+        # moment it lands, so a board that has not projected it is behind even though
+        # nothing has ever been run on it — which is exactly the state a workspace is in
+        # on the day this ships.
+        batches = await batch_changes(db, tenant_id=tid, user_id=uid, source=src)
         n_proj = n_stale = n_never = 0
         last = None
-        for batch, done in batches:
+        for batch, _owner, changed in batches:
             at = projected.get((src, batch))
             if at is None:
                 n_never += 1
                 continue
             n_proj += 1
             last = at if last is None or at > last else last
-            if done is not None and done > at:
+            if changed is not None and changed > at:
                 n_stale += 1
         stale_total += n_stale
         never_total += n_never
@@ -402,12 +415,19 @@ async def get_freshness(
 async def rebuild(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    scope: str = Query(default="mine", pattern="^(mine|agency)$"),
 ):
-    """Re-project every priced batch this user owns.
+    """Re-project every batch — loaded or priced — in scope.
 
     Synchronous and idempotent. Each batch costs two set-based statements, so this is
     seconds of work rather than the kind of job that needs a queue; when it stops being
     so, the loop moves to workers/ unchanged, because project_batch is the whole of it.
+
+    `scope=agency` rebuilds the whole workspace. It is the mode the revenue board needs:
+    that board defaults to agency scope, so a rebuild that covered only the caller's own
+    uploads would clear the staleness banner while leaving half the figures unprojected.
+    Already gated — REBUILD_ROLES is Super Admin and Company Admin, who are the same two
+    roles allowed to read agency-wide in the first place.
     """
     if not role_matches(current_user.role, *REBUILD_ROLES):
         raise HTTPException(
@@ -415,33 +435,40 @@ async def rebuild(
             detail="Only a Super Admin or Company Admin can rebuild the income board.",
         )
 
-    tid, uid = current_user.tenant_id, current_user.id
+    tid = current_user.tenant_id
+    uid = None if scope == "agency" else current_user.id
     done: dict[str, int] = {}
     failed: list[str] = []
 
-    batches: list[tuple[str, str]] = [
-        (r[0], r[1]) for r in (await db.execute(
-            select(distinct(CommissionRun.source), CommissionRun.batch_id)
-            .where(CommissionRun.tenant_id == tid, CommissionRun.created_by_id == uid,
-                   CommissionRun.batch_id.isnot(None))
-        )).all()
-    ]
-    batches += [
-        (SOURCE_BSP, r[0]) for r in (await db.execute(
-            select(BspStatement.batch_id)
-            .where(BspStatement.tenant_id == tid, BspStatement.created_by_id == uid)
-        )).all()
-    ]
+    # Every batch of every projectable source, and the owner comes from the batch rather
+    # than from the caller. A tenant-wide rebuild re-projects a colleague's upload under
+    # THEIR user id, because `created_by_id` is half the projection's unique key —
+    # writing it under the admin's id would duplicate every row rather than restate it.
+    batches: list[tuple[str, str, int]] = []
+    for src in PROJECTED_SOURCES:
+        for batch, owner, _changed in await batch_changes(
+            db, tenant_id=tid, user_id=uid, source=src,
+        ):
+            batches.append((src, batch, owner))
 
-    for src, batch in batches:
+    for src, batch, owner in batches:
         try:
-            n = await project_batch(db, tenant_id=tid, user_id=uid,
+            n = await project_batch(db, tenant_id=tid, user_id=owner,
                                     source=src, batch_id=batch)
             done[src] = done.get(src, 0) + n
         except Exception:
             # One malformed batch must not cost the caller the other forty.
             logger.exception("income_board: rebuild failed for %s/%s", src, batch)
             failed.append(f"{src}/{batch}")
+
+    # Once, at the end, rather than per batch: it is a workspace-wide statement and the
+    # answer only settles when both sides have finished projecting.
+    try:
+        await stamp_bsp_ndc_overlap(db, tenant_id=tid)
+    except Exception:
+        logger.exception("income_board: NDC/BSP overlap stamp failed for tenant %s", tid)
+
     await db.commit()
 
-    return {"batches": len(batches), "rows_by_source": done, "failed": failed}
+    return {"batches": len(batches), "rows_by_source": done, "failed": failed,
+            "scope": scope}

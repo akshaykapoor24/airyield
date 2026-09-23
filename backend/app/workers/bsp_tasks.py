@@ -482,6 +482,21 @@ async def _parse_bsp_statement(batch_id: str, tenant_id: int, user_id: int):
                 )
             logger.info("BSP statement %s completed: %d pages, %d rows", batch_id, total_pages, processed_rows)
 
+            # Project the settlement as SALE, now, rather than waiting for somebody to
+            # run commission on it. BSP has been projected since the board shipped, but
+            # only from `bsp_commission` at the end of a calculation — so a statement
+            # uploaded and never priced contributed no revenue at all, which on a sale
+            # dashboard reads as a month with no business. Best effort; freshness
+            # reports a batch this missed.
+            from app.models.income_board import SOURCE_BSP
+            from app.services import income_board
+
+            async with db.begin():
+                await income_board.refresh(
+                    db, tenant_id=tenant_id, user_id=user_id,
+                    source=SOURCE_BSP, batch_id=batch_id,
+                )
+
             # Fill zero-amount CANX rows from paired SPDR cancellation charges — best-effort.
             try:
                 await _distribute_spdr_canx(db, batch_id)

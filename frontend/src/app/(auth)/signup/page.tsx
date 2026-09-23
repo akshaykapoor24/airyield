@@ -171,7 +171,7 @@ export default function SignupPage() {
   };
 
   const field =
-    "peer w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-10 pr-4 text-sm text-slate-900 shadow-sm outline-none transition-all duration-200 placeholder:text-slate-400 hover:border-slate-300 focus:-translate-y-px focus:border-brand-500 focus:ring-4 focus:ring-brand-500/12";
+    "peer w-full rounded-lg border border-line bg-white py-2.5 pl-10 pr-4 text-sm text-slate-900 shadow-sm outline-none transition-all duration-200 placeholder:text-slate-400 hover:border-brand-200 focus:-translate-y-px focus:border-brand-500 focus:ring-4 focus:ring-brand-500/12";
   const bad = "border-red-300 focus:border-red-400 focus:ring-red-500/12";
   const icon =
     "pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400 transition-colors peer-focus:text-brand-700";
@@ -187,7 +187,7 @@ export default function SignupPage() {
           </span>
         </div>
 
-        <h1 className="text-[1.75rem] font-bold tracking-tight text-slate-900">Check your email</h1>
+        <h1 className="text-[1.75rem] font-semibold tracking-tight text-brand-900">Check your email</h1>
         <p className="mt-2 text-sm leading-relaxed text-slate-500">
           We&apos;ve sent a verification link to{" "}
           <span className="font-semibold text-slate-700">{email}</span>. Click it to
@@ -197,7 +197,7 @@ export default function SignupPage() {
         <div className="mt-7 space-y-3">
           <Link
             href="/login"
-            className="group flex w-full items-center justify-center gap-2 rounded-xl py-3 text-sm font-semibold text-white shadow-lg shadow-brand-500/25 transition-all hover:-translate-y-0.5 hover:shadow-xl hover:shadow-brand-500/35"
+            className="group flex w-full items-center justify-center gap-2 rounded-lg py-3 text-sm font-semibold text-white shadow-lg shadow-brand-500/25 transition-all hover:-translate-y-0.5 hover:shadow-xl hover:shadow-brand-500/35"
             style={{ background: "var(--brand-grad)" }}
           >
             Go to sign in
@@ -206,7 +206,7 @@ export default function SignupPage() {
           <button
             onClick={handleResend}
             disabled={resending}
-            className="w-full rounded-xl border border-slate-200 py-3 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-60"
+            className="w-full rounded-lg border border-line py-3 text-sm font-semibold text-slate-700 transition-colors hover:bg-paper disabled:opacity-60"
           >
             {resending ? "Sending…" : "Resend verification email"}
           </button>
@@ -221,7 +221,7 @@ export default function SignupPage() {
   return (
     <div>
       <div className="animate-fade-up">
-        <h1 className="text-[1.75rem] font-bold tracking-tight text-slate-900">
+        <h1 className="text-[1.75rem] font-semibold tracking-tight text-brand-900">
           Create your account
         </h1>
         <p className="mt-1.5 text-sm text-slate-500">
@@ -241,7 +241,7 @@ export default function SignupPage() {
       >
         <span
           aria-hidden="true"
-          className="absolute inset-y-1.5 left-1.5 w-[calc(50%-0.625rem)] rounded-xl bg-white shadow-md shadow-slate-900/5 ring-1 ring-slate-200 transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]"
+          className="absolute inset-y-1.5 left-1.5 w-[calc(50%-0.625rem)] rounded-lg bg-white shadow-md shadow-slate-900/5 ring-1 ring-slate-200 transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]"
           style={{ transform: isIndividual ? "translateX(calc(100% + 0.5rem))" : "none" }}
         />
         {([
@@ -256,7 +256,7 @@ export default function SignupPage() {
               role="tab"
               aria-selected={active}
               onClick={() => switchType(t)}
-              className="relative z-10 flex flex-col items-start gap-0.5 rounded-xl px-3.5 py-2 text-left"
+              className="relative z-10 flex flex-col items-start gap-0.5 rounded-lg px-3.5 py-2 text-left"
 
             >
               <span
@@ -285,7 +285,7 @@ export default function SignupPage() {
         key={accountType}
       >
         {isIndividual ? (
-          <div className="flex items-start gap-2.5 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5">
+          <div className="flex items-start gap-2.5 rounded-lg border border-line bg-paper px-3.5 py-2.5">
             <User className="mt-0.5 h-4 w-4 shrink-0 text-slate-500" />
             <p className="text-[11px] leading-snug text-slate-600">
               <span className="font-semibold">Private workspace.</span> Only you have
@@ -293,7 +293,7 @@ export default function SignupPage() {
             </p>
           </div>
         ) : (
-          <div className="flex items-start gap-2.5 rounded-xl border border-brand-200 bg-brand-50 px-3.5 py-2.5">
+          <div className="flex items-start gap-2.5 rounded-lg border border-brand-200 bg-brand-50 px-3.5 py-2.5">
             <Building2 className="mt-0.5 h-4 w-4 shrink-0 text-brand-600" />
             <p className="text-[11px] leading-snug text-brand-800">
               <span className="font-semibold">One admin per company.</span> The first
@@ -404,7 +404,7 @@ export default function SignupPage() {
         </div>
 
         {/* GST registered toggle */}
-        <div className="rounded-xl border border-slate-200 bg-slate-50/60 px-3.5 py-2.5">
+        <div className="rounded-lg border border-line bg-paper px-3.5 py-2.5">
           <label className="flex cursor-pointer select-none items-center gap-2.5">
             <input
               type="checkbox"
@@ -428,7 +428,7 @@ export default function SignupPage() {
                 onChange={(e) => handleGstChange(e.target.value)}
                 placeholder="GSTIN — e.g. 22ABCDE1234F1Z5"
                 maxLength={15}
-                className={`w-full rounded-xl border border-slate-200 bg-white px-4 py-2.5 font-mono text-sm uppercase tracking-wider shadow-sm outline-none transition-all placeholder:font-sans placeholder:tracking-normal placeholder:text-slate-400 focus:-translate-y-px focus:border-brand-500 focus:ring-4 focus:ring-brand-500/12 ${
+                className={`w-full rounded-lg border border-line bg-white px-4 py-2.5 font-mono text-sm uppercase tracking-wider shadow-sm outline-none transition-all placeholder:font-sans placeholder:tracking-normal placeholder:text-slate-400 focus:-translate-y-px focus:border-brand-500 focus:ring-4 focus:ring-brand-500/12 ${
                   gstError ? bad : ""
                 }`}
               />
@@ -453,7 +453,7 @@ export default function SignupPage() {
 
         {/* error */}
         {error && (
-          <div className="animate-shake flex items-start gap-2.5 rounded-xl border border-red-200 bg-red-50 px-3.5 py-3">
+          <div className="animate-shake flex items-start gap-2.5 rounded-lg border border-red-200 bg-red-50 px-3.5 py-3">
             <TriangleAlert className="mt-px h-4 w-4 shrink-0 text-red-500" />
             <p className="text-xs leading-relaxed text-red-700">{error}</p>
           </div>
@@ -463,7 +463,7 @@ export default function SignupPage() {
         <button
           type="submit"
           disabled={loading}
-          className="btn-sheen group flex w-full items-center justify-center gap-2 rounded-xl py-3.5 text-sm font-semibold text-white shadow-lg shadow-brand-700/25 transition-all hover:-translate-y-0.5 hover:shadow-xl hover:shadow-brand-700/35 disabled:translate-y-0 disabled:opacity-60 disabled:shadow-none"
+          className="btn-sheen group flex w-full items-center justify-center gap-2 rounded-lg py-3.5 text-sm font-semibold text-white shadow-lg shadow-brand-700/25 transition-all hover:-translate-y-0.5 hover:shadow-xl hover:shadow-brand-700/35 disabled:translate-y-0 disabled:opacity-60 disabled:shadow-none"
           style={{ background: "var(--brand-grad)" }}
         >
           {loading ? (

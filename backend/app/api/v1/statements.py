@@ -41,6 +41,7 @@ from app.models.ticket_statement import TicketStatement
 from app.models.uploaded_ticket import UploadedTicket
 from app.models.user import User
 from app.services import flat_statement as _flat
+from app.services import income_board
 from app.services import sector_split, spec_mapping, spreadsheet, statement_spec as spec
 from app.services import statement_supplier_selection as supplier_selection
 from app.services import tp_airline_resolution as tp_airline
@@ -350,6 +351,24 @@ async def _clear_commission(db: AsyncSession, slug: str, user: User,
             CommissionRun.batch_id == batch_id,
         ))
     return res.rowcount or 0
+
+
+async def _project(db: AsyncSession, slug: str, user: User, batch_id: str) -> int:
+    """Refresh this batch on the income/revenue board. Best effort; never raises.
+
+    Called BEFORE the caller's commit and inside its transaction, so an upload that
+    rolls back leaves no projection of rows that never landed. The flush is what makes
+    the pending `db.add_all(objs)` visible to a set-based INSERT ... SELECT that reads
+    the table rather than the session.
+
+    A no-op for the types the board has no arm for. Only NDC and the three third-party
+    types carry sale it can project; TGQ HMPR and the LCC ledgers restate another
+    statement and are read live instead — see models/income_board.SALE_SOURCES.
+    """
+    await db.flush()
+    return await income_board.refresh(
+        db, tenant_id=user.tenant_id, user_id=user.id, source=slug, batch_id=batch_id,
+    )
 
 
 async def _airline_stamper(db: AsyncSession, slug: str):
@@ -866,6 +885,7 @@ async def confirm_statement(
     db.add_all(objs)
     if supplier is not None:
         db.add(_supplier_link(current_user.tenant_id, slug, batch_id, supplier))
+    await _project(db, slug, current_user, batch_id)
     await db.commit()
     return {
         "batch_id": batch_id,
@@ -1011,6 +1031,7 @@ async def upload_statement(
         ))
     if supplier is not None:
         db.add(_supplier_link(current_user.tenant_id, slug, batch_id, supplier))
+    await _project(db, slug, current_user, batch_id)
     await db.commit()
     return {
         "batch_id": batch_id,
@@ -1239,6 +1260,9 @@ async def resplit_batch(
 
     await db.execute(delete(model).where(model.batch_id == batch_id, *_scope(model, current_user)))
     db.add_all(objs)
+    # A re-split mints new row ids for the same documents, so the projection has to be
+    # rewritten: its orphan sweep is what removes the pre-split rows.
+    await _project(db, slug, current_user, batch_id)
     await db.commit()
     return {
         "source_rows": len(sources),
@@ -1316,6 +1340,9 @@ async def reprocess_batch(
     cleared = await _clear_commission(db, slug, current_user, batch_id=batch_id)
     await db.execute(delete(model).where(model.batch_id == batch_id, *_scope(model, current_user)))
     db.add_all(objs)
+    # Same reason as the re-split: new ids for the same documents, and the commission
+    # figures keyed on the old ones were just cleared.
+    await _project(db, slug, current_user, batch_id)
     await db.commit()
     return {
         "rows": len(objs),
@@ -1505,6 +1532,10 @@ async def delete_record(slug: str, record_id: int, db: AsyncSession = Depends(ge
                     )
                 await db.delete(ticket)
         await db.delete(obj)
+    # The batch survives, so this is a re-project rather than a clear: the orphan sweep
+    # is what removes the row that just went. Without it the deleted line keeps its sale
+    # on the revenue board until somebody presses Rebuild.
+    await _project(db, slug, current_user, obj.batch_id)
     await db.commit()
 
 
@@ -1578,6 +1609,14 @@ async def delete_batch(slug: str, batch_id: str, db: AsyncSession = Depends(get_
                 await db.execute(delete(TicketStatement).where(
                     TicketStatement.batch_id == link.billing_batch_id))
             await db.delete(link)
+    # `source_row_id` carries no foreign key, so nothing cascades and the projected rows
+    # have to be dropped by hand. Before this call `clear_batch` had no callers at all:
+    # a deleted upload left its sale and its income on the board as figures nothing
+    # would ever restate.
+    await income_board.forget(
+        db, tenant_id=current_user.tenant_id, user_id=current_user.id,
+        source=slug, batch_id=batch_id,
+    )
     await db.commit()
     if not res.rowcount:
         raise HTTPException(status_code=404, detail="Upload not found.")

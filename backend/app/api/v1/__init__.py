@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 
 from app.api.v1 import auth, users, subscriptions, airlines, suppliers, airports, routes, deals, tickets, income, documents, reports, classes, approval_workflows, dashboard, customers, corporates, entities, login_ids, tenant_airlines, iata_commissions, gst_configurations, user_entities, user_login_ids, agencies, agency_account, agency_entities, agency_login_ids, agency_billing, adjustments, airline_adjustments, statements, ndc_billing, tp_api_billing, bsp, bsp_summary, bsp_reconciliation, bsp_commission, commission, customer_statements, lcc_detailed, ticket_details, series_contracts
-from app.api.v1 import report_download, sell_reconciliation, income_board
+from app.api.v1 import report_download, sell_reconciliation, income_board, revenue_board
 
 router = APIRouter()
 
@@ -25,6 +25,10 @@ router.include_router(approval_workflows.router, prefix="/approval-workflows", t
 # down about ndc_billing preceding the statements catch-all.
 router.include_router(income_board.router, prefix="/dashboard/income",
                       tags=["Dashboard - Income"])
+# Same rule, same reason. /dashboard/revenue/* is what the Total Revenue tab reads:
+# sale across every loaded statement, where income_board reads only the priced half.
+router.include_router(revenue_board.router, prefix="/dashboard/revenue",
+                      tags=["Dashboard - Total Revenue"])
 router.include_router(dashboard.router, prefix="/dashboard", tags=["Dashboard"])
 router.include_router(customers.router, prefix="/customers", tags=["Customers"])
 router.include_router(corporates.router, prefix="/corporates", tags=["Corporate Billing"])

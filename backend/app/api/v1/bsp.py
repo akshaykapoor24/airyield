@@ -16,7 +16,8 @@ from app.dependencies import get_current_user
 from app.models.user import User
 from app.models.airline import Airline
 from app.models.bsp_statement import BspStatement, BspStatementRow, BspTaxBreakup, BspParseError
-from app.services import file_store
+from app.models.income_board import SOURCE_BSP
+from app.services import file_store, income_board
 from app.services.bsp_extraction import BspExtractionService
 from app.utils.security import create_file_token, verify_file_token
 from app.schemas.bsp_statement import (
@@ -614,6 +615,14 @@ async def delete_bsp_statement(
     stmt = await _get_owned_statement(batch_id, db, current_user)
     blob = stmt.file_url
     await db.delete(stmt)  # cascade removes rows → tax breakups + parse errors
+    # The cascade stops at this schema. `income_board_rows.source_row_id` carries no
+    # foreign key — deliberately, so a derived report can never block a delete — so the
+    # projected sale and income have to be dropped explicitly, and dropping BSP rows also
+    # gives back any NDC tickets that were suppressed as "settled in BSP".
+    await income_board.forget(
+        db, tenant_id=current_user.tenant_id, user_id=current_user.id,
+        source=SOURCE_BSP, batch_id=batch_id,
+    )
     await db.commit()
     if blob:
         await file_store.delete(blob, _bsp_bucket())

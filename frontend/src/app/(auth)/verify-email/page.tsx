@@ -76,7 +76,7 @@ function VerifyEmailInner() {
           <p className="text-sm text-slate-500 mt-1.5">Your account is now active. Let&apos;s finish setting up your workspace.</p>
           <button
             onClick={() => router.push("/dashboard")}
-            className="w-full text-white py-3 rounded-xl font-semibold text-sm hover:opacity-90 transition-all mt-6 shadow-md shadow-brand-500/25"
+            className="w-full text-white py-3 rounded-lg font-semibold text-sm hover:opacity-90 transition-all mt-6 shadow-md shadow-brand-500/25"
             style={{ background: BTN }}>
             Continue to FareQube
           </button>
@@ -93,7 +93,7 @@ function VerifyEmailInner() {
             <p className="text-sm text-slate-500 mt-1.5">{message || "This link is invalid or has expired."}</p>
           </div>
 
-          <div className="mt-6 bg-slate-50 border border-slate-200 rounded-xl p-4">
+          <div className="mt-6 bg-paper border border-line rounded-lg p-4">
             <p className="flex items-center gap-1.5 text-xs font-semibold text-slate-700 mb-2">
               <MailCheck className="w-4 h-4 text-slate-400" /> Request a new link
             </p>
@@ -102,12 +102,12 @@ function VerifyEmailInner() {
               value={resendEmail}
               onChange={e => setResendEmail(e.target.value)}
               placeholder="you@company.com"
-              className="w-full border border-slate-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30 focus:border-brand-400 transition-colors" />
+              className="w-full border border-line rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30 focus:border-brand-400 transition-colors" />
             {resendMsg && <p className="text-[11px] text-slate-600 mt-2">{resendMsg}</p>}
             <button
               onClick={resend}
               disabled={resending}
-              className="w-full text-white py-2.5 rounded-xl font-semibold text-sm hover:opacity-90 disabled:opacity-60 transition-all mt-3 shadow-md shadow-brand-500/25"
+              className="w-full text-white py-2.5 rounded-lg font-semibold text-sm hover:opacity-90 disabled:opacity-60 transition-all mt-3 shadow-md shadow-brand-500/25"
               style={{ background: BTN }}>
               {resending ? "Sending…" : "Resend verification link"}
             </button>

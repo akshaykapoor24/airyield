@@ -38,7 +38,23 @@
   --color-accent-400: #f6b45f;
   --color-accent-500: #f29a33;
   --color-accent-600: #d97e1c;
-  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+
+  /* ── Marketing surfaces → `bg-paper`, `border-line`, `bg-ink` ─────────────
+     The three neutrals the marketing pages are built from. `paper` is the tinted
+     band that alternates with white, `line` is every hairline rule and card border,
+     and `ink` is the near-black the dark chart cards sit on — warmer and less
+     absolute than #000, so white type on it stays comfortable. */
+  --color-paper: #fafbfc;
+  --color-line:  #e1e7ee;
+  --color-ink:   #12181f;
+
+  /* ── Type ────────────────────────────────────────────────────────────────
+     Sora is the display face — headlines, stat figures, the split-flap board.
+     Inter carries everything that is read rather than scanned. Both are loaded by
+     `next/font` in app/layout.tsx, which is what defines the two variables below;
+     the fallbacks keep the page legible if either ever fails to load. */
+  --font-sans: var(--font-inter), "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-sora), var(--font-inter), ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, monospace;
 
   /* ── Motion tokens → generate `animate-*` utilities ──────────────────── */
@@ -65,6 +81,7 @@
   --animate-drift-b:      drift-b 32s ease-in-out infinite;
   --animate-drift-c:      drift-c 38s ease-in-out infinite;
   --animate-ascend:       ascend 30s linear infinite;
+  --animate-plane-drift:  plane-drift 22s ease-in-out infinite;
 
   @keyframes float {
     0%, 100% { transform: translateY(0); }
@@ -190,6 +207,13 @@
     0%, 58% { transform: skewX(-18deg) translateX(-180%); }
     100%    { transform: skewX(-18deg) translateX(480%); }
   }
+  /* The hero's background aircraft. It never leaves the frame — it breathes across
+     it, a few viewport-percent over twenty seconds, so the hero is alive without
+     anything moving fast enough to pull the eye off the headline. */
+  @keyframes plane-drift {
+    0%, 100% { transform: translate3d(0, 0, 0) rotate(0deg); }
+    50%      { transform: translate3d(3vw, -2.6vw, 0) rotate(-1.2deg); }
+  }
   @keyframes shake {
     10%, 90% { transform: translateX(-2px); }
     20%, 80% { transform: translateX(4px); }
@@ -201,7 +225,7 @@
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  font-family: var(--font-inter), "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
   font-size: 14px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
@@ -219,6 +243,34 @@ table { font-size: 13px; }
 th { font-size: 11px; font-weight: 600; letter-spacing: 0.05em; }
 
 /* ── Marketing surface helpers ─────────────────────────────────────────── */
+
+/* Headings on the marketing pages are set in the display face. Scoped to `.marketing`
+   rather than applied to every h1–h3 on the site, because the product screens behind
+   the login are a dense data UI — they stay on Inter, where a tighter, more neutral
+   heading sits better next to a table than Sora's wider display curves do. */
+.marketing :is(h1, h2, h3),
+.marketing .display {
+  font-family: var(--font-display);
+  letter-spacing: -0.01em;
+}
+
+/* The square amber tick the design direction uses for list items, as a marker rather
+   than a wrapper element — it keeps the bullet out of the JSX and off the a11y tree. */
+.tick-list li {
+  position: relative;
+  padding-left: 1.5rem;
+}
+.tick-list li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.55em;
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  background: #f29a33;
+}
+
 
 /* Scroll reveal: hidden until <Reveal> adds .is-visible via IntersectionObserver */
 .reveal {
@@ -243,18 +295,39 @@ th { font-size: 11px; font-weight: 600; letter-spacing: 0.05em; }
   -webkit-mask-image: radial-gradient(ellipse 78% 62% at 50% 34%, #000 38%, transparent 100%);
 }
 
-/* The sticky header's scrolled state. Opaque enough that page content passing underneath
-   never competes with the nav labels — at 0.72 the feature cards read straight through it. */
-.glass {
-  background: rgba(255, 255, 255, 0.9);
-  backdrop-filter: blur(16px) saturate(140%);
-  -webkit-backdrop-filter: blur(16px) saturate(140%);
+/* The sticky header's surface. A tinted band rather than white, so the bar reads as its
+   own strip against a white hero instead of dissolving into it — the logo and the one
+   button are the only things up there, and with no background at all the header simply
+   looked like the top of the page.
+
+   Opaque enough (0.94) that page content passing underneath never competes with the nav;
+   at 0.72 the feature cards read straight through it. */
+.nav-surface {
+  background: linear-gradient(
+    180deg,
+    rgba(219, 234, 250, 0.94) 0%,
+    rgba(240, 246, 252, 0.94) 100%
+  );
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
 }
 
 /* Animated gradient text for the headline accent. Stays inside the blue ramp —
    sweeping through orange produced muddy brown mid-transition. */
 .text-gradient {
   background: linear-gradient(100deg, #12304f 0%, #3a80c6 30%, #2466a8 54%, #5a97d4 78%, #12304f 100%);
+  background-size: 260% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer 7s ease-in-out infinite;
+}
+
+/* The same sweep as `.text-gradient`, for a word set on a dark brand panel. Every stop
+   is light — a ramp that dipped back to navy the way the light-surface one does would
+   swallow part of the word into the panel behind it. */
+.text-gradient-dark {
+  background: linear-gradient(100deg, #7fb9e8 0%, #ffffff 28%, #b4d0ee 54%, #ffffff 78%, #7fb9e8 100%);
   background-size: 260% 100%;
   -webkit-background-clip: text;
   background-clip: text;
@@ -413,7 +486,7 @@ th { font-size: 11px; font-weight: 600; letter-spacing: 0.05em; }
     scroll-behavior: auto !important;
   }
   .reveal { opacity: 1 !important; transform: none !important; }
-  .text-gradient { animation: none; }
+  .text-gradient, .text-gradient-dark { animation: none; }
   /* SMIL ignores CSS animation properties, so hide the moving plane outright.
      The route it flies along is still drawn. */
   .smil-motion { display: none; }

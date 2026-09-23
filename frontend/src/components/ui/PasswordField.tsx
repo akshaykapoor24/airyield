@@ -55,7 +55,7 @@ export default function PasswordField({
 
   const isAuth = variant === "auth";
   const field = isAuth
-    ? "peer w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-10 pr-11 text-sm text-slate-900 shadow-sm outline-none transition-all duration-200 placeholder:text-slate-400 hover:border-slate-300 focus:-translate-y-px focus:border-brand-500 focus:ring-4 focus:ring-brand-500/12 disabled:opacity-60"
+    ? "peer w-full rounded-lg border border-line bg-white py-2.5 pl-10 pr-11 text-sm text-slate-900 shadow-sm outline-none transition-all duration-200 placeholder:text-slate-400 hover:border-brand-200 focus:-translate-y-px focus:border-brand-500 focus:ring-4 focus:ring-brand-500/12 disabled:opacity-60"
     : "peer w-full border border-gray-200 rounded-lg bg-gray-50 pl-9 pr-10 py-2 text-sm outline-none focus:ring-2 focus:ring-brand-400 disabled:opacity-60";
   const bad = isAuth
     ? "border-red-300 focus:border-red-400 focus:ring-red-500/12"
