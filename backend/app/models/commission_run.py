@@ -30,7 +30,9 @@ from app.database import Base
 # has to translate between two vocabularies.
 SOURCE_TP_GDS = "tp-gds"
 SOURCE_TP_LCC = "tp-lcc"
+SOURCE_TP_API = "tp-api"
 SOURCE_LCC_DETAILED = "lcc-detailed"
+SOURCE_NDC = "ndc"
 SOURCE_BSP = "bsp"
 
 # Bumped when a change would make the same statement price differently. Stored on the run

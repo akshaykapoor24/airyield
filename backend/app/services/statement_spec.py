@@ -294,8 +294,10 @@ STATEMENT_SPECS: dict[str, dict] = {
     # money attached instead of dropping them — see services/tp_api_billing_projection.py.
     # The billing base is `net_amount` (TBO's NET) falling through to `total_paid_amount`
     # (MMT's tender total); the two are separate fields on purpose, see tp_api_spec's Money
-    # block. Still no commission adapter: an aggregator's hotel and train lines have no
-    # airline deal to price against, and `commission/__init__.py` has no entry for this slug.
+    # block. Commission income prices this type through `commission/tp_api.py`, but only
+    # its FLIGHT rows: an aggregator's hotel and train lines have no airline deal to price
+    # against, and that adapter returns them as skips naming their product rather than
+    # dropping them, so the priced grid still reconciles to the file.
     "tp-api": {
         "label": "API",
         "columns": _tpapi.COLUMNS,

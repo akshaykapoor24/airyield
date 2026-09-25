@@ -9,9 +9,10 @@ for why re-projection is delete-and-sweep rather than a plain upsert.
 
 COMMISSION_SOURCES vs PROJECTED_SOURCES is a distinction worth keeping straight. The
 first is "has a commission adapter"; the second is "this module knows how to project
-it". NDC and Third Party API are in the second and not the first — they carry sale and
-no adapter prices them — and conflating the two would have the freshness check hunt for
-commission runs that can never exist.
+it". BSP is in the second and not the first — it is priced by its own engine rather than
+by a registered adapter — and conflating the two would have the freshness check hunt for
+commission runs that can never exist. NDC and Third Party API used to sit on that side
+too and no longer do: both gained an adapter, so both are priced like any other source.
 """
 from app.services.income_board.dimensions import (
     classify_txn, counts_in_net_sql, normalise_bsp_segment, normalise_segment,

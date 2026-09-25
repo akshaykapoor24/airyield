@@ -29,27 +29,45 @@ export default function SourceCards({
   const shown = CATEGORY_ORDER.filter((c) => categories.some((x) => x.category === c));
 
   return (
-    <div className={`grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 ${loading ? "opacity-60" : ""}`}>
+    <div className={`grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 transition-opacity ${loading ? "opacity-60" : ""}`}>
       {shown.map((cat) => {
         const c = categories.find((x) => x.category === cat)!;
         const members = sources.filter((s) => s.category === cat);
+        const memberTotal = members.reduce((a, s) => a + Math.abs(s.sale ?? 0), 0);
         return (
-          <section key={cat} className="rounded-xl bg-white border border-gray-200 p-5">
-            <div className="flex items-baseline justify-between">
-              <h2 className="text-sm font-semibold text-gray-900">{cat}</h2>
-              <span className="text-[11px] text-gray-400 tabular-nums">
+          <section key={cat} className="rounded-2xl bg-white ring-1 ring-line shadow-sm p-5">
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">{cat}</h2>
+              <span className="rounded-full bg-brand-50 px-2 py-0.5 text-[11px] font-semibold text-brand-700 tabular-nums">
                 {c.share_pct.toFixed(0)}% of sale
               </span>
             </div>
-            <p className="text-2xl font-bold text-gray-900 mt-1">
+            <p className="font-display text-[28px] font-semibold leading-none tracking-tight text-gray-900 mt-3">
               {inrCompact(c.sale)}
             </p>
-            <p className="text-[11px] text-gray-500">
+            <p className="text-[11px] text-gray-500 mt-1.5">
               {c.rows.toLocaleString("en-IN")} lines
               {c.incentive != null && ` · ${inrCompact(c.incentive)} earned`}
             </p>
 
-            <ul className="mt-3 space-y-2 border-t border-gray-100 pt-3">
+            {/* The family's make-up in one bar — each type in the colour it wears in
+                every chart on the page, with the figures written out below. */}
+            {memberTotal > 0 && (
+              <div className="mt-4 flex h-2 gap-0.5 overflow-hidden rounded-full bg-gray-100" aria-hidden>
+                {members.map((s) => (
+                  <span
+                    key={s.source}
+                    className="h-full first:rounded-l-full last:rounded-r-full"
+                    style={{
+                      width: `${(Math.abs(s.sale ?? 0) / memberTotal) * 100}%`,
+                      background: SOURCE_COLOR[s.source],
+                    }}
+                  />
+                ))}
+              </div>
+            )}
+
+            <ul className="mt-4 space-y-2.5">
               {members.map((s) => (
                 <li key={s.source} className="flex items-center gap-2">
                   <span

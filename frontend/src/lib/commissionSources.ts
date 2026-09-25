@@ -10,7 +10,8 @@
 // response shapes agree, which the backend guarantees by making schemas/commission.py a
 // superset of schemas/bsp_commission.py.
 
-export type CommissionSourceSlug = "bsp" | "lcc-detailed" | "tp-gds" | "tp-lcc";
+export type CommissionSourceSlug =
+  | "bsp" | "ndc" | "lcc-detailed" | "tp-gds" | "tp-lcc" | "tp-api";
 
 export type CommissionSource = {
   slug: CommissionSourceSlug;
@@ -52,6 +53,22 @@ export const COMMISSION_SOURCES: Record<CommissionSourceSlug, CommissionSource> 
     showsAgency: false,
     showsVariance: false,
     sectorFromSource: false,
+    dealKindLabel: "AIR",
+  },
+  ndc: {
+    slug: "ndc",
+    label: "NDC",
+    apiBase: "/commission/vendor/ndc",
+    statementNoun: "NDC statement",
+    uploadHref: "/vendors/statements/bsp/ndc",
+    uploadLabel: "Vendors data → Statements → BSP → NDC",
+    blurb: "Match every row of the airline's own NDC export to an airline deal and estimate the commission you have earned.",
+    // No second document to join against — an NDC export already prints the class, the
+    // sector and the fare components that BSP needs the TGQ for.
+    showsEnrichment: false,
+    showsAgency: false,
+    showsVariance: false,
+    sectorFromSource: true,
     dealKindLabel: "AIR",
   },
   "lcc-detailed": {
@@ -96,6 +113,23 @@ export const COMMISSION_SOURCES: Record<CommissionSourceSlug, CommissionSource> 
     sectorFromSource: true,
     dealKindLabel: "B2B",
   },
+  "tp-api": {
+    slug: "tp-api",
+    label: "API",
+    apiBase: "/commission/vendor/tp-api",
+    statementNoun: "third-party API statement",
+    uploadHref: "/vendors/statements/third-party/api",
+    uploadLabel: "Vendors data → Statements → Third Party → API",
+    blurb: "Match the flight rows of your aggregator's booking export to a B2B deal. Hotel, train, bus and car rows are listed as skipped — they have no airline deal to price against.",
+    showsEnrichment: false,
+    showsAgency: true,
+    // The aggregator prints what a booking cost and what was paid for it, never a
+    // commission it paid us, so there is nothing to compare against and the backend's
+    // /variance 404s for this source.
+    showsVariance: false,
+    sectorFromSource: true,
+    dealKindLabel: "B2B",
+  },
 };
 
 export type CommissionTab = {
@@ -104,13 +138,24 @@ export type CommissionTab = {
   sources: CommissionSourceSlug[];
 };
 
-/** The three top-level tabs. Third Party has two sources behind an inner switch, exactly
- *  as it does on the Statements page — GDS and LCC are different documents from the same
- *  kind of counterparty, and mixing them in one grid would mix two column shapes. */
+/** The three top-level tabs, each holding the documents of one family — the same two
+ *  questions in the same order as the Statements page: which family, then which document.
+ *
+ *  The inner switch is not decoration. Every source in a family is a DIFFERENT DOCUMENT
+ *  with a different column shape and a different set of things it can prove: a BSP
+ *  settlement row knows neither class nor sector while the NDC export beside it prints
+ *  both, and an aggregator's API file carries four products that no airline deal covers.
+ *  Merging any two of them into one grid would merge two column shapes and quietly change
+ *  what a figure means.
+ *
+ *  LCC has ONE source and therefore no inner switch — the shell renders the second row
+ *  only when a family holds more than one. The four other LCC statement types (DI, Divided
+ *  PNR, Flown Report, CTA/BTA) are ledgers and reports rather than sales documents: there
+ *  is no fare to price on them, so they are uploadable but deliberately not listed here. */
 export const COMMISSION_TABS: CommissionTab[] = [
-  { slug: "bsp", label: "BSP", sources: ["bsp"] },
+  { slug: "bsp", label: "BSP", sources: ["bsp", "ndc"] },
   { slug: "lcc", label: "LCC", sources: ["lcc-detailed"] },
-  { slug: "third-party", label: "Third Party", sources: ["tp-gds", "tp-lcc"] },
+  { slug: "third-party", label: "Third Party", sources: ["tp-gds", "tp-lcc", "tp-api"] },
 ];
 
 export function getSource(slug: string | null | undefined): CommissionSource | undefined {

@@ -328,6 +328,54 @@ class TestProjectionShape(unittest.TestCase):
             self.assertEqual(_select_exprs(sql)[_COLUMNS.index("source_row_id")], "s.id", s)
 
 
+class TestEveryArmIsExecutable(unittest.TestCase):
+    """Every projection arm must survive `text()`, which is how project_batch runs it.
+
+    THIS IS NOT A STYLE CHECK. `date_sql` inlines DATE_PATTERNS' regexes with
+    `literal_binds`, and those regexes are full of non-capturing groups —
+    `(?:0?[13578]|1[02])`, `(?:JAN|MAR|MAY|...)`. SQLAlchemy's `text()` re-parses the
+    finished string for `:name` bind parameters and reads `(?:0?...` as a bind called
+    "0". Every execution then raised "A value is required for bind parameter '0'".
+
+    It failed INVISIBLY — income_board/hooks.refresh and runner._project_income_board
+    both catch and log — so the NDC arm never wrote a row, every NDC upload sat at
+    "never projected" forever, and the revenue board's amber banner was the only symptom.
+    Constructing the `text()` is what proves an arm can actually run.
+    """
+
+    ARMS = ("bsp", "tp-gds", "tp-lcc", "lcc-detailed", "ndc", "tp-api")
+
+    #: What project_batch binds. Anything else a `text()` finds is a regex misread as SQL.
+    BOUND = {"tid", "uid", "batch", "source", "direction", "kind", "kind_airline",
+             "engine_version", "ver"}
+
+    def _sql(self, source):
+        from app.services.income_board import project as P
+        if source == "bsp":
+            return P._bsp_select()
+        if source == "ndc":
+            return P._ndc_select()
+        if source == "tp-api":
+            return P._tp_api_select()
+        return P._statement_select(source)
+
+    def test_no_arm_smuggles_a_regex_in_as_a_bind_parameter(self):
+        from sqlalchemy import text
+
+        for source in self.ARMS:
+            with self.subTest(source=source):
+                found = set(text(self._sql(source))._bindparams)
+                self.assertEqual(
+                    found - self.BOUND, set(),
+                    f"{source}: text() read part of the SQL as bind parameters. A regex "
+                    f"like '(?:JAN|MAR)' reaching text() unescaped is the usual cause — "
+                    f"see dimensions.date_sql.")
+
+    def test_every_projected_source_has_an_arm_here(self):
+        # So a seventh source cannot be added to project_batch and skip this check.
+        self.assertEqual(set(self.ARMS), set(PROJECTED_SOURCES))
+
+
 class TestSourceVocabularies(unittest.TestCase):
     """The test that would have caught it.
 
@@ -400,15 +448,34 @@ class TestSourceVocabularies(unittest.TestCase):
         # and it would show as a smaller number rather than as an error.
         self.assertEqual(set(SALE_SOURCES) - set(PROJECTED_SOURCES), set())
 
-    def test_the_two_unpriced_sources_are_not_claimed_to_have_an_adapter(self):
-        # COMMISSION_SOURCES drives api/v1/income_board's freshness check, which looks
-        # for a completed commission run per batch. ndc and tp-api have no adapter in
-        # services/commission/__init__.py, so a batch of either can never have one --
-        # folding them in here would report every upload as permanently "never
-        # projected" and leave the Rebuild banner up for good.
-        for s in ("ndc", "tp-api"):
-            self.assertIn(s, PROJECTED_SOURCES, s)
-            self.assertNotIn(s, COMMISSION_SOURCES, s)
+    def test_commission_sources_is_exactly_the_registered_adapters(self):
+        # COMMISSION_SOURCES drives api/v1/income_board's freshness check, which looks for
+        # a completed commission run per batch, so it has to mean exactly one thing: "a
+        # registered adapter can price this". Derived from ADAPTERS rather than retyped,
+        # because the two failure modes are silent and opposite.
+        #
+        # A source listed here with no adapter can never have a run, so every batch of it
+        # reports "never projected" and the Rebuild banner stays up for good -- which is
+        # what ndc and tp-api used to do, before commission/ndc.py and commission/tp_api.py
+        # gave them one. A source with an adapter left OUT stops being watched for
+        # re-pricing, so the board keeps showing yesterday's incentive and says it is
+        # current, which is the worse of the two.
+        from app.services.commission import ADAPTERS
+
+        self.assertEqual(set(COMMISSION_SOURCES), set(ADAPTERS))
+        # BSP is projected but is NOT an adapter -- it is priced by its own engine
+        # (services/bsp_commission.py) against its own tables.
+        self.assertNotIn(SOURCE_BSP, COMMISSION_SOURCES)
+        self.assertEqual(set(PROJECTED_SOURCES), {SOURCE_BSP} | set(ADAPTERS))
+
+    def test_every_adapter_source_has_a_projection_arm(self):
+        # The mirror of test_every_sale_source_has_a_projection_arm, one layer down: a
+        # source someone can run commission on and that project_batch cannot write is
+        # money calculated and then dropped on the floor -- the run succeeds, the figure
+        # is committed, and the board never shows it.
+        from app.services.commission import ADAPTERS
+
+        self.assertEqual(set(ADAPTERS) - set(PROJECTED_SOURCES), set())
 
 
 class TestCountsInNet(unittest.TestCase):

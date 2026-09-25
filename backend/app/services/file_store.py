@@ -83,9 +83,13 @@ def local_path(locator: str, local_root: Path | str | None = None) -> Path:
     return _local_path(locator[len(LOCAL_PREFIX):], local_root)
 
 
-async def store(content: bytes, blob_name: str, content_type: str, bucket_name: str) -> tuple[str, bool]:
+async def store(content: bytes, blob_name: str, content_type: str, bucket_name: str,
+                *, local_root: Path | str | None = None) -> tuple[str, bool]:
     """Persist `content`; returns (locator, stored_remotely). Never raises for a remote
-    outage — that's the whole point. Only a local-disk failure propagates."""
+    outage — that's the whole point. Only a local-disk failure propagates.
+
+    `local_root` as in ``store_path``: callers holding personal data keep their fallback
+    copies out of the public UPLOAD_DIR."""
     blob_name = _sanitize(blob_name)
     if bucket_name:
         try:
@@ -99,7 +103,7 @@ async def store(content: bytes, blob_name: str, content_type: str, bucket_name: 
     else:
         logger.warning("[store] No bucket configured, storing locally | blob=%s", blob_name)
 
-    path = _local_path(blob_name)
+    path = _local_path(blob_name, local_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     await asyncio.to_thread(path.write_bytes, content)
     logger.info("[store] Stored locally | path=%s | size=%d bytes", path, len(content))

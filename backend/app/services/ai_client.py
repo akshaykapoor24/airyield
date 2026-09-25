@@ -49,6 +49,14 @@ def build_client():
     )
 
 
+def is_reasoning_model(model: str | None) -> bool:
+    """GPT-5 and the o-series reject `temperature`, `seed` and `max_tokens` on chat
+    completions — they take `max_completion_tokens` (which also covers their hidden
+    reasoning) and an optional `reasoning_effort` instead."""
+    name = (model or "").lower()
+    return name.startswith(("gpt-5", "o1", "o3", "o4"))
+
+
 def max_tokens_for(row_count: int, per_row: int, floor: int = 400) -> int:
     """Output ceiling for a chunk of `row_count` rows.
 
@@ -127,13 +135,18 @@ def salvage_or_parse(raw: str, key: str = "rows") -> list[dict]:
 # MODEL CALLS
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def call_json(client, *, system_prompt: str, user_content: str, schema: dict,
+async def call_json(client, *, system_prompt: str, user_content: str | list, schema: dict,
                     max_tokens: int, label: str = "ai", row_count: int = 0,
-                    strict: bool = True) -> str:
+                    strict: bool = True, model: str | None = None,
+                    reasoning_effort: str | None = None) -> str:
     """One chat completion returning JSON text, with the retry ladder and the strict fallback.
 
     Returns the raw string rather than parsed rows: a truncated response is still worth
     salvaging, and only the caller knows what shape it expected.
+
+    `user_content` may be a list of content parts (text and image_url) for a vision read —
+    scanned contracts have no text layer. `model` overrides OPENAI_MODEL for one feature;
+    a reasoning model gets the parameters it accepts (see `is_reasoning_model`).
     """
     from openai import (
         APIConnectionError, APITimeoutError, AuthenticationError, BadRequestError,
@@ -146,6 +159,14 @@ async def call_json(client, *, system_prompt: str, user_content: str, schema: di
     else:
         response_format = {"type": "json_object"}
 
+    chosen = model or settings.OPENAI_MODEL
+    if is_reasoning_model(chosen):
+        tuning = {"max_completion_tokens": max_tokens}
+        if reasoning_effort:
+            tuning["reasoning_effort"] = reasoning_effort
+    else:
+        tuning = {"temperature": 0, "seed": settings.AI_EXTRACT_SEED, "max_tokens": max_tokens}
+
     attempt = 0
     while True:
         try:
@@ -153,15 +174,13 @@ async def call_json(client, *, system_prompt: str, user_content: str, schema: di
             # LengthFinishReasonError on a truncated response, which would make the
             # salvage path in the caller unreachable.
             response = await client.chat.completions.create(
-                model=settings.OPENAI_MODEL,
+                model=chosen,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_content},
                 ],
                 response_format=response_format,
-                temperature=0,
-                seed=settings.AI_EXTRACT_SEED,
-                max_tokens=max_tokens,
+                **tuning,
             )
         except (AuthenticationError, PermissionDeniedError) as exc:
             raise FatalAIError(str(exc)) from exc
@@ -185,7 +204,8 @@ async def call_json(client, *, system_prompt: str, user_content: str, schema: di
                 return await call_json(
                     client, system_prompt=system_prompt, user_content=user_content,
                     schema=schema, max_tokens=max_tokens, label=label,
-                    row_count=row_count, strict=False,
+                    row_count=row_count, strict=False, model=model,
+                    reasoning_effort=reasoning_effort,
                 )
             raise
 

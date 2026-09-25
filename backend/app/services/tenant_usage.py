@@ -60,7 +60,7 @@ from app.models.customer_statement import CustomerStatement
 from app.models.deal import Deal
 from app.models.income_summary import IncomeSummary
 from app.models.lcc_detailed import LccDetailed
-from app.models.series_contract import SeriesContract
+from app.models.series import SeriesContract
 from app.models.statement_row import STATEMENT_MODELS
 from app.models.ticket_adjustment import TicketAdjustment
 from app.models.ticket_statement import TicketStatement
@@ -137,6 +137,15 @@ EXCLUDED_TABLES: frozenset[str] = frozenset({
     "customer_statement_tickets", "approval_workflow_steps",
     "approval_workflow_step_approvers", "deal_approvals", "deal_approval_steps",
     "user_entity_access",
+    # The contract graph under a counted series_contracts row. A sixty-seat group is one
+    # record the workspace produced, not sixty passengers plus two sectors plus four fare
+    # lines — counting the children would make one contract look like a whole month's
+    # trading.
+    "series_allocations", "series_sectors", "series_bookings", "series_passengers",
+    "series_fare_components", "series_payment_schedule", "series_payments",
+    "series_deadlines", "series_events", "series_terms", "series_documents",
+    # Reminders and their read receipts: operational, regenerated from the contracts.
+    "notifications", "notification_reads",
     # upload-session parents whose rows are counted instead
     "bsp_statements", "bsp_summary_statements", "deal_statements", "deal_batches",
     "lcc_detailed_batch",

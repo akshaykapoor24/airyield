@@ -57,26 +57,28 @@ _SOURCE_TABLES = {
     SOURCE_LCC_DETAILED: "lcc_detailed",
 }
 
-# The sources that have a commission adapter in services/commission/__init__.py. NOT the
-# same list as "sources this module projects", and the two must not be conflated: ndc and
-# tp-api are projected for their sale and have no adapter at all, so folding them in here
-# would tell api/v1/income_board's freshness check to look for commission runs that can
-# never exist and report every batch as "never projected".
-COMMISSION_SOURCES = tuple(_SOURCE_TABLES)
-
-# The two sources that carry sale and nothing prices them. `services/commission/__init__`
-# has no adapter for either: an airline's own NDC export settles directly with the
-# carrier, and an aggregator's hotel and train lines have no airline deal to price
-# against. They project with `priced = false` and a NULL incentive.
-_SALE_ONLY_TABLES = {
+# The two sources whose own arm reads a table this module cannot generalise. They are
+# NOT unpriced — both have had a commission adapter since NDC and Third Party API were
+# added to services/commission/__init__.py — but neither fits `_statement_select`, which
+# knows exactly two row shapes: LCC Detailed's typed columns and the third-party GDS/LCC
+# `data` keys. NDC's money is `Payment Amount` with its ancillary lines repeating the
+# ticket's fare, and Third Party API is multi-product with a billing lateral deciding its
+# amount. Each keeps the arm that gets its own gross right and gains the same LEFT JOIN
+# onto the calculation ledger the generic arm has.
+_BESPOKE_TABLES = {
     SOURCE_NDC: "ndc",
     SOURCE_TP_API: "third_party_api",
 }
 
-# Everything `project_batch` has an arm for. BSP is here and not in COMMISSION_SOURCES
-# for the mirror of the same reason: it is priced by its own engine, not by a registered
-# adapter.
-PROJECTED_SOURCES = (SOURCE_BSP, *COMMISSION_SOURCES, *_SALE_ONLY_TABLES)
+# The sources that have a commission adapter in services/commission/__init__.py. NOT the
+# same list as "sources this module projects", and the two must not be conflated: BSP is
+# projected but priced by its own engine rather than by a registered adapter, so folding
+# it in here would tell api/v1/income_board's freshness check to look for commission runs
+# that can never exist and report every batch as "never projected".
+COMMISSION_SOURCES = (*_SOURCE_TABLES, *_BESPOKE_TABLES)
+
+# Everything `project_batch` has an arm for.
+PROJECTED_SOURCES = (SOURCE_BSP, *COMMISSION_SOURCES)
 
 # The projected shape, in order. The INSERT column list and every arm's SELECT are
 # generated from this single tuple so they cannot drift apart.
@@ -121,6 +123,21 @@ _DO_UPDATE = ", ".join(f"{c} = EXCLUDED.{c}" for c in _UPDATE_COLUMNS)
 _SLAB_DEPENDENT = """
     EXISTS (SELECT 1 FROM deal_incentives di
              WHERE di.deal_id = {deal_col} AND di.target_based = 'Slab')"""
+
+
+# The join onto the calculation ledger, shared by every arm that reads it. LEFT, and
+# scoped on all four key columns rather than on the row id alone: `source_row_id` carries
+# no foreign key and points at a different table per source, so `c.source` is what keeps
+# an ndc calculation off a tp-api row that happens to share an id. `d` is joined through
+# it only for `vendor_agency_id`, which lives on the matched deal.
+_CALC_JOIN = """
+        LEFT JOIN commission_calculations c
+               ON c.source_row_id = s.id
+              AND c.source = :source
+              AND c.tenant_id = s.tenant_id
+              AND c.created_by_id = s.created_by_id
+        LEFT JOIN deals d
+               ON d.id = c.matched_deal_id"""
 
 
 def _j(field: str, alias: str = "s") -> str:
@@ -359,7 +376,12 @@ def _statement_select(source: str) -> str:
 
 
 def _ndc_select() -> str:
-    """NDC: the airline's own sales export. Sale only — nothing prices it.
+    """NDC: the airline's own sales export, priced by services/commission/ndc.py.
+
+    ITS OWN ARM RATHER THAN `_statement_select`'S, and the reason is the gross below:
+    nothing generic could compute it. The calculation ledger is joined on exactly as the
+    generic arm joins it, so `priced`, `status` and the money mean the same thing here as
+    everywhere else; only the sale is read differently.
 
     THE GROSS IS `Payment Amount`, NOT `Total Fare`, and getting that backwards inverts
     every refund. ndc_spec states it outright: "`Total Fare` on a REFUND line is the
@@ -387,6 +409,7 @@ def _ndc_select() -> str:
     accounting code first, the 2-letter designator second.
     """
     counts, counts_reason = counts_in_net_sql(SOURCE_NDC, "s")
+    slab = _SLAB_DEPENDENT.format(deal_col="c.matched_deal_id")
     doc_code, doc_serial = doc_key_sql(
         _j("document_no"), _j("airline_iata_code"))
     # Everything the row needs parsed, computed once. Each date_sql is a nine-arm CASE
@@ -417,7 +440,7 @@ def _ndc_select() -> str:
             :direction, :kind,
             air.id, coalesce(air.name, {_j('airline')}), air.how,
             -- The airline IS the counterparty; an NDC statement has no consolidator.
-            NULL, NULL, NULL, NULL, NULL, NULL,
+            NULL, NULL, NULL, NULL, NULL, d.vendor_agency_id,
             {issue}, to_char({issue}, 'YYYY-MM'),
             CASE WHEN n.issue_dt IS NOT NULL THEN 'date_of_issue'
                  WHEN n.book_dt IS NOT NULL THEN 'date_of_booking' ELSE NULL END,
@@ -439,18 +462,26 @@ def _ndc_select() -> str:
             {_component('basic_fare')}, {_component('yq_tax')}, {_component('yr_tax')},
             {_component('total_tax')},
             CASE WHEN n.is_ancillary THEN {gross} ELSE NULL END,
-            -- Nothing prices NDC: it has no adapter in services/commission/__init__.py.
-            NULL, NULL, NULL,
-            NULL, NULL, NULL, NULL, NULL, NULL,
-            false, 'unpriced', NULL, NULL,
-            NULL, NULL, NULL, NULL, false,
+            -- Priced by services/commission/ndc.py when a run has touched the row; NULL
+            -- and `unpriced` until one has. Declared columns stay NULL for good: an
+            -- airline's own export prints no commission it paid us, which is why the
+            -- adapter sets `has_declared_amounts = False`.
+            c.incentive, c.iata_commission, c.incentive_breakdown,
+            c.declared_commission, c.declared_incentive, c.declared_tds, c.declared_net,
+            c.declared_net_ok, c.variance_total,
+            (c.id IS NOT NULL), coalesce(c.status, 'unpriced'), c.reason,
+            c.skipped_criteria,
+            c.matched_deal_id, c.matched_deal_type, c.matched_deal_name,
+            c.matched_deal_no,
+            {slab},
             {_j('document_no')}, {_j('document_no')},
             {ticket_key_sql(_j('document_no'))},
             {doc_code}, {doc_serial},
             {_j('airline_pnr')}, 1,
-            NULL, NULL, :ver, now(), now()
+            c.run_id, :engine_version, :ver, now(), now()
         FROM ndc s
         {lateral}
+{_CALC_JOIN}
         -- LATERAL ... LIMIT 1, NOT a plain LEFT JOIN. `airlines.iata_code` is unique but
         -- `iata_numeric_code` is not constrained to be, and an OR-join matching two master
         -- rows would duplicate the statement row -- doubling its gross silently, since
@@ -474,7 +505,14 @@ def _ndc_select() -> str:
 
 
 def _tp_api_select() -> str:
-    """Third Party API: an aggregator's booking export. Sale only — nothing prices it.
+    """Third Party API: an aggregator's booking export, priced by commission/tp_api.py.
+
+    ITS OWN ARM RATHER THAN `_statement_select`'S, because its amount comes from the
+    billing lateral and its product is a real dimension rather than a constant. Only the
+    FLIGHT rows can carry an incentive — the adapter returns every hotel, train, bus and
+    car row as a `skipped` calculation naming its product — so a non-flight row here is
+    `priced` with a NULL incentive and a reason saying why, which is a more useful claim
+    than calling the whole file unpriced.
 
     THE ONLY MULTI-PRODUCT ARM. One MakeMyTrip or TBO file carries hotel, flight, train,
     bus and car bookings side by side, so `product` is a real dimension here and not a
@@ -490,6 +528,7 @@ def _tp_api_select() -> str:
     billing worklist, so it is NULL on every unresolved upload.
     """
     counts, counts_reason = counts_in_net_sql(SOURCE_TP_API, "s")
+    slab = _SLAB_DEPENDENT.format(deal_col="c.matched_deal_id")
     issue = (f"coalesce({iso_date_sql(_j('transaction_date'))}, "
              f"{iso_date_sql(_j('booking_date'))})")
     travel = (f"coalesce({iso_date_sql(_j('travel_date'))}, "
@@ -498,9 +537,15 @@ def _tp_api_select() -> str:
         SELECT
             s.tenant_id, s.created_by_id, :source, s.batch_id, s.id,
             :direction, :kind,
-            NULL, NULL, NULL,
+            -- NULL until the row is priced. The type declares no `resolve_airline` —
+            -- its only carrier field holds a hotel's name on a hotel row — but the
+            -- commission adapter resolves the FLIGHT rows against the airline master,
+            -- so a priced flight row does name its carrier here and a hotel row still
+            -- does not. See _tp_api_select's docstring.
+            c.airline_id, c.airline_name,
+            CASE WHEN c.airline_id IS NOT NULL THEN 'resolved' ELSE NULL END,
             sbs.supplier_id, sbs.supplier_name, sbs.supplier_code, sbs.supplier_branch,
-            NULL, NULL,
+            c.supplier_match_by, d.vendor_agency_id,
             {issue}, to_char({issue}, 'YYYY-MM'),
             CASE WHEN {iso_date_sql(_j('transaction_date'))} IS NOT NULL
                  THEN 'transaction_date' ELSE 'booking_date' END,
@@ -518,19 +563,29 @@ def _tp_api_select() -> str:
                  THEN 'printed' ELSE 'derived' END,
             {jsonb_decimal_sql(_j('base_fare'))}, NULL, NULL,
             {jsonb_decimal_sql(_j('taxes'))}, NULL,
-            -- No commission adapter: an aggregator's hotel and train lines have no
-            -- airline deal to price against.
-            NULL, NULL, NULL,
-            NULL, NULL, NULL, NULL, NULL, NULL,
-            false, 'unpriced', NULL, NULL,
-            NULL, NULL, NULL, NULL, false,
+            -- Priced by services/commission/tp_api.py, whose adapter costs the FLIGHT
+            -- rows and returns every hotel, train, bus and car row as a `skipped`
+            -- calculation naming its product. So a non-flight row here is `priced` with
+            -- a NULL incentive and a reason — which is a different and more useful claim
+            -- than the blanket `unpriced` this arm used to make of the whole file.
+            -- Declared columns stay NULL for good: an aggregator prints no commission it
+            -- paid us, which is why the adapter sets `has_declared_amounts = False`.
+            c.incentive, c.iata_commission, c.incentive_breakdown,
+            c.declared_commission, c.declared_incentive, c.declared_tds, c.declared_net,
+            c.declared_net_ok, c.variance_total,
+            (c.id IS NOT NULL), coalesce(c.status, 'unpriced'), c.reason,
+            c.skipped_criteria,
+            c.matched_deal_id, c.matched_deal_type, c.matched_deal_name,
+            c.matched_deal_no,
+            {slab},
             {_j('invoice_number')}, {_j('booking_id')},
             {ticket_key_sql(_j('booking_id'))},
             NULL, NULL,
             {_j('pnr')}, coalesce(s.bill_pax_count, 1),
-            NULL, NULL, :ver, now(), now()
+            c.run_id, :engine_version, :ver, now(), now()
         FROM third_party_api s
         {tp_api_bill_lateral('s')}
+{_CALC_JOIN}
         LEFT JOIN statement_batch_suppliers sbs
                ON sbs.slug = :source
               AND sbs.batch_id = s.batch_id
@@ -610,7 +665,7 @@ async def batch_changes(
     if source in _BATCH_SQL:
         sql = _BATCH_SQL[source].format(user=scoped, user_b=scoped_b)
     else:
-        tbl = {**_SOURCE_TABLES, **_SALE_ONLY_TABLES}[source]
+        tbl = {**_SOURCE_TABLES, **_BESPOKE_TABLES}[source]
         sql = _SPEC_BATCH_SQL.format(tbl=tbl, user=scoped)
     return [(r[0], r[1], r[2]) for r in (await db.execute(text(sql), params)).all()]
 
@@ -654,10 +709,11 @@ async def project_batch(
                   "WHERE r.tenant_id = :tid AND r.created_by_id = :uid "
                   "AND r.statement_id = :batch")
         id_params = {"tid": tenant_id, "uid": user_id, "batch": batch_id}
-    elif source in _SALE_ONLY_TABLES:
-        # ndc and tp-api: statement rows with no commission adapter behind them. Sale
-        # only, `priced = false`, incentive NULL — and NULL is the whole point, because a
-        # zero would say a deal applied and earned nothing.
+    elif source in _BESPOKE_TABLES:
+        # ndc and tp-api: their own arm for the gross, the generic arm's LEFT JOIN for the
+        # money. A batch nobody has priced still projects, with `priced = false` and a NULL
+        # incentive — and NULL is the whole point, because a zero would say a deal applied
+        # and earned nothing.
         select_sql = _ndc_select() if source == SOURCE_NDC else _tp_api_select()
         params = {
             "tid": tenant_id, "uid": user_id, "batch": batch_id, "source": source,
@@ -665,9 +721,9 @@ async def project_batch(
             # NDC comes straight from the carrier; an aggregator statement is issued by a
             # consolidator we bought through.
             "kind": KIND_AIRLINE if source == SOURCE_NDC else KIND_SUPPLIER,
-            "ver": PROJECTION_VERSION,
+            "engine_version": engine_version, "ver": PROJECTION_VERSION,
         }
-        tbl = _SALE_ONLY_TABLES[source]
+        tbl = _BESPOKE_TABLES[source]
         # The same predicate the arm carries, so the sweep's live-id set is exactly the
         # set the INSERT wrote. NDC's declared grand-total line is stored as a row and
         # never projected; leaving it out of both is what keeps them in step.

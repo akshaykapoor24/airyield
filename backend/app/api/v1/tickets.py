@@ -616,17 +616,23 @@ async def confirm_ticket_upload(
 
 
 async def _rematch_series_contracts(db: AsyncSession, *, tenant_id: int, created_by_id: int, batch_id: str) -> None:
-    """Refresh Series/SIT/MICE contract rollups after tickets land.
+    """Refresh Series/SIT/MICE/Group contract rollups after tickets land.
 
     Best-effort by design: a block-booking contract going stale is a reporting
     problem, losing a ticket save is a data problem. Never let the former cause
     the latter. Same posture as the auto-reconcile in workers/bsp_tasks.
 
+    NOT SCOPED TO THE UPLOADER. `created_by_id` is still taken so this signature
+    matches its callers, but the match itself runs for the whole workspace: a
+    contract is visible agency-wide, so a statement one person uploads has to be
+    able to settle a contract somebody else keyed in. Scoping the run per-creator
+    would leave those contracts reading zero forever.
+
     Imported locally to keep the service out of this module's import graph.
     """
     try:
-        from app.services.series_contract_matching import SeriesContractMatchingService
-        await SeriesContractMatchingService.run(db, tenant_id=tenant_id, created_by_id=created_by_id)
+        from app.services.series.matching import SeriesMatchingService
+        await SeriesMatchingService.run(db, tenant_id=tenant_id)
         await db.commit()
     except Exception as ex:  # noqa: BLE001
         logging.getLogger(__name__).warning(

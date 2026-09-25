@@ -50,7 +50,7 @@ export default function RevenueFilterBar({
     value.source.length || value.category.length;
 
   return (
-    <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-3 flex flex-wrap items-start gap-2">
+    <div className="bg-white rounded-2xl ring-1 ring-line shadow-sm p-3 flex flex-wrap items-start gap-2">
       <Filter className="w-4 h-4 text-gray-400 shrink-0 mt-2.5" aria-hidden />
 
       <input

@@ -145,8 +145,25 @@ DELETION_GROUPS: tuple[DeletionGroup, ...] = (
         GroupCategory.RECORDS, ("billings",),
     ),
     DeletionGroup(
-        "series", "Series / SIT / MICE", "Series contracts.",
-        GroupCategory.RECORDS, ("series_contracts",),
+        # The whole contract graph. Every child FKs the contract with ON DELETE CASCADE,
+        # so naming them here is about the deletion PREVIEW being honest about what goes,
+        # not about the delete needing help to reach them.
+        "series", "Series / SIT / MICE / Group",
+        "Block-booking contracts, their departures, PNRs, passengers, fares, "
+        "payment schedule and deadlines.",
+        GroupCategory.RECORDS, (
+            "series_contracts", "series_allocations", "series_sectors",
+            "series_bookings", "series_passengers", "series_fare_components",
+            "series_payment_schedule", "series_payments", "series_deadlines",
+            "series_events", "series_terms", "series_documents",
+        ),
+    ),
+    DeletionGroup(
+        # Rows only, like reports: stored contract PDFs under series/{tenant}/ are left to
+        # the bucket's lifecycle rule. Reads go first — they reference notifications.
+        "notifications", "Notifications",
+        "Reminders and alerts shown in the notification bell, and who has read them.",
+        GroupCategory.RECORDS, ("notification_reads", "notifications"),
     ),
     DeletionGroup(
         # Rows only. The stored workbooks under reports/{tenant}/ are left to the GCS

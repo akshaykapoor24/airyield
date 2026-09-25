@@ -70,6 +70,9 @@ export { AXIS_TICK, GRID_STROKE } from "@/lib/accrual";
  *  White doing the separating, rather than a stroke drawn around each mark. */
 export const MARK_GAP = { stroke: "#ffffff", strokeWidth: 2 };
 
-export const CARD = "bg-white rounded-xl border border-gray-200 p-5";
-export const CARD_TITLE = "text-sm font-semibold text-gray-900";
-export const CARD_NOTE = "text-xs text-gray-500";
+// The card frame shared by every chart on the three revenue boards. Matches Panel in
+// components/dashboard/ui/Board.tsx, so a chart card and a table panel sit side by side
+// without one looking borrowed from another page.
+export const CARD = "bg-white rounded-2xl ring-1 ring-line shadow-sm p-5";
+export const CARD_TITLE = "font-display text-[15px] font-semibold text-gray-900";
+export const CARD_NOTE = "text-xs leading-relaxed text-gray-500";

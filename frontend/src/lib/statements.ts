@@ -102,7 +102,7 @@ export const STATEMENT_NAV: StatementCategory[] = [
         apiBase: "/statements/ndc", supportsMapping: true, supportsBilling: true,
         billingWorklist: "ndc",
         blurb: "NDC statements — the airline's own sales export, one row per transaction.",
-        doneHint: "Open Billing on the upload to bill them, or price them in Commission income.",
+        doneHint: "Open Billing on the upload to bill them, or price them under Vendors data → Commission income → BSP → NDC.",
       },
     ],
   },
@@ -125,10 +125,12 @@ export const STATEMENT_NAV: StatementCategory[] = [
       { slug: "gds", label: "GDS", kind: "spec-repo", status: "ready", apiBase: "/statements/tp-gds", requiresSupplier: true, supportsMapping: true, blurb: "Third-party GDS statement from your consolidator, normalized.", doneHint: "Price it under Vendors data → Commission income → Third Party." },
       { slug: "lcc", label: "LCC", kind: "spec-repo", status: "ready", apiBase: "/statements/tp-lcc", requiresSupplier: true, supportsMapping: true, blurb: "Third-party LCC statement from your consolidator, normalized.", doneHint: "Price it under Vendors data → Commission income → Third Party." },
       // The only multi-product type: one aggregator file carries hotel, flight, train, bus
-      // and car bookings side by side, told apart by Category inside the upload. No
-      // doneHint pointing at Commission income — an aggregator's hotel and train lines have
-      // no airline deal to price against, so it deliberately does not feed that screen.
-      { slug: "api", label: "API", kind: "spec-repo", status: "ready", apiBase: "/statements/tp-api", requiresSupplier: true, supportsMapping: true, supportsBilling: true, billingWorklist: "tp-api", blurb: "Aggregator booking statement (MakeMyTrip, TBO) — hotel, flight, train, bus and car in one file.", doneHint: "Open Billing on the upload to bill it — flight, hotel, train, bus and car rows each bill at the party's markup for that category." },
+      // and car bookings side by side, told apart by Category inside the upload. It feeds
+      // Commission income too, but only PARTLY, and the hint says so rather than promising
+      // a figure for the whole file: an aggregator's hotel and train lines have no airline
+      // deal to price against, so that screen costs the flight rows and lists the rest as
+      // skipped (services/commission/tp_api.py).
+      { slug: "api", label: "API", kind: "spec-repo", status: "ready", apiBase: "/statements/tp-api", requiresSupplier: true, supportsMapping: true, supportsBilling: true, billingWorklist: "tp-api", blurb: "Aggregator booking statement (MakeMyTrip, TBO) — hotel, flight, train, bus and car in one file.", doneHint: "Open Billing on the upload to bill it — flight, hotel, train, bus and car rows each bill at the party's markup for that category. Its flight rows can also be priced under Vendors data → Commission income → Third Party → API." },
     ],
   },
 ];
