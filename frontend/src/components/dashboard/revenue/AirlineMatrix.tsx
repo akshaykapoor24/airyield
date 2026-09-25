@@ -2,14 +2,14 @@
 
 import { ArrowRight, Info } from "lucide-react";
 import { dashIfZero, inrCompact } from "@/lib/money";
-import { CARD_NOTE, CARD_TITLE, SOURCE_COLOR } from "@/lib/revenueCharts";
+import { SOURCE_COLOR } from "@/lib/revenueCharts";
+import { Panel, TD, TH } from "@/components/dashboard/ui/Board";
 import {
   SALE_SOURCES, SOURCE_SHORT, type AirlineRevenuePoint,
 } from "@/lib/revenueBoard";
 
-const HEAD =
-  "px-2.5 py-2 text-[10px] font-semibold uppercase tracking-wide text-white/80 whitespace-nowrap";
-const CELL = "px-2.5 py-1.5 whitespace-nowrap tabular-nums";
+const HEAD = TH;
+const CELL = TD;
 
 /**
  * Every airline, every statement type, one row each.
@@ -43,20 +43,24 @@ export default function AirlineMatrix({
   const cols = SALE_SOURCES.filter((s) => rows.some((r) => r.by_source[s]));
 
   return (
-    <section className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-      <div className="p-5 pb-3">
-        <h2 className={CARD_TITLE}>Every airline, every statement type</h2>
-        <p className={CARD_NOTE}>
-          One carrier per row, whatever it was sold through. Click a row for its months
-          and its incentive split.
-        </p>
-      </div>
-
-      <div className={`overflow-x-auto ${loading ? "opacity-60" : ""}`}>
+    <Panel
+      flush
+      loading={loading}
+      title="Every airline, every statement type"
+      subtitle="One carrier per row, whatever it was sold through. Click a row for its months and its incentive split."
+      actions={
+        rows.length ? (
+          <span className="rounded-full bg-gray-100 px-2.5 py-1 text-[11px] font-medium text-gray-600">
+            {rows.length} airline{rows.length === 1 ? "" : "s"}
+          </span>
+        ) : null
+      }
+    >
+      <div className="max-h-[560px] overflow-auto">
         <table className="w-full text-xs">
-          <thead style={{ background: "#1e3a5f" }}>
+          <thead>
             <tr>
-              <th className={`${HEAD} text-left sticky left-0`} style={{ background: "#1e3a5f" }}>
+              <th className={`${HEAD} text-left left-0 z-[2]`}>
                 Airline
               </th>
               {cols.map((s) => (
@@ -81,10 +85,10 @@ export default function AirlineMatrix({
             {rows.map((r) => (
               <tr
                 key={String(r.airline_id ?? "none")}
-                className="group hover:bg-blue-50/40 cursor-pointer"
+                className="group hover:bg-brand-50/60 cursor-pointer"
                 onClick={() => onOpen(r)}
               >
-                <td className={`${CELL} sticky left-0 bg-white group-hover:bg-blue-50/40 font-medium text-gray-900`}>
+                <td className={`${CELL} sticky left-0 bg-white group-hover:bg-brand-50/60 font-medium text-gray-900`}>
                   {r.airline}
                   {r.airline_id === null && (
                     <span
@@ -101,7 +105,15 @@ export default function AirlineMatrix({
                   </td>
                 ))}
                 <td className={`${CELL} text-right font-semibold text-gray-900`}>
-                  {inrCompact(r.sale)}
+                  <span className="inline-flex items-center justify-end gap-2">
+                    <span className="hidden sm:block h-1.5 w-14 overflow-hidden rounded-full bg-gray-100" aria-hidden>
+                      <span
+                        className="block h-full rounded-full bg-brand-600"
+                        style={{ width: `${Math.min(100, Math.max(2, r.share_pct))}%` }}
+                      />
+                    </span>
+                    {inrCompact(r.sale)}
+                  </span>
                 </td>
                 <td className={`${CELL} text-right text-gray-700`}>
                   {r.incentive == null ? "—" : inrCompact(r.incentive)}
@@ -111,7 +123,7 @@ export default function AirlineMatrix({
                 </td>
                 <td className={CELL}>
                   <ArrowRight
-                    className="w-3.5 h-3.5 text-gray-300 group-hover:text-blue-500"
+                    className="w-3.5 h-3.5 text-gray-300 group-hover:text-brand-600"
                     aria-hidden
                   />
                 </td>
@@ -127,6 +139,6 @@ export default function AirlineMatrix({
           </tbody>
         </table>
       </div>
-    </section>
+    </Panel>
   );
 }

@@ -1,7 +1,8 @@
 from fastapi import APIRouter
 
-from app.api.v1 import auth, users, subscriptions, airlines, suppliers, airports, routes, deals, tickets, income, documents, reports, classes, approval_workflows, dashboard, customers, corporates, entities, login_ids, tenant_airlines, iata_commissions, gst_configurations, user_entities, user_login_ids, agencies, agency_account, agency_entities, agency_login_ids, agency_billing, adjustments, airline_adjustments, statements, ndc_billing, tp_api_billing, bsp, bsp_summary, bsp_reconciliation, bsp_commission, commission, customer_statements, lcc_detailed, ticket_details, series_contracts
-from app.api.v1 import report_download, sell_reconciliation, income_board, revenue_board
+from app.api.v1 import auth, users, subscriptions, airlines, suppliers, airports, routes, deals, tickets, income, documents, reports, classes, approval_workflows, dashboard, customers, corporates, entities, login_ids, tenant_airlines, iata_commissions, gst_configurations, user_entities, user_login_ids, agencies, agency_account, agency_entities, agency_login_ids, agency_billing, adjustments, airline_adjustments, statements, ndc_billing, tp_api_billing, bsp, bsp_summary, bsp_reconciliation, bsp_commission, commission, customer_statements, lcc_detailed, ticket_details, series
+from app.api.v1 import report_download, sell_reconciliation, income_board, revenue_board, notifications
+from app.api.v1 import sales_flown, risk_board
 
 router = APIRouter()
 
@@ -29,6 +30,11 @@ router.include_router(income_board.router, prefix="/dashboard/income",
 # sale across every loaded statement, where income_board reads only the priced half.
 router.include_router(revenue_board.router, prefix="/dashboard/revenue",
                       tags=["Dashboard - Total Revenue"])
+# Both read the same projection through the revenue board's own sale predicate.
+router.include_router(sales_flown.router, prefix="/dashboard/sales-flown",
+                      tags=["Dashboard - Sales vs Flown"])
+router.include_router(risk_board.router, prefix="/dashboard/risk",
+                      tags=["Dashboard - Risk analysis"])
 router.include_router(dashboard.router, prefix="/dashboard", tags=["Dashboard"])
 router.include_router(customers.router, prefix="/customers", tags=["Customers"])
 router.include_router(corporates.router, prefix="/corporates", tags=["Corporate Billing"])
@@ -68,6 +74,7 @@ router.include_router(commission.router, prefix="/commission/vendor", tags=["Ven
 # answers a different question against different storage and is left untouched.
 router.include_router(sell_reconciliation.router, prefix="/reconciliation/vendor", tags=["Vendors - Reconciliation"])
 router.include_router(customer_statements.router, prefix="/customer-statements", tags=["Customer Statements"])
-router.include_router(series_contracts.router, prefix="/series-contracts", tags=["Vendors - Series/SIT/MICE Contracts"])
+router.include_router(series.router, prefix="/series-contracts", tags=["Vendors - Series/SIT/MICE/Group Contracts"])
+router.include_router(notifications.router, prefix="/notifications", tags=["Notifications"])
 # Its own literal prefix, never under /statements (see the ordering note above).
 router.include_router(report_download.router, prefix="/report-download", tags=["Workspace - Report Download"])

@@ -1,8 +1,9 @@
 "use client";
 
 import { useAuth } from "@/hooks/useAuth";
-import { Bell, Search } from "lucide-react";
+import { Search } from "lucide-react";
 import { isPlatformAdmin } from "@/lib/rbac";
+import NotificationBell from "@/components/layout/NotificationBell";
 
 export default function Header() {
   const { user } = useAuth();
@@ -25,10 +26,8 @@ export default function Header() {
 
       {/* Right — Notifications (the account menu now lives in the sidebar footer) */}
       <div className="flex items-center gap-2">
-        <button className="relative p-2 rounded-xl text-slate-500 hover:bg-slate-100 hover:text-slate-700 transition-colors">
-          <Bell className="w-4.5 h-4.5" />
-          <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full border-2 border-white" />
-        </button>
+        {/* Platform admins have no workspace, so nothing is addressed to them. */}
+        {!platform && <NotificationBell />}
       </div>
     </header>
   );

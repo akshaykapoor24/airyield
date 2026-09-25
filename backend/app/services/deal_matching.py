@@ -83,6 +83,14 @@ _FIRST_CLASSES    = {"F", "A", "P"}
 # their source cannot supply and the dependent filters are bypassed instead.
 SKIP_CLASS       = "class"
 SKIP_TRAVEL_DATE = "travel_date"
+# THE SAME TRAP, ONE FIELD OVER. `_flight_type_matches` answers True for a NULL
+# segment_type — "can't determine, allow" — which is right for a source that merely
+# failed to read the cell, and wrong for one whose document has no such column at all:
+# a Domestic-only deal would silently pay every International ticket in the file. An
+# NDC export is the first such source (services/commission/ndc.py). Naming this skip
+# makes a restrictive flight_type UNCONFIRMED instead of passed, so the row withholds
+# rather than guesses. Sources that do print a segment never name it and are unaffected.
+SKIP_SEGMENT     = "segment_type"
 
 # ── B2B supplier guard ──────────────────────────────────────────────────────
 # How a statement's counterparty was matched to a deal's, reported on the result so
@@ -228,6 +236,18 @@ def segment_letter(segment_type: str | None) -> str | None:
     if seg in _DOM_SEGMENTS:
         return "D"
     return None
+
+
+def _flight_type_is_restrictive(plb_flight_type: str | None) -> bool:
+    """Does this incentive pay on ONE flight type rather than any?
+
+    The mirror of `_class_is_restrictive`, and it matters for the same reason: a deal
+    written for "Both" does not care whether the ticket was domestic, so a source with
+    no such column costs nothing; a deal written for "Domestic" cannot be confirmed
+    against a ticket nobody can place. Same predicate as `_flight_type_matches`' early
+    return, named for the decision it drives.
+    """
+    return bool(plb_flight_type) and plb_flight_type.strip().lower() not in ("both", "all", "")
 
 
 def _flight_type_matches(segment_type: str | None, plb_flight_type: str | None) -> bool:
@@ -481,6 +501,31 @@ def _compute_ancillary_from_items(
 
 def _is_slab(config: DealIncentiveConfig) -> bool:
     return (config.amount_based_type or "").strip().lower() == "slab based" or bool(getattr(config, "slabs", None))
+
+
+def _slab_is_segment_sensitive(config: DealIncentiveConfig) -> bool:
+    """Does this slab pay a DIFFERENT rate domestic vs international?
+
+    The second half of SKIP_SEGMENT, and the half that is easy to miss. `flight_type`
+    is not the only way a config depends on the segment: a slab's cells are keyed
+    `domEconomy` / `intlBusiness`, and `_slab_seg_key` resolves an unknown segment to
+    'dom' — the comment on it says "default / domestic" out loud. So a slab paying 3%
+    domestic and 6% international, written for flight_type "Both" (which
+    `_flight_type_is_restrictive` correctly calls unrestricted), would quietly pay the
+    3% cell on every international ticket of a statement that prints no segment.
+
+    A slab whose two cells agree — or that only has one of them — costs nothing, so it
+    is not flagged: withholding there would withhold on almost every deal for no gain.
+    """
+    for slab in (getattr(config, "slabs", None) or []):
+        cells = {sv.value_key: sv.value for sv in (slab.values or []) if sv.value_key}
+        for key in cells:
+            if not key.startswith("dom"):
+                continue
+            intl_key = "intl" + key[3:]
+            if intl_key in cells and cells[intl_key] != cells[key]:
+                return True
+    return False
 
 
 def _safe_date(*raws: str | None) -> date | None:
@@ -1021,7 +1066,20 @@ class DealMatchingService:
             # dropped out for some other reason never gated anything.
             unconfirmed: set[str] = set()
             for config in deal.incentives:
-                if not _flight_type_matches(segment_type, config.flight_type):
+                config_unconfirmed: set[str] = set()
+
+                # FLIGHT TYPE. Skipping is not passing, exactly as for class below:
+                # a source with no domestic/international column at all lets the config
+                # through, but a config written for ONE flight type records that it was
+                # never actually checked. See SKIP_SEGMENT.
+                if SKIP_SEGMENT in skips:
+                    # Two ways a config can depend on the segment, and both withhold:
+                    # it pays on one flight type, or its slab pays a different rate
+                    # domestic vs international.
+                    if (_flight_type_is_restrictive(config.flight_type)
+                            or _slab_is_segment_sensitive(config)):
+                        config_unconfirmed.add(SKIP_SEGMENT)
+                elif not _flight_type_matches(segment_type, config.flight_type):
                     continue
 
                 # CLASS. Skipping is not passing. When the source cannot supply a
@@ -1029,7 +1087,6 @@ class DealMatchingService:
                 # ever match a BSP row — but if the config is written for ONE class
                 # we record that we never actually checked it, so the caller can
                 # decline to pay on an unverified match.
-                config_unconfirmed: set[str] = set()
                 if SKIP_CLASS in skips:
                     if _class_is_restrictive(config.class_):
                         config_unconfirmed.add(SKIP_CLASS)
@@ -1237,17 +1294,33 @@ class DealMatchingService:
 
                 # Flight type
                 ft_val = config.flight_type
-                ft_pass = _flight_type_matches(segment_type, ft_val)
-                steps.append(MatchStepResult(
-                    step="Flight Type",
-                    passed=ft_pass,
-                    ticket_value=segment_type or "—",
-                    deal_value=ft_val or "Any",
-                    detail=(
-                        f"ticket segment_type='{segment_type}', config flight_type='{ft_val}'; "
-                        + ("match" if ft_pass else f"MISMATCH — change config flight_type to '{segment_type}' or 'Both'")
-                    ),
-                ))
+                if SKIP_SEGMENT in skips:
+                    # The popup must say the same thing the run did. Reporting a pass
+                    # here while the row came back `needs_data` is how someone spends an
+                    # afternoon looking for the mismatch that withheld it.
+                    steps.append(MatchStepResult(
+                        step="Flight Type",
+                        passed=True,
+                        ticket_value="not printed",
+                        deal_value=ft_val or "Any",
+                        detail=("this statement prints no domestic/international column — "
+                                + ("flight-type filter skipped, and this config pays on one "
+                                   "flight type, so nothing was claimed on it"
+                                   if _flight_type_is_restrictive(ft_val)
+                                   else "flight-type filter skipped; this config pays on any")),
+                    ))
+                else:
+                    ft_pass = _flight_type_matches(segment_type, ft_val)
+                    steps.append(MatchStepResult(
+                        step="Flight Type",
+                        passed=ft_pass,
+                        ticket_value=segment_type or "—",
+                        deal_value=ft_val or "Any",
+                        detail=(
+                            f"ticket segment_type='{segment_type}', config flight_type='{ft_val}'; "
+                            + ("match" if ft_pass else f"MISMATCH — change config flight_type to '{segment_type}' or 'Both'")
+                        ),
+                    ))
 
                 # Booking class
                 cls_key = config.class_

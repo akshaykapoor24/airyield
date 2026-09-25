@@ -36,7 +36,7 @@ from app.models.deal import (
     DealRule,
     build_rule_dict,
 )
-from app.services.deal_matching import SKIP_CLASS, SKIP_TRAVEL_DATE
+from app.services.deal_matching import SKIP_CLASS, SKIP_SEGMENT, SKIP_TRAVEL_DATE
 from app.services.exclusion_evaluator import (
     evaluate_exclusion_for_payout_values,
     evaluate_inclusion_for_payout_values,
@@ -204,6 +204,7 @@ async def apply_payout_rules(
 NEEDS_DATA_LABEL = {
     SKIP_CLASS: "cabin class",
     SKIP_TRAVEL_DATE: "travel date",
+    SKIP_SEGMENT: "flight type",
     "sector": "sector",
 }
 

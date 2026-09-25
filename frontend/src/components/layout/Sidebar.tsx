@@ -10,7 +10,7 @@ import {
   Calculator, CheckSquare,
   Edit3, Users, Shield, GitMerge, Search,
   History, LayoutGrid, Contact, Layers,
-  CreditCard, TrendingUp, Receipt, FileDown,
+  CreditCard, TrendingUp, Receipt, FileDown, PlaneTakeoff, ShieldAlert,
 } from "lucide-react";
 import { USER_MASTER_NAV, userMasterHref } from "@/lib/userMasterNav";
 import { cn } from "@/lib/utils";
@@ -52,6 +52,13 @@ const TENANT_NAV: NavItem[] = [
       // The PLB accrual board — supplier income earned on flown revenue, before
       // the airline pays it. The number finance books as a receivable.
       { label: "PLB Accrual", href: "/dashboard/accrual", icon: TrendingUp },
+      // Of what we sold, how much has flown — the sale-month × flown-month cohort, and
+      // where the flown stands against the PLB slabs. After the accrual board because
+      // it explains the flown that board accrues on.
+      { label: "Sales vs Flown", href: "/dashboard/sales-flown", icon: PlaneTakeoff },
+      // Where the figures above could fail to arrive: unflown, no deal, unconfirmable
+      // income, refunds, ADMs, concentration.
+      { label: "Risk analysis", href: "/dashboard/risk", icon: ShieldAlert },
     ],
   },
 
@@ -61,7 +68,7 @@ const TENANT_NAV: NavItem[] = [
       { label: "Incoming deals", href: "/deals", icon: FolderOpen },
       // TODO: wire badge to real count
       { label: "Statements", href: "/vendors/statements", icon: FileText },
-      { label: "Series/SIT/MICE", href: "/vendors/series-sit-mice", icon: Layers },
+      { label: "Series/SIT/MICE/Group", href: "/vendors/series-sit-mice", icon: Layers },
       { label: "Ticket Search", href: "/ticket-details", icon: Search },
       // Reconciliation moved to its own group below.
       { label: "Commission income", href: "/vendors/commission-income", icon: DollarSign },

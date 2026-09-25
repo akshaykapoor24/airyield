@@ -397,6 +397,17 @@ def iso_date_sql(expr: str) -> str:
             f"THEN (left({e}, 10))::date ELSE NULL END")
 
 
+#: SQLAlchemy's OWN bind-parameter pattern, copied from `sqlalchemy.sql.elements.TextClause`
+#: so that what `date_sql` escapes is exactly what `text()` would otherwise capture. Kept
+#: verbatim rather than approximated: a looser pattern here would escape a colon text()
+#: does not touch, and PostgreSQL would then see a stray backslash inside a regex.
+#: The two characters `text()` reads as "this colon is literal". Built from chr(92)
+#: rather than written as a string escape so no future reformat can silently halve it.
+BACKSLASH_COLON = chr(92) + ":"
+
+_SA_BIND_PARAM = re.compile(r"(?<![:\w\$]):([\w\$]+)(?![:\w\$])")
+
+
 def date_sql(expr: str) -> str:
     """One of any vendor's printed date spellings -> a 'YYYY-MM-DD' text expression.
 
@@ -430,6 +441,34 @@ def date_sql(expr: str) -> str:
     assert "%%" not in sql, (
         "date_sql compiled a doubled '%%', which format() reads as a literal percent. "
         "The compiling dialect's paramstyle no longer matches the engine's."
+    )
+
+    # THE SAME TRAP AS THE '%%' ABOVE, ONE PUNCTUATION MARK OVER, and it cost the NDC arm
+    # of the revenue board every row it ever had.
+    #
+    # `literal_binds` inlines DATE_PATTERNS' regexes into the SQL, and those regexes are
+    # full of non-capturing groups: `(?:0?[13578]|1[02])`, `(?:JAN|MAR|MAY|...)`. When
+    # project.py hands the finished string to `text()`, SQLAlchemy re-parses it looking for
+    # `:name` bind parameters -- and `(?:0?...` reads as a bind called "0", `(?:JAN|...` as
+    # one called "JAN". The statement then raises "A value is required for bind parameter
+    # '0'" on EVERY execution.
+    #
+    # It fails INVISIBLY, which is why it lasted: income_board/hooks.refresh and
+    # runner._project_income_board both catch and log, so an NDC upload simply never lands
+    # on the board and the freshness banner reports it as "never projected" forever.
+    #
+    # `\:` is how text() is told a colon is literal -- it strips the backslash before the
+    # statement reaches the driver. Every colon in here is inside one of our own regexes
+    # (the compile above inlined them; nothing a vendor typed reaches this string), so
+    # escaping all of them is right rather than merely expedient.
+    sql = _SA_BIND_PARAM.sub(r"\\:\1", sql)
+    # Strip what we just escaped, then ask the ORIGINAL pattern whether any BARE
+    # colon survived. Re-checking with `_SA_BIND_PARAM` directly cannot work: its
+    # lookbehind excludes `:`, a word char and `$` but not a backslash, so it matches
+    # `\:JAN` exactly as happily as `:JAN`.
+    assert not _SA_BIND_PARAM.search(sql.replace(BACKSLASH_COLON, "")), (
+        "date_sql left a bare ':name' in its SQL, which text() will read as a bind "
+        "parameter and refuse to execute. See the note above."
     )
     return sql
 

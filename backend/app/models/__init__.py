@@ -23,7 +23,12 @@ from app.models.airline_class_master import AirlineClassMaster
 from app.models.class_approval import ClassApproval
 from app.models.customer import Customer
 from app.models.corporate import Corporate
-from app.models.series_contract import SeriesContract
+from app.models.series import (
+    SeriesContract, SeriesAllocation, SeriesSector, SeriesBooking, SeriesPassenger,
+    SeriesFareComponent, SeriesPaymentSchedule, SeriesPayment, SeriesDeadline,
+    SeriesEvent, SeriesTerm, SeriesDocument,
+)
+from app.models.notification import Notification, NotificationRead
 from app.models.billing import Billing
 from app.models.uploaded_ticket import UploadedTicket
 from app.models.ticket_statement import TicketStatement
@@ -112,7 +117,10 @@ __all__ = [
     "AirlineClassMaster", "ClassApproval",
     "Customer",
     "Corporate",
-    "SeriesContract",
+    "SeriesContract", "SeriesAllocation", "SeriesSector", "SeriesBooking",
+    "SeriesPassenger", "SeriesFareComponent", "SeriesPaymentSchedule",
+    "SeriesPayment", "SeriesDeadline", "SeriesEvent", "SeriesTerm", "SeriesDocument",
+    "Notification", "NotificationRead",
     "Billing",
     "UploadedTicket",
     "TicketStatement",

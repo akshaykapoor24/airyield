@@ -27,6 +27,7 @@ from app.models.bsp_summary import BspSummaryStatement
 from app.models.airline_adjustment import AirlineADM, AirlineACM, AirlineRA
 from app.models.statement_row import STATEMENT_MODELS
 from app.models.deal import DealStatement
+from app.models.series import SeriesDocument
 from app.services.statement_spec import STATEMENT_SPECS
 
 
@@ -40,6 +41,10 @@ def _bsp_bucket() -> str:
 
 def _deals_bucket() -> str:
     return settings.GCS_DEALS_BUCKET_NAME
+
+
+def _series_bucket() -> str:
+    return settings.GCS_SERIES_BUCKET_NAME or settings.GCS_DEALS_BUCKET_NAME
 
 
 @dataclass
@@ -68,6 +73,7 @@ SOURCES: list[DocSource] = [
     DocSource("acm",         "ACM",                "Adjustments", AirlineACM,           _bsp_bucket,     "batch_id", "source_file", "uploaded_at", "created_by_id", None,            True),
     DocSource("ra",          "RA",                 "Adjustments", AirlineRA,            _bsp_bucket,     "batch_id", "source_file", "uploaded_at", "created_by_id", None,            True),
     DocSource("deals",       "Deal",               "Deals",       DealStatement,        _deals_bucket,   "id",       "file_name",   "created_at",  "created_by_id", "supplier_name", False, id_is_int=True),
+    DocSource("series",      "Series / Group Contract", "Series",  SeriesDocument,       _series_bucket,  "id",       "file_name",   "created_at",  "created_by_id", None,            False, id_is_int=True, link_tpl="/vendors/series-sit-mice/new?document={id}"),
 ]
 
 # Vendor statement types (TGQ HMPR / NDC / LCC* / Third-Party) — one dedicated table each,
