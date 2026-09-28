@@ -10,6 +10,15 @@ import { useAppSelector } from "@/store/hooks";
 import { canManageGlobalMasters } from "@/lib/rbac";
 import { INPUT, LABEL, ModalShell, apiError } from "@/components/userMaster/shared";
 import DeleteWorkspaceModal from "@/components/admin/DeleteWorkspaceModal";
+import {
+  AiCell, DbCell, FilesCell, HoverCell, PanelRow, PanelTitle, UnavailableCell, UsageTiles,
+  type PlatformUsage, type ResourceUsage,
+} from "@/components/admin/UsageCells";
+import InvoiceCell from "@/components/admin/invoices/InvoiceCell";
+import GenerateInvoiceModal from "@/components/admin/invoices/GenerateInvoiceModal";
+import InvoiceHistoryModal from "@/components/admin/invoices/InvoiceHistoryModal";
+import { downloadInvoicePdf, type InvoiceSummary } from "@/components/admin/invoices/shared";
+import { VerificationCell, VerifyEmailModal, type VerificationState } from "@/components/admin/Verification";
 
 type PlanStatus = "free" | "trial" | "active" | "expired" | "suspended";
 
@@ -33,10 +42,18 @@ type TenantPlan = {
   record_breakdown: Record<string, number>;
   owner_email: string | null;
   owner_name: string | null;
+  // What the workspace costs to run: OpenAI, stored files, share of Postgres. null when
+  // the server could not read it — shown as "—", never as zeros.
+  resources: ResourceUsage | null;
+  // The Invoice column. null when the server could not read invoices.
+  invoices: InvoiceSummary | null;
+  // Whether the owner has confirmed their email — unverified accounts can't sign in.
+  verification: VerificationState | null;
 };
 
 type Stats = {
   total: number; active: number; free: number; trial: number; expired: number; suspended: number;
+  usage: PlatformUsage | null;
 };
 
 const STATUS_OPTIONS: { value: PlanStatus; label: string; hint: string }[] = [
@@ -81,61 +98,31 @@ function StatTile({ icon: Icon, label, value, tone }: {
   );
 }
 
-/**
- * The Records total, with the per-table breakdown behind a hover.
- *
- * The panel is `position: fixed` rather than `absolute` on purpose: the table
- * sits inside `overflow-x-auto`, and a non-visible overflow on one axis makes the
- * browser clip the other too — an absolutely positioned panel would be cut off at
- * the first and last rows. Fixed escapes that, and no ancestor of this table sets
- * transform/filter/will-change, so it resolves against the viewport.
- */
+/** The Records total, with the per-table breakdown behind a hover. */
 function RecordsCell({ total, breakdown }: {
   total: number; breakdown: Record<string, number>;
 }) {
-  const [at, setAt] = useState<{ x: number; y: number } | null>(null);
   const entries = Object.entries(breakdown ?? {});
 
-  // A fixed panel does not travel with the scroll container, so drop it rather
-  // than let it hang over unrelated rows.
-  useEffect(() => {
-    if (!at) return;
-    const close = () => setAt(null);
-    window.addEventListener("scroll", close, true);
-    return () => window.removeEventListener("scroll", close, true);
-  }, [at]);
-
   if (!total) {
-    return <td className="px-4 py-3 text-xs tabular-nums"><span className="text-gray-300">0</span></td>;
+    return <HoverCell panel={null}><span className="text-gray-300">0</span></HoverCell>;
   }
 
+  const panel = entries.length > 0 ? (
+    <>
+      <PanelTitle>Records by source</PanelTitle>
+      {entries.map(([label, n]) => (
+        <PanelRow key={label} label={label} value={n.toLocaleString()} />
+      ))}
+    </>
+  ) : null;
+
   return (
-    <td
-      className="px-4 py-3 text-xs tabular-nums"
-      onMouseEnter={(e) => {
-        const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-        setAt({ x: r.left, y: r.bottom + 6 });
-      }}
-      onMouseLeave={() => setAt(null)}
-    >
+    <HoverCell panel={panel}>
       <span className="text-gray-700 font-medium cursor-default border-b border-dotted border-gray-300">
         {total.toLocaleString()}
       </span>
-      {at && entries.length > 0 && (
-        <div
-          className="fixed z-50 bg-white border border-gray-200 rounded-lg shadow-lg py-1.5 px-2 min-w-44 pointer-events-none"
-          style={{ left: at.x, top: at.y }}
-        >
-          <p className="text-[9px] uppercase tracking-wide text-gray-400 px-1 pb-1">Records by source</p>
-          {entries.map(([label, n]) => (
-            <div key={label} className="flex items-center justify-between gap-6 px-1 py-0.5">
-              <span className="text-[10px] text-gray-600 whitespace-nowrap">{label}</span>
-              <span className="text-[10px] text-gray-900 font-medium tabular-nums">{n.toLocaleString()}</span>
-            </div>
-          ))}
-        </div>
-      )}
-    </td>
+    </HoverCell>
   );
 }
 
@@ -159,8 +146,12 @@ export default function SubscriptionsPage() {
   const [formError, setFormError] = useState("");
 
   const [deleting, setDeleting] = useState<TenantPlan | null>(null);
+  const [invoicing, setInvoicing] = useState<TenantPlan | null>(null);
+  const [history, setHistory] = useState<{ tenant: TenantPlan; highlightId?: number } | null>(null);
   // Survives the modal closing, so the operator sees what actually went.
   const [deleteNotice, setDeleteNotice] = useState("");
+  const [verifying, setVerifying] = useState<TenantPlan | null>(null);
+  const [notice, setNotice] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -241,6 +232,9 @@ export default function SubscriptionsPage() {
         </div>
       )}
 
+      {/* What the platform costs to run, across every workspace. */}
+      {stats?.usage && <UsageTiles usage={stats.usage} />}
+
       <div className="flex items-center gap-2 flex-wrap">
         <div className="relative flex-1 min-w-56">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
@@ -278,6 +272,15 @@ export default function SubscriptionsPage() {
         <div className="bg-red-50 border border-red-200 text-red-600 text-xs rounded-lg px-3 py-2">{error}</div>
       )}
 
+      {notice && (
+        <div className="flex items-start justify-between gap-3 bg-green-50 border border-green-200 text-green-800 text-xs rounded-lg px-3 py-2">
+          <span>{notice}</span>
+          <button onClick={() => setNotice("")} className="text-green-600 hover:text-green-800 shrink-0">
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {deleteNotice && (
         <div className="flex items-start justify-between gap-3 bg-amber-50 border border-amber-200 text-amber-800 text-xs rounded-lg px-3 py-2">
           <span>{deleteNotice}</span>
@@ -291,23 +294,28 @@ export default function SubscriptionsPage() {
         <div className="overflow-x-auto">
           <table className="w-full text-left">
             <thead className="bg-gray-50 border-b border-gray-100">
-              <tr className="text-[10px] uppercase tracking-wide text-gray-400">
+              <tr className="text-[10px] uppercase tracking-wide text-gray-400 whitespace-nowrap">
                 <th className="px-4 py-2.5 font-semibold">Workspace</th>
                 <th className="px-4 py-2.5 font-semibold">Owner</th>
+                <th className="px-4 py-2.5 font-semibold">Verified</th>
                 <th className="px-4 py-2.5 font-semibold">Users</th>
                 <th className="px-4 py-2.5 font-semibold">Records</th>
+                <th className="px-4 py-2.5 font-semibold">AI usage</th>
+                <th className="px-4 py-2.5 font-semibold">Files</th>
+                <th className="px-4 py-2.5 font-semibold">Database</th>
                 <th className="px-4 py-2.5 font-semibold">Plan</th>
                 <th className="px-4 py-2.5 font-semibold">Expires</th>
                 <th className="px-4 py-2.5 font-semibold">Joined</th>
+                <th className="px-4 py-2.5 font-semibold">Invoice</th>
                 <th className="px-4 py-2.5 font-semibold text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-50">
               {loading && (
-                <tr><td colSpan={8} className="px-4 py-8 text-center text-xs text-gray-400">Loading…</td></tr>
+                <tr><td colSpan={13} className="px-4 py-8 text-center text-xs text-gray-400">Loading…</td></tr>
               )}
               {!loading && rows.length === 0 && (
-                <tr><td colSpan={8} className="px-4 py-8 text-center text-xs text-gray-400">No workspaces match.</td></tr>
+                <tr><td colSpan={13} className="px-4 py-8 text-center text-xs text-gray-400">No workspaces match.</td></tr>
               )}
               {!loading && rows.map((t) => (
                 <tr key={t.id} className="hover:bg-gray-50/60">
@@ -326,10 +334,22 @@ export default function SubscriptionsPage() {
                     <p className="text-xs text-gray-700 truncate">{t.owner_name || "—"}</p>
                     <p className="text-[10px] text-gray-400 truncate">{t.owner_email || "—"}</p>
                   </td>
+                  <VerificationCell state={t.verification} onVerify={() => setVerifying(t)} />
                   <td className="px-4 py-3 text-xs text-gray-600">{t.user_count}</td>
                   {/* Usage at a glance — a zero reads as "signed up but never used".
                       Hover the number for which tables it came from. */}
                   <RecordsCell total={t.record_count} breakdown={t.record_breakdown} />
+                  {/* What the workspace costs to run. Hover each for the breakdown — by
+                      feature and member for OpenAI, by feature for files, by area for the DB. */}
+                  {t.resources ? (
+                    <>
+                      <AiCell ai={t.resources.ai} />
+                      <FilesCell files={t.resources.files} />
+                      <DbCell db={t.resources.database} />
+                    </>
+                  ) : (
+                    <><UnavailableCell /><UnavailableCell /><UnavailableCell /></>
+                  )}
                   <td className="px-4 py-3">
                     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border ${CHIP[t.plan_status]}`}>
                       <span className={`w-1.5 h-1.5 rounded-full ${t.has_active_plan ? "bg-green-500" : "bg-gray-400"}`} />
@@ -341,13 +361,18 @@ export default function SubscriptionsPage() {
                       <span className="ml-1.5 text-[10px] text-amber-600">lapsed</span>
                     )}
                   </td>
-                  <td className="px-4 py-3 text-xs text-gray-600">{fmtDate(t.plan_expires_at)}</td>
-                  <td className="px-4 py-3 text-xs text-gray-500">{fmtDate(t.created_at)}</td>
+                  <td className="px-4 py-3 text-xs text-gray-600 whitespace-nowrap">{fmtDate(t.plan_expires_at)}</td>
+                  <td className="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">{fmtDate(t.created_at)}</td>
+                  <InvoiceCell
+                    summary={t.invoices}
+                    onGenerate={() => setInvoicing(t)}
+                    onHistory={() => setHistory({ tenant: t })}
+                  />
                   <td className="px-4 py-3">
                     <div className="flex items-center justify-end gap-1.5">
                       <button
                         onClick={() => openEditor(t)}
-                        className="inline-flex items-center gap-1.5 text-white px-3 py-1.5 rounded-lg text-[11px] font-medium"
+                        className="inline-flex items-center gap-1.5 whitespace-nowrap text-white px-3 py-1.5 rounded-lg text-[11px] font-medium"
                         style={{ background: "#7c3aed" }}
                       >
                         <CreditCard className="w-3 h-3" /> Manage plan
@@ -441,6 +466,55 @@ export default function SubscriptionsPage() {
             </p>
           </div>
         </ModalShell>
+      )}
+
+      {verifying && verifying.verification && (
+        <VerifyEmailModal
+          tenantId={verifying.id}
+          workspaceName={verifying.name || verifying.domain || `Workspace #${verifying.id}`}
+          emails={verifying.verification.unverified_emails}
+          onClose={() => setVerifying(null)}
+          onDone={(message) => {
+            setVerifying(null);
+            setNotice(message);
+            load();
+          }}
+        />
+      )}
+
+      {invoicing && (
+        <GenerateInvoiceModal
+          tenantId={invoicing.id}
+          tenantName={invoicing.name || invoicing.domain || `Workspace #${invoicing.id}`}
+          usage={invoicing.resources}
+          onClose={() => setInvoicing(null)}
+          onCreated={(inv) => {
+            // Straight into the history, with the new invoice flagged and its PDF on its way
+            // down — the next thing anyone does with a fresh invoice is send it.
+            const tenant = invoicing;
+            setInvoicing(null);
+            setHistory({ tenant, highlightId: inv.id });
+            // A failed download is recoverable from the history's own Download button.
+            downloadInvoicePdf(inv).catch(() => undefined);
+            load();
+          }}
+        />
+      )}
+
+      {history && (
+        <InvoiceHistoryModal
+          tenantId={history.tenant.id}
+          tenantName={history.tenant.name || history.tenant.domain || `Workspace #${history.tenant.id}`}
+          ownerEmail={history.tenant.owner_email}
+          highlightId={history.highlightId}
+          onClose={() => setHistory(null)}
+          onChanged={load}
+          onGenerate={() => {
+            const tenant = history.tenant;
+            setHistory(null);
+            setInvoicing(tenant);
+          }}
+        />
       )}
 
       {deleting && (

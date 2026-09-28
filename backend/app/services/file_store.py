@@ -32,7 +32,7 @@ import shutil
 from pathlib import Path
 
 from app.config import settings
-from app.services import gcs
+from app.services import gcs, usage_meter
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +107,11 @@ async def store(content: bytes, blob_name: str, content_type: str, bucket_name: 
     path.parent.mkdir(parents=True, exist_ok=True)
     await asyncio.to_thread(path.write_bytes, content)
     logger.info("[store] Stored locally | path=%s | size=%d bytes", path, len(content))
+    # The GCS branch above is metered inside gcs.upload_bytes; only the fallback is here.
+    await usage_meter.record_object_stored(
+        storage="local", bucket="", object_name=blob_name,
+        size_bytes=len(content), content_type=content_type,
+    )
     return LOCAL_PREFIX + blob_name, False
 
 
@@ -147,7 +152,12 @@ async def store_path(
     target = _local_path(blob_name, local_root)
     target.parent.mkdir(parents=True, exist_ok=True)
     await asyncio.to_thread(shutil.move, str(source), str(target))
-    logger.info("[store] Stored locally | path=%s | size=%d bytes", target, target.stat().st_size)
+    size = target.stat().st_size
+    logger.info("[store] Stored locally | path=%s | size=%d bytes", target, size)
+    await usage_meter.record_object_stored(
+        storage="local", bucket="", object_name=blob_name,
+        size_bytes=size, content_type=content_type,
+    )
     return LOCAL_PREFIX + blob_name, False
 
 
@@ -166,10 +176,13 @@ async def delete(locator: str | None, bucket_name: str, *, local_root: Path | st
     if not locator:
         return
     if is_local(locator):
+        name = locator[len(LOCAL_PREFIX):]
         try:
-            _local_path(locator[len(LOCAL_PREFIX):], local_root).unlink(missing_ok=True)
+            _local_path(name, local_root).unlink(missing_ok=True)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[store] Local delete failed (ignored) | %s | %s", locator, exc)
+            return
+        await usage_meter.record_object_deleted(storage="local", bucket="", object_name=name)
         return
     await gcs.delete_blob(locator, bucket_name)
 

@@ -210,8 +210,13 @@ def _sweep_stale_temp_dirs() -> None:
 async def _housekeeping(conn: "AsyncConnection") -> None:
     from app.services.report_download import jobs
 
+    from app.services import usage_meter
+
     try:
-        purged = await jobs.purge_expired(conn, _utcnow())
+        # A system scope: the purge is nobody's usage, but the files it deletes must come
+        # off the storage ledger or the console keeps counting them.
+        with usage_meter.scope(None, None):
+            purged = await jobs.purge_expired(conn, _utcnow())
         if purged:
             logger.info("expired %d report(s)", purged)
     except Exception:  # noqa: BLE001 — housekeeping must never block the build it precedes
@@ -442,6 +447,10 @@ async def _run(export_id: int, task_id: Optional[str], run: _RunState) -> None:
             return
         run.attempt = claim.attempt
         logger.info("report %s: claimed attempt %s", export_id, claim.attempt)
+        # The stored workbook counts toward its owner's storage (services/usage_meter.py).
+        # asyncio.run gave this task its own context, so nothing needs resetting.
+        from app.services import usage_meter
+        usage_meter.enter_scope(claim.tenant_id, claim.created_by_id)
 
         owner = await _active_owner(conn, claim)
         if owner is None:

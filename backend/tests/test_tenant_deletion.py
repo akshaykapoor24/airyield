@@ -48,6 +48,11 @@ GLOBAL_TABLES = frozenset({
     "airlines", "airports", "routes", "airline_class_masters", "suppliers",
 })
 
+# The platform's own records about workspaces — invoices it raised to them. Not workspace
+# data: deleting a workspace must leave them (FK SET NULL), which is why they carry
+# billed_tenant_id rather than tenant_id. See app/models/platform_invoice.py.
+PLATFORM_TABLES = frozenset({"platform_invoices"})
+
 TENANT_SCOPED = frozenset(
     name for name, t in Base.metadata.tables.items() if "tenant_id" in t.c
 )
@@ -71,7 +76,7 @@ class TestCoverage(unittest.TestCase):
     def test_every_other_table_is_global_or_has_a_route_to_a_tenant(self):
         """A table with no tenant_id must either be shared master data or say
         which tenant-scoped parent it hangs off."""
-        known = TENANT_SCOPED | GLOBAL_TABLES | set(CHILD_TABLES) | {"tenants"}
+        known = TENANT_SCOPED | GLOBAL_TABLES | PLATFORM_TABLES | set(CHILD_TABLES) | {"tenants"}
         unclassified = sorted(set(Base.metadata.tables) - known)
         self.assertEqual(
             unclassified, [],

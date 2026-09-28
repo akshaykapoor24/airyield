@@ -171,10 +171,20 @@ EXCLUDED_TABLES: frozenset[str] = frozenset({
     # generated Report download workbooks — a job row and a file rebuilt from uploads
     # that are already counted, so counting it would count the same data again
     "report_exports",
+    # PLB accrual board: overrides of a board that is itself derived from statements
+    # already counted, plus its settings and frozen copies — adjustments to counted work,
+    # not new work
+    "plb_accrual_inputs", "plb_airline_settings", "plb_accrual_snapshots",
+    # metering ledgers (services/usage_meter.py): what using the product cost, not usage
+    # of it — an AI call is made on behalf of a deal or statement already counted, and a
+    # stored file is the upload behind rows already counted
+    "ai_usage_events", "stored_objects",
     # config / master data owned by the workspace
     "users", "customers", "corporates", "entities", "user_entities",
     "user_login_ids", "login_ids", "agencies", "agency_entities",
     "agency_login_ids", "agency_terms", "iata_commissions", "approval_workflows",
+    # per-workspace GST rule overrides; almost every row is global (tenant_id NULL)
+    "gst_configurations",
     # the tenant's own subset of the platform airline master, with its ids —
     # master data, like login_ids next to it, not a unit of usage
     "tenant_airlines",
@@ -183,7 +193,7 @@ EXCLUDED_TABLES: frozenset[str] = frozenset({
     # counted — counting both would report a workspace's agency invoices twice.
     "agency_ledger",
     "airline_approvals", "airport_approvals", "class_approvals",
-    "supplier_approvals",
+    "supplier_approvals", "iata_commission_approvals",
     # no tenant_id: records parse failures, reachable only via bsp_statements
     "bsp_parse_errors",
     # the tenant row itself

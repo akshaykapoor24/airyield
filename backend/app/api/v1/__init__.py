@@ -3,11 +3,15 @@ from fastapi import APIRouter
 from app.api.v1 import auth, users, subscriptions, airlines, suppliers, airports, routes, deals, tickets, income, documents, reports, classes, approval_workflows, dashboard, customers, corporates, entities, login_ids, tenant_airlines, iata_commissions, gst_configurations, user_entities, user_login_ids, agencies, agency_account, agency_entities, agency_login_ids, agency_billing, adjustments, airline_adjustments, statements, ndc_billing, tp_api_billing, bsp, bsp_summary, bsp_reconciliation, bsp_commission, commission, customer_statements, lcc_detailed, ticket_details, series
 from app.api.v1 import report_download, sell_reconciliation, income_board, revenue_board, notifications
 from app.api.v1 import sales_flown, risk_board
+from app.api.v1 import platform_invoices
 
 router = APIRouter()
 
 router.include_router(auth.router, prefix="/auth", tags=["Auth"])
 router.include_router(users.router, prefix="/users", tags=["Users"])
+# Before subscriptions.router, by the literal-before-general rule below: its /invoices/...
+# paths share the prefix with /{tenant_id}. They do not collide today (different lengths).
+router.include_router(platform_invoices.router, prefix="/subscriptions", tags=["Platform - Invoices"])
 router.include_router(subscriptions.router, prefix="/subscriptions", tags=["Platform - Subscriptions"])
 router.include_router(airlines.router, prefix="/airlines", tags=["Airlines"])
 router.include_router(suppliers.router, prefix="/suppliers", tags=["Suppliers"])

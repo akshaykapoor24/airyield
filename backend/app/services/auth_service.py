@@ -190,6 +190,8 @@ class AuthService:
             raise HTTPException(status_code=404, detail="Account not found.")
         if not user.is_verified:
             user.is_verified = True
+            # By the link: when, but no `verified_by_id` — that marks a manual verification.
+            user.verified_at = datetime.utcnow()
             await db.commit()
         return user
 

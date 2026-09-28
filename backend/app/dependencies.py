@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.database import get_db
+from app.services import usage_meter
 from app.utils.security import verify_token, ACCESS_PURPOSE
 from app.models.user import User, UserRole, role_matches
 
@@ -111,6 +112,12 @@ async def get_current_user(
     # Last, so that an expired session or a deactivated account still reports
     # itself as such rather than as a billing problem.
     _assert_plan_active(user, request.url.path)
+
+    # Every OpenAI call and stored file from here to the end of the request is billed to
+    # this workspace and member (services/usage_meter.py). Set here so every router gets
+    # it without asking, for the same reason as the plan gate above. The request's task
+    # owns its context, so there is nothing to reset.
+    usage_meter.enter_scope(user.tenant_id, user.id)
     return user
 
 

@@ -46,7 +46,9 @@ def _from_domain() -> str:
     return domain or "localhost"
 
 
-def _send_sync(to_email: str, subject: str, html_body: str, text_body: str) -> None:
+def _send_sync(to_email: str, subject: str, html_body: str, text_body: str,
+               attachments: list[tuple[str, bytes, str]] | None = None) -> None:
+    """`attachments` is [(filename, content, mime type)], e.g. ("inv.pdf", b"%PDF…", "application/pdf")."""
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = formataddr((settings.SMTP_FROM_NAME, settings.SMTP_FROM))
@@ -62,6 +64,11 @@ def _send_sync(to_email: str, subject: str, html_body: str, text_body: str) -> N
     # scores worse. set_content/add_alternative produces that order.
     msg.set_content(text_body)
     msg.add_alternative(html_body, subtype="html")
+    # After the alternatives, so the message becomes multipart/mixed with the text/HTML
+    # pair as its first part — the structure every client renders the body from.
+    for filename, content, mime in attachments or ():
+        maintype, _, subtype = mime.partition("/")
+        msg.add_attachment(content, maintype=maintype, subtype=subtype, filename=filename)
 
     with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=15) as server:
         if settings.SMTP_USE_TLS:
@@ -71,8 +78,13 @@ def _send_sync(to_email: str, subject: str, html_body: str, text_body: str) -> N
         server.send_message(msg)
 
 
-async def send_verification_email(to_email: str, link: str) -> None:
-    """Send the account verification link."""
+async def send_verification_email(to_email: str, link: str, *, raise_errors: bool = False) -> None:
+    """Send the account verification link.
+
+    Signup swallows a failure (the account still exists and the user can ask for another
+    link). `raise_errors` is for the platform admin's Resend, who is waiting to hear
+    whether it went.
+    """
     subject = f"Confirm your email address for {BRAND}"
 
     text_body = (
@@ -138,6 +150,8 @@ async def send_verification_email(to_email: str, link: str) -> None:
         logger.info("[email] Verification email sent to %s", to_email)
     except Exception as exc:  # don't fail signup because SMTP is down
         logger.error("[email] Failed to send verification email to %s: %s", to_email, exc)
+        if raise_errors:
+            raise
 
 
 async def send_password_reset_email(to_email: str, link: str) -> None:
@@ -217,3 +231,70 @@ async def send_password_reset_email(to_email: str, link: str) -> None:
         logger.info("[email] Password reset email sent to %s", to_email)
     except Exception as exc:
         logger.error("[email] Failed to send password reset email to %s: %s", to_email, exc)
+
+
+async def send_invoice_email(
+    to_email: str,
+    *,
+    invoice_number: str,
+    issuer_name: str,
+    recipient_name: str,
+    amount: str,
+    due_date: str | None,
+    message: str | None,
+    pdf: bytes,
+    filename: str,
+) -> None:
+    """Send a platform invoice with its PDF attached.
+
+    Unlike the account emails above, this RAISES on failure: the platform admin pressed
+    Send and is waiting to hear whether the bill went out. Swallowing the error would tell
+    them it did.
+    """
+    from html import escape
+
+    subject = f"Invoice {invoice_number} from {issuer_name}"
+    due = f" It is due on {due_date}." if due_date else ""
+    note = (message or "").strip()
+
+    text_body = (
+        f"Dear {recipient_name},\n\n"
+        f"Please find attached invoice {invoice_number} for {amount}.{due}\n\n"
+        + (f"{note}\n\n" if note else "")
+        + "Payment details are on the invoice. Please quote the invoice number as the "
+        "payment reference.\n\n"
+        f"Regards,\n{issuer_name}"
+    )
+    note_html = (
+        '<p style="margin:14px 0 0 0;font-size:14px;line-height:22px;color:#4b5563">'
+        + escape(note).replace("\n", "<br>") + "</p>"
+    ) if note else ""
+    html_body = f"""\
+<div style="background:#f4f6f8;padding:32px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,Helvetica,sans-serif">
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width:520px;margin:0 auto;background:#ffffff;border-radius:12px;border:1px solid #e5e9ef">
+    <tr><td style="padding:28px 32px 0 32px">
+      <div style="font-size:19px;font-weight:700;color:#1e3a5f;letter-spacing:-0.2px">{escape(issuer_name)}</div>
+    </td></tr>
+    <tr><td style="padding:20px 32px 0 32px">
+      <h1 style="margin:0 0 12px 0;font-size:20px;font-weight:600;color:#111827">Invoice {escape(invoice_number)}</h1>
+      <p style="margin:0;font-size:14px;line-height:22px;color:#4b5563">
+        Dear {escape(recipient_name)}, please find attached invoice <b>{escape(invoice_number)}</b>
+        for <b>{escape(amount)}</b>.{escape(due)}
+      </p>
+      {note_html}
+    </td></tr>
+    <tr><td style="padding:20px 32px 24px 32px">
+      <p style="margin:0;font-size:12px;line-height:18px;color:#6b7280">
+        Payment details are on the invoice. Please quote the invoice number as the payment reference.
+      </p>
+    </td></tr>
+    <tr><td style="padding:16px 32px 24px 32px;border-top:1px solid #eef1f5">
+      <p style="margin:0;font-size:11px;color:#9ca3af">— {escape(issuer_name)}</p>
+    </td></tr>
+  </table>
+</div>"""
+
+    await asyncio.to_thread(
+        _send_sync, to_email, subject, html_body, text_body, [(filename, pdf, "application/pdf")]
+    )
+    logger.info("[email] Invoice %s sent to %s", invoice_number, to_email)
