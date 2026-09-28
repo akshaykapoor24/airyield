@@ -72,6 +72,17 @@ class User(Base):
     # email verification: signup creates an unverified account; login is blocked
     # until the emailed verification link flips this to True.
     is_verified:     Mapped[bool]     = mapped_column(Boolean, default=False, nullable=False)
+    # When and how it became verified. `verified_by_id` is set only when a platform admin
+    # verified the account by hand from Subscriptions — bypassing the proof that the user
+    # owns the mailbox, which is why it is recorded. NULL with a `verified_at` means the
+    # emailed link did it. Both NULL on accounts verified before this was tracked, and on
+    # admin-created teammates, which are born verified.
+    verified_at:     Mapped[datetime|None] = mapped_column(DateTime, nullable=True)
+    verified_by_id:  Mapped[int|None] = mapped_column(
+                                           Integer,
+                                           ForeignKey("users.id", ondelete="SET NULL"),
+                                           nullable=True,
+                                       )
     # first-login onboarding wizard (user info → entities → login ids) completion.
     onboarding_complete: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     tenant_id:       Mapped[int|None] = mapped_column(

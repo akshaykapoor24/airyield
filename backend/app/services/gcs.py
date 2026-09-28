@@ -1,11 +1,13 @@
 import asyncio
 import logging
+import os
 from datetime import timedelta
 
 from google.cloud import storage
 from google.oauth2 import service_account
 
 from app.config import settings
+from app.services import usage_meter
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +57,16 @@ async def upload_bytes(content: bytes, blob_name: str, content_type: str, bucket
             logger.error("[GCS] Upload FAILED | bucket=%s | blob=%s | error: %s", bucket_name, blob_name, e, exc_info=True)
             raise
 
-    return await loop.run_in_executor(None, _do)
+    stored = await loop.run_in_executor(None, _do)
+    # This module is the only code that writes to a bucket, so it is where bucket usage is
+    # metered — every upload screen, present and future, is covered from here. Recorded in
+    # the event loop, not inside _do: run_in_executor does not carry the ContextVar that
+    # says whose upload this is.
+    await usage_meter.record_object_stored(
+        storage="gcs", bucket=bucket_name, object_name=blob_name,
+        size_bytes=len(content), content_type=content_type,
+    )
+    return stored
 
 
 # Resumable-upload chunk for upload_file. A generated report can run to hundreds of MB; the
@@ -74,6 +85,7 @@ async def upload_file(path: str, blob_name: str, content_type: str, bucket_name:
     """
     logger.info("[GCS] Uploading file | bucket=%s | blob=%s | path=%s", bucket_name, blob_name, path)
 
+    size = os.path.getsize(path)
     loop = asyncio.get_event_loop()
 
     def _do() -> str:
@@ -86,7 +98,12 @@ async def upload_file(path: str, blob_name: str, content_type: str, bucket_name:
             logger.error("[GCS] Upload FAILED | bucket=%s | blob=%s | error: %s", bucket_name, blob_name, e, exc_info=True)
             raise
 
-    return await loop.run_in_executor(None, _do)
+    stored = await loop.run_in_executor(None, _do)
+    await usage_meter.record_object_stored(
+        storage="gcs", bucket=bucket_name, object_name=blob_name,
+        size_bytes=size, content_type=content_type,
+    )
+    return stored
 
 
 async def download_bytes(blob_name: str, bucket_name: str) -> bytes:
@@ -124,16 +141,26 @@ async def blob_exists(blob_name: str, bucket_name: str) -> bool:
 
 async def delete_blob(blob_name: str, bucket_name: str) -> None:
     """Best-effort delete of a blob (used when a BSP statement is deleted)."""
+    from google.api_core.exceptions import NotFound
+
     loop = asyncio.get_event_loop()
 
-    def _do() -> None:
+    def _do() -> bool:
+        """True when the object is gone afterwards — deleted now, or already missing."""
         try:
             _bucket(bucket_name).blob(blob_name).delete()
             logger.info("[GCS] Delete OK | bucket=%s | blob=%s", bucket_name, blob_name)
+            return True
+        except NotFound:
+            return True
         except Exception as e:
             logger.warning("[GCS] Delete FAILED (ignored) | bucket=%s | blob=%s | error: %s", bucket_name, blob_name, e)
+            return False
 
-    await loop.run_in_executor(None, _do)
+    # A delete that failed leaves the object billing in the bucket, so the ledger keeps
+    # counting it.
+    if await loop.run_in_executor(None, _do):
+        await usage_meter.record_object_deleted(storage="gcs", bucket=bucket_name, object_name=blob_name)
 
 
 async def generate_signed_url(

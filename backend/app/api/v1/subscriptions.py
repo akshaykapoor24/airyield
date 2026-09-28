@@ -6,6 +6,7 @@ admin belongs to no tenant and its whole job is to look across them. That is why
 require_role(PLATFORM_ADMIN) guards every route here rather than a per-query
 filter doing the work.
 """
+import logging
 from datetime import datetime
 from typing import Optional
 
@@ -13,19 +14,24 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_db
+from app.database import AsyncSessionLocal, get_db
 from app.dependencies import require_role
 from app.models.tenant import PlanStatus, Tenant
 from app.models.user import User, UserRole
+from app.schemas.platform_invoice import InvoiceSummary
 from app.schemas.subscription import (
-    DeletionGroupRead, DeletionLine, DeletionPreview, DeletionResult,
-    PlanStats, TenantPlanRead, TenantPlanUpdate,
+    AiUsage, DbUsage, DeletionGroupRead, DeletionLine, DeletionPreview, DeletionResult,
+    FileUsage, PlanStats, PlatformUsage, ResourceUsage, TenantPlanRead, TenantPlanUpdate,
+    VerificationResent, VerificationState,
 )
+from app.services import platform_invoices, tenant_resources, workspace_verification
 from app.services.tenant_deletion import (
     DELETION_GROUPS, GROUPS_BY_KEY, GROUP_REQUIREMENTS,
     delete_groups, group_counts, validate_groups,
 )
 from app.services.tenant_usage import to_breakdown, usage_counts
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -63,11 +69,58 @@ async def _user_counts(db: AsyncSession, tenant_ids: list[int]) -> dict[int, int
     return {tid: n for tid, n in rows}
 
 
+async def _resources(tenant_ids: list[int]) -> Optional[dict[int, ResourceUsage]]:
+    """``{tenant_id: ResourceUsage}`` — OpenAI spend, stored files, share of Postgres.
+
+    On a session of its own, and every failure degrades instead of raising: this is the
+    console's secondary information, and a metering table that is not migrated yet (or a
+    catalog query the database role may not run) must not take the plan controls down with
+    it. A failed statement on the request's session would also abort its transaction and
+    every query after it. None means "unavailable"; the page shows exactly that.
+    """
+    if not tenant_ids:
+        return {}
+    try:
+        async with AsyncSessionLocal() as session:
+            ai = await tenant_resources.ai_usage(session, tenant_ids)
+            files = await tenant_resources.file_usage(session, tenant_ids)
+    except Exception:  # noqa: BLE001
+        logger.exception("subscriptions: usage metering unavailable")
+        return None
+    try:
+        footprint = await tenant_resources.db_footprint()
+    except Exception:  # noqa: BLE001
+        logger.exception("subscriptions: database footprint unavailable")
+        footprint = None
+    return {
+        tid: ResourceUsage(
+            ai=AiUsage(**ai[tid]) if tid in ai else AiUsage(),
+            files=FileUsage(**files[tid]) if tid in files else FileUsage(),
+            database=DbUsage(**footprint.for_tenant(tid)) if footprint else None,
+        )
+        for tid in tenant_ids
+    }
+
+
+async def _invoice_summaries(tenant_ids: list[int]) -> Optional[dict[int, InvoiceSummary]]:
+    """The Invoice column. Own session and a soft failure, for the reasons on _resources."""
+    try:
+        async with AsyncSessionLocal() as session:
+            rows = await platform_invoices.summaries(session, tenant_ids)
+    except Exception:  # noqa: BLE001
+        logger.exception("subscriptions: invoice summaries unavailable")
+        return None
+    return {tid: InvoiceSummary(**rows.get(tid, {})) for tid in tenant_ids}
+
+
 def _to_read(
     t: Tenant,
     owner: Optional[User],
     user_count: int,
     usage: Optional[dict[str, int]] = None,
+    resources: Optional[dict[int, ResourceUsage]] = None,
+    invoices: Optional[dict[int, InvoiceSummary]] = None,
+    verification: Optional[dict[int, dict]] = None,
 ) -> TenantPlanRead:
     """`usage` is {source_key: rows} for this tenant, straight from usage_counts.
 
@@ -84,7 +137,32 @@ def _to_read(
     read.record_breakdown = to_breakdown(counts)
     read.owner_email = owner.email if owner else None
     read.owner_name = owner.full_name if owner else None
+    read.resources = resources.get(t.id) if resources is not None else None
+    read.invoices = invoices.get(t.id) if invoices is not None else None
+    if verification is not None and t.id in verification:
+        read.verification = VerificationState(**verification[t.id])
     return read
+
+
+async def _read_many(db: AsyncSession, tenants: list[Tenant]) -> list[TenantPlanRead]:
+    """Every column of the console for these workspaces. One builder, so the list, the
+    single-row read and every action that returns a row can never disagree on shape."""
+    ids = [t.id for t in tenants]
+    owners = await _owner_map(db, ids)
+    counts = await _user_counts(db, ids)
+    usage = await usage_counts(db, ids)
+    verification = await workspace_verification.states(db, ids, owners)
+    resources = await _resources(ids)
+    invoices = await _invoice_summaries(ids)
+    return [
+        _to_read(t, owners.get(t.id), counts.get(t.id, 0), usage.get(t.id), resources,
+                 invoices, verification)
+        for t in tenants
+    ]
+
+
+async def _read_one(db: AsyncSession, tenant: Tenant) -> TenantPlanRead:
+    return (await _read_many(db, [tenant]))[0]
 
 
 @router.get("/", response_model=list[TenantPlanRead])
@@ -112,14 +190,7 @@ async def list_tenant_plans(
         stmt.order_by(Tenant.created_at.desc(), Tenant.id.desc()).offset(skip).limit(limit)
     )).scalars().all()
 
-    ids = [t.id for t in tenants]
-    owners = await _owner_map(db, ids)
-    counts = await _user_counts(db, ids)
-    usage = await usage_counts(db, ids)
-    return [
-        _to_read(t, owners.get(t.id), counts.get(t.id, 0), usage.get(t.id))
-        for t in tenants
-    ]
+    return await _read_many(db, list(tenants))
 
 
 @router.get("/stats", response_model=PlanStats)
@@ -133,6 +204,12 @@ async def plan_stats(db: AsyncSession = Depends(get_db), _: User = _admin):
         key = getattr(stored, "value", stored)
         if hasattr(stats, key):
             setattr(stats, key, getattr(stats, key) + n)
+    # Own session and a soft failure, for the reasons given on _resources.
+    try:
+        async with AsyncSessionLocal() as session:
+            stats.usage = PlatformUsage(**await tenant_resources.platform_totals(session))
+    except Exception:  # noqa: BLE001
+        logger.exception("subscriptions: platform usage totals unavailable")
     return stats
 
 
@@ -142,15 +219,7 @@ async def get_tenant_plan(
     db: AsyncSession = Depends(get_db),
     _: User = _admin,
 ):
-    tenant = await db.get(Tenant, tenant_id)
-    if tenant is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found.")
-    owners = await _owner_map(db, [tenant.id])
-    counts = await _user_counts(db, [tenant.id])
-    usage = await usage_counts(db, [tenant.id])
-    return _to_read(
-        tenant, owners.get(tenant.id), counts.get(tenant.id, 0), usage.get(tenant.id),
-    )
+    return await _read_one(db, await _get_tenant(tenant_id, db))
 
 
 def _confirm_phrase(tenant: Tenant) -> str:
@@ -294,10 +363,44 @@ async def update_tenant_plan(
 
     await db.commit()
     await db.refresh(tenant)
+    return await _read_one(db, tenant)
 
-    owners = await _owner_map(db, [tenant.id])
-    counts = await _user_counts(db, [tenant.id])
-    usage = await usage_counts(db, [tenant.id])
-    return _to_read(
-        tenant, owners.get(tenant.id), counts.get(tenant.id, 0), usage.get(tenant.id),
-    )
+
+@router.post("/{tenant_id}/verify", response_model=TenantPlanRead)
+async def verify_workspace_email(
+    tenant_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin: User = _admin,
+):
+    """Verify the workspace's unverified accounts by hand, so they can sign in.
+
+    Skips the proof that they own the mailbox, so it is recorded against the admin who
+    did it (User.verified_by_id) and logged. Idempotent: an already-verified workspace
+    comes back unchanged rather than as an error, so a double-click cannot fail.
+    """
+    tenant = await _get_tenant(tenant_id, db)
+    emails = await workspace_verification.verify_members(db, tenant_id, admin)
+    if emails:
+        logger.info("platform admin %s verified %s in workspace %s by hand", admin.id, emails, tenant_id)
+    return await _read_one(db, tenant)
+
+
+@router.post("/{tenant_id}/resend-verification", response_model=VerificationResent)
+async def resend_workspace_verification(
+    tenant_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: User = _admin,
+):
+    """Email a fresh verification link to the workspace's unverified accounts — the
+    alternative to verifying by hand, which keeps the mailbox proof."""
+    await _get_tenant(tenant_id, db)
+    try:
+        sent = await workspace_verification.resend_links(db, tenant_id)
+    except Exception as exc:  # noqa: BLE001 — the admin must hear it did not go
+        logger.exception("subscriptions: verification resend for workspace %s failed", tenant_id)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
+                            detail=f"The verification email could not be sent ({exc}).")
+    if not sent:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail="Everyone in this workspace is already verified.")
+    return VerificationResent(sent_to=sent)

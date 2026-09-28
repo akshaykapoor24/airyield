@@ -43,6 +43,11 @@ GLOBAL_TABLES = frozenset({
 # has no tenant_id; uploaded_tickets / income_summaries superseded them.
 LEGACY_TABLES = frozenset({"tickets", "income_records", "documents"})
 
+# The platform's own records about workspaces — invoices it raised to them. Not workspace
+# data: deleting a workspace must leave them (FK SET NULL), which is why they carry
+# billed_tenant_id rather than tenant_id. See app/models/platform_invoice.py.
+PLATFORM_TABLES = frozenset({"platform_invoices"})
+
 COUNTED_TABLES = frozenset(s.model.__tablename__ for s in USAGE_SOURCES)
 
 
@@ -53,7 +58,7 @@ class TestRegistryCoverage(unittest.TestCase):
         If this fails, decide which the new table is and add it to USAGE_SOURCES
         or to EXCLUDED_TABLES — do not delete the assertion.
         """
-        known = COUNTED_TABLES | EXCLUDED_TABLES | GLOBAL_TABLES | LEGACY_TABLES
+        known = COUNTED_TABLES | EXCLUDED_TABLES | GLOBAL_TABLES | LEGACY_TABLES | PLATFORM_TABLES
         unclassified = sorted(set(Base.metadata.tables) - known)
         self.assertEqual(
             unclassified, [],

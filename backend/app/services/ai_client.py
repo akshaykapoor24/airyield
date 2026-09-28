@@ -23,6 +23,7 @@ import json
 import logging
 import random
 import re
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +154,7 @@ async def call_json(client, *, system_prompt: str, user_content: str | list, sch
         InternalServerError, PermissionDeniedError, RateLimitError,
     )
     from app.config import settings
+    from app.services import usage_meter
 
     if strict:
         response_format = {"type": "json_schema", "json_schema": schema}
@@ -173,6 +175,7 @@ async def call_json(client, *, system_prompt: str, user_content: str | list, sch
             # Deliberately chat.completions.create() and not .parse(): .parse() raises
             # LengthFinishReasonError on a truncated response, which would make the
             # salvage path in the caller unreachable.
+            started = time.monotonic()
             response = await client.chat.completions.create(
                 model=chosen,
                 messages=[
@@ -211,6 +214,17 @@ async def call_json(client, *, system_prompt: str, user_content: str | list, sch
 
         choice = response.choices[0]
         usage = getattr(response, "usage", None)
+        # Every billed completion lands in ai_usage_events for the platform admin's cost
+        # column. Here, once, rather than in each feature: this is the only line in the app
+        # that holds a response OpenAI has charged for. Attributed to whoever the ambient
+        # UsageScope names (see services/usage_meter.py); never raises.
+        served_by = getattr(response, "model", None)
+        await usage_meter.record_ai_call(
+            feature=label,
+            model=served_by if isinstance(served_by, str) and served_by else chosen,
+            usage=usage,
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
         completion_tokens = getattr(usage, "completion_tokens", None)
         logger.info(
             "%s chunk rows=%s finish=%s completion_tokens=%s max_tokens=%s fingerprint=%s",

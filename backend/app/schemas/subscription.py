@@ -1,9 +1,108 @@
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, model_validator
 
 from app.models.tenant import PlanStatus, TenantType
+from app.schemas.platform_invoice import InvoiceSummary
+
+
+class AiUsageLine(BaseModel):
+    label: str
+    calls: int = 0
+    tokens: int = 0
+    cost_usd: float = 0.0
+
+
+class AiUsage(BaseModel):
+    """OpenAI calls billed to this workspace. See services/tenant_resources.py."""
+    calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    # The priced calls only. `unpriced_calls` > 0 means some model has no entry in
+    # services/ai_pricing.py, so the real figure is higher — the console says so rather
+    # than letting an unknown cost read as $0.
+    cost_usd: float = 0.0
+    unpriced_calls: int = 0
+    # This calendar month (UTC) — the slice an invoice is raised against.
+    month_calls: int = 0
+    month_cost_usd: float = 0.0
+    by_feature: list[AiUsageLine] = []
+    by_member: list[AiUsageLine] = []
+
+
+class StorageLine(BaseModel):
+    label: str
+    files: int = 0
+    bytes: int = 0
+
+
+class FileUsage(BaseModel):
+    """What this workspace keeps in object storage. See services/usage_meter.py."""
+    # Every file a member uploaded, including ones since deleted — the activity.
+    uploads: int = 0
+    # What is stored right now, uploads and generated reports alike — the cost.
+    files: int = 0
+    bytes: int = 0
+    gcs_bytes: int = 0
+    # The local-disk fallback, used when GCS was unreachable at upload time.
+    local_bytes: int = 0
+    by_source: list[StorageLine] = []
+    # files = uploads by that member; bytes = what of theirs is still stored.
+    by_member: list[StorageLine] = []
+
+
+class DbAreaLine(BaseModel):
+    label: str
+    bytes: int = 0
+
+
+class DbUsage(BaseModel):
+    """Estimated share of Postgres — each table's on-disk size split by row share. See
+    the docstring of services/tenant_resources.py for exactly what is estimated."""
+    bytes: int = 0
+    share: float = 0.0          # of the whole database, 0..1
+    by_area: list[DbAreaLine] = []
+    measured_at: Optional[datetime] = None
+
+
+class ResourceUsage(BaseModel):
+    ai: AiUsage = AiUsage()
+    files: FileUsage = FileUsage()
+    database: Optional[DbUsage] = None
+
+
+class PlatformUsage(BaseModel):
+    """The stats tiles: every workspace plus the unattributed remainder."""
+    ai_calls: int = 0
+    ai_cost_usd: float = 0.0
+    ai_unpriced_calls: int = 0
+    ai_month_calls: int = 0
+    ai_month_cost_usd: float = 0.0
+    uploads: int = 0
+    files: int = 0
+    gcs_bytes: int = 0
+    local_bytes: int = 0
+    # Stored bytes no workspace owns — mostly files left behind by deleted workspaces.
+    unattributed_bytes: int = 0
+    database_bytes: int = 0
+    database_attributed_bytes: int = 0
+    database_measured_at: Optional[datetime] = None
+
+
+class VerificationState(BaseModel):
+    """Whether the workspace's accounts have confirmed their email — an unverified owner
+    cannot sign in at all. See services/workspace_verification.py."""
+    status: Literal["verified", "unverified", "no_users"] = "no_users"
+    unverified_emails: list[str] = []
+    # The owner's. None when verified before this was recorded.
+    verified_at: Optional[datetime] = None
+    # The platform admin who verified by hand; None when the emailed link did it.
+    verified_by: Optional[str] = None
+
+
+class VerificationResent(BaseModel):
+    sent_to: list[str] = []
 
 
 class TenantPlanRead(BaseModel):
@@ -34,6 +133,13 @@ class TenantPlanRead(BaseModel):
     record_breakdown: dict[str, int] = {}
     owner_email: Optional[str] = None      # the tenant's super_admin
     owner_name: Optional[str] = None
+    # What the workspace costs to run: OpenAI spend, stored files, share of Postgres. None
+    # when it could not be read (metering tables not migrated yet) — the console says
+    # "unavailable" rather than showing zeros that look like a real answer.
+    resources: Optional[ResourceUsage] = None
+    # The Invoice column: how many, what is unpaid, the latest. None = could not be read.
+    invoices: Optional[InvoiceSummary] = None
+    verification: Optional[VerificationState] = None
 
     model_config = {"from_attributes": True}
 
@@ -109,3 +215,5 @@ class PlanStats(BaseModel):
     trial: int = 0
     expired: int = 0
     suspended: int = 0
+    # None when it could not be read — see TenantPlanRead.resources.
+    usage: Optional[PlatformUsage] = None

@@ -173,6 +173,23 @@ DELETION_GROUPS: tuple[DeletionGroup, ...] = (
         GroupCategory.RECORDS, ("report_exports",),
     ),
     DeletionGroup(
+        # The human half of Dashboard → PLB Accrual; the board itself is derived live from
+        # the statements. Every table FKs users with no ON DELETE, so the users group pulls
+        # this in by itself.
+        "plb_accrual", "PLB accrual",
+        "Accrual board overrides, flown-confirmation settings and frozen periods.",
+        GroupCategory.RECORDS,
+        ("plb_accrual_inputs", "plb_airline_settings", "plb_accrual_snapshots"),
+    ),
+    DeletionGroup(
+        # The ledgers behind the console's AI and storage columns (services/usage_meter.py).
+        # Rows only: the stored files stay where they are, like reports above.
+        "usage", "Usage history",
+        "OpenAI call log and file-storage ledger behind the platform cost columns. "
+        "The files themselves are not touched.",
+        GroupCategory.RECORDS, ("ai_usage_events", "stored_objects"),
+    ),
+    DeletionGroup(
         "legacy", "Legacy records",
         "Rows in the three pre-tenant tables. Nothing in the product writes these any more.",
         GroupCategory.RECORDS, ("tickets", "income_records", "documents"),
@@ -223,14 +240,21 @@ DELETION_GROUPS: tuple[DeletionGroup, ...] = (
     ),
     DeletionGroup(
         "master_requests", "Pending master requests",
-        "Airline, airport, class and supplier changes this workspace submitted and nobody has actioned.",
+        "Airline, airport, class, supplier and IATA commission changes this workspace "
+        "submitted and nobody has actioned.",
         GroupCategory.SETUP,
-        ("airline_approvals", "airport_approvals", "class_approvals", "supplier_approvals"),
+        ("airline_approvals", "airport_approvals", "class_approvals", "supplier_approvals",
+         "iata_commission_approvals"),
     ),
     DeletionGroup(
         "users", "User accounts",
         "Every member of the workspace. Frees their email addresses to sign up again.",
         GroupCategory.SETUP, ("users",),
+        # The usage ledgers point at users with SET NULL — removing one member must not
+        # erase what the workspace spent through them — so the schema does not pull them
+        # in. Deleting every member still has to: a workspace with no members keeps no
+        # records, and "users takes everything they created" holds for every other group.
+        extra_requires=("usage",),
     ),
     DeletionGroup(
         "workspace", "The workspace itself",
@@ -246,6 +270,13 @@ DELETION_GROUPS: tuple[DeletionGroup, ...] = (
 GROUPS_BY_KEY: dict[str, DeletionGroup] = {g.key: g for g in DELETION_GROUPS}
 ALL_GROUP_KEYS: tuple[str, ...] = tuple(g.key for g in DELETION_GROUPS)
 _OWNER: dict[str, str] = {t: g.key for g in DELETION_GROUPS for t in g.tables}
+
+
+def group_for_table(table_name: str) -> DeletionGroup | None:
+    """The group that owns a table, or None for global master data. Also how
+    services/tenant_resources.py names the areas of a workspace's database footprint."""
+    key = _OWNER.get(table_name)
+    return GROUPS_BY_KEY[key] if key else None
 
 
 # ── tables with no tenant_id, reached through one that has ───────────────────
