@@ -1,9 +1,6 @@
 "use client";
 
-import Link from "next/link";
-import { usePathname } from "next/navigation";
 import type { LucideIcon } from "lucide-react";
-import { PlaneTakeoff, Receipt, ShieldAlert } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 /**
@@ -14,55 +11,6 @@ import { cn } from "@/lib/utils";
  * Presentation only. Nothing here knows what a sale is; every figure still comes from
  * the page that renders it.
  */
-
-// ── Tabs across the three boards ────────────────────────────────────────────
-
-const BOARDS: { href: string; label: string; icon: LucideIcon; blurb: string }[] = [
-  { href: "/dashboard/revenue", label: "Total Revenue", icon: Receipt, blurb: "What was sold and earned" },
-  { href: "/dashboard/sales-flown", label: "Sales vs Flown", icon: PlaneTakeoff, blurb: "How much of it has flown" },
-  { href: "/dashboard/risk", label: "Risk analysis", icon: ShieldAlert, blurb: "What could fail to arrive" },
-];
-
-export function BoardTabs() {
-  const pathname = usePathname();
-  return (
-    <nav
-      aria-label="Revenue boards"
-      className="flex gap-1 overflow-x-auto rounded-xl bg-white p-1 ring-1 ring-line shadow-sm"
-    >
-      {BOARDS.map((b) => {
-        const active = pathname === b.href;
-        const Icon = b.icon;
-        return (
-          <Link
-            key={b.href}
-            href={b.href}
-            aria-current={active ? "page" : undefined}
-            className={cn(
-              "group flex min-w-44 flex-1 items-center gap-2.5 rounded-lg px-3 py-2 transition-colors",
-              active ? "bg-brand-900 text-white shadow-sm" : "text-gray-600 hover:bg-brand-50",
-            )}
-          >
-            <span
-              className={cn(
-                "flex h-7 w-7 shrink-0 items-center justify-center rounded-md",
-                active ? "bg-white/15" : "bg-brand-50 text-brand-700 group-hover:bg-white",
-              )}
-            >
-              <Icon className="h-4 w-4" aria-hidden />
-            </span>
-            <span className="min-w-0">
-              <span className="block text-[13px] font-semibold leading-tight">{b.label}</span>
-              <span className={cn("block truncate text-[11px] leading-tight", active ? "text-white/70" : "text-gray-400")}>
-                {b.blurb}
-              </span>
-            </span>
-          </Link>
-        );
-      })}
-    </nav>
-  );
-}
 
 // ── Page header ─────────────────────────────────────────────────────────────
 

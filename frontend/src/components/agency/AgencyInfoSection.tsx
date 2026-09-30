@@ -30,7 +30,7 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import {
   AlertTriangle, ArrowRight, Check, Clock, Edit2, PencilLine,
-  RefreshCw, Search, Trash2, Wallet,
+  ReceiptIndianRupee, RefreshCw, Search, Trash2, Wallet,
 } from "lucide-react";
 import api from "@/lib/api";
 import SearchSelect from "@/components/ui/SearchSelect";
@@ -82,6 +82,10 @@ export type AgencyRow = {
   contact_phone: string | null;
   contact_email: string | null;
   notes: string | null;
+  // The user's own references — optional, not unique (a branch's GDS and LCC rows
+  // usually share them). customer_code is stored uppercased; account_code as typed.
+  customer_code: string | null;
+  account_code: string | null;
   // The two service rates, one per direction — see SERVICE_FEE_DIRECTIONS. Null
   // means nobody has been asked; a stored 0 means "we deliberately charge nothing",
   // so the two must not be collapsed into one falsy check.
@@ -373,7 +377,14 @@ export default function AgencyInfoSection({
                 const byChannel = Object.fromEntries(r.terms.map(t => [t.channel, t]));
                 return (
                   <tr key={r.id} className={`border-b border-gray-50 hover:bg-sky-50/30 ${idx % 2 ? "bg-gray-50/30" : "bg-white"}`}>
-                    <td className="px-3 py-2 text-[11px] font-semibold text-gray-800">{r.name}</td>
+                    <td className="px-3 py-2 text-[11px] font-semibold text-gray-800">
+                      {r.name}
+                      {(r.customer_code || r.account_code) && (
+                        <p className="text-[10px] font-normal font-mono text-gray-400 mt-0.5">
+                          {[r.customer_code, r.account_code && `A/c ${r.account_code}`].filter(Boolean).join(" · ")}
+                        </p>
+                      )}
+                    </td>
                     <td className="px-3 py-2 text-[11px] text-gray-600 whitespace-nowrap">
                       {r.branch_name || r.city || "—"}
                       <span className="text-[10px] text-gray-400 ml-1">{r.branch_code}</span>
@@ -409,6 +420,10 @@ export default function AgencyInfoSection({
                     <td className="px-3 py-2"><ActiveBadge active={r.is_active} onClick={() => toggle(r)} /></td>
                     <td className="px-3 py-2">
                       <div className="flex items-center gap-1">
+                        {/* The way through to Invoicing, as on Employee / Corporate Master. */}
+                        <button onClick={() => router.push(`/billing/agency/${r.id}`)}
+                          className="p-1.5 hover:bg-green-50 rounded-lg text-green-600"
+                          title="Bill this agency"><ReceiptIndianRupee className="w-3.5 h-3.5" /></button>
                         <button onClick={() => router.push(`/user-master/agency-master/${r.id}`)}
                           className="p-1.5 hover:bg-emerald-50 rounded-lg text-emerald-500 hover:text-emerald-700"
                           title="Account — payments, terms history and billing cycles"><Wallet className="w-3.5 h-3.5" /></button>
@@ -553,6 +568,8 @@ function AgencyModal({
     contact_phone: agency?.contact_phone ?? "",
     contact_email: agency?.contact_email ?? "",
     notes: agency?.notes ?? "",
+    customer_code: agency?.customer_code ?? "",
+    account_code: agency?.account_code ?? "",
     // Both service rates, held as strings like every other input here. A stored 0
     // must survive the round-trip as "0" and not become "" — `?? ""` on the value
     // rather than `|| ""`, because a deliberate zero rate is a real answer.
@@ -806,6 +823,7 @@ function AgencyModal({
           // Editable here, unlike the terms — see the form's own note on why.
           ...feeFields,
           notes: form.notes || null, is_active: form.is_active,
+          customer_code: form.customer_code.trim() || null, account_code: form.account_code.trim() || null,
         });
         onSaved();
       } catch (e) { setError(apiError(e)); }
@@ -862,6 +880,8 @@ function AgencyModal({
         contact_email: form.contact_email || null,
         ...feeFields,
         notes: form.notes || null,
+        customer_code: form.customer_code.trim() || null,
+        account_code: form.account_code.trim() || null,
         is_active: form.is_active,
         channels,
         terms: payloadTerms,
@@ -1212,6 +1232,16 @@ function AgencyModal({
         </div>
       )}
 
+      {/* Both optional — neither is needed to save an agency. */}
+      <div className="grid grid-cols-2 gap-3">
+        <div><label className={LABEL}>Customer Code</label>
+          <input value={form.customer_code} onChange={e => set("customer_code", e.target.value.toUpperCase())}
+            placeholder="e.g. LORDS-DEL (optional)" maxLength={50} className={INPUT} /></div>
+        <div><label className={LABEL}>Account Code</label>
+          <input value={form.account_code} onChange={e => set("account_code", e.target.value)}
+            placeholder="e.g. ACC-2001 (optional)" maxLength={50} className={INPUT} /></div>
+      </div>
+
       <div><label className={LABEL}>Address</label>
         <input value={form.address} onChange={e => set("address", e.target.value)} placeholder="e.g. 12 Connaught Place" className={INPUT} />
         <p className="text-[10px] text-gray-400 mt-1">This branch&apos;s address. Entities added under it start from this address, state and city.</p></div>
@@ -1434,7 +1464,7 @@ function AgencyModal({
           // that works both gets two rows. STATE is required on every row: the
           // GSTIN is checked against it.
           <UploadBox resource="agencies" templateName="agency_template.xlsx"
-            columns="NAME, BRANCH_CODE, BRANCH_NAME, ADDRESS, STATE, CITY, REGION, PAN, GST_REGISTERED, GST, PHONE, EMAIL, NOTES, CHANNELS, GDS_TYPE, GDS_LIMIT, GDS_DEPOSIT, GDS_USAGE_PCT, GDS_BILLING_CYCLE, LCC_TYPE, LCC_LIMIT, LCC_DEPOSIT, LCC_USAGE_PCT, LCC_BILLING_CYCLE, ACTIVE"
+            columns="NAME, BRANCH_CODE, BRANCH_NAME, CUSTOMER_CODE, ACCOUNT_CODE, ADDRESS, STATE, CITY, REGION, PAN, GST_REGISTERED, GST, PHONE, EMAIL, NOTES, CHANNELS, GDS_TYPE, GDS_LIMIT, GDS_DEPOSIT, GDS_USAGE_PCT, GDS_BILLING_CYCLE, LCC_TYPE, LCC_LIMIT, LCC_DEPOSIT, LCC_USAGE_PCT, LCC_BILLING_CYCLE, ACTIVE"
             onDone={onSaved} />
         )}
     </ModalShell>

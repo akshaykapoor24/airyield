@@ -9,7 +9,7 @@ import {
 import toast from "react-hot-toast";
 
 import {
-  BoardHeader, BoardTabs, MetaChip, Metric, Notice, Panel, SectionLabel,
+  BoardHeader, MetaChip, Metric, Notice, Panel, SectionLabel,
 } from "@/components/dashboard/ui/Board";
 import AirlineDrawer from "@/components/dashboard/revenue/AirlineDrawer";
 import AirlineMatrix from "@/components/dashboard/revenue/AirlineMatrix";
@@ -144,8 +144,6 @@ export default function TotalRevenuePage() {
 
   return (
     <div className="space-y-4">
-      <BoardTabs />
-
       <BoardHeader
         icon={Receipt}
         title="Total Revenue"

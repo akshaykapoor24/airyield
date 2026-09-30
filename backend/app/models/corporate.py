@@ -30,6 +30,13 @@ class Corporate(Base):
 
     company:       Mapped[str | None] = mapped_column(String(255), nullable=True)   # the corporate's NAME — required by the API
     corporate_type: Mapped[str | None] = mapped_column(String(50), nullable=True)   # 'proprietorship' | 'private_limited' | … (see api/v1/corporates.py)
+    # The user's own references for this corporate, both optional and NOT identifiers (no
+    # unique index — `company` is what identifies a corporate). `customer_code` is stored
+    # trimmed + uppercased, like customers.employee_code and agencies.customer_code;
+    # `account_code` — the ledger it is booked under — trimmed but otherwise as typed.
+    # Both are inherited by the corporate's employees (services/party_inherit).
+    customer_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    account_code:  Mapped[str | None] = mapped_column(String(50), nullable=True)
 
     first_name:    Mapped[str | None] = mapped_column(String(200), nullable=True)   # legacy, see docstring
     last_name:     Mapped[str | None] = mapped_column(String(200), nullable=True)   # legacy

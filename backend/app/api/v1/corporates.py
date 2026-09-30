@@ -133,6 +133,13 @@ def _clean_upper(value) -> Optional[str]:
     return v or None
 
 
+def _clean(value) -> Optional[str]:
+    """Strip a possibly-None free-text code, returning None if empty. Case is kept."""
+    if value is None:
+        return None
+    return str(value).strip() or None
+
+
 # ── GST registration and state ──────────────────────────────────────────────
 # A corporate is REGISTERED or UNREGISTERED — the same choice a customer has. It
 # used to be "a GSTIN always, no exceptions", but real corporates exist with no
@@ -284,6 +291,8 @@ def _corporate_list_query(current_user: User, search: Optional[str], ticket_stat
             # Pre-split rows may still carry the contact's name and no company.
             Corporate.first_name.ilike(term),
             Corporate.last_name.ilike(term),
+            Corporate.customer_code.ilike(term),
+            Corporate.account_code.ilike(term),
         ))
 
     if ticket_state == "unbilled":
@@ -353,6 +362,8 @@ async def create_corporate(
         created_by_id=current_user.id,
         company=company,
         corporate_type=_norm_corporate_type(payload.corporate_type),
+        customer_code=_clean_upper(payload.customer_code),
+        account_code=_clean(payload.account_code),
         phone=(payload.phone or "").strip() or None,
         email=(payload.email or "").strip() or None,
         address=(payload.address or "").strip() or None,
@@ -479,6 +490,10 @@ async def bulk_upload_corporates(
                 created_by_id=current_user.id,
                 company=company,
                 corporate_type=_norm_corporate_type(_cell(row, "CORPORATE_TYPE")),
+                # CUSTOMER_CODE is the template's header; CORPORATE_CODE is what templates
+                # downloaded before the rename call it, so those files still import.
+                customer_code=_clean_upper(_cell(row, "CUSTOMER_CODE") or _cell(row, "CORPORATE_CODE")),
+                account_code=_cell(row, "ACCOUNT_CODE"),
                 phone=_cell(row, "PHONE"),
                 email=_cell(row, "EMAIL"),
                 address=_cell(row, "ADDRESS"),
@@ -565,6 +580,8 @@ async def bulk_create_corporates(
                 created_by_id=current_user.id,
                 company=company,
                 corporate_type=_norm_corporate_type(row.corporate_type),
+                customer_code=_clean_upper(row.customer_code),
+                account_code=_clean(row.account_code),
                 phone=(row.phone or "").strip() or None,
                 email=(row.email or "").strip() or None,
                 address=(row.address or "").strip() or None,
@@ -599,8 +616,9 @@ async def download_corporate_template():
 
     # The category columns go LAST, after every column older templates had, so a file
     # made from any earlier template is still a valid (if shorter) version of this one.
+    # Columns are read by header name, so the two codes' position does not break old files.
     headers = [
-        "COMPANY", "CORPORATE_TYPE", "PHONE", "EMAIL",
+        "COMPANY", "CORPORATE_TYPE", "CUSTOMER_CODE", "ACCOUNT_CODE", "PHONE", "EMAIL",
         "ADDRESS", "CITY", "STATE", "PINCODE", "COUNTRY",
         "GST_REGISTERED", "GST_NO", "PAN_NO",
         "MARKUP_TYPE", "MARKUP_VALUE", "BILLING_TYPE",
@@ -614,11 +632,11 @@ async def download_corporate_template():
     # A made-up GSTIN that PASSES _tax_problem: a Maharashtra code, a company PAN (4th
     # letter C) and a correct check digit. The previous sample failed all three checks,
     # so uploading the template unchanged rejected its own first row.
-    ws.append(["Acme Pvt Ltd", "Private Limited", "9876543210", "accounts@acme.com",
+    ws.append(["Acme Pvt Ltd", "Private Limited", "ACME", "ACC-3001", "9876543210", "accounts@acme.com",
                "12 MG Road, Andheri East", "Mumbai", "Maharashtra", "400069", "India",
                "Registered", "27ABCCA1234F1Z6", "ABCCA1234F", "percentage", "10", "reseller",
                *acme_categories])
-    ws.append(["Beta Traders", "Proprietorship", "9123456780", "info@betatraders.in",
+    ws.append(["Beta Traders", "Proprietorship", "", "", "9123456780", "info@betatraders.in",
                "Shop 4, Sector 18", "Noida", "Uttar Pradesh", "201301", "India",
                "Unregistered", "", "", "fixed", "500", "agency",
                *no_categories])
@@ -704,6 +722,10 @@ async def update_corporate(
         data["company"] = company
     if "corporate_type" in data:
         data["corporate_type"] = _norm_corporate_type(data["corporate_type"])
+    if "customer_code" in data:
+        data["customer_code"] = _clean_upper(data["customer_code"])
+    if "account_code" in data:
+        data["account_code"] = _clean(data["account_code"])
     if "markup_type" in data:
         data["markup_type"] = _norm_choice(data["markup_type"], _MARKUP_TYPES)
     if "category_markups" in data:

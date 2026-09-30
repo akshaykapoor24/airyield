@@ -64,6 +64,12 @@ export type Party = {
   /** Per-category overrides of the two above. Null/absent means "no overrides". */
   category_markups?: CategoryMarkups | null;
   billing_type: BillingType | null;
+  /** Both kinds — the ledger / account code this party is booked under. Optional and not
+   *  unique; stored as typed (trimmed). An employee inherits their corporate's. */
+  account_code?: string | null;
+  /** Both kinds — the user's own customer code. Optional, not unique, stored uppercased.
+   *  An employee inherits their corporate's. */
+  customer_code?: string | null;
   /** Customer only — the customer's own id for this person (a payroll or staff number).
    *  Optional, unique per workspace when set, and the ONLY field that can tell two
    *  employees of one name apart: everything else is either the name or inherited from
@@ -129,9 +135,9 @@ export const PARTY: Record<PartyKind, PartyConfig> = {
     detailHref: (id) => `/customers/${id}`,
     templateFile: "customer_template.xlsx",
     templateColumns:
-      "FIRST_NAME, LAST_NAME, EMPLOYEE_CODE, COMPANY, TITLE, PHONE, EMAIL, GST_REGISTERED (Registered|Unregistered), GST_NO, PAN_NO, MARKUP_TYPE (percentage|fixed), MARKUP_VALUE, BILLING_TYPE (reseller|agency), then optional AIR / HOTEL / TRAIN / BUS / CAR / MICE _MARKUP_TYPE + _MARKUP_VALUE",
+      "FIRST_NAME, LAST_NAME, EMPLOYEE_CODE, CUSTOMER_CODE, ACCOUNT_CODE, COMPANY, TITLE, PHONE, EMAIL, GST_REGISTERED (Registered|Unregistered), GST_NO, PAN_NO, MARKUP_TYPE (percentage|fixed), MARKUP_VALUE, BILLING_TYPE (reseller|agency), then optional AIR / HOTEL / TRAIN / BUS / CAR / MICE _MARKUP_TYPE + _MARKUP_VALUE",
     templateNote:
-      "COMPANY is matched to Corporate Master by name — an exact match links the employee to that corporate AND fills in any markup, billing, GST, PAN, phone or email you left blank, from that corporate. Anything you do fill in is kept. No match is left as an individual.",
+      "COMPANY is matched to Corporate Master by name — an exact match links the employee to that corporate AND fills in any customer code, account code, markup, billing, GST, PAN, phone or email you left blank, from that corporate. Anything you do fill in is kept. No match is left as an individual.",
     emailPlaceholder: "customer@email.com",
   },
   corporate: {
@@ -148,7 +154,7 @@ export const PARTY: Record<PartyKind, PartyConfig> = {
     detailHref: (id) => `/corporates/${id}`,
     templateFile: "corporate_template.xlsx",
     templateColumns:
-      "COMPANY, CORPORATE_TYPE, PHONE, EMAIL, ADDRESS, CITY, STATE (required), PINCODE, COUNTRY, GST_REGISTERED (Registered|Unregistered), GST_NO (required when Registered), PAN_NO, MARKUP_TYPE (percentage|fixed), MARKUP_VALUE, BILLING_TYPE (reseller|agency), then optional AIR / HOTEL / TRAIN / BUS / CAR / MICE _MARKUP_TYPE + _MARKUP_VALUE",
+      "COMPANY, CORPORATE_TYPE, CUSTOMER_CODE, ACCOUNT_CODE, PHONE, EMAIL, ADDRESS, CITY, STATE (required), PINCODE, COUNTRY, GST_REGISTERED (Registered|Unregistered), GST_NO (required when Registered), PAN_NO, MARKUP_TYPE (percentage|fixed), MARKUP_VALUE, BILLING_TYPE (reseller|agency), then optional AIR / HOTEL / TRAIN / BUS / CAR / MICE _MARKUP_TYPE + _MARKUP_VALUE",
     emailPlaceholder: "corporate@email.com",
   },
 };
@@ -293,6 +299,7 @@ export function corporateLabel(p: Party): string {
  * and really is kept in sync; see models/customer.py for why.)
  */
 export const INHERITED_FIELDS = [
+  "customer_code", "account_code",
   "phone", "email", "markup_type", "markup_value", "category_markups",
   "billing_type", "gst_registered", "gst_no", "pan_no",
 ] as const;
@@ -341,6 +348,8 @@ export function seedFromCorporate(
   corporate: Party | null,
 ): { values: InheritedValues; held: Set<InheritedField> } {
   const source: InheritedValues = {
+    customer_code: corporate?.customer_code ?? "",
+    account_code: corporate?.account_code ?? "",
     phone: corporate?.phone ?? "",
     email: corporate?.email ?? "",
     markup_type: corporate?.markup_type ?? "",

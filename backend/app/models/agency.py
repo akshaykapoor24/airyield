@@ -133,6 +133,14 @@ class Agency(Base):
     branch_code:   Mapped[str]        = mapped_column(String(50),  nullable=False)   # copied from supplier.code, else "MAIN"
     branch_name:   Mapped[str | None] = mapped_column(String(255), nullable=True)    # supplier.branch or city, display only
 
+    # The user's own references for this agency, both optional. NEITHER IS AN IDENTIFIER:
+    # one vendor branch is a GDS row and an LCC row here, and both usually carry the same
+    # codes, so there is no unique index. `customer_code` is stored trimmed + uppercased
+    # (like customers.employee_code); `account_code` — the ledger it is booked under —
+    # trimmed but otherwise as typed, since it has to match another system exactly.
+    customer_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    account_code:  Mapped[str | None] = mapped_column(String(50), nullable=True)
+
     # The branch's postal address. Copied from the supplier's address_1..3 at
     # add-time; `state` has NO source in the master (it holds region_chapter —
     # "WESTERN REGION" — which is an IATA chapter, not a state) so it is typed in.

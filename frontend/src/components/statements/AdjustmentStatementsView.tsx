@@ -10,20 +10,11 @@ import toast from "react-hot-toast";
 import { notifyRequired } from "@/lib/requiredFields";
 import MultiSelectDropdown from "@/components/ui/MultiSelectDropdown";
 import { type TenantAirlineOpt, sameAirlineOnly, toOptions } from "@/lib/tenantAirlineOptions";
-import LccPartyPicker, { type PartyOption } from "@/components/statements/lcc/LccPartyPicker";
 import StatementUploadWizard from "@/components/statements/StatementUploadWizard";
+import StatementAgencyField, { agencyBlockReason } from "@/components/statements/StatementAgencyField";
+import type { VendorAgency } from "@/lib/vendorAgency";
 import NdcBillingWorklist from "@/components/statements/ndc/NdcBillingWorklist";
 import TpApiBillingWorklist from "@/components/statements/tpapi/TpApiBillingWorklist";
-
-/** One row of GET /suppliers/ — only the fields the picker renders.
- *  `code` is the unique one: 141 of the master's 2,340 names repeat across branches. */
-type SupplierOpt = {
-  id: number;
-  name: string;
-  code?: string | null;
-  branch?: string | null;
-  city?: string | null;
-};
 
 const PAGE = 50;
 // The API rejects anything below 3 recognised columns (_MIN_MATCHED_COLUMNS in
@@ -118,8 +109,8 @@ function UploadModal({ apiBase, title, requiresAirlineId, requiresSupplier, onCl
   title: string;
   /** LCC types only — their exports name no carrier, so the ID is mandatory here. */
   requiresAirlineId?: boolean;
-  /** Third-party types only — the uploader must name the consolidator from the Supplier
-   *  master. A consolidator statement doesn't say who sent it, and the B2B deal is matched
+  /** Third-party types only — the uploader must name the consolidator from their Agency
+   *  Master. A consolidator statement doesn't say who sent it, and the B2B deal is matched
    *  against the answer. */
   requiresSupplier?: boolean;
   onClose: () => void;
@@ -130,8 +121,7 @@ function UploadModal({ apiBase, title, requiresAirlineId, requiresSupplier, onCl
   const [uploading, setUploading] = useState(false);
   const [airlines, setAirlines] = useState<TenantAirlineOpt[]>([]);
   const [tenantAirlineIds, setTenantAirlineIds] = useState<number[]>([]);
-  const [suppliers, setSuppliers] = useState<SupplierOpt[]>([]);
-  const [supplierId, setSupplierId] = useState<number | null>(null);
+  const [agency, setAgency] = useState<VendorAgency | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Only fetched for the types that ask for it — the other statement types share this
@@ -142,25 +132,6 @@ function UploadModal({ apiBase, title, requiresAirlineId, requiresSupplier, onCl
       .then((r) => setAirlines(r.data))
       .catch(() => toast.error("Failed to load your Airline Master."));
   }, [requiresAirlineId]);
-
-  // Same opt-in discipline. The full master is ~2,500 rows and the picker searches
-  // in-place, which is what the B2B deal form does with the same list.
-  useEffect(() => {
-    if (!requiresSupplier) return;
-    api.get<SupplierOpt[]>("/suppliers/", { params: { limit: 5000 } })
-      .then((r) => setSuppliers(r.data))
-      .catch(() => toast.error("Failed to load the Supplier master."));
-  }, [requiresSupplier]);
-
-  // Label = name, sublabel = branch/city · code. 141 of the master's names repeat across
-  // branches ("Riya Travel & Tours" is fourteen rows), so a label stopping at the name
-  // would render identical options and the pick would be a coin toss. `code` is unique.
-  const supplierOptions: PartyOption<"agency">[] = suppliers.map((s) => ({
-    value: s.id,
-    label: s.name,
-    sublabel: [s.branch || s.city, s.code].filter(Boolean).join(" · "),
-    kind: "agency" as const,
-  }));
 
   // Narrowed to the carrier already picked — the server refuses a mixed selection.
   const airlineChoices = sameAirlineOnly(airlines, tenantAirlineIds);
@@ -175,16 +146,15 @@ function UploadModal({ apiBase, title, requiresAirlineId, requiresSupplier, onCl
       notifyRequired("Select the airline ID(s) this statement belongs to — the file itself doesn't say.");
       return;
     }
-    if (requiresSupplier && supplierId == null) {
-      notifyRequired("Select the agency this statement came from — the file itself doesn't name your consolidator.");
-      return;
-    }
+    const agencyBlocked = requiresSupplier ? agencyBlockReason(agency) : null;
+    if (agencyBlocked) { notifyRequired(agencyBlocked); return; }
     setUploading(true);
     try {
       const fd = new FormData(); fd.append("file", file);
       // Repeated field, one per id — how FastAPI reads a list from form data.
       for (const id of tenantAirlineIds) fd.append("tenant_airline_ids", String(id));
-      if (supplierId != null) fd.append("supplier_id", String(supplierId));
+      // The supplier-master row the agency was copied from — see StatementAgencyField.
+      if (requiresSupplier && agency?.supplier_id != null) fd.append("supplier_id", String(agency.supplier_id));
       const { data } = await api.post<{ inserted: number; matched_columns: number; source_rows?: number; leg_rows?: number }>(`${apiBase}/upload`, fd);
       // Sector-split types insert more rows than the file has lines — say so, or "imported
       // 518" against a 223-line file reads like a bug.
@@ -278,29 +248,9 @@ function UploadModal({ apiBase, title, requiresAirlineId, requiresSupplier, onCl
               names its sender (the file's own "Customer Name" column is YOU), so this is
               the only source of it — and it is what the incoming B2B deal is matched
               against, so the wrong pick would price the statement against the wrong deal.
-              Labelled "Agency" because that is what the trade calls it; the values are
-              rows in the platform-admin Supplier master. */}
+              The values are rows in the user's own Agency Master. */}
           {requiresSupplier && (
-            <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50/60 px-3.5 py-3">
-              <label className="text-xs font-semibold text-slate-700 block mb-1.5">
-                Agency <span className="text-red-500">*</span>
-              </label>
-              <LccPartyPicker
-                options={supplierOptions}
-                value={supplierId}
-                onChange={(o) => setSupplierId(o?.value ?? null)}
-                disabled={suppliers.length === 0}
-                placeholder={suppliers.length ? "Select the consolidator who sent this…" : "Supplier master is empty"}
-                searchPlaceholder="Search the Supplier master…"
-                emptyLabel="No suppliers yet — ask your platform admin to add them."
-              />
-              <p className="text-[11px] text-slate-400 mt-1.5">
-                Who sent you this statement. The file doesn&apos;t say, and Commission income
-                needs it to find the right B2B deal. Names come from the Supplier master, the
-                same list a B2B deal picks its supplier from — pick the right branch, since
-                each one is its own contract.
-              </p>
-            </div>
+            <StatementAgencyField value={agency} onChange={setAgency} className="mt-4" />
           )}
 
           <p className="text-[11px] text-slate-400 mt-3">The original file is stored so you can download it later. Columns are matched by header name.</p>

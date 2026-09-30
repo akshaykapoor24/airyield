@@ -137,6 +137,8 @@ export default function PartyModal({
       ? structuredClone(party.category_markups)
       : {}) as CategoryMarkups,
     employee_code: party?.employee_code ?? "",
+    account_code: party?.account_code ?? "",
+    customer_code: party?.customer_code ?? "",
     // Agency on a NEW party, the way `country` defaults to India above. Blank is
     // not a neutral starting point here: billing_calc.compute_gst applies NO GST
     // at all to an unset billing type, so a party onboarded without touching this
@@ -340,6 +342,8 @@ export default function PartyModal({
       // state and this keeps the wire honest about which it is.
       category_markups: categoryCount ? form.category_markups : null,
       billing_type: form.billing_type || null,
+      customer_code: form.customer_code.trim().toUpperCase() || null,
+      account_code: form.account_code.trim() || null,
     };
     // The two routers take different payloads: /corporates/ has no person
     // columns to write to, and /customers/ has no address columns.
@@ -428,6 +432,30 @@ export default function PartyModal({
                   className={INPUT}
                 />
               </div>
+
+              {/* Both optional — neither is needed to save a corporate. */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={LABEL}>Customer Code</label>
+                  <input
+                    value={form.customer_code}
+                    onChange={(e) => set("customer_code", e.target.value.toUpperCase())}
+                    placeholder="e.g. ACME (optional)"
+                    maxLength={50}
+                    className={INPUT}
+                  />
+                </div>
+                <div>
+                  <label className={LABEL}>Account Code</label>
+                  <input
+                    value={form.account_code}
+                    onChange={(e) => set("account_code", e.target.value)}
+                    placeholder="e.g. ACC-3001 (optional)"
+                    maxLength={50}
+                    className={INPUT}
+                  />
+                </div>
+              </div>
             </>
           ) : (
             <>
@@ -443,14 +471,22 @@ export default function PartyModal({
               </div>
 
               <div>
-                <label className={LABEL}>Employee Code</label>
-                <input
-                  value={form.employee_code}
-                  onChange={(e) => set("employee_code", e.target.value.toUpperCase())}
-                  placeholder="e.g. EMP-042 (optional)"
-                  maxLength={50}
-                  className={INPUT}
-                />
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className={LABEL}>Employee Code</label>
+                    <input
+                      value={form.employee_code}
+                      onChange={(e) => set("employee_code", e.target.value.toUpperCase())}
+                      placeholder="e.g. EMP-042 (optional)"
+                      maxLength={50}
+                      className={INPUT}
+                    />
+                  </div>
+                  <div>
+                    <label className={LABEL}>Title</label>
+                    <input value={form.title} onChange={(e) => set("title", e.target.value)} placeholder="Mr / Ms / Director…" className={INPUT} />
+                  </div>
+                </div>
                 {/* The only field that can tell two people of one name apart: every other
                     detail on this form is either the name itself or inherited from their
                     corporate, so colleagues legitimately share it. */}
@@ -461,33 +497,28 @@ export default function PartyModal({
                   </p>
                 ) : (
                   <p className="text-[10px] text-gray-400 mt-1">
-                    Your own reference for this person. Needed only when two of them share a name.
+                    Employee Code is your own reference for this person — needed only when two
+                    of them share a name.
                   </p>
                 )}
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className={LABEL}>Company</label>
-                  <select
-                    value={employer}
-                    onChange={(e) => selectEmployer(e.target.value)}
-                    className={INPUT}
-                    disabled={!corporatesLoaded}
-                  >
-                    <option value={INDIVIDUAL}>Individual / Direct</option>
-                    {corporates.map((c) => (
-                      <option key={c.id} value={`corp:${c.id}`}>{corporateLabel(c)}</option>
-                    ))}
-                    {hasLegacyCompany && (
-                      <option value={LEGACY}>{party!.company} (not linked)</option>
-                    )}
-                  </select>
-                </div>
-                <div>
-                  <label className={LABEL}>Title</label>
-                  <input value={form.title} onChange={(e) => set("title", e.target.value)} placeholder="Mr / Ms / Director…" className={INPUT} />
-                </div>
+              <div>
+                <label className={LABEL}>Company</label>
+                <select
+                  value={employer}
+                  onChange={(e) => selectEmployer(e.target.value)}
+                  className={INPUT}
+                  disabled={!corporatesLoaded}
+                >
+                  <option value={INDIVIDUAL}>Individual / Direct</option>
+                  {corporates.map((c) => (
+                    <option key={c.id} value={`corp:${c.id}`}>{corporateLabel(c)}</option>
+                  ))}
+                  {hasLegacyCompany && (
+                    <option value={LEGACY}>{party!.company} (not linked)</option>
+                  )}
+                </select>
               </div>
 
               {corporatesLoaded && corporates.length === 0 && (
@@ -507,6 +538,37 @@ export default function PartyModal({
                   it below and this employee keeps your version.
                 </p>
               )}
+
+              {/* Straight under Company because that is where they come from: picking one
+                  fills both from its Corporate Master entry (INHERITED_FIELDS). Optional. */}
+              <div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <FieldLabel text="Customer Code" from={inheritedFrom("customer_code")} />
+                    <input
+                      value={form.customer_code}
+                      onChange={(e) => set("customer_code", e.target.value.toUpperCase())}
+                      placeholder="e.g. ACME (optional)"
+                      maxLength={50}
+                      className={INPUT}
+                    />
+                  </div>
+                  <div>
+                    <FieldLabel text="Account Code" from={inheritedFrom("account_code")} />
+                    <input
+                      value={form.account_code}
+                      onChange={(e) => set("account_code", e.target.value)}
+                      placeholder="e.g. ACC-1001 (optional)"
+                      maxLength={50}
+                      className={INPUT}
+                    />
+                  </div>
+                </div>
+                <p className="text-[10px] text-gray-400 mt-1">
+                  Picking a company fills both from its Corporate Master entry. Account Code is
+                  the ledger they are booked under.
+                </p>
+              </div>
             </>
           )}
 

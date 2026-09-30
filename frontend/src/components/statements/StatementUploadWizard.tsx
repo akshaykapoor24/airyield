@@ -31,7 +31,8 @@ import {
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { notifyRequired } from "@/lib/requiredFields";
-import LccPartyPicker, { type PartyOption } from "@/components/statements/lcc/LccPartyPicker";
+import StatementAgencyField, { agencyBlockReason } from "@/components/statements/StatementAgencyField";
+import type { VendorAgency } from "@/lib/vendorAgency";
 
 type Step = "upload" | "mapping" | "review" | "done";
 
@@ -104,13 +105,6 @@ type SaveResp = {
   filter_column_mapped: boolean | null;
 };
 
-/** One row of GET /suppliers/ — the platform-admin master. `code` is the unique one:
- *  141 of its 2,340 names repeat across branches. */
-type SupplierOpt = {
-  id: number; name: string;
-  code?: string | null; branch?: string | null; city?: string | null;
-};
-
 const SKIP = "";        // "— not in file —"
 const PAGE = 25;
 
@@ -159,8 +153,8 @@ export default function StatementUploadWizard({
 }: {
   apiBase: string;
   title: string;
-  /** Third-party types only — the uploader must name the consolidator from the platform-admin
-   *  Supplier master, because the file never says who sent it and the B2B deal is matched
+  /** Third-party types only — the uploader must name the consolidator from their own Agency
+   *  Master, because the file never says who sent it and the B2B deal is matched
    *  against the answer. Off for NDC: an airline's own export names its carrier, so there is
    *  nothing for the uploader to declare and asking would be a question with no purpose. */
   requireSupplier?: boolean;
@@ -180,8 +174,10 @@ export default function StatementUploadWizard({
   const [file, setFile] = useState<File | null>(null);
   const [dragging, setDragging] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [suppliers, setSuppliers] = useState<SupplierOpt[]>([]);
-  const [supplierId, setSupplierId] = useState<number | null>(null);
+  const [agency, setAgency] = useState<VendorAgency | null>(null);
+  // The supplier-master row the agency was copied from — what the upload is attributed to.
+  // See StatementAgencyField.
+  const supplierId = requireSupplier ? agency?.supplier_id ?? null : null;
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Mapping
@@ -206,29 +202,6 @@ export default function StatementUploadWizard({
       .then((r) => setStd(r.data))
       .catch(() => toast.error("Failed to load the column list."));
   }, [apiBase]);
-
-  // The platform-admin Supplier master — the same list a B2B deal picks its supplier
-  // from, which is what lets the two sides of the match name the same thing. Only fetched
-  // for the types that ask for it; the others would be making a call they never read.
-  useEffect(() => {
-    if (!requireSupplier) return;
-    api.get<SupplierOpt[]>("/suppliers/", { params: { limit: 5000 } })
-      .then((r) => setSuppliers(r.data))
-      .catch(() => toast.error("Failed to load the Supplier master."));
-  }, [requireSupplier]);
-
-  // Label = name, sublabel = branch/city · code. 141 of the master's names repeat across
-  // branches ("Riya Travel & Tours" is fourteen rows), so a label stopping at the name
-  // would render identical options and the pick would be a coin toss. `code` is unique.
-  const supplierOptions: PartyOption<"agency">[] = useMemo(
-    () => suppliers.map((s) => ({
-      value: s.id,
-      label: s.name,
-      sublabel: [s.branch || s.city, s.code].filter(Boolean).join(" · "),
-      kind: "agency" as const,
-    })),
-    [suppliers],
-  );
 
   const allCols: StdCol[] = useMemo(
     () => (std?.groups ?? []).flatMap((g) => g.columns), [std]);
@@ -259,10 +232,8 @@ export default function StatementUploadWizard({
 
   const doExtract = async () => {
     if (!file) { notifyRequired("Choose a statement file to continue."); return; }
-    if (requireSupplier && supplierId == null) {
-      notifyRequired("Select the agency this statement came from — the file itself doesn't name your consolidator.");
-      return;
-    }
+    const agencyBlocked = requireSupplier ? agencyBlockReason(agency) : null;
+    if (agencyBlocked) { notifyRequired(agencyBlocked); return; }
     setBusy(true);
     try {
       const fd = new FormData();
@@ -469,36 +440,10 @@ export default function StatementUploadWizard({
           {step === "upload" && (
             <>
               {/* Agency FIRST: it decides which B2B deal prices the statement, and a
-                  wrong pick is not visible anywhere later. Labelled "Agency" because that
-                  is what the trade calls it; the values are rows in the platform-admin
-                  Supplier master. */}
+                  wrong pick is not visible anywhere later. The values are rows in the
+                  user's own Agency Master. */}
               {requireSupplier && (
-              <div className="rounded-lg border border-slate-200 bg-slate-50/60 px-3.5 py-3 mb-4">
-                <label className="text-xs font-semibold text-slate-700 block mb-1.5">
-                  Agency <span className="text-red-500">*</span>
-                </label>
-                <LccPartyPicker
-                  options={supplierOptions}
-                  value={supplierId}
-                  onChange={(o) => setSupplierId(o?.value ?? null)}
-                  disabled={suppliers.length === 0}
-                  placeholder={suppliers.length ? "Select the consolidator who sent this…" : "Supplier master is empty"}
-                  searchPlaceholder="Search the Supplier master…"
-                  emptyLabel="No suppliers yet — ask your platform admin to add them."
-                />
-                <p className="text-[11px] text-slate-400 mt-1.5">
-                  Who sent you this statement. The file doesn&apos;t say, and Commission income
-                  needs it to find the right B2B deal. Names come from the Supplier master, the
-                  same list a B2B deal picks its supplier from — pick the right branch, since
-                  each one is its own contract.
-                </p>
-                {suppliers.length === 0 && (
-                  <p className="text-[11px] text-amber-600 mt-2">
-                    The Supplier master is empty. Ask your platform admin to add the
-                    consolidator before uploading.
-                  </p>
-                )}
-              </div>
+                <StatementAgencyField value={agency} onChange={setAgency} className="mb-4" />
               )}
 
               <div

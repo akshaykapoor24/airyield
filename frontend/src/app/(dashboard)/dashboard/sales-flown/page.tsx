@@ -12,7 +12,7 @@ import CohortMatrix, { type CohortMode } from "@/components/dashboard/flown/Coho
 import FlownByMonthChart from "@/components/dashboard/flown/FlownByMonthChart";
 import PlbSlabPanel from "@/components/dashboard/flown/PlbSlabPanel";
 import {
-  BoardHeader, BoardTabs, EmptyState, MetaChip, Metric, Notice, Panel, SectionLabel, TD, TH,
+  BoardHeader, EmptyState, MetaChip, Metric, Notice, Panel, SectionLabel, TD, TH,
 } from "@/components/dashboard/ui/Board";
 import { inrCompact, pct, rupees } from "@/lib/money";
 import { defaultRange, fetchRevenueFilters } from "@/lib/revenueBoard";
@@ -81,8 +81,6 @@ export default function SalesVsFlownPage() {
 
   return (
     <div className="space-y-4">
-      <BoardTabs />
-
       <BoardHeader
         icon={PlaneTakeoff}
         title="Sales vs Flown"
