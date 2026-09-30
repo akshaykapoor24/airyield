@@ -109,6 +109,11 @@ export const IMPORT_FIELDS: Record<PartyKind, ImportField[]> = {
     { key: "last_name", label: "Last Name", type: "text", aliases: ["lastname", "lname", "surname"] },
   { key: "employee_code", label: "Employee Code", type: "text",
     aliases: ["emp_code", "employee_id", "staff_code", "emp_id", "payroll_id"] },
+    // Blank takes the linked corporate's on save, like the account code below.
+    { key: "customer_code", label: "Customer Code", type: "text",
+      aliases: ["cust_code", "client_code", "corporate_code"] },
+    { key: "account_code", label: "Account Code", type: "text",
+      aliases: ["acc_code", "account_no", "account_id", "ledger_code", "gl_code"] },
     {
       key: "company", label: "Company", type: "text",
       aliases: ["corporate", "employer", "organisation", "organization", "firm", "company_name"],
@@ -129,6 +134,10 @@ export const IMPORT_FIELDS: Record<PartyKind, ImportField[]> = {
       key: "corporate_type", label: "Corporate Type", type: "choice",
       options: CORPORATE_TYPES, aliases: ["type", "entity_type", "legal_form", "constitution"],
     },
+    { key: "customer_code", label: "Customer Code", type: "text",
+      aliases: ["corporate_code", "corp_code", "corporate_id", "client_code"] },
+    { key: "account_code", label: "Account Code", type: "text",
+      aliases: ["acc_code", "account_no", "account_id", "ledger_code", "gl_code"] },
     { key: "phone", label: "Phone / Contact", type: "text", aliases: ["contact", "mobile", "phone_no", "contact_no", "telephone"] },
     { key: "email", label: "Email", type: "text", aliases: ["email_id", "mail", "email_address"] },
     { key: "address", label: "Address", type: "text", aliases: ["address_1", "address_line_1", "street", "registered_address"] },

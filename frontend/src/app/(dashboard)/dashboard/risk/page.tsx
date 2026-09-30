@@ -10,7 +10,7 @@ import {
 
 import BoardFilterBar, { toBoardQuery, type BoardFilters } from "@/components/dashboard/BoardFilterBar";
 import {
-  BoardHeader, BoardTabs, EmptyState, MetaChip, Metric, Panel, SectionLabel, TD, TH,
+  BoardHeader, EmptyState, MetaChip, Metric, Panel, SectionLabel, TD, TH,
 } from "@/components/dashboard/ui/Board";
 import { inrCompact, pct, rupees } from "@/lib/money";
 import { defaultRange, fetchRevenueFilters } from "@/lib/revenueBoard";
@@ -100,8 +100,6 @@ export default function RiskAnalysisPage() {
 
   return (
     <div className="space-y-4">
-      <BoardTabs />
-
       <BoardHeader
         icon={ShieldAlert}
         title="Risk analysis"

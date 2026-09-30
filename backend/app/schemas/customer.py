@@ -6,6 +6,8 @@ class CustomerCreate(BaseModel):
     first_name: str
     last_name: Optional[str] = None
     employee_code: Optional[str] = None   # unique per workspace when set
+    customer_code: Optional[str] = None   # inherited from the corporate; optional, not unique
+    account_code: Optional[str] = None    # ledger code; inherited from the corporate; optional, not unique
     # The corporate this person works for; None = individual / direct. `company`
     # is derived from it and ignored on input whenever corporate_id is set.
     corporate_id: Optional[int] = None
@@ -33,6 +35,8 @@ class CustomerUpdate(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     employee_code: Optional[str] = None   # unique per workspace when set
+    customer_code: Optional[str] = None   # inherited from the corporate; optional, not unique
+    account_code: Optional[str] = None    # ledger code; inherited from the corporate; optional, not unique
     corporate_id: Optional[int] = None   # send explicitly as null to unlink
     company: Optional[str] = None
     title: Optional[str] = None
@@ -54,6 +58,8 @@ class CustomerRead(BaseModel):
     first_name: str
     last_name: Optional[str] = None
     employee_code: Optional[str] = None   # unique per workspace when set
+    customer_code: Optional[str] = None   # inherited from the corporate; optional, not unique
+    account_code: Optional[str] = None    # ledger code; inherited from the corporate; optional, not unique
     corporate_id: Optional[int] = None
     company: Optional[str] = None
     title: Optional[str] = None
@@ -86,6 +92,8 @@ class CustomerBulkCreateRow(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     employee_code: Optional[str] = None   # unique per workspace when set
+    customer_code: Optional[str] = None   # inherited from the corporate; optional, not unique
+    account_code: Optional[str] = None    # ledger code; inherited from the corporate; optional, not unique
     company: Optional[str] = None
     title: Optional[str] = None
     phone: Optional[str] = None

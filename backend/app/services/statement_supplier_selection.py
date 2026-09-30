@@ -13,6 +13,11 @@ could not line up with a deal: `agencies` splits one vendor into a GDS row and a
 with the same name, so a statement attributed to one of them was attributed to half a
 relationship.
 
+THE PICKER, HOWEVER, NOW LISTS THE AGENCY MASTER (frontend StatementAgencyField.tsx), as
+the B2B deal form does. It still sends a supplier id — the supplier row the picked agency
+was copied from — so what is stored and matched here is unchanged; an agency with no
+supplier row yet (awaiting platform-admin approval) is refused by the client before upload.
+
 WHAT IS AND IS NOT CHECKED HERE. A supplier row is one branch and its `code` is unique, so
 the id alone identifies the counterparty — there is no channel to validate, which is why
 the channel rule that used to live here is gone rather than moved. What remains is
@@ -60,8 +65,8 @@ def resolve_supplier_choice(supplier):
         raise UnknownSupplier(
             "Select the agency this statement came from — the file itself doesn't name your "
             "consolidator, and the commission run needs it to find the right B2B deal. "
-            "Names come from the Supplier master; ask your platform admin to add them if "
-            "they aren't listed."
+            "Names come from User master → Agency Master; onboard the consolidator there "
+            "if it isn't listed."
         )
     if not supplier.is_active:
         raise InactiveSupplier(

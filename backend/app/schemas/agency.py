@@ -84,6 +84,10 @@ class AgencyBase(BaseModel):
     contact_phone: Optional[str] = None
     contact_email: Optional[str] = None
     notes: Optional[str] = None
+    # The user's own references — optional, not unique (a branch's GDS and LCC rows
+    # usually share them). See models/agency.py.
+    customer_code: Optional[str] = None
+    account_code: Optional[str] = None
     # ── Service charge / service fee, one triple per DIRECTION ────────────────
     # An agency is a vendor on the Vendors data screens and a customer on the
     # Customer data ones, and the same money means opposite things there: what they

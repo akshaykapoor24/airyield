@@ -75,6 +75,13 @@ def _clean_upper(value) -> Optional[str]:
     return v or None
 
 
+def _clean(value) -> Optional[str]:
+    """Strip a possibly-None free-text code, returning None if empty. Case is kept."""
+    if value is None:
+        return None
+    return str(value).strip() or None
+
+
 def _clean_state(value) -> Optional[str]:
     """A state name filed under its canonical spelling, or None.
 
@@ -272,6 +279,8 @@ def _customer_list_query(
             # The code is the one field that identifies a person outright, so it is the
             # first thing someone types when two share a name.
             Customer.employee_code.ilike(term),
+            Customer.customer_code.ilike(term),
+            Customer.account_code.ilike(term),
         ))
 
     if ticket_state == "unbilled":
@@ -360,6 +369,8 @@ async def create_customer(
         created_by_id=current_user.id,
         first_name=first_name,
         employee_code=employee_code,
+        customer_code=_clean_upper(payload.customer_code),
+        account_code=_clean(payload.account_code),
         last_name=last_name,
         corporate_id=corporate.id if corporate else None,
         company=company,
@@ -491,6 +502,9 @@ async def bulk_upload_customers(
             continue
 
         values = _apply_inheritance({
+            # Blank codes take the corporate's, like every other term in this dict.
+            "customer_code": _clean_upper(_cell(row, "CUSTOMER_CODE")),
+            "account_code": _cell(row, "ACCOUNT_CODE"),
             "phone": _cell(row, "PHONE"),
             "email": _cell(row, "EMAIL"),
             "gst_registered": gst_registered,
@@ -587,6 +601,8 @@ async def bulk_create_customers(
         # and NULL billing type — correctly linked, on no terms at all, and therefore
         # billed at zero markup. Whatever the sheet DID say still wins.
         values = _apply_inheritance({
+            "customer_code": _clean_upper(row.customer_code),
+            "account_code": _clean(row.account_code),
             "phone": (row.phone or "").strip() or None,
             "email": (row.email or "").strip() or None,
             "gst_registered": gst_registered,
@@ -738,8 +754,10 @@ async def download_customer_template():
     ws.title = "Customer Template"
 
     # Category columns LAST, so a file made from any older template is still valid here.
+    # Columns are read by header name, so the codes' positions do not break old files.
+    # CUSTOMER_CODE and ACCOUNT_CODE left blank take the linked corporate's.
     headers = [
-        "FIRST_NAME", "LAST_NAME", "EMPLOYEE_CODE", "COMPANY", "TITLE", "PHONE", "EMAIL",
+        "FIRST_NAME", "LAST_NAME", "EMPLOYEE_CODE", "CUSTOMER_CODE", "ACCOUNT_CODE", "COMPANY", "TITLE", "PHONE", "EMAIL",
         "GST_REGISTERED", "GST_NO", "PAN_NO",
         "MARKUP_TYPE", "MARKUP_VALUE", "BILLING_TYPE",
         *CATEGORY_COLUMNS,
@@ -751,8 +769,8 @@ async def download_customer_template():
     no_categories = [""] * len(CATEGORY_COLUMNS)
     john_categories = list(no_categories)
     john_categories[:4] = ["fixed", "300", "percentage", "5"]          # Air ₹300, Hotel 5%
-    ws.append(["John", "Doe", "EMP-001", "Acme Pvt Ltd", "Mr", "9876543210", "john@acme.com", "Registered", "27ABCCA1234F1Z6", "ABCCA1234F", "percentage", "10", "reseller", *john_categories])
-    ws.append(["Jane", "Roe", "", "Beta Travels", "Ms", "9123456780", "jane@beta.com", "Unregistered", "", "", "fixed", "500", "agency", *no_categories])
+    ws.append(["John", "Doe", "EMP-001", "ACME", "ACC-1001", "Acme Pvt Ltd", "Mr", "9876543210", "john@acme.com", "Registered", "27ABCCA1234F1Z6", "ABCCA1234F", "percentage", "10", "reseller", *john_categories])
+    ws.append(["Jane", "Roe", "", "", "", "Beta Travels", "Ms", "9123456780", "jane@beta.com", "Unregistered", "", "", "fixed", "500", "agency", *no_categories])
 
     bio = BytesIO()
     wb.save(bio)
@@ -859,6 +877,10 @@ async def update_customer(
     # the identity it holds right now.
     if "employee_code" in data:
         data["employee_code"] = _clean_upper(data["employee_code"])
+    if "customer_code" in data:
+        data["customer_code"] = _clean_upper(data["customer_code"])
+    if "account_code" in data:
+        data["account_code"] = _clean(data["account_code"])
     if {"first_name", "last_name", "corporate_id", "company",
             "employee_code"} & data.keys():
         clash = (await CustomerDuplicates.load(db, current_user)).check(

@@ -12,6 +12,8 @@ class CorporateCreate(BaseModel):
     """
     company: str
     corporate_type: Optional[str] = None    # 'proprietorship' | 'private_limited' | … (api/v1/corporates.py:_CORPORATE_TYPES)
+    customer_code: Optional[str] = None     # the user's own code; optional, not unique
+    account_code: Optional[str] = None      # ledger code; optional, not unique
     phone: Optional[str] = None
     email: Optional[str] = None
     address: Optional[str] = None
@@ -35,6 +37,8 @@ class CorporateCreate(BaseModel):
 class CorporateUpdate(BaseModel):
     company: Optional[str] = None
     corporate_type: Optional[str] = None
+    customer_code: Optional[str] = None     # the user's own code; optional, not unique
+    account_code: Optional[str] = None      # ledger code; optional, not unique
     phone: Optional[str] = None
     email: Optional[str] = None
     address: Optional[str] = None
@@ -56,6 +60,8 @@ class CorporateRead(BaseModel):
     id: int
     company: Optional[str] = None
     corporate_type: Optional[str] = None
+    customer_code: Optional[str] = None     # the user's own code; optional, not unique
+    account_code: Optional[str] = None      # ledger code; optional, not unique
     # Legacy person fields — read-only, so pre-split rows still render a name.
     first_name: Optional[str] = None
     last_name: Optional[str] = None
@@ -106,6 +112,8 @@ class CorporateBulkCreateRow(BaseModel):
     """
     company: Optional[str] = None
     corporate_type: Optional[str] = None
+    customer_code: Optional[str] = None     # the user's own code; optional, not unique
+    account_code: Optional[str] = None      # ledger code; optional, not unique
     phone: Optional[str] = None
     email: Optional[str] = None
     address: Optional[str] = None

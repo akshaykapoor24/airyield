@@ -128,6 +128,22 @@ class AgencyLite(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class AgencyBillingListItem(AgencyLite):
+    """A row of the Agency Invoicing list — an onboarded agency and its ticket counts.
+
+    The counts use the SAME scope as the agency's Sold Tickets tab
+    (agency_account.agency_statement_scope), so the badge always agrees with what the
+    drill-down shows.
+    """
+    branch_code: str
+    state: Optional[str] = None
+    customer_code: Optional[str] = None
+    account_code: Optional[str] = None
+    is_active: bool = True
+    ticket_count: int = 0
+    unbilled_ticket_count: int = 0
+
+
 class AgencyTicketsResponse(BaseModel):
     """An agency's tickets (tagged by statement agency) with markup/GST applied."""
     agency: AgencyLite

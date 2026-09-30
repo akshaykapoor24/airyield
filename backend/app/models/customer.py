@@ -58,7 +58,15 @@ class Customer(Base):
     # like gst_no/pan_no, which is what makes the unique index case-insensitive in effect.
     # See services/party_dedupe.CustomerDuplicates.
     employee_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    title:         Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # The customer code and the ledger / account code this person is booked under. Both are
+    # INHERITED from the corporate (services/party_inherit) — picking a company fills them
+    # from its Corporate Master entry — and can be overridden per employee after that.
+    # Optional and NOT identifiers — colleagues share them — so no index and no part in
+    # dedupe. customer_code is stored trimmed + uppercased like corporates.customer_code;
+    # account_code trimmed but otherwise as typed, since it has to match another system.
+    customer_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    account_code:  Mapped[str | None] = mapped_column(String(50), nullable=True)
+    title:        Mapped[str | None] = mapped_column(String(100), nullable=True)
     phone:         Mapped[str | None] = mapped_column(String(50),  nullable=True)
     email:         Mapped[str | None] = mapped_column(String(255), nullable=True)
     # Note: customer-local naming (gst_no / pan_no). The User/tenant/supplier models

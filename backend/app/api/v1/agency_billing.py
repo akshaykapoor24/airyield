@@ -12,10 +12,10 @@ from decimal import Decimal
 from types import SimpleNamespace
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import StreamingResponse
 
-from sqlalchemy import select, func, update
+from sqlalchemy import or_, select, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -30,7 +30,7 @@ from app.models.tenant import Tenant
 from app.schemas.customer import PlaceOfSupplyRead, SoldTicketRead, SoldTicketsSummary
 from app.schemas.billing import (
     BillingCreate, BillingUpdate, BillingRead, BillingListItem,
-    AgencyLite, AgencyTicketsResponse,
+    AgencyLite, AgencyTicketsResponse, AgencyBillingListItem,
 )
 from app.services.billing_calc import (
     to_float as _f,
@@ -124,6 +124,93 @@ async def _load_agency_tickets(agency: Agency, db: AsyncSession, current_user: U
     )
     result = await db.execute(q)
     return list(result.scalars().all())
+
+
+# ── Agency list ──────────────────────────────────────────────────────────────
+
+async def _agency_ticket_counts(agency: Agency, db: AsyncSession, current_user: User) -> tuple[int, int]:
+    """`(total, unbilled)` tickets for one agency, under the same scope as its tickets tab."""
+    clause, _ambiguous = await agency_statement_scope(db, agency, current_user)
+    total, unbilled = (await db.execute(
+        select(
+            func.count(UploadedTicket.id),
+            func.count().filter(UploadedTicket.is_billed.is_(False)),
+        )
+        .select_from(UploadedTicket)
+        .join(TicketStatement, UploadedTicket.batch_id == TicketStatement.batch_id)
+        .where(
+            UploadedTicket.tenant_id == current_user.tenant_id,
+            UploadedTicket.created_by_id == current_user.id,
+            clause,
+        )
+    )).one()
+    return int(total or 0), int(unbilled or 0)
+
+
+@router.get("/", response_model=list[AgencyBillingListItem])
+async def list_billable_agencies(
+    response: Response,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(25, ge=1, le=1000),
+    search: Optional[str] = None,
+    ticket_state: Optional[str] = Query(None, pattern="^(any|unbilled|has|none)$"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Agency Invoicing's list: every agency onboarded in Agency Master, with its ticket counts.
+
+    The twin of the Customer / Corporate Invoicing lists (customers.py::list_customers),
+    with the same search / ticket_state / paging contract and the row total in
+    `X-Total-Count`.
+
+    COUNTED PER AGENCY, NOT IN ONE GROUPED QUERY. Which statements belong to an agency is
+    not a plain FK: agency_statement_scope falls back to the statement's vendor NAME, and
+    only when that name resolves to exactly one of the user's agencies. Re-using it here is
+    what keeps each count equal to the rows its Sold Tickets tab shows. Agencies are
+    private to one user, so this is tens of rows, not thousands — and the ticket_state
+    filter then has to run over the counts, which is why paging is applied afterwards.
+    """
+    q = select(Agency).where(Agency.user_id == current_user.id)
+    if search and search.strip():
+        term = f"%{search.strip()}%"
+        q = q.where(or_(
+            Agency.name.ilike(term),
+            Agency.branch_name.ilike(term),
+            Agency.branch_code.ilike(term),
+            Agency.city.ilike(term),
+            Agency.gst_number.ilike(term),
+            Agency.contact_phone.ilike(term),
+            Agency.contact_email.ilike(term),
+            Agency.customer_code.ilike(term),
+            Agency.account_code.ilike(term),
+        ))
+    # Branch second, so a vendor's branches sit together under its name.
+    agencies = (await db.execute(
+        q.order_by(Agency.name, Agency.branch_code, Agency.id)
+    )).scalars().all()
+
+    rows: list[AgencyBillingListItem] = []
+    for a in agencies:
+        total, unbilled = await _agency_ticket_counts(a, db, current_user)
+        if ticket_state == "unbilled" and unbilled == 0:
+            continue
+        if ticket_state == "has" and total == 0:
+            continue
+        if ticket_state == "none" and total > 0:
+            continue
+        rows.append(AgencyBillingListItem(
+            **AgencyLite.model_validate(a).model_dump(),
+            branch_code=a.branch_code,
+            state=a.state,
+            customer_code=a.customer_code,
+            account_code=a.account_code,
+            is_active=bool(a.is_active),
+            ticket_count=total,
+            unbilled_ticket_count=unbilled,
+        ))
+
+    response.headers["X-Total-Count"] = str(len(rows))
+    return rows[skip:skip + limit]
 
 
 # ── Tickets ──────────────────────────────────────────────────────────────────

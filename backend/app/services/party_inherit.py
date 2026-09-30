@@ -29,10 +29,13 @@ import copy
 
 __all__ = ["INHERITED_FIELDS", "is_blank", "inherit_from_corporate"]
 
-# The same nine as lib/party.ts INHERITED_FIELDS, in the same order. Note this is more
+# The same eleven as lib/party.ts INHERITED_FIELDS, in the same order. Note this is more
 # than the "Billing & Tax" box on the form suggests: phone and email are inherited too,
-# because an invoice raised against the corporate carries the corporate's contact.
+# because an invoice raised against the corporate carries the corporate's contact — and so
+# are the corporate's Customer Code and Account Code, which is how its employees are booked.
 INHERITED_FIELDS = (
+    "customer_code",
+    "account_code",
     "phone",
     "email",
     "markup_type",

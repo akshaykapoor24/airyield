@@ -27,6 +27,8 @@ class FakeCorporate:
 
     def __init__(self, **kw):
         self.__dict__.update({
+            "customer_code": "ACME",
+            "account_code": "ACC-3001",
             "phone": "+91-2200000000",
             "email": "accounts@acme.test",
             "markup_type": "percentage",
@@ -94,7 +96,8 @@ class InheritTests(unittest.TestCase):
         self.assertNotIn("markup_value", filled)
 
     def test_nothing_is_invented_when_the_corporate_is_blank_too(self):
-        bare = FakeCorporate(markup_type=None, markup_value=None, category_markups=None,
+        bare = FakeCorporate(customer_code=None, account_code=None,
+                             markup_type=None, markup_value=None, category_markups=None,
                              billing_type=None, phone=None, email=None, pan_no=None,
                              gst_registered=False, gst_no=None)
         self.assertEqual(inherit_from_corporate(blank_employee(), bare), {})
@@ -107,6 +110,16 @@ class InheritTests(unittest.TestCase):
         before = dict(values)
         inherit_from_corporate(values, FakeCorporate())
         self.assertEqual(values, before)
+
+    def test_the_codes_are_inherited_but_an_employees_own_code_is_kept(self):
+        filled = inherit_from_corporate(blank_employee(), FakeCorporate())
+        self.assertEqual(filled["customer_code"], "ACME")
+        self.assertEqual(filled["account_code"], "ACC-3001")
+        own = inherit_from_corporate(
+            blank_employee(customer_code="EMP-CC", account_code="ACC-9"), FakeCorporate()
+        )
+        self.assertNotIn("customer_code", own)
+        self.assertNotIn("account_code", own)
 
     def test_company_is_not_inherited(self):
         # It is a mirror the routers keep in sync, not a default. If it ever appears
@@ -248,10 +261,11 @@ class CategoryMarkupTests(unittest.TestCase):
 
 class FieldListTests(unittest.TestCase):
 
-    def test_the_nine_fields_match_the_frontend_twin(self):
+    def test_the_fields_match_the_frontend_twin(self):
         # lib/party.ts INHERITED_FIELDS. If this fails, the same employee gets different
         # terms depending on whether they were typed in or imported.
         self.assertEqual(INHERITED_FIELDS, (
+            "customer_code", "account_code",
             "phone", "email", "markup_type", "markup_value", "category_markups",
             "billing_type", "gst_registered", "gst_no", "pan_no",
         ))

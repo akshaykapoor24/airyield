@@ -47,7 +47,7 @@ class TestSelection(unittest.TestCase):
     def test_nothing_picked_is_refused_and_says_where_the_names_come_from(self):
         with self.assertRaises(UnknownSupplier) as cm:
             resolve_supplier_choice(None)
-        self.assertIn("Supplier master", str(cm.exception))
+        self.assertIn("Agency Master", str(cm.exception))
 
     def test_an_id_that_resolves_to_nothing_looks_the_same_as_none(self):
         """resolve_for_upload returns None for an unknown id, so a stale client and an

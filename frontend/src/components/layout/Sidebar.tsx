@@ -11,6 +11,7 @@ import {
   Edit3, Users, Shield, GitMerge, Search,
   History, LayoutGrid, Contact, Layers,
   CreditCard, TrendingUp, Receipt, FileDown, PlaneTakeoff, ShieldAlert,
+  Landmark, Wallet,
 } from "lucide-react";
 import { USER_MASTER_NAV, userMasterHref } from "@/lib/userMasterNav";
 import { cn } from "@/lib/utils";
@@ -37,8 +38,10 @@ const TENANT_NAV: NavItem[] = [
   // ────────────── New information architecture (top) ──────────────
   {
     id: "dashboard", label: "Dashboard", icon: BarChart2,
+    // Overview, Commission income and PLB Accrual are hidden from the sidebar for now; the
+    // pages still exist at their URLs.
     children: [
-      { label: "Overview", href: "/dashboard", icon: LayoutGrid },
+      // { label: "Overview", href: "/dashboard", icon: LayoutGrid },
       // What the loaded statements SOLD, across every type, and what that sale earned.
       // Second because the group reads as a progression: what we sold, then what that
       // sale earned, then what we expect to earn. Deliberately distinct from Commission
@@ -48,10 +51,10 @@ const TENANT_NAV: NavItem[] = [
       // Realized commission: what the loaded statements have actually earned, by
       // carrier and by consolidator. Deliberately separate from PLB Accrual below —
       // one is money the statements prove, the other is money we expect.
-      { label: "Commission income", href: "/dashboard/income", icon: DollarSign },
+      // { label: "Commission income", href: "/dashboard/income", icon: DollarSign },
       // The PLB accrual board — supplier income earned on flown revenue, before
       // the airline pays it. The number finance books as a receivable.
-      { label: "PLB Accrual", href: "/dashboard/accrual", icon: TrendingUp },
+      // { label: "PLB Accrual", href: "/dashboard/accrual", icon: TrendingUp },
       // Of what we sold, how much has flown — the sale-month × flown-month cohort, and
       // where the flown stands against the PLB slabs. After the accrual board because
       // it explains the flown that board accrues on.
@@ -112,17 +115,34 @@ const TENANT_NAV: NavItem[] = [
   },
 
   {
-    id: "billing", label: "Billing", icon: Contact,
+    id: "billing", label: "Invoicing", icon: Contact,
     children: [
-      { label: "Customer Billing", href: "/customers", icon: Contact },
-      { label: "Agency Billing", href: "/billing/agency", icon: Building2 },
-      { label: "Corporate Billing", href: "/corporates", icon: Building },
+      { label: "Customer Invoicing", href: "/customers", icon: Contact },
+      { label: "Agency Invoicing", href: "/billing/agency", icon: Building2 },
+      { label: "Corporate Invoicing", href: "/corporates", icon: Building },
+    ],
+  },
+
+  {
+    id: "accounting", label: "Accounting", icon: Calculator,
+    children: [
+      { label: "Sale Accounting", href: "/accounting/sale", icon: Receipt },
+      { label: "Purchase Accounting", href: "/accounting/purchase", icon: CreditCard },
+    ],
+  },
+
+  {
+    id: "credit-cards", label: "Credit card details", icon: CreditCard,
+    children: [
+      // The vendor banks' credit cards: onboard each card's details.
+      { label: "Credit Card Onboarding", href: "/credit-cards/onboarding", icon: Landmark },
+      { label: "Credit Card Loaded", href: "/credit-cards/loaded", icon: Wallet },
     ],
   },
 
   {
     // "User master" = the parties you maintain (who you work with). Billing them
-    // lives under "Billing". Children come from lib/userMasterNav so this and the
+    // lives under "Invoicing". Children come from lib/userMasterNav so this and the
     // user-master layout's tab strip cannot drift apart.
     id: "user-master", label: "User master", icon: Users,
     children: USER_MASTER_NAV.map((t) => ({
@@ -263,7 +283,7 @@ export default function Sidebar() {
           !pathname.startsWith("/tickets/create") &&
           !pathname.startsWith("/tickets/bsp") &&
           !pathname.startsWith("/tickets/adjustments"))
-    // "/customers" is Customer Billing: the picker plus the /customers/{id}
+    // "/customers" is Customer Invoicing: the picker plus the /customers/{id}
     // billing workspace. Its siblings (directory / statements under "Customer data",
     // reconciliation under "Reconciliation") are separate entries and must not light
     // this up.

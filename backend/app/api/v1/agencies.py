@@ -57,6 +57,16 @@ def _cell(v) -> str:
     return str(v).strip()
 
 
+def _clean_customer_code(v) -> Optional[str]:
+    """Customer Code: trimmed and uppercased, like customers.employee_code. None if blank."""
+    return (str(v).strip().upper() if v is not None else "") or None
+
+
+def _clean_account_code(v) -> Optional[str]:
+    """Account Code: trimmed but case kept — it must match another system's ledger code."""
+    return (str(v).strip() if v is not None else "") or None
+
+
 def _scope(current_user: User):
     """User scope — agencies are private to their owner."""
     return Agency.user_id == current_user.id
@@ -690,6 +700,8 @@ async def create_agency(
         contact_phone=(payload.contact_phone or "").strip() or None,
         contact_email=(payload.contact_email or "").strip() or None,
         notes=(payload.notes or "").strip() or None,
+        customer_code=_clean_customer_code(payload.customer_code),
+        account_code=_clean_account_code(payload.account_code),
         channels=scope,
         is_active=payload.is_active if payload.is_active is not None else True,
         # Both directions, or neither half of either. The vocabulary was already
@@ -1002,6 +1014,10 @@ async def bulk_upload_agencies(
                 contact_phone=_cell(row.get("PHONE")) or None,
                 contact_email=_cell(row.get("EMAIL")) or None,
                 notes=_cell(row.get("NOTES")) or None,
+                # CUSTOMER_CODE is the template's header; AGENCY_CODE is what templates
+                # downloaded before the rename call it, so those files still import.
+                customer_code=_clean_customer_code(_cell(row.get("CUSTOMER_CODE")) or _cell(row.get("AGENCY_CODE"))),
+                account_code=_clean_account_code(_cell(row.get("ACCOUNT_CODE"))),
                 channels=scope,
                 is_active=is_active,
                 **service_fees,
@@ -1057,7 +1073,7 @@ async def download_agency_template():
     # a blank _GST is taken as exclusive. Filling a _VALUE without its _TYPE fails
     # the row rather than being ignored.
     ws.append([
-        "NAME", "BRANCH_CODE", "BRANCH_NAME", "ADDRESS", "STATE", "CITY", "REGION",
+        "NAME", "BRANCH_CODE", "BRANCH_NAME", "CUSTOMER_CODE", "ACCOUNT_CODE", "ADDRESS", "STATE", "CITY", "REGION",
         "PAN", "GST_REGISTERED", "GST",
         "PHONE", "EMAIL", "NOTES", "CHANNELS",
         "GDS_TYPE", "GDS_LIMIT", "GDS_DEPOSIT", "GDS_USAGE_PCT", "GDS_BILLING_CYCLE",
@@ -1074,7 +1090,7 @@ async def download_agency_template():
     # them. The two are unrelated numbers pointing opposite ways, which is exactly
     # why they are separate columns.
     ws.append([
-        "Lords Travels", "DEL", "Delhi", "12 Connaught Place", "Delhi", "NEW DELHI", "NORTHERN REGION",
+        "Lords Travels", "DEL", "Delhi", "LORDS-DEL", "ACC-2001", "12 Connaught Place", "Delhi", "NEW DELHI", "NORTHERN REGION",
         "AAPFU0939F", "yes", "07AAPFU0939F1ZX", "9876543210", "ops@lords.com", "", "GDS",
         "cash", "", "10000000", "90", "monthly",
         "", "", "", "", "",
@@ -1085,7 +1101,7 @@ async def download_agency_template():
     # The same branch on the other channel, and the rates differ from its GDS row —
     # one agency row is one channel, so each carries its own.
     ws.append([
-        "Lords Travels", "DEL", "Delhi", "12 Connaught Place", "Delhi", "NEW DELHI", "NORTHERN REGION",
+        "Lords Travels", "DEL", "Delhi", "LORDS-DEL", "ACC-2001", "12 Connaught Place", "Delhi", "NEW DELHI", "NORTHERN REGION",
         "AAPFU0939F", "yes", "07AAPFU0939F1ZX", "9876543210", "ops@lords.com", "", "LCC",
         "", "", "", "", "",
         "credit", "5000000", "", "", "fortnightly",
@@ -1098,7 +1114,7 @@ async def download_agency_template():
     # Both service-rate blocks left blank: they are optional, and a blank means
     # nobody has been asked rather than "we charge nothing".
     ws.append([
-        "Lords Travels", "BOM", "Mumbai", "4 Nariman Point", "Maharashtra", "MUMBAI", "WESTERN REGION",
+        "Lords Travels", "BOM", "Mumbai", "LORDS-BOM", "ACC-2002", "4 Nariman Point", "Maharashtra", "MUMBAI", "WESTERN REGION",
         "AAPFU0939F", "yes", "27AAPFU0939F1ZV", "9876500001", "bom@lords.com", "", "GDS",
         "credit", "3000000", "", "", "monthly",
         "", "", "", "", "",
@@ -1109,7 +1125,7 @@ async def download_agency_template():
     # Not GST registered — GST_REGISTERED is "no" and the GST column stays empty.
     # We only ever buy from this one, so it carries a vendor charge and no customer fee.
     ws.append([
-        "Aadesh Travels", "MAIN", "", "", "Delhi", "NEW DELHI", "NORTHERN REGION",
+        "Aadesh Travels", "MAIN", "", "", "", "", "Delhi", "NEW DELHI", "NORTHERN REGION",
         "AACCA1234K", "no", "", "9876500000", "ops@aadesh.com", "", "LCC",
         "", "", "", "", "",
         "credit", "5000000", "", "", "weekly",
@@ -1183,6 +1199,11 @@ async def update_agency(
         if clash:
             raise HTTPException(status_code=400, detail=clash)
         data["name"] = new_name
+
+    if "customer_code" in data:
+        data["customer_code"] = _clean_customer_code(data["customer_code"])
+    if "account_code" in data:
+        data["account_code"] = _clean_account_code(data["account_code"])
 
     if {"state", "gst_number", "pan_number", "gst_registered"} & data.keys():
         sent = lambda field, stored: data[field] if field in data else stored  # noqa: E731
