@@ -145,6 +145,14 @@ DELETION_GROUPS: tuple[DeletionGroup, ...] = (
         GroupCategory.RECORDS, ("billings",),
     ),
     DeletionGroup(
+        # Receipts a linked line posted into an agency's ledger belong to the agencies
+        # group and stay with it: agency_ledger_id is ON DELETE SET NULL from this side.
+        "bank_statements", "Bank statements",
+        "Uploaded bank statements, every transaction line, and which party each deposit "
+        "was linked to.",
+        GroupCategory.RECORDS, ("bank_statements", "bank_statement_rows"),
+    ),
+    DeletionGroup(
         # The whole contract graph. Every child FKs the contract with ON DELETE CASCADE,
         # so naming them here is about the deletion PREVIEW being honest about what goes,
         # not about the delete needing help to reach them.

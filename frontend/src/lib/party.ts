@@ -150,7 +150,7 @@ export const PARTY: Record<PartyKind, PartyConfig> = {
     masterHref: "/user-master/corporate-master",
     masterLabel: "Corporate Master",
     billingHref: "/corporates",
-    billingLabel: "Corporate Billing",
+    billingLabel: "Corporate Invoicing",
     detailHref: (id) => `/corporates/${id}`,
     templateFile: "corporate_template.xlsx",
     templateColumns:

@@ -26,18 +26,20 @@ from datetime import datetime
 
 from collections.abc import Collection
 
-from sqlalchemy import and_, case, func, not_, or_, select
+from sqlalchemy import and_, case, func, not_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.lcc_detailed import LccDetailed, LccDetailedBatch
 from app.models.ticket_statement import TicketStatement
 from app.models.uploaded_ticket import UploadedTicket
 from app.services import customer_resolver as cres
+from app.services.lcc_merge import AG_PAYMENT_METHOD
 
 __all__ = [
     "BILLABLE_STATUSES", "BILLING_STATES", "SENDABLE_STATES", "MAX_PAX",
     "billing_state", "billing_state_cond", "project_batch", "projected_ticket_ids",
-    "file_pax", "row_pax",
+    "file_pax", "row_pax", "is_ag", "ag_cond",
+    "bill_amount", "billing_kind", "billing_kind_cond", "is_payment_row", "not_payment_cond",
 ]
 
 # The statuses that mean "a party has been settled for this row".
@@ -83,12 +85,11 @@ _MAX_SECTOR = 200                # UploadedTicket.sector / .flight_no are String
 # says the same thing in SQL so the worklist can filter on it. They live together
 # because keeping them apart is exactly how they drift.
 #
-# THE NULL TRAP. A row imported but never resolved has `bill_kind IS NULL`. In Python
-# `None != "payment"` is True; in SQL `NULL != 'payment'` is NULL, so the naive
-# predicate silently drops those rows out of every result set. That divergence already
-# exists in this codebase — lcc_detailed.py's billing-default excludes them, while
-# project_batch below includes them — so everything here goes through `_is_payment` and
-# its `_not_payment_cond` twin, and the two answers finally agree.
+# THE NULL TRAP. A naive `x != 'payment'` is NULL in SQL when x is NULL, which silently
+# drops the row out of every result set while Python happily keeps it. So whether a row
+# has anything to bill is decided ONLY by `is_payment_row` and its `not_payment_cond`
+# twin, both read from the billed amount and both COALESCEd: a row with no money is
+# "nothing to bill" in SQL exactly as in Python.
 
 
 # ── pax: how many passengers the booking bills for ───────────────────────────
@@ -123,13 +124,75 @@ def _row_pax_sql():
                 else_=file_figure)
 
 
-def _is_payment(bill_kind: str | None) -> bool:
-    return bill_kind == "payment"
+# ── AG only: which rows billing sees at all ──────────────────────────────────
+# Only a row the agency paid from its airline account — `PaymentMethodCode = AG` — is
+# the agency's to bill. Any other code (EI, EM, EV, PT…) was paid some other way, and a
+# blank one carries no payment at all, so neither belongs on a customer's invoice. The
+# two-file merge already keeps only AG rows at import (lcc_merge rule 2); a single-file
+# export such as IndiGo's keeps every row, so this is where the same rule reaches billing.
+#
+# Billing only. Commission, the income board and reports still read every row, which is
+# why this is a filter here and not a change to `bill_kind` (they all read that).
+# Every billing read and write goes through one of these two — the worklist, its counts
+# and gaps, the party/pax/default writers, and project_batch.
+
+def is_ag(row) -> bool:
+    return (getattr(row, "payment_method_code", None) or "").strip().upper() == AG_PAYMENT_METHOD
 
 
-def _not_payment_cond():
-    """The SQL twin of `not _is_payment(...)`. Explicitly NULL-safe; see the note above."""
-    return or_(LccDetailed.bill_kind.is_(None), LccDetailed.bill_kind != "payment")
+def ag_cond():
+    """SQL twin of `is_ag`. COALESCE keeps it NULL-safe — a blank code is FALSE, not NULL,
+    so `not_(ag_cond())` finds it too."""
+    return func.upper(func.trim(func.coalesce(LccDetailed.payment_method_code, ""))) == AG_PAYMENT_METHOD
+
+
+# ── what a row bills: the money paid on it ───────────────────────────────────
+# An AG row's money is what the agency paid on that line — `PaymentAmount`. IndiGo
+# writes many bookings as a fare line (Total set, no payment method, PaymentAmount 0)
+# plus an AG payment line (Total 0, PaymentAmount set); one refund there is even settled
+# in two AG payments, -5097 on its fare line and -1292 on a line of its own. Billing each
+# AG line at what was paid on it bills every booking exactly once. A file with no
+# PaymentAmount — the two-file merge puts the account's money in `total` — falls back to
+# Total.
+#
+# `bill_kind` is NOT this. It is classified from `total` at ingest and commission reads
+# it, where an AG payment line rightly stays "payment": the sale is its fare line. So
+# billing classifies from `bill_amount` and never consults `bill_kind`.
+
+def bill_amount(row):
+    """The signed amount billing charges for this row. None when there is none."""
+    paid = getattr(row, "payment_amount", None)
+    return paid if paid else getattr(row, "total", None)
+
+
+def _bill_amount_sql():
+    """SQL twin of `bill_amount`."""
+    return case((func.coalesce(LccDetailed.payment_amount, 0) != 0, LccDetailed.payment_amount),
+                else_=LccDetailed.total)
+
+
+def billing_kind(row) -> str:
+    """sale | refund | payment, read from `bill_amount` — what billing calls this row."""
+    amount = bill_amount(row)
+    if not amount:
+        return "payment"
+    return "sale" if amount > 0 else "refund"
+
+
+def is_payment_row(row) -> bool:
+    """Nothing to bill — no money was paid on this row."""
+    return billing_kind(row) == "payment"
+
+
+def not_payment_cond():
+    """SQL twin of `not is_payment_row(row)`. COALESCE makes no money a plain FALSE."""
+    return func.coalesce(_bill_amount_sql(), 0) != 0
+
+
+def billing_kind_cond(kind: str):
+    """A `billing_kind` value as SQL, for the worklist's Kind filter. None when unknown."""
+    amount = func.coalesce(_bill_amount_sql(), 0)
+    return {"sale": amount > 0, "refund": amount < 0, "payment": amount == 0}.get(kind)
 
 
 def billing_state(row, ticket) -> str:
@@ -143,7 +206,7 @@ def billing_state(row, ticket) -> str:
     projected = ticket is not None
     if projected and ticket.billing_id is not None:
         return "invoiced"
-    if _is_payment(row.bill_kind):
+    if is_payment_row(row):
         return "not_billable"
 
     billable = row.bill_status in BILLABLE_STATUSES
@@ -171,7 +234,7 @@ def billing_state_cond(state: str, T):
     """
     projected = T.id.isnot(None)
     invoiced = and_(projected, T.billing_id.isnot(None))
-    not_payment = _not_payment_cond()
+    not_payment = not_payment_cond()
     billable = and_(not_payment, LccDetailed.bill_status.in_(BILLABLE_STATUSES))
     # IS NOT DISTINCT FROM, never `=`: two NULL corporate_ids are a MATCH, but
     # `NULL = NULL` is NULL, which would report every direct-billed row as stale.
@@ -185,7 +248,7 @@ def billing_state_cond(state: str, T):
 
     return {
         "invoiced": invoiced,
-        "not_billable": and_(live, LccDetailed.bill_kind == "payment"),
+        "not_billable": and_(live, not_(not_payment)),
         "no_party": and_(live, not_payment, not_(projected), not_(billable)),
         "ready": and_(live, not_(projected), billable),
         "withdrawn": and_(live, not_payment, projected, not_(billable)),
@@ -239,7 +302,12 @@ def _build_ticket(row: LccDetailed, batch: LccDetailedBatch, *, now: datetime) -
     the INSERT and the in-place UPDATE of an already-projected ticket.
     """
     first, last = cres.split_person_name(row.name1)
-    kind = row.bill_kind or ""
+    kind = billing_kind(row)
+    amount = bill_amount(row)
+    # The fare breakdown describes the row's Total. On an AG payment line what was paid
+    # differs from it (Total 0), so the breakdown would sit beside money it doesn't
+    # explain — it is left out rather than shown as a zero fare.
+    breakdown = amount == row.total
 
     return {
         # provenance
@@ -250,17 +318,18 @@ def _build_ticket(row: LccDetailed, batch: LccDetailedBatch, *, now: datetime) -
         "created_at": now,
         "statement_type": _STATEMENT_TYPE,
 
-        # money — `total_amt` IS the billing base: customers.py:521 reads it first and
+        # money — `total_amt` IS the billing base: customers.py reads it first and
         # falls back to sell_fare only when it is NULL. Signed, so a refund projects
-        # as a negative line with no extra negation step.
-        "total_amt": row.total,
-        "net_amt": row.total,
-        "sell_fare": row.base_fare,
-        "sell_tax": row.taxes_total,
-        "booking_fee_sell": row.other_fee_total,
+        # as a negative line with no extra negation step. What was PAID on the row —
+        # see `bill_amount`.
+        "total_amt": amount,
+        "net_amt": amount,
+        "sell_fare": row.base_fare if breakdown else None,
+        "sell_tax": row.taxes_total if breakdown else None,
+        "booking_fee_sell": row.other_fee_total if breakdown else None,
         # LCC's SSR money is the scalar column; `lcc_detailed.ssr` is hard-nulled at
         # ingest (lcc_detailed_spec.py) and must not be read.
-        "seat_selection": row.other_ssr_total,
+        "seat_selection": row.other_ssr_total if breakdown else None,
 
         # identity — name1 is the only per-row identity in an LCC export. first/last
         # are populated too so a row that ends up with no party link is still findable
@@ -310,7 +379,7 @@ def _build_ticket(row: LccDetailed, batch: LccDetailedBatch, *, now: datetime) -
         "sold_to": "customer",
 
         # audit
-        "tax_breakup": _tax_breakup(row.taxes),
+        "tax_breakup": _tax_breakup(row.taxes) if breakdown else None,
         "segments": row.segments,
         "raw_data": {
             "lcc_detailed_id": row.id,
@@ -429,17 +498,22 @@ async def project_batch(
         q = q.where(LccDetailed.id.in_(row_ids))
     rows = (await db.execute(q)).scalars().all()
 
-    should = {r.id: r for r in rows
-              if r.bill_status in BILLABLE_STATUSES and not _is_payment(r.bill_kind)}
+    # Non-AG rows are never sent. They still count toward `already`, so a full sync
+    # withdraws one that was sent before the AG rule existed — unless it is invoiced,
+    # which the frozen-ticket rule below leaves alone.
+    in_scope = [r for r in rows if is_ag(r)]
+    should = {r.id: r for r in in_scope
+              if r.bill_status in BILLABLE_STATUSES and not is_payment_row(r)}
     already = {r.id: r.projected_ticket_id for r in rows if r.projected_ticket_id}
 
     # Why a selected row did nothing, so the toast can say so instead of reporting a
-    # silent "0 added". In unscoped mode these two overlap with `deleted` — they are
+    # silent "0 added". In unscoped mode these overlap with `deleted` — they are
     # different axes: "had no party" versus "had a projection that has now gone".
-    skipped_not_billable = sum(1 for r in rows if _is_payment(r.bill_kind))
+    skipped_not_ag = len(rows) - len(in_scope)
+    skipped_not_billable = sum(1 for r in in_scope if is_payment_row(r))
     skipped_no_party = sum(
-        1 for r in rows
-        if not _is_payment(r.bill_kind) and r.bill_status not in BILLABLE_STATUSES
+        1 for r in in_scope
+        if not is_payment_row(r) and r.bill_status not in BILLABLE_STATUSES
     )
 
     tickets = {}
@@ -509,5 +583,6 @@ async def project_batch(
         "skipped_billed": skipped_billed,
         "skipped_no_party": skipped_no_party,
         "skipped_not_billable": skipped_not_billable,
+        "skipped_not_ag": skipped_not_ag,
         "projected_rows": batch.projected_rows,
     }

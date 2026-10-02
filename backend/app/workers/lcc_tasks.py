@@ -135,9 +135,11 @@ async def _ingest(batch_id: str, tenant_id: int, user_id: int):
     from sqlalchemy import select, delete, update
     from app.models.lcc_detailed import LccDetailed, LccDetailedBatch
     from app.models.lcc_detailed_batch_file import LccDetailedBatchFile
+    from types import SimpleNamespace
     from app.api.v1.lcc_detailed import _bill_kind
     from app.services import customer_resolver as cres
     from app.services import gcs
+    from app.services import lcc_billing_projection as billing_proj
     from app.services import lcc_detailed_spec as spec
     from app.services import lcc_merge
 
@@ -282,8 +284,13 @@ async def _ingest(batch_id: str, tenant_id: int, user_id: int):
                 # rows would drop the whole chunk into the slow row-by-row fallback.
                 kind = _bill_kind(built.get("total"))
                 built["bill_kind"] = kind
+                # EXCLUDED means "nothing to bill", which is read from what was PAID on
+                # the row, not from `kind`: an IndiGo AG payment line has Total 0 but its
+                # money in PaymentAmount. See lcc_billing_projection.bill_amount.
+                money = SimpleNamespace(total=built.get("total"),
+                                        payment_amount=built.get("payment_amount"))
                 built["bill_status"] = (
-                    cres.EXCLUDED if kind == "payment" else cres.UNRESOLVED
+                    cres.EXCLUDED if billing_proj.is_payment_row(money) else cres.UNRESOLVED
                 )
                 buf.append(built)
                 seen += 1

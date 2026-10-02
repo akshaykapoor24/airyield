@@ -78,6 +78,8 @@ from app.models.gst_configuration import GstConfiguration
 from app.models.report_export import ReportExport
 from app.models.usage_meter import AiUsageEvent, StoredObject
 from app.models.platform_invoice import PlatformInvoice
+# Accounting → Bank Statement: the tenant's own bank lines, linked to the parties that paid.
+from app.models.bank_statement import BankStatement, BankStatementRow
 from app.models.plb_accrual import (
     PlbAccrualInput,
     PlbAirlineSetting,
@@ -147,6 +149,7 @@ __all__ = [
     "ReportExport",
     "AiUsageEvent", "StoredObject",
     "PlatformInvoice",
+    "BankStatement", "BankStatementRow",
     "PlbAccrualInput", "PlbAirlineSetting", "PlbAccrualSnapshot",
     # New unified deal schema
     "DealStatement", "Deal",

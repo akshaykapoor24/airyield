@@ -21,7 +21,8 @@ WHAT IS NOT, AND WHY
       counting them would make the total a function of schema shape rather than of
       user activity.
     * Upload-session parents whose rows are already counted — bsp_statements,
-      bsp_summary_statements, deal_statements, deal_batches, lcc_detailed_batch.
+      bsp_summary_statements, deal_statements, deal_batches, lcc_detailed_batch,
+      bank_statements.
       Counting the file AND its rows reports 1001 for a 1000-row upload.
     * Derived caches — ticket_calculations (calculation-run history) and
       ticket_reconciliation, whose own docstring calls it "a report/cache, not a
@@ -53,6 +54,7 @@ from sqlalchemy import String, func, literal, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.airline_adjustment import ADJUSTMENT_MODELS
+from app.models.bank_statement import BankStatementRow
 from app.models.billing import Billing
 from app.models.bsp_statement import BspStatementRow
 from app.models.bsp_summary import BspSummaryRow
@@ -121,6 +123,7 @@ USAGE_SOURCES += [
 USAGE_SOURCES += [
     UsageSource("income_summaries",   "Income Summaries",   IncomeSummary),
     UsageSource("billings",           "Billings",           Billing),
+    UsageSource("bank_statements",    "Bank Statements",    BankStatementRow),
     UsageSource("series_contracts",   "Series Contracts",   SeriesContract),
     UsageSource("ticket_adjustments", "Ticket Adjustments", TicketAdjustment),
 ]
@@ -148,7 +151,7 @@ EXCLUDED_TABLES: frozenset[str] = frozenset({
     "notifications", "notification_reads",
     # upload-session parents whose rows are counted instead
     "bsp_statements", "bsp_summary_statements", "deal_statements", "deal_batches",
-    "lcc_detailed_batch",
+    "lcc_detailed_batch", "bank_statements",
     # which of the workspace's airline ids an LCC upload covers, which agency sent a
     # third-party upload, and where an NDC upload stands on its way into billing — state
     # about an already-classified upload, not records the workspace produced

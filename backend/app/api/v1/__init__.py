@@ -4,6 +4,7 @@ from app.api.v1 import auth, users, subscriptions, airlines, suppliers, airports
 from app.api.v1 import report_download, sell_reconciliation, income_board, revenue_board, notifications
 from app.api.v1 import sales_flown, risk_board
 from app.api.v1 import platform_invoices
+from app.api.v1 import bank_statements
 
 router = APIRouter()
 
@@ -82,3 +83,4 @@ router.include_router(series.router, prefix="/series-contracts", tags=["Vendors 
 router.include_router(notifications.router, prefix="/notifications", tags=["Notifications"])
 # Its own literal prefix, never under /statements (see the ordering note above).
 router.include_router(report_download.router, prefix="/report-download", tags=["Workspace - Report Download"])
+router.include_router(bank_statements.router, prefix="/bank-statements", tags=["Accounting - Bank Statement"])

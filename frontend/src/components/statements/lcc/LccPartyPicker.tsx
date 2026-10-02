@@ -14,7 +14,9 @@
 // name are still distinguishable in the list.
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Building, ChevronDown, Search, Store, User } from "lucide-react";
+import { useAnchoredPanel } from "@/hooks/useAnchoredPanel";
 
 export type PartyKind = "customer" | "corporate" | "agency";
 
@@ -56,14 +58,25 @@ export default function LccPartyPicker<K extends PartyKind = PartyKind>({
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const ref = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
 
+  // Only while open: the worklist renders one picker per row, up to 200 a page, and
+  // each listening all the time would mean 200 handlers on every click.
   useEffect(() => {
+    if (!open) return;
     const h = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) { setOpen(false); setQuery(""); }
+      const t = e.target as Node;
+      // The panel is portalled out of `ref`, so it needs its own check.
+      if (ref.current?.contains(t) || panelRef.current?.contains(t)) return;
+      setOpen(false); setQuery("");
     };
     document.addEventListener("mousedown", h);
     return () => document.removeEventListener("mousedown", h);
-  }, []);
+  }, [open]);
+
+  // Portalled to <body> so the worklist table's scroll wrapper can't clip it —
+  // on the last rows it opens upward instead.
+  useAnchoredPanel(open, ref, panelRef);
 
   const selected = useMemo(
     () => options.find((o) => o.value === value && (valueKind === undefined || o.kind === valueKind)) ?? null,
@@ -99,8 +112,12 @@ export default function LccPartyPicker<K extends PartyKind = PartyKind>({
         <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0" />
       </button>
 
-      {open && (
-        <div className="absolute z-50 top-full left-0 right-0 mt-1 min-w-[260px] bg-white border border-slate-200 rounded-lg shadow-lg">
+      {open && createPortal(
+        <div
+          ref={panelRef}
+          className="fixed z-[60] min-w-[260px] bg-white border border-slate-200 rounded-lg shadow-lg"
+          style={{ visibility: "hidden" }}
+        >
           <div className="p-2 border-b border-slate-100">
             <div className="relative">
               <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
@@ -147,7 +164,8 @@ export default function LccPartyPicker<K extends PartyKind = PartyKind>({
               </button>
             </div>
           )}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

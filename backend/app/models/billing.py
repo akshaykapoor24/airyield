@@ -1,5 +1,5 @@
 from datetime import datetime, date
-from sqlalchemy import String, DateTime, Date, Numeric, Integer, ForeignKey
+from sqlalchemy import String, DateTime, Date, Numeric, Integer, ForeignKey, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
@@ -27,6 +27,14 @@ class Billing(Base):
     billing_name:  Mapped[str]        = mapped_column(String(200), nullable=False)
     period_from:   Mapped[date]       = mapped_column(Date, nullable=False)
     period_to:     Mapped[date]       = mapped_column(Date, nullable=False)
+    # The INVOICE DATE: printed on the PDF, and the date the invoice number's financial
+    # year is read from. Picked on Corporate Billing, where it may never fall before the
+    # user's last bill for anyone (services/billing_dates); the save date everywhere else,
+    # which is what the PDF printed before this column existed. See billing_date_01.
+    billing_date:  Mapped[date]       = mapped_column(
+        Date, nullable=False, default=lambda: datetime.utcnow().date(),
+        server_default=text("CURRENT_DATE"), index=True,
+    )
     billing_type:  Mapped[str | None] = mapped_column(String(20), nullable=True)   # snapshot: 'reseller' | 'agency'
     # GDS | LCC on an agency billing — an agency that is cash on one channel and
     # credit on the other settles them separately, so a bill belongs to one of
