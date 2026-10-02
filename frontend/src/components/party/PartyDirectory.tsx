@@ -19,7 +19,7 @@ import {
   type Party, type PartyKind, type PartyMode,
 } from "@/lib/party";
 
-const PAGE_SIZE = 25;
+const PAGE_SIZES = [50, 100, 200];    // the list endpoints allow up to 1000
 
 const SELECT_CLS =
   "px-2 py-1.5 border border-gray-200 rounded-lg text-xs bg-gray-50 focus:outline-none focus:ring-1 focus:ring-[#1e3a5f]/40";
@@ -113,10 +113,14 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [debounced, setDebounced] = useState("");
-  const [ticketState, setTicketState] = useState<TicketState>("any");
+  // Corporate Billing opens on the corporates with something left to bill — that is the
+  // work. Everywhere else (Customer Billing, both masters) it opens on everyone.
+  const defaultTicketState: TicketState = isCorporate && !isMaster ? "unbilled" : "any";
+  const [ticketState, setTicketState] = useState<TicketState>(defaultTicketState);
   const [corporate, setCorporate] = useState("");        // "" | "none" | "<id>"
   const [corpOptions, setCorpOptions] = useState<Party[]>([]);
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(PAGE_SIZES[0]);
   const [showAdd, setShowAdd] = useState(false);
   const [showUpload, setShowUpload] = useState(false);
   const [editTarget, setEditTarget] = useState<Party | null>(null);
@@ -146,8 +150,8 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
     try {
       const res = await api.get<Party[]>(`/${cfg.resource}/`, {
         params: {
-          skip: (page - 1) * PAGE_SIZE,
-          limit: PAGE_SIZE,
+          skip: (page - 1) * pageSize,
+          limit: pageSize,
           ...(debounced.trim() ? { search: debounced.trim() } : {}),
           ...(ticketState !== "any" ? { ticket_state: ticketState } : {}),
           ...(!isCorporate && corporate ? { corporate } : {}),
@@ -158,13 +162,13 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
       // Falls back to "this page and no more" if the header is ever missing, so a CORS
       // misconfiguration degrades to a short pager rather than a silently wrong count.
       const raw = Number(res.headers?.["x-total-count"]);
-      setTotal(Number.isFinite(raw) && raw >= 0 ? raw : (page - 1) * PAGE_SIZE + res.data.length);
+      setTotal(Number.isFinite(raw) && raw >= 0 ? raw : (page - 1) * pageSize + res.data.length);
     } catch {
       if (seq === reqSeq.current) setError(`Failed to load ${many.toLowerCase()}.`);
     } finally {
       if (seq === reqSeq.current) setLoading(false);
     }
-  }, [cfg.resource, many, page, debounced, ticketState, corporate, isCorporate]);
+  }, [cfg.resource, many, page, pageSize, debounced, ticketState, corporate, isCorporate]);
 
   useEffect(() => {
     fetchParties();
@@ -182,8 +186,17 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
     return () => { cancelled = true; };
   }, [isCorporate]);
 
+  // Two questions, because the default can itself narrow the list. `filtersActive`: is
+  // anyone being hidden? — it words the count and the empty state. `filtersChanged`: has
+  // the user moved off the default? — only then is there anything for Clear to undo.
   const filtersActive = !!debounced.trim() || ticketState !== "any" || !!corporate;
+  const filtersChanged = !!debounced.trim() || ticketState !== defaultTicketState || !!corporate;
   const clearFilters = () => {
+    setSearch(""); setDebounced(""); setTicketState(defaultTicketState); setCorporate(""); setPage(1);
+  };
+  /** Nothing hidden at all — the empty state's way out, which a reset to a narrowing
+   *  default would not be. */
+  const showEveryone = () => {
     setSearch(""); setDebounced(""); setTicketState("any"); setCorporate(""); setPage(1);
   };
 
@@ -252,7 +265,7 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
           </p>
         ) : (
           <div>
-            <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-0.5">Billing</p>
+            <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-0.5">Invoicing</p>
             <h1 className="text-xl font-bold text-gray-900">{cfg.billingLabel}</h1>
             <p className="text-xs text-gray-500 mt-0.5">
               Pick a {cfg.singular.toLowerCase()} to bill. Add or edit {cfg.masterPlural.toLowerCase()} in {cfg.masterLabel}.
@@ -335,8 +348,10 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
             />
           </div>
 
-          {/* Defaults to "All" on purpose, in both modes. A picker that silently hides
-              rows the moment it opens is how someone concludes a customer has vanished. */}
+          {/* "All" by default, except on Corporate Billing, which opens on "Has unbilled".
+              A list that hides rows the moment it opens is how someone concludes a party
+              has vanished — so the count says "matching" and the empty state names the
+              filter and offers everyone back. */}
           <select
             value={ticketState}
             onChange={(e) => { setTicketState(e.target.value as TicketState); setPage(1); }}
@@ -347,6 +362,15 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
             <option value="unbilled">Has unbilled</option>
             <option value="has">Has tickets</option>
             <option value="none">No tickets</option>
+          </select>
+
+          <select
+            value={pageSize}
+            onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }}
+            className={SELECT_CLS}
+            title="How many to show per page"
+          >
+            {PAGE_SIZES.map((n) => <option key={n} value={n}>{n}</option>)}
           </select>
 
           {!isCorporate && (
@@ -364,7 +388,7 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
             </select>
           )}
 
-          {filtersActive && (
+          {filtersChanged && (
             <button
               onClick={clearFilters}
               className="inline-flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-700"
@@ -407,12 +431,16 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
                       <div className="w-14 h-14 bg-gray-50 rounded-full flex items-center justify-center mb-3">
                         <Search className="w-7 h-7 text-gray-300" />
                       </div>
-                      <p className="text-sm font-medium text-gray-600">Nothing matches</p>
-                      <p className="text-xs text-gray-400 mt-1 mb-4">
-                        No {many.toLowerCase()} match the current search and filters.
+                      <p className="text-sm font-medium text-gray-600">
+                        {!filtersChanged && ticketState === "unbilled" ? "Nothing left to bill" : "Nothing matches"}
                       </p>
-                      <button onClick={clearFilters} className="flex items-center gap-1.5 bg-white border border-gray-200 text-gray-700 text-xs font-semibold px-3.5 py-2 rounded-lg hover:bg-gray-50">
-                        <X className="w-3.5 h-3.5" /> Clear filters
+                      <p className="text-xs text-gray-400 mt-1 mb-4">
+                        {!filtersChanged && ticketState === "unbilled"
+                          ? `No ${many.toLowerCase()} have unbilled tickets right now.`
+                          : `No ${many.toLowerCase()} match the current search and filters.`}
+                      </p>
+                      <button onClick={showEveryone} className="flex items-center gap-1.5 bg-white border border-gray-200 text-gray-700 text-xs font-semibold px-3.5 py-2 rounded-lg hover:bg-gray-50">
+                        <X className="w-3.5 h-3.5" /> Show all {many.toLowerCase()}
                       </button>
                     </div>
                   </td>
@@ -586,8 +614,8 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
             </tbody>
           </table>
         </div>
-        {total > PAGE_SIZE && (
-          <Pagination page={page} pageSize={PAGE_SIZE} total={total} onPageChange={(p) => setPage(p)} />
+        {total > pageSize && (
+          <Pagination page={page} pageSize={pageSize} total={total} onPageChange={(p) => setPage(p)} />
         )}
       </div>
 

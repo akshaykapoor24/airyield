@@ -25,7 +25,7 @@ from fastapi import (
 )
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, column, delete, func, literal, or_, select, update
+from sqlalchemy import and_, column, delete, func, literal, not_, or_, select, update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -913,6 +913,11 @@ _BILL_PARTY_TYPES = ("corporate", "direct")
 MAX_SEND_ROWS = 500
 MAX_BILLING_SELECT_IDS = 500
 
+# Refused by every single-row writer. The worklist never shows such a row, so reaching
+# one means a stale screen or a direct call — see lcc_billing_projection's AG note.
+_NOT_AG_DETAIL = ("This row wasn't paid from your agency account (payment method AG), "
+                  "so it isn't billed.")
+
 
 def _bill_kind(total) -> str:
     """Classify a row from `total`, NOT `base_fare`.
@@ -1014,10 +1019,10 @@ async def _owned_batch(batch_id: str, db: AsyncSession, current_user: User) -> L
 
 
 async def _status_counts(db: AsyncSession, batch_id: str) -> dict[str, int]:
-    """`{bill_status: n}` for one batch — the chips' source, and _recount's."""
+    """`{bill_status: n}` for one batch's AG rows — the chips' source, and _recount's."""
     rows = (await db.execute(
         select(LccDetailed.bill_status, func.count())
-        .where(LccDetailed.batch_id == batch_id)
+        .where(LccDetailed.batch_id == batch_id, proj.ag_cond())
         .group_by(LccDetailed.bill_status)
     )).all()
     return {s: n for s, n in rows}
@@ -1044,7 +1049,7 @@ async def _billing_state_counts(db: AsyncSession, batch_id: str) -> dict[str, in
         ])
         .select_from(LccDetailed)
         .outerjoin(T, T.id == LccDetailed.projected_ticket_id)
-        .where(LccDetailed.batch_id == batch_id)
+        .where(LccDetailed.batch_id == batch_id, proj.ag_cond())
     )).one()
     return {s: getattr(row, s) or 0 for s in proj.BILLING_STATES}
 
@@ -1063,6 +1068,70 @@ async def _recount(db: AsyncSession, batch: LccDetailedBatch) -> None:
         .where(LccDetailed.batch_id == batch.batch_id,
                LccDetailed.projected_ticket_id.isnot(None))
     ) or 0
+
+
+def _match_party(index: cres.CustomerIndex, batch: LccDetailedBatch,
+                 name1: str | None, gst_number: str | None) -> cres.CustomerMatch:
+    """The resolver's answer for one billable row."""
+    # The GSTIN the airline printed on the booking is tried first — it names the party
+    # exactly, where the passenger name only matches if that person happens to be on the
+    # master. Falls through to the name when the file carries no GSTIN or the master
+    # does not know it.
+    m = index.resolve(name1, gstin=gst_number)
+    if m.status == cres.UNRESOLVED and batch.default_customer_type:
+        # The batch fallback is the primary path in practice: an LCC export's passengers
+        # rarely overlap the Customer master at all.
+        m = cres.CustomerMatch(
+            status=cres.DEFAULTED,
+            customer_id=batch.default_customer_id,
+            corporate_id=batch.default_corporate_id,
+            customer_type=batch.default_customer_type,
+            display_name=(name1 or "").strip(),
+            note="Billed to this upload's default party.",
+        )
+    return m
+
+
+def _party_update(row_id: int, m: cres.CustomerMatch, now: datetime, user_id: int) -> dict:
+    """The row columns a match writes, for a bulk `update(LccDetailed)`."""
+    return {
+        "id": row_id,
+        "bill_status": m.status,
+        "bill_customer_type": m.customer_type,
+        "bill_customer_id": m.customer_id,
+        "bill_corporate_id": m.corporate_id,
+        "bill_match_reason": m.note,
+        "resolved_at": now,
+        "resolved_by_id": user_id,
+    }
+
+
+async def _match_newly_billable(db: AsyncSession, batch: LccDetailedBatch, user: User) -> int:
+    """Match the rows still marked EXCLUDED that do have money to bill. Returns how many.
+
+    EXCLUDED used to be decided from Total alone. An IndiGo AG payment line has Total 0
+    and its money in PaymentAmount (see proj.bill_amount), so it was excluded and never
+    matched — and nothing re-runs matching when the screen opens, deliberately (see
+    billing_summary). These rows have no party to lose and have never been in billing,
+    so matching them settles nothing anyone already relies on. Overrides, matches and
+    anything sent are not in this set and are not touched.
+    """
+    rows = (await db.execute(
+        select(LccDetailed.id, LccDetailed.name1, LccDetailed.gst_number)
+        .where(LccDetailed.batch_id == batch.batch_id, *_scope(LccDetailed, user),
+               proj.ag_cond(), proj.not_payment_cond(),
+               LccDetailed.bill_status == cres.EXCLUDED,
+               LccDetailed.projected_ticket_id.is_(None))
+    )).all()
+    if not rows:
+        return 0
+    index = await cres.CustomerIndex.load(db, tenant_id=user.tenant_id, created_by_id=user.id)
+    now = datetime.utcnow()
+    await db.execute(update(LccDetailed), [
+        _party_update(r.id, _match_party(index, batch, r.name1, r.gst_number), now, user.id)
+        for r in rows
+    ])
+    return len(rows)
 
 
 class ResolvePayload(BaseModel):
@@ -1088,21 +1157,27 @@ async def resolve_customers(
     index = await cres.CustomerIndex.load(
         db, tenant_id=current_user.tenant_id, created_by_id=current_user.id
     )
+    # AG rows only — nothing else is billed, so nothing else needs a party.
     rows = (await db.execute(
-        select(LccDetailed.id, LccDetailed.name1, LccDetailed.total,
+        select(LccDetailed.id, LccDetailed.name1, LccDetailed.total, LccDetailed.payment_amount,
                LccDetailed.bill_status, LccDetailed.gst_number)
-        .where(LccDetailed.batch_id == batch_id, *_scope(LccDetailed, current_user))
+        .where(LccDetailed.batch_id == batch_id, *_scope(LccDetailed, current_user),
+               proj.ag_cond())
     )).all()
 
     now = datetime.utcnow()
-    default_set = bool(batch.default_customer_type)
     updates: list[dict] = []
     summary: dict[str, int] = {}
 
-    for row_id, name1, total, current_status, gst_number in rows:
-        kind = _bill_kind(total)
+    for r in rows:
+        row_id, name1, current_status, gst_number = r.id, r.name1, r.bill_status, r.gst_number
+        # Stored exactly as ingest stored it — commission reads it, and on an AG payment
+        # line (Total 0) "payment" is right there. Whether the row has anything to BILL is
+        # read from what was paid on it instead; see proj.bill_amount.
+        kind = _bill_kind(r.total)
+        nothing_to_bill = proj.is_payment_row(r)
 
-        if not payload.reset_overrides and current_status == cres.OVERRIDDEN and kind != "payment":
+        if not payload.reset_overrides and current_status == cres.OVERRIDDEN and not nothing_to_bill:
             summary[cres.OVERRIDDEN] = summary.get(cres.OVERRIDDEN, 0) + 1
             updates.append({"id": row_id, "bill_kind": kind})
             continue
@@ -1110,37 +1185,15 @@ async def resolve_customers(
         # a corrected pax is left alone — it is not written in the dict below at all.
         pax_reset = {"bill_pax_count": None} if payload.reset_overrides else {}
 
-        if kind == "payment":
+        if nothing_to_bill:
             m = cres.CustomerMatch(status=cres.EXCLUDED, note=cres.REASON[cres.EXCLUDED])
         else:
-            # The GSTIN the airline printed on the booking is tried first — it names
-            # the party exactly, where the passenger name only matches if that person
-            # happens to be on the master. Falls through to the name when the file
-            # carries no GSTIN or the master does not know it.
-            m = index.resolve(name1, gstin=gst_number)
-            if m.status == cres.UNRESOLVED and default_set:
-                # The batch fallback is the primary path in practice: an LCC export's
-                # passengers rarely overlap the Customer master at all.
-                m = cres.CustomerMatch(
-                    status=cres.DEFAULTED,
-                    customer_id=batch.default_customer_id,
-                    corporate_id=batch.default_corporate_id,
-                    customer_type=batch.default_customer_type,
-                    display_name=(name1 or "").strip(),
-                    note="Billed to this upload's default party.",
-                )
+            m = _match_party(index, batch, name1, gst_number)
 
         summary[m.status] = summary.get(m.status, 0) + 1
         updates.append({
-            "id": row_id,
+            **_party_update(row_id, m, now, current_user.id),
             "bill_kind": kind,
-            "bill_status": m.status,
-            "bill_customer_type": m.customer_type,
-            "bill_customer_id": m.customer_id,
-            "bill_corporate_id": m.corporate_id,
-            "bill_match_reason": m.note,
-            "resolved_at": now,
-            "resolved_by_id": current_user.id,
             **pax_reset,
         })
 
@@ -1169,6 +1222,11 @@ async def _billing_summary(
         "customers_in_scope": customers_in_scope,
         "summary": summary if summary is not None else await _status_counts(db, batch.batch_id),
         "state_counts": await _billing_state_counts(db, batch.batch_id),
+        # Left out of billing by the AG rule, so the screen can say how many and why.
+        "non_ag_rows": await db.scalar(
+            select(func.count()).select_from(LccDetailed)
+            .where(LccDetailed.batch_id == batch.batch_id, not_(proj.ag_cond()))
+        ) or 0,
         "billable_rows": batch.billable_rows,
         "resolved_rows": batch.resolved_rows,
         "unresolved_rows": batch.unresolved_rows,
@@ -1192,11 +1250,23 @@ async def billing_summary(
 
     `customers_in_scope` is a plain count rather than len(CustomerIndex): its one
     consumer only tests it against zero, to say "your Customer master is empty".
+
+    It does two writes, neither of which can move a settled row. It matches rows still
+    marked EXCLUDED that turn out to have money to bill (`_match_newly_billable` — they
+    have no party and were never sent), and it refreshes the batch's stored counters,
+    which are derived from the rows and shown on the uploads list. A batch counted
+    before the AG rule would otherwise go on showing its old "N billable" there until
+    something else happened to touch it.
     """
     batch = await _owned_batch(batch_id, db, current_user)
     in_scope = await db.scalar(
         select(func.count()).select_from(Customer).where(*_scope(Customer, current_user))
     ) or 0
+    # Not before the first resolve: that open runs resolve-customers, which does it all.
+    if batch.resolution_status != "none":
+        await _match_newly_billable(db, batch, current_user)
+    await _recount(db, batch)
+    await db.commit()
     return await _billing_summary(db, batch, customers_in_scope=in_scope)
 
 
@@ -1209,7 +1279,7 @@ async def list_billing_rows(
     status_filter: str | None = Query(None, alias="status"),
     billing_state: str | None = Query(None, pattern=_BILLING_STATE_PATTERN),
     q: str | None = Query(None, max_length=100),
-    kind: str | None = Query(None),
+    kind: str | None = Query(None, pattern="^(sale|refund|payment)$"),
     ids_only: bool = Query(False),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
@@ -1238,11 +1308,13 @@ async def list_billing_rows(
     T = aliased(UploadedTicket)
     base = (select(LccDetailed, T)
             .outerjoin(T, T.id == LccDetailed.projected_ticket_id)
-            .where(LccDetailed.batch_id == batch_id, *_scope(LccDetailed, current_user)))
+            .where(LccDetailed.batch_id == batch_id, *_scope(LccDetailed, current_user),
+                   proj.ag_cond()))
     if status_filter:
         base = base.where(LccDetailed.bill_status == status_filter)
     if kind:
-        base = base.where(LccDetailed.bill_kind == kind)
+        # What billing calls the row, not `bill_kind` — see proj.bill_amount.
+        base = base.where(proj.billing_kind_cond(kind))
     if billing_state:
         base = base.where(proj.billing_state_cond(billing_state, T))
     if q and q.strip():
@@ -1296,15 +1368,18 @@ async def list_billing_rows(
     def _row(r):
         t = tickets.get(r.id)
         state = proj.billing_state(r, t)
+        amount = proj.bill_amount(r)
         return {
             "id": r.id,
             "passenger": r.name1,
             "record_locator": r.record_locator,
             "transaction_date": r.transaction_date,
             "departure_date": r.departure_date,
-            "total": float(r.total) if r.total is not None else None,
+            # What BILLING charges and calls the row — the money paid on it, which on an
+            # IndiGo AG payment line is PaymentAmount while Total is 0. See proj.bill_amount.
+            "total": float(amount) if amount is not None else None,
             "base_fare": float(r.base_fare) if r.base_fare is not None else None,
-            "bill_kind": r.bill_kind,
+            "bill_kind": proj.billing_kind(r),
             "bill_status": r.bill_status,
             "bill_customer_type": r.bill_customer_type,
             "bill_customer_id": r.bill_customer_id,
@@ -1362,7 +1437,7 @@ async def billing_gaps(
             func.array_agg(func.coalesce(LccDetailed.name1, "—")).label("samples"),
         )
         .where(LccDetailed.batch_id == batch_id, *_scope(LccDetailed, current_user),
-               LccDetailed.bill_status.notin_(billable))
+               LccDetailed.bill_status.notin_(billable), proj.ag_cond())
         .group_by(LccDetailed.bill_status, LccDetailed.bill_match_reason)
         .order_by(func.count().desc())
         .limit(MAX_GAP_GROUPS)
@@ -1413,7 +1488,7 @@ async def set_billing_default(
     rows_updated = 0
     if ct:
         conds = [LccDetailed.batch_id == batch_id, *_scope(LccDetailed, current_user),
-                 LccDetailed.bill_kind != "payment"]
+                 proj.not_payment_cond(), proj.ag_cond()]
         if apply_to == "unresolved":
             conds.append(LccDetailed.bill_status.notin_(
                 (cres.RESOLVED, cres.DEFAULTED, cres.OVERRIDDEN)
@@ -1454,11 +1529,13 @@ async def set_row_billing_party(
     )
     if not row:
         raise HTTPException(status_code=404, detail="Row not found.")
-    if row.bill_kind == "payment":
+    if proj.is_payment_row(row):
         raise HTTPException(
             status_code=409,
             detail="This row is a payment movement — it carries no fare, so there is nothing to bill.",
         )
+    if not proj.is_ag(row):
+        raise HTTPException(status_code=409, detail=_NOT_AG_DETAIL)
     # Once a row is in billing, the TICKET is the thing that exists and its party
     # is what billing reads; this row is only the record of how it got there.
     # Editing it here would change nothing anyone bills and would leave the two
@@ -1519,11 +1596,13 @@ async def set_row_pax_count(
     )
     if not row:
         raise HTTPException(status_code=404, detail="Row not found.")
-    if row.bill_kind == "payment":
+    if proj.is_payment_row(row):
         raise HTTPException(
             status_code=409,
             detail="This row is a payment movement — it carries no fare, so there is nothing to bill.",
         )
+    if not proj.is_ag(row):
+        raise HTTPException(status_code=409, detail=_NOT_AG_DETAIL)
     if row.projected_ticket_id is not None:
         raise HTTPException(
             status_code=409,
@@ -1588,9 +1667,9 @@ async def set_rows_billing_party(
             LccDetailed.id.in_(ids),
             LccDetailed.batch_id == batch_id,
             *_scope(LccDetailed, current_user),
-            # NULL-safe: `bill_kind != 'payment'` would drop never-resolved rows, whose
-            # kind is still NULL. See lcc_billing_projection's note on the same trap.
-            or_(LccDetailed.bill_kind.is_(None), LccDetailed.bill_kind != "payment"),
+            # NULL-safe — see lcc_billing_projection's note on the trap.
+            proj.not_payment_cond(),
+            proj.ag_cond(),
             LccDetailed.projected_ticket_id.is_(None),
         ).values(
             bill_status=cres.OVERRIDDEN,
@@ -1701,13 +1780,15 @@ def _guard_row_for_employee(row: LccDetailed) -> str | None:
     """Why this row cannot take an employee, or None."""
     if _is_payment_row(row):
         return "This row is a payment movement — there is nothing to bill."
+    if not proj.is_ag(row):
+        return _NOT_AG_DETAIL
     if row.projected_ticket_id is not None:
         return "This row is already in billing. Remove it from the billing first."
     return None
 
 
 def _is_payment_row(row: LccDetailed) -> bool:
-    return (row.bill_kind or "") == "payment"
+    return proj.is_payment_row(row)
 
 
 @router.post("/rows/{row_id}/create-employee", status_code=status.HTTP_201_CREATED)

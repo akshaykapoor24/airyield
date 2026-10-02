@@ -11,7 +11,7 @@ import {
   Edit3, Users, Shield, GitMerge, Search,
   History, LayoutGrid, Contact, Layers,
   CreditCard, TrendingUp, Receipt, FileDown, PlaneTakeoff, ShieldAlert,
-  Landmark, Wallet,
+  Landmark, Wallet, Banknote,
 } from "lucide-react";
 import { USER_MASTER_NAV, userMasterHref } from "@/lib/userMasterNav";
 import { cn } from "@/lib/utils";
@@ -126,6 +126,9 @@ const TENANT_NAV: NavItem[] = [
   {
     id: "accounting", label: "Accounting", icon: Calculator,
     children: [
+      // The tenant's own bank statement: each deposit linked to the party that paid it,
+      // and billed vs received per party. Feeds the two below.
+      { label: "Bank Statement", href: "/accounting/bank-statement", icon: Banknote },
       { label: "Sale Accounting", href: "/accounting/sale", icon: Receipt },
       { label: "Purchase Accounting", href: "/accounting/purchase", icon: CreditCard },
     ],

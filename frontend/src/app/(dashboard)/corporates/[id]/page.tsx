@@ -82,6 +82,8 @@ type BillingListItem = {
   billing_name: string;
   period_from: string;
   period_to: string;
+  /** The invoice date. */
+  billing_date?: string | null;
   total_base: number;
   total_markup: number;
   total_additional_markup: number;
@@ -129,6 +131,7 @@ type BillingDetail = {
   billing_name: string;
   period_from: string;
   period_to: string;
+  billing_date?: string | null;
   billing_type: string | null;
   total_base: number;
   total_markup: number;
@@ -163,62 +166,26 @@ function passengerName(t: SoldTicket): string {
   return t.pax_name || [t.first_name, t.last_name].filter(Boolean).join(" ") || "—";
 }
 
-/**
- * A ticket's issue date as `YYYY-MM-DD`, or "" if it cannot be read.
- * Twin of customers/[id]/page.tsx — keep the two in step.
- *
- * `ticket_date` is a String(50) carried straight from whatever spreadsheet the ticket
- * arrived on — ticket_extraction normalises what it can and deliberately stores the rest
- * verbatim — so it is not reliably a date at all. This mirrors
- * backend/app/services/billing_calc.py::safe_date, which is the function that decides
- * which tickets a date filter keeps.
- *
- * NEVER FALL BACK TO `new Date(s)`. JavaScript reads "03/04/2026" as 4 March, the US
- * month-first order; the backend reads the same string as 3 April
- * (`dateutil.parse(..., dayfirst=True)`). A parser that silently disagrees with the
- * server about the same string is worse than one that admits defeat — this value ends up
- * as the period printed on an invoice. Hence the explicit day-first branch below, and ""
- * for anything that does not match it.
- */
-function ticketDateISO(raw: string | null): string {
-  if (!raw) return "";
-  const s = raw.trim();
-  if (!s) return "";
+/** Today in the browser's own calendar, as `YYYY-MM-DD` — what a date input holds. */
+function todayISO(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
 
-  // A real calendar date, or "". Date.parse is no use as a validator here: it happily
-  // rolls 2026-02-31 over into 3 March, so the parts are checked back out of the Date.
-  const build = (y: number, mo: number, d: number): string => {
-    if (!(y >= 1900 && y <= 2999) || mo < 1 || mo > 12 || d < 1 || d > 31) return "";
-    const dt = new Date(Date.UTC(y, mo - 1, d));
-    if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) return "";
-    return `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-  };
-
-  // Year-first: the ISO prefix every LCC-projected row carries, and the slash variant.
-  const ymd = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/.exec(s);
-  if (ymd) return build(Number(ymd[1]), Number(ymd[2]), Number(ymd[3]));
-
-  // Day-first d/m/y, matching the backend. Two-digit years are 20xx.
-  const dmy = /^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})$/.exec(s);
-  if (dmy) {
-    const year = dmy[3].length === 2 ? 2000 + Number(dmy[3]) : Number(dmy[3]);
-    return build(year, Number(dmy[2]), Number(dmy[1]));
-  }
-  return "";
+/** `YYYY-MM-DD` → `DD-MM-YYYY`, the way the invoice prints it. */
+function dmy(iso: string): string {
+  return iso.split("-").reverse().join("-");
 }
 
 /**
- * The span the selected tickets actually cover — the truest period for their bill.
- * Plain string comparison is correct because every value is `YYYY-MM-DD`; no Date
- * objects, so no timezone can shift a boundary.
+ * A bill's date for the lists. A bill raised since Corporate Billing asked for a billing
+ * date stores that date as both ends of its period; an older one covered a real period.
  */
-function periodFromTickets(rows: SoldTicket[]): { from: string; to: string; undated: number } {
-  const dates = rows.map((t) => ticketDateISO(t.ticket_date)).filter(Boolean).sort();
-  return {
-    from: dates[0] ?? "",
-    to: dates[dates.length - 1] ?? "",
-    undated: rows.length - dates.length,
-  };
+function billDateLabel(b: { period_from: string; period_to: string; billing_date?: string | null }): string {
+  if (b.billing_date && b.period_from === b.billing_date && b.period_to === b.billing_date) {
+    return dmy(b.billing_date);
+  }
+  return `${b.period_from} → ${b.period_to}`;
 }
 
 /** Recompute one row with the corporate markup + the entered additional (flat) markup.
@@ -275,7 +242,8 @@ export default function CorporateDetailPage() {
   const [corporate, setCorporate] = useState<Corporate | null>(null);
   const [loadingCorporate, setLoadingCorporate] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>("Corporate Details");
+  // Opens on Sold Tickets — invoicing is what this page is opened for.
+  const [tab, setTab] = useState<Tab>("Sold Tickets");
 
   // Sold Tickets
   const [dateField, setDateField] = useState<"ticket" | "travel">("ticket");
@@ -283,6 +251,9 @@ export default function CorporateDetailPage() {
   const [dateTo, setDateTo] = useState("");
   // Narrowed on the server, so the summary cards total exactly the category shown.
   const [category, setCategory] = useState("");
+  // Unbilled by default — those are the rows still to invoice. Also server-side, for the
+  // same reason, and so Download XLS holds the same rows.
+  const [billedFilter, setBilledFilter] = useState<"unbilled" | "billed" | "">("unbilled");
   const [soldTickets, setSoldTickets] = useState<SoldTicket[] | null>(null);
   // Which GST heads this party's supplies carry, and why — decided server-side
   // from the two GSTINs. One answer for the whole list: it is a fact about the
@@ -298,14 +269,15 @@ export default function CorporateDetailPage() {
   const [discounts, setDiscounts] = useState<Record<number, string>>({});
   const [selected, setSelected] = useState<Set<number>>(new Set());
 
-  // Save Billing. The period is its own state, not the filter dates: the filter is now
-  // optional, but `billings.period_from/to` are NOT NULL and get printed on the invoice.
+  // Save Billing. One billing date — the invoice date — which may not fall before
+  // `lastBill`, the user's latest bill for anyone. The server enforces the same rule
+  // (services/billing_dates); this only stops the user picking a date it will refuse.
   const [showSaveBilling, setShowSaveBilling] = useState(false);
   const [billingName, setBillingName] = useState("");
-  const [periodFrom, setPeriodFrom] = useState("");
-  const [periodTo, setPeriodTo] = useState("");
-  const [periodUndated, setPeriodUndated] = useState(0);
+  const [billingDate, setBillingDate] = useState("");
+  const [lastBill, setLastBill] = useState<{ date: string; name: string } | null>(null);
   const [savingBilling, setSavingBilling] = useState(false);
+  const dateTooEarly = !!(lastBill && billingDate && billingDate < lastBill.date);
 
   // Billing Info
   const [billings, setBillings] = useState<BillingListItem[]>([]);
@@ -358,11 +330,16 @@ export default function CorporateDetailPage() {
    * and what Agency Billing has always offered. A range also drops tickets whose date
    * cannot be parsed, so clearing the dates is the only way to see undated tickets.
    */
+  // A sequence, not a flag: filters now apply as they change, so a slow response for the
+  // old filters could otherwise land after the new one and paint the wrong rows.
+  const ticketsSeq = useRef(0);
+
   const applyRange = useCallback(async () => {
     if (dateFrom && dateTo && dateFrom > dateTo) {
       setTicketsError("From date must be before To date.");
       return;
     }
+    const seq = ++ticketsSeq.current;
     setLoadingTickets(true);
     setTicketsError(null);
     try {
@@ -370,7 +347,9 @@ export default function CorporateDetailPage() {
       if (dateFrom) params.date_from = dateFrom;
       if (dateTo) params.date_to = dateTo;
       if (category) params.category = category;
+      if (billedFilter) params.billed = billedFilter;
       const { data } = await api.get<SoldTicketsResponse>(`/corporates/${corporateId}/sold-tickets`, { params });
+      if (seq !== ticketsSeq.current) return;
       setSoldTickets(data.tickets);
       setAppliedFilters(params);
       setPlaceOfSupply(data.place_of_supply ?? null);
@@ -378,28 +357,36 @@ export default function CorporateDetailPage() {
       setDiscounts({});
       setSelected(new Set());
     } catch {
-      setTicketsError("Failed to load tickets.");
+      if (seq === ticketsSeq.current) setTicketsError("Failed to load tickets.");
     } finally {
-      setLoadingTickets(false);
+      if (seq === ticketsSeq.current) setLoadingTickets(false);
     }
-  }, [corporateId, dateFrom, dateTo, dateField, category]);
+  }, [corporateId, dateFrom, dateTo, dateField, category, billedFilter]);
 
-  // Load once, the first time the tab is actually opened — not on mount, because the
-  // page lands on Details and this fetch is unpaginated. A ref guard rather than
-  // depending on `applyRange`, which is memoised on the dates: depending on it would
-  // refire on every keystroke in a date box and wipe the ticks and markups being typed.
-  const ticketsLoaded = useRef(false);
+  // Filters apply themselves — there is no Apply button. Gated on the tab because this
+  // fetch is unpaginated: a link that opens another tab should not pay for it.
+  // Keyed on the filters, so going back to the tab does not reload and wipe the ticks
+  // and markups being typed. Debounced, so typing a year into a date box ("2", "20",
+  // "202", "2026") is one request, not four.
+  const loadedFilters = useRef<string | null>(null);
   useEffect(() => {
-    if (tab !== "Sold Tickets" || ticketsLoaded.current) return;
-    ticketsLoaded.current = true;
-    applyRange();
-  }, [tab, applyRange]);
+    if (tab !== "Sold Tickets") return;
+    const key = JSON.stringify([dateField, dateFrom, dateTo, category, billedFilter]);
+    if (key === loadedFilters.current) return;
+    const first = loadedFilters.current === null;
+    // Recorded when the load fires, not now: leaving the tab inside the debounce cancels
+    // it, and coming back must still load.
+    const t = setTimeout(() => { loadedFilters.current = key; void applyRange(); }, first ? 0 : 400);
+    return () => clearTimeout(t);
+  }, [tab, applyRange, dateField, dateFrom, dateTo, category, billedFilter]);
 
   /** "" when no range is set, which is now the default and means "everything". */
   const rangeLabel = dateFrom && dateTo ? `${dateFrom} → ${dateTo}`
     : dateFrom ? `from ${dateFrom}`
     : dateTo ? `up to ${dateTo}`
     : "";
+  /** "unbilled " / "billed " for the list's wording; "" when both are shown. */
+  const statusWord = billedFilter ? `${billedFilter} ` : "";
 
   const summary = useMemo(() => {
     const rows = soldTickets ?? [];
@@ -505,31 +492,38 @@ export default function CorporateDetailPage() {
   }, [editBilling, addlEdits]);
 
   /**
-   * Open the save dialog, seeding the invoice period.
-   *
-   * A filter range, when the user set one — that is what this dialog has always shown.
-   * Otherwise the span the SELECTED tickets actually cover, which is a truer period than
-   * an arbitrary filter window anyway. Either way it stays editable.
+   * Open the save dialog: the company's name, and today as the billing date — or the
+   * last bill's date, if that is later still, since a bill may not be dated before it.
+   * The invoice number is not shown: it is the saved row's, so the server appends it.
    */
-  const openSaveBilling = () => {
-    const rows = (soldTickets ?? []).filter((t) => selected.has(t.id) && !t.is_billed);
-    const span = periodFromTickets(rows);
-    setPeriodFrom(dateFrom || span.from);
-    setPeriodTo(dateTo || span.to);
-    setPeriodUndated(dateFrom && dateTo ? 0 : span.undated);
+  const openSaveBilling = async () => {
+    setBillingName(corporate ? partyName(corporate) : "");
+    setBillingDate(todayISO());
+    setLastBill(null);
     setShowSaveBilling(true);
+    try {
+      const { data } = await api.get<{ last_billing_date: string | null; last_billing_name: string | null }>(
+        `/corporates/${corporateId}/billing-date-floor`,
+      );
+      if (data.last_billing_date) {
+        const last = { date: data.last_billing_date, name: data.last_billing_name ?? "" };
+        setLastBill(last);
+        setBillingDate((d) => (d < last.date ? last.date : d));
+      }
+    } catch {
+      /* Not fatal: the server still refuses a date before the last bill on save. */
+    }
   };
 
   const saveBilling = async () => {
     const rows = (soldTickets ?? []).filter((t) => selected.has(t.id) && !t.is_billed);
     if (!billingName.trim() || rows.length === 0) return;
-    if (!periodFrom || !periodTo || periodFrom > periodTo) return;
+    if (!billingDate || dateTooEarly) return;
     setSavingBilling(true);
     try {
       await api.post(`/corporates/${corporateId}/billings`, {
         billing_name: billingName.trim(),
-        period_from: periodFrom,
-        period_to: periodTo,
+        billing_date: billingDate,
         items: rows.map((t) => ({
           ticket_id: t.id,
           additional_markup: parseFloat(additional[t.id] ?? "") || 0,
@@ -616,7 +610,7 @@ export default function CorporateDetailPage() {
 
   /**
    * This corporate's Sold Tickets as the Corporate Billing sheet — the rows on screen,
-   * billed and unbilled. Figures are what is SAVED: a billed ticket's invoice line, an
+   * under the same Status filter. Figures are what is SAVED: a billed ticket's invoice line, an
    * unbilled one at the corporate's markup; additional markup typed here but not yet saved
    * as a billing is not in the file. Built by api/v1/corporates.py::export_corporate_sold_tickets.
    */
@@ -664,7 +658,7 @@ export default function CorporateDetailPage() {
             <ArrowLeft className="w-4 h-4 text-gray-600" />
           </button>
           <div>
-            <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-0.5">Corporate Billing</p>
+            <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-0.5">Corporate Invoicing</p>
             <h1 className="text-xl font-bold text-gray-900">
               {corporate ? partyName(corporate) : "Corporate"}
             </h1>
@@ -781,19 +775,23 @@ export default function CorporateDetailPage() {
                 ))}
               </select>
             </div>
-            <button
-              onClick={() => applyRange()}
-              disabled={loadingTickets}
-              className="bg-[#1e3a5f] hover:bg-[#16304f] text-white rounded-lg px-4 py-2 text-sm font-semibold disabled:opacity-50"
-            >
-              {loadingTickets ? "Loading…" : "Apply"}
-            </button>
+            <div>
+              <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Status</label>
+              <select
+                value={billedFilter}
+                onChange={(e) => setBilledFilter(e.target.value as "unbilled" | "billed" | "")}
+                className="border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#1e3a5f]/30 bg-gray-50"
+              >
+                <option value="unbilled">Unbilled</option>
+                <option value="billed">Billed</option>
+                <option value="">Billed &amp; unbilled</option>
+              </select>
+            </div>
             {(dateFrom || dateTo) && (
               <button
                 onClick={() => { setDateFrom(""); setDateTo(""); }}
-                disabled={loadingTickets}
-                className="inline-flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-700 pb-2.5 disabled:opacity-50"
-                title="Clear the dates, then press Apply to see every ticket"
+                className="inline-flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-700 pb-2.5"
+                title="Clear the dates to see every ticket"
               >
                 <X className="w-3 h-3" /> Clear dates
               </button>
@@ -808,7 +806,7 @@ export default function CorporateDetailPage() {
                   onClick={downloadTickets}
                   disabled={exportingTickets || loadingTickets}
                   className="flex items-center gap-1.5 bg-[#1e3a5f] hover:bg-[#16304f] text-white rounded-lg px-4 py-2 text-sm font-semibold disabled:opacity-60"
-                  title="The tickets listed below — billed and unbilled — as an Excel sheet. Uses saved figures: additional markup typed here counts once the billing is saved."
+                  title="The tickets listed below, under the same filters, as an Excel sheet. Uses saved figures: additional markup typed here counts once the billing is saved."
                 >
                   {exportingTickets
                     ? <><RefreshCw className="w-4 h-4 animate-spin" /> Downloading…</>
@@ -851,7 +849,9 @@ export default function CorporateDetailPage() {
                 <Ticket className="w-7 h-7 text-gray-300" />
               </div>
               <p className="text-sm font-medium text-gray-600">Could not load tickets</p>
-              <p className="text-xs text-gray-400 mt-1">Press Apply to try again.</p>
+              <button onClick={() => applyRange()} className="text-xs text-[#1e3a5f] font-semibold hover:underline mt-1">
+                Try again
+              </button>
             </div>
           ) : (
             <>
@@ -910,8 +910,10 @@ export default function CorporateDetailPage() {
                 <div className="px-4 py-3 border-b border-gray-100">
                   <p className="text-xs font-semibold text-gray-700">
                     {rangeLabel
-                      ? `${soldTickets.length} tickets by ${dateField === "travel" ? "travel" : "issue"} date ${rangeLabel} for `
-                      : `All ${soldTickets.length} tickets for `}
+                      ? `${soldTickets.length} ${statusWord}tickets by ${dateField === "travel" ? "travel" : "issue"} date ${rangeLabel} for `
+                      : statusWord
+                        ? `${soldTickets.length} ${statusWord}tickets for `
+                        : `All ${soldTickets.length} tickets for `}
                     {partyName(corporate)}
                   </p>
                   <p className="text-[10px] text-gray-400 mt-0.5">
@@ -922,8 +924,8 @@ export default function CorporateDetailPage() {
                       ? `${corporate.billing_type} — 18% GST on ${corporate.billing_type === "reseller" ? "gross + markup" : "markup only"}`
                       : "not set — no GST applied"}
                     . Edit Additional Markup to recalculate. Totals above cover every row
-                    shown, tickets already billed included; Save Billing charges only the
-                    rows you tick.
+                    shown{billedFilter === "unbilled" ? "" : ", tickets already billed included"}; Save
+                    Billing charges only the rows you tick.
                   </p>
                 </div>
                 <div className="overflow-x-auto">
@@ -965,12 +967,17 @@ export default function CorporateDetailPage() {
                                 <Ticket className="w-7 h-7 text-gray-300" />
                               </div>
                               <p className="text-sm font-medium text-gray-600">
-                                {rangeLabel ? "No tickets in this date range" : "No tickets for this corporate yet"}
+                                {rangeLabel ? "No tickets in this date range"
+                                  : billedFilter === "unbilled" ? "Nothing left to bill"
+                                  : billedFilter === "billed" ? "No billed tickets yet"
+                                  : "No tickets for this corporate yet"}
                               </p>
                               <p className="text-xs text-gray-400 mt-1">
                                 {rangeLabel
-                                  ? `No tickets matched this corporate's employees ${rangeLabel}. Clear the dates to see every ticket.`
-                                  : "No uploaded ticket is tagged to this corporate or matches one of its employees' names."}
+                                  ? `No ${statusWord}tickets matched this corporate's employees ${rangeLabel}. Clear the dates to see every ticket.`
+                                  : billedFilter
+                                    ? `No ${statusWord}ticket is tagged to this corporate or matches one of its employees' names. Set Status to “Billed & unbilled” to see every ticket.`
+                                    : "No uploaded ticket is tagged to this corporate or matches one of its employees' names."}
                               </p>
                             </div>
                           </td>
@@ -1150,7 +1157,7 @@ export default function CorporateDetailPage() {
             <table className="w-full">
               <thead>
                 <tr style={{ background: "#1e3a5f" }}>
-                  {["BILLING STATEMENT", "PERIOD", "TICKETS", "TOTAL FARE", "TOTAL MARKUP", "TOTAL GST", "GRAND TOTAL", "CREATED", "ACTIONS"].map((h) => (
+                  {["BILLING STATEMENT", "BILLING DATE", "TICKETS", "TOTAL FARE", "TOTAL MARKUP", "TOTAL GST", "GRAND TOTAL", "CREATED", "ACTIONS"].map((h) => (
                     <th key={h} className="px-3 py-2.5 text-left text-[10px] font-semibold text-white uppercase tracking-wider whitespace-nowrap">
                       {h}
                     </th>
@@ -1180,7 +1187,7 @@ export default function CorporateDetailPage() {
                   billings.map((b, idx) => (
                     <tr key={b.id} className={`border-b border-gray-50 hover:bg-blue-50/30 ${idx % 2 === 0 ? "bg-white" : "bg-gray-50/30"}`}>
                       <td className="px-3 py-2 text-[11px] font-semibold text-gray-800">{b.billing_name}</td>
-                      <td className="px-3 py-2 text-[11px] text-gray-500">{b.period_from} → {b.period_to}</td>
+                      <td className="px-3 py-2 text-[11px] text-gray-500">{billDateLabel(b)}</td>
                       <td className="px-3 py-2 text-[11px] text-gray-600">{b.item_count}</td>
                       <td className="px-3 py-2 text-[11px] text-gray-600">{money(b.total_base)}</td>
                       <td className="px-3 py-2 text-[11px] text-gray-600">{money(b.total_markup + b.total_additional_markup)}</td>
@@ -1243,46 +1250,41 @@ export default function CorporateDetailPage() {
             <div className="px-6 py-4 space-y-3">
               <div>
                 <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Billing Name *</label>
-                <input
-                  value={billingName}
-                  onChange={(e) => setBillingName(e.target.value)}
-                  placeholder="e.g. June 2026 — Acme Corp"
-                  autoFocus
-                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#1e3a5f]/30 bg-gray-50"
-                />
+                <div className="flex">
+                  <input
+                    value={billingName}
+                    onChange={(e) => setBillingName(e.target.value)}
+                    placeholder="e.g. ORIX"
+                    autoFocus
+                    className="flex-1 min-w-0 border border-gray-200 rounded-l-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#1e3a5f]/30 bg-gray-50"
+                  />
+                  <span className="flex items-center px-2.5 border border-l-0 border-gray-200 rounded-r-lg bg-gray-100 text-[11px] text-gray-500 whitespace-nowrap">
+                    - Invoice No.
+                  </span>
+                </div>
+                <p className="text-[10px] text-gray-400 mt-1">
+                  Saved as “{billingName.trim() || "…"} - &lt;invoice no.&gt;” — the number is assigned when you save.
+                </p>
               </div>
               <div>
                 <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">
-                  Billing Period *
+                  Billing Date *
                 </label>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="date"
-                    value={periodFrom}
-                    onChange={(e) => setPeriodFrom(e.target.value)}
-                    className="flex-1 min-w-0 border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#1e3a5f]/30 bg-gray-50"
-                  />
-                  <span className="text-gray-400 text-sm">→</span>
-                  <input
-                    type="date"
-                    value={periodTo}
-                    onChange={(e) => setPeriodTo(e.target.value)}
-                    className="flex-1 min-w-0 border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#1e3a5f]/30 bg-gray-50"
-                  />
-                </div>
+                <input
+                  type="date"
+                  value={billingDate}
+                  min={lastBill?.date}
+                  onChange={(e) => setBillingDate(e.target.value)}
+                  className={`w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#1e3a5f]/30 bg-gray-50 ${
+                    dateTooEarly ? "border-red-300" : "border-gray-200"
+                  }`}
+                />
                 <p className="text-[10px] text-gray-400 mt-1">
-                  {dateFrom && dateTo
-                    ? "From the date range you applied."
-                    : "Taken from the first and last issue date of the tickets you selected. It prints on the invoice — adjust it if this bill covers a different period."}
-                  {periodUndated > 0 && ` ${periodUndated} selected ${periodUndated === 1 ? "ticket has" : "tickets have"} no readable date and were ignored here.`}
+                  The invoice date printed on the bill.
+                  {lastBill && ` Your last bill (${lastBill.name}) is dated ${dmy(lastBill.date)}, so this one can't be earlier.`}
                 </p>
-                {!periodFrom && !periodTo && (
-                  <p className="text-[10px] text-amber-600 mt-1">
-                    None of the selected tickets has a readable date — set the period this bill covers.
-                  </p>
-                )}
-                {periodFrom && periodTo && periodFrom > periodTo && (
-                  <p className="text-[10px] text-red-500 mt-1">The From date must not be after the To date.</p>
+                {dateTooEarly && lastBill && (
+                  <p className="text-[10px] text-red-500 mt-1">Pick {dmy(lastBill.date)} or later.</p>
                 )}
               </div>
               <div className="bg-gray-50 border border-gray-100 rounded-lg px-3 py-2.5 text-[11px] text-gray-600 space-y-1">
@@ -1296,10 +1298,7 @@ export default function CorporateDetailPage() {
               </button>
               <button
                 onClick={saveBilling}
-                disabled={
-                  savingBilling || !billingName.trim()
-                  || !periodFrom || !periodTo || periodFrom > periodTo
-                }
+                disabled={savingBilling || !billingName.trim() || !billingDate || dateTooEarly}
                 className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg py-2 text-sm font-semibold disabled:opacity-50"
               >
                 {savingBilling ? "Saving…" : "Save Billing"}
@@ -1321,7 +1320,7 @@ export default function CorporateDetailPage() {
                 <div>
                   <h2 className="text-sm font-bold text-gray-900">{viewBilling.billing_name}</h2>
                   <p className="text-[10px] text-gray-400">
-                    {viewBilling.period_from} → {viewBilling.period_to}
+                    {billDateLabel(viewBilling)}
                     {viewBilling.billing_type ? ` · ${viewBilling.billing_type}` : ""} · {viewBilling.line_items.length} tickets
                   </p>
                 </div>
@@ -1412,7 +1411,7 @@ export default function CorporateDetailPage() {
                 <div>
                   <h2 className="text-sm font-bold text-gray-900">Edit Additional Markup — {editBilling.billing_name}</h2>
                   <p className="text-[10px] text-gray-400">
-                    {editBilling.period_from} → {editBilling.period_to}
+                    {billDateLabel(editBilling)}
                     {editBilling.billing_type ? ` · ${editBilling.billing_type}` : ""} · {editBilling.line_items.length} tickets · edit each ticket&apos;s additional markup
                   </p>
                 </div>

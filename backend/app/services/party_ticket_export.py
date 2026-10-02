@@ -291,6 +291,18 @@ def booking_order(t) -> tuple:
     return (safe_date(getattr(t, "ticket_date", None)) or date.max, t.id)
 
 
+def passenger_order(t) -> tuple:
+    """Sort key: passenger A→Z, then booking date, then upload order.
+
+    The name is the one the Sold Tickets table prints (`passenger_name`), compared without
+    case or stray spacing, so "Sujoyta  Ghosh" and "SUJOYTA GHOSH" sit together. A row
+    with no name or no readable date goes last within its group rather than first.
+    """
+    raw = passenger_name(t)
+    name = "" if raw == "—" else " ".join(raw.split()).casefold()
+    return (not name, name, *booking_order(t))
+
+
 def _party_label(party) -> str:
     return customer_name(party) if isinstance(party, Customer) else corporate_name(party)
 

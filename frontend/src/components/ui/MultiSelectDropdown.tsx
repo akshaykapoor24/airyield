@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { ChevronDown, X } from "lucide-react";
+import { useAnchoredPanel } from "@/hooks/useAnchoredPanel";
 
 type Option<T extends string | number> = { value: T; label: string; sublabel?: string };
 
@@ -29,13 +31,15 @@ export default function MultiSelectDropdown<T extends string | number>({
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const containerRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
-        setOpen(false);
-        setSearch("");
-      }
+      const target = e.target as Node;
+      // The panel is portalled out of the container, so it needs its own check.
+      if (containerRef.current?.contains(target) || panelRef.current?.contains(target)) return;
+      setOpen(false);
+      setSearch("");
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
@@ -60,6 +64,9 @@ export default function MultiSelectDropdown<T extends string | number>({
   const selectedOptions = selected
     .map((v) => options.find((o) => o.value === v))
     .filter((o): o is Option<T> => Boolean(o));
+
+  // Portalled to <body> so a scrolling ancestor (a modal body) can't clip it.
+  useAnchoredPanel(open, containerRef, panelRef);
 
   return (
     <div ref={containerRef} className="relative">
@@ -90,8 +97,12 @@ export default function MultiSelectDropdown<T extends string | number>({
         <ChevronDown className={`w-4 h-4 text-gray-400 shrink-0 mt-0.5 transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
 
-      {open && (
-        <div className="absolute z-50 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg">
+      {open && createPortal(
+        <div
+          ref={panelRef}
+          className="fixed z-[60] bg-white border border-gray-200 rounded-lg shadow-lg"
+          style={{ visibility: "hidden" }}
+        >
           {searchable && (
             <div className="p-2 border-b border-gray-100">
               <input
@@ -131,7 +142,8 @@ export default function MultiSelectDropdown<T extends string | number>({
               })
             )}
           </ul>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

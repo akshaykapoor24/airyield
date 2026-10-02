@@ -262,5 +262,47 @@ class WorkbookTests(unittest.TestCase):
         self.assertEqual(ws.freeze_panes, "A2")
 
 
+class PassengerOrderTests(unittest.TestCase):
+    """The Sold Tickets tab lists by passenger first, then by date."""
+
+    @staticmethod
+    def _order(*tickets):
+        return [t.id for t in sorted(tickets, key=pte.passenger_order)]
+
+    def test_name_comes_before_date(self):
+        self.assertEqual(self._order(
+            ticket(id=1, pax_name="VIVEK WADHERA", ticket_date="2026-08-14"),
+            ticket(id=2, pax_name="Amal Murugan Kaunder", ticket_date="2026-08-20"),
+            ticket(id=3, pax_name="JATIN L K WASNIK", ticket_date="2026-08-15"),
+        ), [2, 3, 1])
+
+    def test_one_passengers_tickets_run_oldest_first(self):
+        self.assertEqual(self._order(
+            ticket(id=1, pax_name="SUJOYTA GHOSH", ticket_date="2026-08-18"),
+            ticket(id=2, pax_name="SUJOYTA GHOSH", ticket_date="16/08/2026"),   # day-first
+            ticket(id=3, pax_name="SUJOYTA GHOSH", ticket_date="2026-08-17"),
+        ), [2, 3, 1])
+
+    def test_case_and_spacing_do_not_split_a_passenger(self):
+        self.assertEqual(self._order(
+            ticket(id=1, pax_name="Sujoyta  Ghosh", ticket_date="2026-08-18"),
+            ticket(id=2, pax_name="BABITA VARSHNEY", ticket_date="2026-08-19"),
+            ticket(id=3, pax_name="SUJOYTA GHOSH", ticket_date="2026-08-16"),
+        ), [2, 3, 1])
+
+    def test_first_and_last_name_count_when_there_is_no_pax_name(self):
+        self.assertEqual(self._order(
+            ticket(id=1, first_name="Zoya", last_name="Khan"),
+            ticket(id=2, first_name="Arun", last_name="Mehta"),
+        ), [2, 1])
+
+    def test_nameless_and_undated_rows_go_last(self):
+        self.assertEqual(self._order(
+            ticket(id=1, ticket_date="2026-08-01"),                             # no name
+            ticket(id=2, pax_name="ARUN", ticket_date=None),                    # no date
+            ticket(id=3, pax_name="ARUN", ticket_date="2026-08-02"),
+        ), [3, 2, 1])
+
+
 if __name__ == "__main__":
     unittest.main()

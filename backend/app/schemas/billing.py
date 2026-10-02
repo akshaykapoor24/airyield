@@ -20,6 +20,17 @@ class BillingCreate(BaseModel):
     items: list[BillingItemInput]
 
 
+class CorporateBillingCreate(BaseModel):
+    """Corporate Billing asks for the billing date itself rather than a period.
+
+    `billing_name` is what the user typed — by default the company's name; the invoice
+    number is appended on save, once it exists.
+    """
+    billing_name: str
+    billing_date: date
+    items: list[BillingItemInput]
+
+
 class BillingUpdateItem(BaseModel):
     ticket_id: int
     additional_markup: float
@@ -69,6 +80,8 @@ class BillingRead(BaseModel):
     billing_name: str
     period_from: date
     period_to: date
+    # The invoice date. Optional only so a reader built from a hand-made dict still works.
+    billing_date: Optional[date] = None
     billing_type: Optional[str] = None
     channel: Optional[str] = None
     total_base: float
@@ -95,6 +108,7 @@ class BillingListItem(BaseModel):
     billing_name: str
     period_from: date
     period_to: date
+    billing_date: Optional[date] = None
     channel: Optional[str] = None
     total_base: float
     total_markup: float

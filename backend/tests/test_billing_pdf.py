@@ -215,6 +215,32 @@ class TestInvoiceNumber(unittest.TestCase):
     def test_a_nameless_workspace_still_gets_a_number(self):
         self.assertTrue(_invoice_number(_billing(), {}).startswith("INV/"))
 
+    def test_the_financial_year_comes_from_the_billing_date_not_the_save_date(self):
+        # Saved on 2 April, but dated 31 March: it belongs to the year it is dated in.
+        bill = _billing(created_at=datetime(2026, 4, 2), billing_date=date(2026, 3, 31))
+        self.assertEqual(_invoice_number(bill, supplier_block(TENANT, USER)), "MY/25-26/0099")
+
+
+class TestBillingDate(unittest.TestCase):
+    """The invoice date is the billing date the user picked, not the moment of saving."""
+
+    def test_the_billing_date_is_the_invoice_date(self):
+        text = render(created_at=datetime(2026, 9, 30), billing_date=date(2026, 9, 26))
+        self.assertIn("26-09-2026", text)
+        self.assertNotIn("30-09-2026", text)
+
+    def test_a_bill_without_one_still_prints_its_save_date(self):
+        self.assertIn("18-08-2026", render())
+
+    def test_a_single_date_bill_prints_no_period_line(self):
+        day = date(2026, 9, 26)
+        text = render(billing_date=day, period_from=day, period_to=day)
+        self.assertNotIn("Billing period", text)
+
+    def test_a_bill_with_a_real_period_still_prints_it(self):
+        text = render(billing_date=date(2026, 9, 1))
+        self.assertIn("Billing period", text)
+
 
 class TestPlaceOfSupply(unittest.TestCase):
     def test_it_reads_code_and_state(self):

@@ -341,14 +341,20 @@ def _place_of_supply(billing) -> str:
     return f"{code}-{name}" if name else code
 
 
+def _invoice_date(billing):
+    """The date the invoice carries: `billing_date`, else the save date (a bill object
+    built before the column existed, as the tests do)."""
+    return getattr(billing, "billing_date", None) or getattr(billing, "created_at", None)
+
+
 def _invoice_number(billing, agency: dict) -> str:
     """'MY/26-27/0099' — a prefix, the Indian financial year, and the serial.
 
     The financial year runs April to March, so an invoice dated August 2026 sits
-    in 26-27. Derived from the billing rather than stored, exactly as the old
-    'BILL-2026-0099' was.
+    in 26-27 — read from the invoice date, `billing_date`. Derived from the billing
+    rather than stored, exactly as the old 'BILL-2026-0099' was.
     """
-    raised = getattr(billing, "created_at", None) or date.today()
+    raised = _invoice_date(billing) or date.today()
     year = raised.year
     fy_start = year if raised.month >= 4 else year - 1
     fy = f"{fy_start % 100:02d}-{(fy_start + 1) % 100:02d}"
@@ -429,7 +435,7 @@ def build_billing_pdf(billing, customer, agency: dict | None = None) -> io.Bytes
     ]))
 
     # ── invoice meta + BILL TO, with place of supply beside them ──
-    raised = getattr(billing, "created_at", None)
+    raised = _invoice_date(billing)
     meta = [
         Paragraph(f"<b>Invoice No. :</b>&nbsp;&nbsp;&nbsp;{_invoice_number(billing, agency)}", label),
         Paragraph(f"<b>Invoice Date:</b>&nbsp;&nbsp;&nbsp;{raised:%d-%m-%Y}" if raised else "", label),
@@ -441,9 +447,12 @@ def build_billing_pdf(billing, customer, agency: dict | None = None) -> io.Bytes
         bill_to.append(Paragraph(f"Party GST No. {customer.gst_no}", body))
     elif getattr(customer, "gst_number", None):
         bill_to.append(Paragraph(f"Party GST No. {customer.gst_number}", body))
-    bill_to.append(Paragraph(
-        f"Billing period: {billing.period_from:%d %b %Y} - {billing.period_to:%d %b %Y}", body,
-    ))
+    # A corporate bill has a date rather than a period, and stores it as both ends;
+    # printing "Billing period: 26 Sep - 26 Sep" under the invoice date says nothing.
+    if not (billing.period_from == billing.period_to == getattr(billing, "billing_date", None)):
+        bill_to.append(Paragraph(
+            f"Billing period: {billing.period_from:%d %b %Y} - {billing.period_to:%d %b %Y}", body,
+        ))
 
     pos = [
         Paragraph(f"<b>Place of Supply :</b>&nbsp;&nbsp;&nbsp;{_place_of_supply(billing)}", label),

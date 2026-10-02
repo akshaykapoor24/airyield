@@ -41,7 +41,7 @@ type BillingParty = PartyOption<"customer" | "corporate">;
  *  overridable rather than leaving it to be inferred server-side. */
 type Employer = { id: number; name: string };
 
-const PAGE = 50;
+const PAGE_SIZES = [50, 100, 200];    // the API allows up to 500
 const MAX_SELECTION = 500;      // matches MAX_SEND_ROWS on the API
 
 const SELECT_CLS =
@@ -88,6 +88,8 @@ type Summary = {
   projected_rows: number; resolution_status: string;
   summary: Record<string, number>; state_counts: Record<string, number>;
   customers_in_scope: number;
+  /** Rows left out because their payment method isn't AG. None of the counts above include them. */
+  non_ag_rows?: number;
 };
 
 const STATUS_STYLE: Record<string, string> = {
@@ -205,6 +207,11 @@ export default function LccBillingWorklist({
   const [rows, setRows] = useState<Row[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
+  const [pageSize, setPageSize] = useState(PAGE_SIZES[0]);
+  // `load` reads the size through a ref, so changing it doesn't re-create `load` —
+  // that would fire the filter effect below and drop the selection.
+  const pageSizeRef = useRef(pageSize);
+  const tableRef = useRef<HTMLDivElement>(null);
   const [filter, setFilter] = useState<string>("");
   const [billState, setBillState] = useState<string>("");
   // Sale / credit / payment. The endpoint has always accepted `kind`, but nothing
@@ -287,7 +294,7 @@ export default function LccBillingWorklist({
     try {
       const { data } = await api.get<{ total: number; rows: Row[] }>(
         `${apiBase}/batches/${batchId}/billing-rows`,
-        { params: { offset: off, limit: PAGE, ...rowParams() } },
+        { params: { offset: off, limit: pageSizeRef.current, ...rowParams() } },
       );
       if (seq !== reqSeq.current) return;      // a newer request already landed
       setRows(data.rows); setTotal(data.total); setOffset(off);
@@ -354,7 +361,22 @@ export default function LccBillingWorklist({
   // rows across pages is the whole point here (152 rows over four pages), ids are stable,
   // and silently dropping ticks loses work invisibly. The action bar always states the
   // count, which is what makes that safe.
-  const goToPage = (off: number) => load(off);
+  //
+  // The pager sits under up to 200 rows, so bring the table's top back into view —
+  // otherwise the new page opens on its last row.
+  const goToPage = async (off: number) => {
+    await load(off);
+    const top = tableRef.current?.getBoundingClientRect().top;
+    if (top !== undefined && top < 0) tableRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+  };
+
+  // Lands on the page that holds the first row you were looking at, rather than
+  // jumping back to page 1. Keeps the selection, like paging does.
+  const changePageSize = (size: number) => {
+    pageSizeRef.current = size;
+    setPageSize(size);
+    void goToPage(Math.floor(offset / size) * size);
+  };
 
   const applyDefault = async () => {
     if (!defaultPick || !defaultKind) { toast.error("Pick a customer or corporate first."); return; }
@@ -508,7 +530,7 @@ export default function LccBillingWorklist({
       const { data } = await api.post<{
         scoped: boolean; requested: number; created: number; updated: number;
         deleted: number; skipped_billed: number; skipped_no_party: number;
-        skipped_not_billable: number;
+        skipped_not_billable: number; skipped_not_ag?: number;
       }>(`${apiBase}/batches/${batchId}/send-to-billing`, ids ? { row_ids: ids } : {});
       const bits = [
         data.created ? `${data.created} added` : null,
@@ -517,6 +539,9 @@ export default function LccBillingWorklist({
         data.skipped_billed ? `${data.skipped_billed} already on an invoice, left alone` : null,
         data.skipped_no_party ? `${data.skipped_no_party} skipped — no party` : null,
         data.skipped_not_billable ? `${data.skipped_not_billable} skipped — payment movements` : null,
+        // A whole-upload send always skips every non-AG row, and the note above the
+        // table already says so; only worth repeating for a hand-picked selection.
+        data.scoped && data.skipped_not_ag ? `${data.skipped_not_ag} skipped — not paid by AG` : null,
       ].filter(Boolean);
       toast.success(
         (data.scoped ? `Sent ${data.requested.toLocaleString()} selected rows` : "Sent to billing")
@@ -580,8 +605,9 @@ export default function LccBillingWorklist({
   return (
     <div>
       <div className="flex items-center gap-2 mb-3 flex-wrap">
-        <button onClick={onBack} className="flex items-center gap-1 text-xs text-slate-400 hover:text-slate-700">
-          <ArrowLeft className="w-3.5 h-3.5" /> Back to uploads
+        <button onClick={onBack} title="Back to uploads"
+          className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold text-slate-700 border border-slate-200 bg-white rounded-lg hover:bg-slate-50 hover:text-slate-900">
+          <ArrowLeft className="w-3.5 h-3.5" /> Back
         </button>
         <span className="text-slate-300">|</span>
         <h3 className="text-sm font-semibold text-slate-800 truncate max-w-[320px]" title={fileName ?? undefined}>
@@ -623,7 +649,7 @@ export default function LccBillingWorklist({
           different fixes: one is a choice between candidates, the other has none. */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-2 mb-3">
         <Chip label="Billable rows" value={summary?.billable_rows ?? 0} tone="bg-white border-slate-200 text-slate-700"
-              hint="Charges and credits. Payment movements are excluded — they carry no fare." />
+              hint="Charges and credits paid from your agency account (payment method AG). Payment movements are excluded — they carry no fare." />
         <Chip label="Have a party" value={summary?.resolved_rows ?? 0} tone="bg-emerald-50 border-emerald-200 text-emerald-700" />
         <Chip label="Need a look" value={needALook} tone="bg-amber-50 border-amber-200 text-amber-700"
               hint="Several customers share the name, or only initials were given. Never guessed." />
@@ -632,6 +658,19 @@ export default function LccBillingWorklist({
         <Chip label="In billing" value={sc.sent ?? 0} tone="bg-sky-50 border-sky-200 text-sky-700"
               hint="Rows projected into billing whose party still agrees with this statement." />
       </div>
+
+      {/* Otherwise the row count here silently disagrees with the statement's own. */}
+      {!!summary?.non_ag_rows && (
+        <div className="flex items-start gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 mb-3 text-xs text-slate-600">
+          <Info className="w-4 h-4 shrink-0 mt-0.5 text-slate-400" />
+          <span>
+            Only rows paid from your agency account (payment method <b>AG</b>) are billed.{" "}
+            {summary.non_ag_rows.toLocaleString()} row{summary.non_ag_rows === 1 ? "" : "s"} in
+            this statement {summary.non_ag_rows === 1 ? "has" : "have"} a different or blank payment
+            method and {summary.non_ag_rows === 1 ? "is" : "are"} left out — open the statement to see every row.
+          </span>
+        </div>
+      )}
 
       {summary && summary.customers_in_scope === 0 && (
         <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 mb-3 text-xs text-amber-700">
@@ -766,7 +805,7 @@ export default function LccBillingWorklist({
         </div>
       )}
 
-      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+      <div ref={tableRef} className="bg-white border border-slate-200 rounded-xl overflow-hidden scroll-mt-4">
         <div className="overflow-x-auto">
           <table className="w-full text-xs">
             <thead className="bg-slate-50 border-b border-slate-200 text-[10px] uppercase tracking-wide text-slate-400">
@@ -920,12 +959,24 @@ export default function LccBillingWorklist({
           </table>
         </div>
         {total > 0 && (
-          <div className="flex items-center justify-between px-3 py-2.5 border-t border-slate-100 text-xs text-slate-500">
-            <span>Showing {start.toLocaleString()}–{end.toLocaleString()} of {total.toLocaleString()}</span>
-            <div className="flex items-center gap-1">
-              <button disabled={offset === 0 || loading} onClick={() => goToPage(Math.max(0, offset - PAGE))}
+          <div className="flex items-center justify-between flex-wrap gap-2 px-3 py-2.5 border-t border-slate-100 text-xs text-slate-500">
+            <div className="flex items-center gap-3">
+              <label className="flex items-center gap-1.5">
+                Rows per page
+                <select value={pageSize} onChange={(e) => changePageSize(Number(e.target.value))}
+                  disabled={loading} className={SELECT_CLS + " py-1 disabled:opacity-50"}>
+                  {PAGE_SIZES.map((n) => <option key={n} value={n}>{n}</option>)}
+                </select>
+              </label>
+              <span>Showing {start.toLocaleString()}–{end.toLocaleString()} of {total.toLocaleString()}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="tabular-nums">
+                Page {(Math.floor(offset / pageSize) + 1).toLocaleString()} of {Math.max(1, Math.ceil(total / pageSize)).toLocaleString()}
+              </span>
+              <button disabled={offset === 0 || loading} onClick={() => goToPage(Math.max(0, offset - pageSize))}
                 className="px-2 py-1 border border-slate-200 rounded-md hover:bg-slate-50 disabled:opacity-40">Prev</button>
-              <button disabled={offset + PAGE >= total || loading} onClick={() => goToPage(offset + PAGE)}
+              <button disabled={offset + pageSize >= total || loading} onClick={() => goToPage(offset + pageSize)}
                 className="px-2 py-1 border border-slate-200 rounded-md hover:bg-slate-50 disabled:opacity-40">Next</button>
             </div>
           </div>

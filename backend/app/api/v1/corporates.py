@@ -34,11 +34,13 @@ from app.schemas.corporate import (
 )
 from app.core.india_tax import canonical_state, pan_error, tax_id_error
 from app.schemas.customer import PlaceOfSupplyRead, SoldTicketRead, SoldTicketsSummary
-from app.schemas.billing import BillingCreate, BillingUpdate, BillingRead, BillingListItem
-from app.services.billing_pdf import build_billing_pdf, load_logo, supplier_block
+from app.schemas.billing import CorporateBillingCreate, BillingUpdate, BillingRead, BillingListItem
+from app.services.billing_dates import date_error as billing_date_error, last_billing
+from app.services.billing_pdf import _invoice_number, build_billing_pdf, load_logo, supplier_block
 from app.services.party_ticket_export import (
     booking_order as _booking_order,
     export_rows as _export_rows,
+    passenger_order as _passenger_order,
     xlsx_download as _xlsx_download,
 )
 from app.services.party_dedupe import CorporateDuplicates
@@ -835,10 +837,12 @@ async def _sold_tickets(
     date_to: Optional[date],
     date_field: str,
     category: Optional[str],
+    billed: Optional[str] = None,
 ) -> tuple[list[UploadedTicket], list[tuple]]:
     """The tickets the Sold Tickets tab lists for this corporate, and the names they match on.
 
     Shared by the tab and its XLS download, so the file holds exactly the rows on screen.
+    `billed` is "billed", "unbilled", or None for both.
     """
     try:
         category_filter = _ticket_category_clause(category)
@@ -889,6 +893,8 @@ async def _sold_tickets(
         )
         .order_by(UploadedTicket.created_at.desc())
     )
+    if billed:
+        q = q.where(UploadedTicket.is_billed.is_(billed == "billed"))
     result = await db.execute(q)
     tickets = result.scalars().all()
 
@@ -906,7 +912,13 @@ async def _sold_tickets(
                 continue
             in_range.append(t)
         tickets = in_range
-    return list(tickets), names
+    # Passenger, then date — one person's tickets read together. Here rather than in the
+    # tab, so the XLS download lists the rows in the order they are shown.
+    return sorted(tickets, key=_passenger_order), names
+
+
+# The Sold Tickets tab's Billed / Unbilled filter. Omitted means both.
+_BILLED_PATTERN = "^(billed|unbilled)$"
 
 
 @router.get("/{corporate_id}/sold-tickets", response_model=CorporateSoldTicketsResponse)
@@ -916,6 +928,7 @@ async def get_corporate_sold_tickets(
     date_to: Optional[date] = None,
     date_field: str = "ticket",
     category: Optional[str] = None,
+    billed: Optional[str] = Query(None, pattern=_BILLED_PATTERN),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -923,6 +936,7 @@ async def get_corporate_sold_tickets(
     tickets, names = await _sold_tickets(
         corporate, db, current_user,
         date_from=date_from, date_to=date_to, date_field=date_field, category=category,
+        billed=billed,
     )
 
     # WHICH GST these rows carry. The corporate IS the recipient here — an
@@ -1013,6 +1027,7 @@ async def export_corporate_sold_tickets(
     date_to: Optional[date] = None,
     date_field: str = "ticket",
     category: Optional[str] = None,
+    billed: Optional[str] = Query(None, pattern=_BILLED_PATTERN),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1027,8 +1042,10 @@ async def export_corporate_sold_tickets(
     tickets, _names = await _sold_tickets(
         corporate, db, current_user,
         date_from=date_from, date_to=date_to, date_field=date_field, category=category,
+        billed=billed,
     )
-    pairs = [(t, corporate) for t in sorted(tickets, key=_booking_order)]
+    # Already in the tab's order (passenger, then date) — see _sold_tickets.
+    pairs = [(t, corporate) for t in tickets]
     slug = re.sub(r"[^A-Za-z0-9]+", "-", corporate.company or "").strip("-").lower() or f"corporate-{corporate.id}"
     return _xlsx_download(
         await _export_rows(db, current_user, pairs),
@@ -1038,16 +1055,38 @@ async def export_corporate_sold_tickets(
 
 # ── Billing ─────────────────────────────────────────────────────────────────
 
+@router.get("/{corporate_id}/billing-date-floor")
+async def billing_date_floor(
+    corporate_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The earliest date a new bill may carry: the user's last bill for anyone.
+
+    For the Save Billing popup's date box, which needs it before anything is sent. The
+    create endpoint enforces the same rule itself — see services/billing_dates.
+    """
+    await _get_owned_corporate(corporate_id, db, current_user)
+    last = await last_billing(db, current_user)
+    return {
+        "last_billing_date": last.billing_date if last else None,
+        "last_billing_name": last.billing_name if last else None,
+    }
+
+
 @router.post("/{corporate_id}/billings", response_model=BillingRead, status_code=status.HTTP_201_CREATED)
 async def create_billing(
     corporate_id: int,
-    payload: BillingCreate,
+    payload: CorporateBillingCreate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     corporate = await _get_owned_corporate(corporate_id, db, current_user)
     if not payload.billing_name.strip():
         raise HTTPException(status_code=400, detail="billing_name is required.")
+    date_problem = billing_date_error(payload.billing_date, await last_billing(db, current_user))
+    if date_problem:
+        raise HTTPException(status_code=400, detail=date_problem)
     if not payload.items:
         raise HTTPException(status_code=400, detail="At least one ticket is required to create a billing.")
 
@@ -1159,8 +1198,11 @@ async def create_billing(
         created_by_id=current_user.id,
         corporate_id=corporate.id,
         billing_name=payload.billing_name.strip(),
-        period_from=payload.period_from,
-        period_to=payload.period_to,
+        billing_date=payload.billing_date,
+        # A corporate bill has a date, not a period. Both ends are set to it because
+        # they are NOT NULL and bank-statement matching filters on `period_to`.
+        period_from=payload.billing_date,
+        period_to=payload.billing_date,
         billing_type=corporate.billing_type,
         total_base=round(total_base, 2),
         total_markup=round(total_markup, 2),
@@ -1177,6 +1219,10 @@ async def create_billing(
     )
     db.add(billing)
     await db.flush()  # assign billing.id before linking tickets
+    # "<name> - <invoice no.>". The number is the id's, so it only exists from here on —
+    # which is why the popup cannot show it and the server appends it.
+    suffix = f" - {_invoice_number(billing, supplier_block(current_user.tenant, current_user))}"
+    billing.billing_name = billing.billing_name[:200 - len(suffix)].rstrip() + suffix
     for t in tickets:
         t.is_billed = True
         t.billing_id = billing.id
@@ -1208,6 +1254,7 @@ async def list_billings(
             billing_name=b.billing_name,
             period_from=b.period_from,
             period_to=b.period_to,
+            billing_date=b.billing_date,
             total_base=_f(b.total_base),
             total_markup=_f(b.total_markup),
             total_additional_markup=_f(b.total_additional_markup),
