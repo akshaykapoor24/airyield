@@ -113,9 +113,9 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [debounced, setDebounced] = useState("");
-  // Corporate Billing opens on the corporates with something left to bill — that is the
-  // work. Everywhere else (Customer Billing, both masters) it opens on everyone.
-  const defaultTicketState: TicketState = isCorporate && !isMaster ? "unbilled" : "any";
+  // The invoicing pickers open on the parties with something left to bill — that is the
+  // work. The two masters open on everyone.
+  const defaultTicketState: TicketState = isMaster ? "any" : "unbilled";
   const [ticketState, setTicketState] = useState<TicketState>(defaultTicketState);
   const [corporate, setCorporate] = useState("");        // "" | "none" | "<id>"
   const [corpOptions, setCorpOptions] = useState<Party[]>([]);
@@ -348,8 +348,8 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
             />
           </div>
 
-          {/* "All" by default, except on Corporate Billing, which opens on "Has unbilled".
-              A list that hides rows the moment it opens is how someone concludes a party
+          {/* "Has unbilled" by default on the invoicing pickers, "All" on the masters. A
+              list that hides rows the moment it opens is how someone concludes a party
               has vanished — so the count says "matching" and the empty state names the
               filter and offers everyone back. */}
           <select
@@ -362,15 +362,6 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
             <option value="unbilled">Has unbilled</option>
             <option value="has">Has tickets</option>
             <option value="none">No tickets</option>
-          </select>
-
-          <select
-            value={pageSize}
-            onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }}
-            className={SELECT_CLS}
-            title="How many to show per page"
-          >
-            {PAGE_SIZES.map((n) => <option key={n} value={n}>{n}</option>)}
           </select>
 
           {!isCorporate && (
@@ -387,6 +378,16 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
               ))}
             </select>
           )}
+
+          {/* Last of the filters — it shapes the page, not which parties are on it. */}
+          <select
+            value={pageSize}
+            onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }}
+            className={SELECT_CLS}
+            title="How many to show per page"
+          >
+            {PAGE_SIZES.map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
 
           {filtersChanged && (
             <button

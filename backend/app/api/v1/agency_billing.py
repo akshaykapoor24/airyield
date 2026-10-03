@@ -43,6 +43,7 @@ from app.services.billing_calc import (
 from app.services.place_of_supply import as_payload as _pos_payload, place_of_supply
 from app.services.billing_pdf import build_billing_pdf, load_logo, supplier_block
 from app.services.agency_account import agency_statement_scope, current_terms
+from app.services.party_ticket_export import passenger_order
 
 router = APIRouter()
 
@@ -102,8 +103,11 @@ async def _get_owned_agency_billing(billing_id: int, agency_id: int, db: AsyncSe
     return obj
 
 
-async def _load_agency_tickets(agency: Agency, db: AsyncSession, current_user: User) -> list[UploadedTicket]:
-    """All uploaded tickets tagged to this agency BRANCH.
+async def _load_agency_tickets(
+    agency: Agency, db: AsyncSession, current_user: User, billed: Optional[str] = None,
+) -> list[UploadedTicket]:
+    """All uploaded tickets tagged to this agency BRANCH. `billed` narrows to "billed" or
+    "unbilled"; None keeps both.
 
     Resolution lives in agency_statement_scope: an explicit `agency_id` on the
     statement always wins, and the bare-name fallback applies only when that
@@ -122,6 +126,8 @@ async def _load_agency_tickets(agency: Agency, db: AsyncSession, current_user: U
         )
         .order_by(UploadedTicket.created_at.desc())
     )
+    if billed:
+        q = q.where(UploadedTicket.is_billed.is_(billed == "billed"))
     result = await db.execute(q)
     return list(result.scalars().all())
 
@@ -221,11 +227,13 @@ async def get_agency_tickets(
     date_from: Optional[date] = None,
     date_to: Optional[date] = None,
     date_field: str = "ticket",
+    # The Sold Tickets tab's Billed / Unbilled filter. Omitted means both.
+    billed: Optional[str] = Query(None, pattern="^(billed|unbilled)$"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     agency = await _get_owned_agency(agency_id, db, current_user)
-    tickets = await _load_agency_tickets(agency, db, current_user)
+    tickets = await _load_agency_tickets(agency, db, current_user, billed=billed)
 
     # Filter by date range (date fields are strings; parse in Python).
     # date_field='travel' uses departure/travel date, else the ticket issue date.
@@ -243,6 +251,9 @@ async def get_agency_tickets(
                 continue
             in_range.append(t)
         tickets = in_range
+    # Passenger, then date — one person's tickets read together, as on Customer and
+    # Corporate Invoicing.
+    tickets = sorted(tickets, key=passenger_order)
 
     # WHICH GST these rows carry. An agency is the recipient of this supply, and
     # unlike a customer it already carries both a GSTIN and a state of its own —

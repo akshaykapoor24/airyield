@@ -189,12 +189,15 @@ export default function AgencyBillingDetailPage() {
   const [agency, setAgency] = useState<AgencyRow | null>(null);
   const [loadingAgency, setLoadingAgency] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>("Agency Details");
+  // Opens on Sold Tickets — invoicing is what this page is opened for.
+  const [tab, setTab] = useState<Tab>("Sold Tickets");
 
   // Tickets
   const [dateField, setDateField] = useState<"ticket" | "travel">("ticket");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
+  // Unbilled by default — those are the rows still to invoice. Narrowed on the server.
+  const [billedFilter, setBilledFilter] = useState<"unbilled" | "billed" | "">("unbilled");
   const [soldTickets, setSoldTickets] = useState<SoldTicket[] | null>(null);
   // Which GST heads this agency's supplies carry, and why — decided server-side
   // from the two GSTINs. One answer for the whole list: it is a fact about the
@@ -265,39 +268,55 @@ export default function AgencyBillingDetailPage() {
    * and you get everything. A range also drops tickets whose date cannot be parsed, so
    * clearing the dates is the only way to see undated tickets.
    */
+  // A sequence, not a flag: filters apply as they change, so a slow response for the old
+  // filters could otherwise land after the new one and paint the wrong rows.
+  const ticketsSeq = useRef(0);
+
   const applyRange = useCallback(async () => {
     if (dateFrom && dateTo && dateFrom > dateTo) {
       setTicketsError("From date must be before To date.");
       return;
     }
+    const seq = ++ticketsSeq.current;
     setLoadingTickets(true);
     setTicketsError(null);
     try {
       const params: Record<string, string> = { date_field: dateField };
       if (dateFrom) params.date_from = dateFrom;
       if (dateTo) params.date_to = dateTo;
+      if (billedFilter) params.billed = billedFilter;
       const { data } = await api.get<AgencyTicketsResponse>(`/agency-billings/${agencyId}/tickets`, { params });
+      if (seq !== ticketsSeq.current) return;
       setSoldTickets(data.tickets);
       setPlaceOfSupply(data.place_of_supply ?? null);
       setAdditional({});
       setDiscounts({});
       setSelected(new Set());
     } catch {
-      setTicketsError("Failed to load tickets.");
+      if (seq === ticketsSeq.current) setTicketsError("Failed to load tickets.");
     } finally {
-      setLoadingTickets(false);
+      if (seq === ticketsSeq.current) setLoadingTickets(false);
     }
-  }, [agencyId, dateFrom, dateTo, dateField]);
+  }, [agencyId, dateFrom, dateTo, dateField, billedFilter]);
 
-  // Load once, the first time the tab is opened — the page lands on Details. A ref guard
-  // rather than depending on `applyRange`, which is memoised on the dates: depending on it
-  // would refire on every keystroke in a date box and wipe the ticks and markups typed.
-  const ticketsLoaded = useRef(false);
+  // Filters apply themselves — there is no Apply button. Gated on the tab because this
+  // fetch is unpaginated. Keyed on the filters, so going back to the tab does not reload
+  // and wipe the ticks and markups being typed. Debounced, so typing a year into a date
+  // box ("2", "20", "202", "2026") is one request, not four.
+  const loadedFilters = useRef<string | null>(null);
   useEffect(() => {
-    if (tab !== "Sold Tickets" || ticketsLoaded.current) return;
-    ticketsLoaded.current = true;
-    applyRange();
-  }, [tab, applyRange]);
+    if (tab !== "Sold Tickets") return;
+    const key = JSON.stringify([dateField, dateFrom, dateTo, billedFilter]);
+    if (key === loadedFilters.current) return;
+    const first = loadedFilters.current === null;
+    // Recorded when the load fires, not now: leaving the tab inside the debounce cancels
+    // it, and coming back must still load.
+    const t = setTimeout(() => { loadedFilters.current = key; void applyRange(); }, first ? 0 : 400);
+    return () => clearTimeout(t);
+  }, [tab, applyRange, dateField, dateFrom, dateTo, billedFilter]);
+
+  /** "unbilled " / "billed " for the list's wording; "" when both are shown. */
+  const statusWord = billedFilter ? `${billedFilter} ` : "";
 
   // Live summary over the loaded tickets + entered additional markups.
   const summary = useMemo(() => {
@@ -603,14 +622,28 @@ export default function AgencyBillingDetailPage() {
                     className="border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#1e3a5f]/30 bg-gray-50"
                   />
                 </div>
-                <button
-                  onClick={applyRange}
-                  disabled={loadingTickets}
-                  className="bg-[#1e3a5f] hover:bg-[#16304f] text-white rounded-lg px-4 py-2 text-sm font-semibold disabled:opacity-50"
-                >
-                  {loadingTickets ? "Loading…" : "Apply"}
-                </button>
-                <span className="text-[10px] text-gray-400 pb-2">Dates optional — leave blank to show all of the agency&apos;s tickets.</span>
+                <div>
+                  <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Status</label>
+                  <select
+                    value={billedFilter}
+                    onChange={(e) => setBilledFilter(e.target.value as "unbilled" | "billed" | "")}
+                    className="border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#1e3a5f]/30 bg-gray-50"
+                  >
+                    <option value="unbilled">Unbilled</option>
+                    <option value="billed">Billed</option>
+                    <option value="">Billed &amp; unbilled</option>
+                  </select>
+                </div>
+                {(dateFrom || dateTo) && (
+                  <button
+                    onClick={() => { setDateFrom(""); setDateTo(""); }}
+                    className="inline-flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-700 pb-2.5"
+                    title="Clear the dates to see every ticket"
+                  >
+                    <X className="w-3 h-3" /> Clear dates
+                  </button>
+                )}
+                {/* On the filters' row, pushed right; the hint below takes a row of its own. */}
                 {soldTickets && soldTickets.length > 0 && (
                   <button
                     onClick={openSaveBilling}
@@ -620,6 +653,10 @@ export default function AgencyBillingDetailPage() {
                     <Save className="w-4 h-4" /> Save Billing{selected.size > 0 ? ` (${selected.size})` : ""}
                   </button>
                 )}
+                <p className="basis-full text-[11px] text-gray-400 -mt-1">
+                  Leave the dates blank to see every ticket — a range only narrows the list,
+                  and also hides any ticket whose date cannot be read.
+                </p>
               </div>
 
               {ticketsError && <div className="px-4 py-3 text-xs text-red-500 bg-red-50 border border-red-100 rounded-lg">{ticketsError}</div>}
@@ -633,8 +670,10 @@ export default function AgencyBillingDetailPage() {
                   <div className="w-14 h-14 bg-gray-50 rounded-full flex items-center justify-center mb-3">
                     <Ticket className="w-7 h-7 text-gray-300" />
                   </div>
-                  <p className="text-sm font-medium text-gray-600">Click Apply to view this agency&apos;s tickets</p>
-                  <p className="text-xs text-gray-400 mt-1">Optionally pick a From / To date to filter first.</p>
+                  <p className="text-sm font-medium text-gray-600">Could not load tickets</p>
+                  <button onClick={() => applyRange()} className="text-xs text-[#1e3a5f] font-semibold hover:underline mt-1">
+                    Try again
+                  </button>
                 </div>
               ) : (
                 <>
@@ -734,8 +773,16 @@ export default function AgencyBillingDetailPage() {
                                   <div className="w-14 h-14 bg-gray-50 rounded-full flex items-center justify-center mb-3">
                                     <Ticket className="w-7 h-7 text-gray-300" />
                                   </div>
-                                  <p className="text-sm font-medium text-gray-600">No tickets for this agency</p>
-                                  <p className="text-xs text-gray-400 mt-1">No tickets are tagged to {agency.name}{dateFrom || dateTo ? " in this date range" : ""}.</p>
+                                  <p className="text-sm font-medium text-gray-600">
+                                    {dateFrom || dateTo ? "No tickets in this date range"
+                                      : billedFilter === "unbilled" ? "Nothing left to bill"
+                                      : billedFilter === "billed" ? "No billed tickets yet"
+                                      : "No tickets for this agency"}
+                                  </p>
+                                  <p className="text-xs text-gray-400 mt-1">
+                                    No {statusWord}tickets are tagged to {agency.name}{dateFrom || dateTo ? " in this date range" : ""}.
+                                    {billedFilter && " Set Status to “Billed & unbilled” to see every ticket."}
+                                  </p>
                                 </div>
                               </td>
                             </tr>

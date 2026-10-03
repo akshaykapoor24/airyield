@@ -193,6 +193,10 @@ class SoldTicketRead(BaseModel):
     # Corporate column could not show which of the two a ticket is on.
     customer_id: Optional[int] = None
     corporate_id: Optional[int] = None
+    # Customer Billing only: set to the employer's name when the employer pays. The row
+    # is shown so the person's tickets are all in one place, but it is the corporate's
+    # to bill — priced at the corporate's terms and left out of this page's totals.
+    paid_by_corporate: Optional[str] = None
     # computed
     base_amount: float
     markup_amount: float
