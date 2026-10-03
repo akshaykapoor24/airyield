@@ -32,6 +32,7 @@ from app.services.party_dedupe import CustomerDuplicates, name_key
 from app.services.party_ticket_export import (
     booking_order as _booking_order,
     export_rows as _export_rows,
+    passenger_order as _passenger_order,
     xlsx_download as _xlsx_download,
 )
 from app.services.party_inherit import INHERITED_FIELDS, inherit_from_corporate
@@ -783,6 +784,22 @@ async def download_customer_template():
     )
 
 
+async def _employers_of(
+    db: AsyncSession, current_user: User, tickets: list[UploadedTicket],
+) -> dict[int, Corporate]:
+    """The corporates that pay for these tickets, by id — one query, however many rows."""
+    ids = {t.corporate_id for t in tickets if t.corporate_id}
+    if not ids:
+        return {}
+    return {c.id: c for c in (await db.execute(
+        select(Corporate).where(
+            Corporate.id.in_(ids),
+            Corporate.tenant_id == current_user.tenant_id,
+            Corporate.created_by_id == current_user.id,
+        )
+    )).scalars().all()}
+
+
 # Declared BEFORE /{customer_id} so the path is not swallowed by it.
 @router.get("/tickets-export")
 async def export_customer_tickets(
@@ -821,17 +838,7 @@ async def export_customer_tickets(
             )
         )).scalars().all()
 
-    employer_ids = {t.corporate_id for t in tickets if t.corporate_id}
-    employers: dict[int, Corporate] = {}
-    if employer_ids:
-        employers = {c.id: c for c in (await db.execute(
-            select(Corporate).where(
-                Corporate.id.in_(employer_ids),
-                Corporate.tenant_id == current_user.tenant_id,
-                Corporate.created_by_id == current_user.id,
-            )
-        )).scalars().all()}
-
+    employers = await _employers_of(db, current_user, tickets)
     pairs = [
         (t, employers.get(t.corporate_id) or customers[t.customer_id])
         for t in sorted(tickets, key=lambda t: (rank[t.customer_id], *_booking_order(t)))
@@ -942,10 +949,17 @@ async def _sold_tickets(
     date_to: Optional[date],
     date_field: str,
     category: Optional[str],
+    billed: Optional[str] = None,
 ) -> list[UploadedTicket]:
     """The tickets the Sold Tickets tab lists for this customer.
 
     Shared by the tab and its XLS download, so the file holds exactly the rows on screen.
+    `billed` is "billed", "unbilled", or None for both.
+
+    Two kinds of row. The ones this person is billed for (customer_ticket_scope), and the
+    ones that name them but whose EMPLOYER pays — the latter are the corporate's to bill,
+    but the Customer Billing list counts them ("2 / 3"), so the drill-down shows them too,
+    read-only, rather than leaving a count nobody can find the tickets behind.
     """
     try:
         category_filter = _ticket_category_clause(category)
@@ -970,16 +984,20 @@ async def _sold_tickets(
 
     # The explicit link wins; the name conditions above only apply to tickets no party
     # has claimed. See services/billing_calc.py for why all four columns are checked.
+    employer_pays = and_(UploadedTicket.customer_id == customer.id,
+                         UploadedTicket.corporate_id.is_not(None))
     q = (
         select(UploadedTicket)
         .where(
             UploadedTicket.tenant_id == current_user.tenant_id,
             UploadedTicket.created_by_id == current_user.id,
-            _customer_ticket_scope(customer, conds),
+            or_(_customer_ticket_scope(customer, conds), employer_pays),
             *category_filter,
         )
         .order_by(UploadedTicket.created_at.desc())
     )
+    if billed:
+        q = q.where(UploadedTicket.is_billed.is_(billed == "billed"))
     result = await db.execute(q)
     tickets = result.scalars().all()
 
@@ -999,7 +1017,13 @@ async def _sold_tickets(
                 continue
             in_range.append(t)
         tickets = in_range
-    return list(tickets)
+    # Passenger, then date — one person's tickets read together. Here rather than in the
+    # tab, so the XLS download lists the rows in the order they are shown.
+    return sorted(tickets, key=_passenger_order)
+
+
+# The Sold Tickets tab's Billed / Unbilled filter. Omitted means both.
+_BILLED_PATTERN = "^(billed|unbilled)$"
 
 
 @router.get("/{customer_id}/sold-tickets", response_model=SoldTicketsResponse)
@@ -1009,6 +1033,7 @@ async def get_customer_sold_tickets(
     date_to: Optional[date] = None,
     date_field: str = "ticket",
     category: Optional[str] = None,
+    billed: Optional[str] = Query(None, pattern=_BILLED_PATTERN),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1016,32 +1041,40 @@ async def get_customer_sold_tickets(
     tickets = await _sold_tickets(
         customer, db, current_user,
         date_from=date_from, date_to=date_to, date_field=date_field, category=category,
+        billed=billed,
     )
 
-    # WHICH GST these rows carry. A customer billing is always a DIRECT sale —
-    # customer_ticket_scope excludes any ticket naming a corporate — so the
-    # recipient is this person, and it is their own GSTIN or state that decides.
+    # WHICH GST these rows carry. A customer billing is always a DIRECT sale, so the
+    # recipient is this person, and it is their own GSTIN or state that decides. A row
+    # the EMPLOYER pays is priced under the employer instead — its markup, its billing
+    # type, its place of supply — so it reads exactly as Corporate Billing will charge it.
     pos = place_of_supply(current_user.tenant, customer)
+    employers = await _employers_of(db, current_user, tickets)
+    employer_pos = {cid: place_of_supply(current_user.tenant, c) for cid, c in employers.items()}
 
     rows: list[SoldTicketRead] = []
     total_base = total_markup = total_gst = total_with_markup = 0.0
     total_cgst = total_sgst = total_igst = 0.0
     for t in tickets:
+        employer = employers.get(t.corporate_id) if t.corporate_id else None
+        payer, payer_pos = (employer, employer_pos[employer.id]) if employer else (customer, pos)
         base = _f(t.total_amt) if t.total_amt is not None else _f(t.sell_fare)
         # The party's markup for THIS line's category, a fixed one charged per passenger. With
         # no overrides and one passenger — every line except a multi-pax aggregator booking —
         # this is exactly the arithmetic it has always been. See services/party_markup.
-        markup_amount, markup_note = _line_markup(base, customer, t)
-        gst = _split_gst(base, markup_amount, customer.billing_type, interstate=pos.interstate)
+        markup_amount, markup_note = _line_markup(base, payer, t)
+        gst = _split_gst(base, markup_amount, payer.billing_type, interstate=payer_pos.interstate)
         gst_amount = gst["gst_amount"]
         total = base + markup_amount + gst_amount
-        total_base += base
-        total_markup += markup_amount
-        total_gst += gst_amount
-        total_cgst += gst["cgst"]
-        total_sgst += gst["sgst"]
-        total_igst += gst["igst"]
-        total_with_markup += total
+        # The totals are THIS person's bill. An employer-paid row is on the corporate's.
+        if not t.corporate_id:
+            total_base += base
+            total_markup += markup_amount
+            total_gst += gst_amount
+            total_cgst += gst["cgst"]
+            total_sgst += gst["sgst"]
+            total_igst += gst["igst"]
+            total_with_markup += total
         rows.append(SoldTicketRead(
             id=t.id,
             ticket_number=t.ticket_number,
@@ -1069,6 +1102,10 @@ async def get_customer_sold_tickets(
             # passenger's bill or their employer's, and offer to move it.
             customer_id=t.customer_id,
             corporate_id=t.corporate_id,
+            paid_by_corporate=(
+                (((employer.company or "").strip() if employer else "") or "their corporate")
+                if t.corporate_id else None
+            ),
             matched_by=_ticket_matched_by(
                 t, customer=customer, names=[(customer.first_name, customer.last_name)]
             ),
@@ -1086,7 +1123,7 @@ async def get_customer_sold_tickets(
         customer=CustomerRead.model_validate(customer),
         tickets=rows,
         summary=SoldTicketsSummary(
-            count=len(rows),
+            count=sum(1 for r in rows if not r.paid_by_corporate),
             total_base=round(total_base, 2),
             total_markup=round(total_markup, 2),
             total_gst=round(total_gst, 2),
@@ -1106,21 +1143,27 @@ async def export_customer_sold_tickets(
     date_to: Optional[date] = None,
     date_field: str = "ticket",
     category: Optional[str] = None,
+    billed: Optional[str] = Query(None, pattern=_BILLED_PATTERN),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """One customer's Sold Tickets as the Customer Billing sheet.
 
     THE ROWS ARE THE TAB'S ROWS, under the same filters: the tickets this person is billed
-    for directly, and untagged ones their name reaches. Twin of
+    for directly, untagged ones their name reaches, and ones their employer pays. Each is
+    billed under whoever pays — an employer-paid row at the corporate's markup, addressed
+    to the corporate, as the all-customers download above already does. Twin of
     corporates.py::export_corporate_sold_tickets.
     """
     customer = await _get_owned_customer(customer_id, db, current_user)
     tickets = await _sold_tickets(
         customer, db, current_user,
         date_from=date_from, date_to=date_to, date_field=date_field, category=category,
+        billed=billed,
     )
-    pairs = [(t, customer) for t in sorted(tickets, key=_booking_order)]
+    employers = await _employers_of(db, current_user, tickets)
+    # Already in the tab's order (passenger, then date) — see _sold_tickets.
+    pairs = [(t, employers.get(t.corporate_id) or customer) for t in tickets]
     person = f"{customer.first_name or ''} {customer.last_name or ''}"
     slug = re.sub(r"[^A-Za-z0-9]+", "-", person).strip("-").lower() or f"customer-{customer.id}"
     return _xlsx_download(

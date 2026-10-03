@@ -12,7 +12,7 @@ import RetagPartyControl, {
 // this page is the billing workspace and reads the record.
 import { categoryMarkupLabel, type Party as Customer } from "@/lib/party";
 import { INCENTIVE_TYPE_COLS } from "@/lib/incentives";
-import { splitGst, type GstTreatment, type PlaceOfSupply } from "@/lib/gstSplit";
+import { splitGst, type GstSplit, type GstTreatment, type PlaceOfSupply } from "@/lib/gstSplit";
 import GstCells, { GstTotalCells } from "@/components/billing/GstCells";
 import CategoryBadge, {
   BILLABLE_CATEGORIES, isAirLine, lineProvider, lineReference, lineRoute, type ServiceDetails,
@@ -53,6 +53,10 @@ type SoldTicket = {
    *  passenger is billed and it lives here. */
   customer_id?: number | null;
   corporate_id?: number | null;
+  /** The employer's name when the employer pays. Such a row is shown so this person's
+   *  tickets are all in one place, but it is the corporate's to bill: priced at the
+   *  corporate's terms, read-only here, and left out of this page's totals. */
+  paid_by_corporate?: string | null;
   base_amount: number;
   markup_amount: number;
   gst_amount: number;
@@ -229,6 +233,18 @@ function periodFromTickets(rows: SoldTicket[]): { from: string; to: string; unda
 function rowCalc(
   t: SoldTicket, additionalStr: string, discountStr: string, billingType: Customer["billing_type"],
 ) {
+  // An employer-paid row is priced under the CORPORATE, whose billing type this page does
+  // not have — so it shows the server's figures as they are. Nothing can be added to it here.
+  if (t.paid_by_corporate) {
+    const split: GstSplit = {
+      cgst: t.cgst_amount, sgst: t.sgst_amount, igst: t.igst_amount, gst: t.gst_amount,
+      treatment: t.gst_treatment ?? "unsplit",
+    };
+    return {
+      base: t.base_amount, custMarkup: t.markup_amount, addl: 0, disc: 0, totalMarkup: t.markup_amount,
+      gst: t.gst_amount, split, total: t.total_with_markup,
+    };
+  }
   const base = t.base_amount;
   const custMarkup = t.markup_amount;
   const addl = parseFloat(additionalStr) || 0;
@@ -272,7 +288,8 @@ export default function CustomerDetailPage() {
   const [customer, setCustomer] = useState<Customer | null>(null);
   const [loadingCustomer, setLoadingCustomer] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>("Customer Details");
+  // Opens on Sold Tickets — invoicing is what this page is opened for.
+  const [tab, setTab] = useState<Tab>("Sold Tickets");
 
   // Sold Tickets
   const [dateField, setDateField] = useState<"ticket" | "travel">("ticket");
@@ -280,6 +297,9 @@ export default function CustomerDetailPage() {
   const [dateTo, setDateTo] = useState("");
   // Narrowed on the server, so the summary cards total exactly the category shown.
   const [category, setCategory] = useState("");
+  // Unbilled by default — those are the rows still to invoice. Also server-side, for the
+  // same reason, and so Download XLS holds the same rows.
+  const [billedFilter, setBilledFilter] = useState<"unbilled" | "billed" | "">("unbilled");
   const [soldTickets, setSoldTickets] = useState<SoldTicket[] | null>(null);
   // Which GST heads this party's supplies carry, and why — decided server-side
   // from the two GSTINs. One answer for the whole list: it is a fact about the
@@ -355,11 +375,16 @@ export default function CustomerDetailPage() {
    * and what Agency Billing has always offered. A range also drops tickets whose date
    * cannot be parsed, so clearing the dates is the only way to see undated tickets.
    */
+  // A sequence, not a flag: filters apply as they change, so a slow response for the old
+  // filters could otherwise land after the new one and paint the wrong rows.
+  const ticketsSeq = useRef(0);
+
   const applyRange = useCallback(async () => {
     if (dateFrom && dateTo && dateFrom > dateTo) {
       setTicketsError("From date must be before To date.");
       return;
     }
+    const seq = ++ticketsSeq.current;
     setLoadingTickets(true);
     setTicketsError(null);
     try {
@@ -367,7 +392,9 @@ export default function CustomerDetailPage() {
       if (dateFrom) params.date_from = dateFrom;
       if (dateTo) params.date_to = dateTo;
       if (category) params.category = category;
+      if (billedFilter) params.billed = billedFilter;
       const { data } = await api.get<SoldTicketsResponse>(`/customers/${customerId}/sold-tickets`, { params });
+      if (seq !== ticketsSeq.current) return;
       setSoldTickets(data.tickets);
       setAppliedFilters(params);
       setPlaceOfSupply(data.place_of_supply ?? null);
@@ -375,32 +402,40 @@ export default function CustomerDetailPage() {
       setDiscounts({});
       setSelected(new Set());
     } catch {
-      setTicketsError("Failed to load tickets.");
+      if (seq === ticketsSeq.current) setTicketsError("Failed to load tickets.");
     } finally {
-      setLoadingTickets(false);
+      if (seq === ticketsSeq.current) setLoadingTickets(false);
     }
-  }, [customerId, dateFrom, dateTo, dateField, category]);
+  }, [customerId, dateFrom, dateTo, dateField, category, billedFilter]);
 
-  // Load once, the first time the tab is actually opened — not on mount, because the
-  // page lands on Details and this fetch is unpaginated. A ref guard rather than
-  // depending on `applyRange`, which is memoised on the dates: depending on it would
-  // refire on every keystroke in a date box and wipe the ticks and markups being typed.
-  const ticketsLoaded = useRef(false);
+  // Filters apply themselves — there is no Apply button. Gated on the tab because this
+  // fetch is unpaginated. Keyed on the filters, so going back to the tab does not reload
+  // and wipe the ticks and markups being typed. Debounced, so typing a year into a date
+  // box ("2", "20", "202", "2026") is one request, not four.
+  const loadedFilters = useRef<string | null>(null);
   useEffect(() => {
-    if (tab !== "Sold Tickets" || ticketsLoaded.current) return;
-    ticketsLoaded.current = true;
-    applyRange();
-  }, [tab, applyRange]);
+    if (tab !== "Sold Tickets") return;
+    const key = JSON.stringify([dateField, dateFrom, dateTo, category, billedFilter]);
+    if (key === loadedFilters.current) return;
+    const first = loadedFilters.current === null;
+    // Recorded when the load fires, not now: leaving the tab inside the debounce cancels
+    // it, and coming back must still load.
+    const t = setTimeout(() => { loadedFilters.current = key; void applyRange(); }, first ? 0 : 400);
+    return () => clearTimeout(t);
+  }, [tab, applyRange, dateField, dateFrom, dateTo, category, billedFilter]);
 
   /** "" when no range is set, which is now the default and means "everything". */
   const rangeLabel = dateFrom && dateTo ? `${dateFrom} → ${dateTo}`
     : dateFrom ? `from ${dateFrom}`
     : dateTo ? `up to ${dateTo}`
     : "";
+  /** "unbilled " / "billed " for the list's wording; "" when both are shown. */
+  const statusWord = billedFilter ? `${billedFilter} ` : "";
 
-  // Live summary over the loaded tickets + entered additional markups.
+  // Live summary over the loaded tickets + entered additional markups. THIS person's bill
+  // only — an employer-paid row is listed but is on the corporate's.
   const summary = useMemo(() => {
-    const rows = soldTickets ?? [];
+    const rows = (soldTickets ?? []).filter((t) => !t.paid_by_corporate);
     let base = 0,
       markup = 0,
       addl = 0,
@@ -456,11 +491,13 @@ export default function CustomerDetailPage() {
     } finally { setRetagBusy(false); }
   }, [soldTickets, selected, afterRetag]);
 
-  // Ids of rows that can be selected (already-billed tickets are locked).
+  // Ids of rows that can be selected. Already-billed tickets are locked, and an
+  // employer-paid one is the corporate's to bill — Save Billing here would be refused.
   const selectableIds = useMemo(
-    () => (soldTickets ?? []).filter((t) => !t.is_billed).map((t) => t.id),
+    () => (soldTickets ?? []).filter((t) => !t.is_billed && !t.paid_by_corporate).map((t) => t.id),
     [soldTickets],
   );
+  const corporateRows = (soldTickets ?? []).filter((t) => t.paid_by_corporate).length;
   const allSelected = selectableIds.length > 0 && selectableIds.every((id) => selected.has(id));
 
   const toggleRow = (id: number) =>
@@ -667,7 +704,7 @@ export default function CustomerDetailPage() {
             <ArrowLeft className="w-4 h-4 text-gray-600" />
           </button>
           <div>
-            <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-0.5">Customer Billing</p>
+            <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-0.5">Customer Invoicing</p>
             <h1 className="text-xl font-bold text-gray-900">
               {customer ? `${customer.first_name} ${customer.last_name ?? ""}`.trim() : "Customer"}
             </h1>
@@ -780,34 +817,35 @@ export default function CustomerDetailPage() {
                 ))}
               </select>
             </div>
-            <button
-              onClick={() => applyRange()}
-              disabled={loadingTickets}
-              className="bg-[#1e3a5f] hover:bg-[#16304f] text-white rounded-lg px-4 py-2 text-sm font-semibold disabled:opacity-50"
-            >
-              {loadingTickets ? "Loading…" : "Apply"}
-            </button>
+            <div>
+              <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Status</label>
+              <select
+                value={billedFilter}
+                onChange={(e) => setBilledFilter(e.target.value as "unbilled" | "billed" | "")}
+                className="border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#1e3a5f]/30 bg-gray-50"
+              >
+                <option value="unbilled">Unbilled</option>
+                <option value="billed">Billed</option>
+                <option value="">Billed &amp; unbilled</option>
+              </select>
+            </div>
             {(dateFrom || dateTo) && (
               <button
                 onClick={() => { setDateFrom(""); setDateTo(""); }}
-                disabled={loadingTickets}
-                className="inline-flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-700 pb-2.5 disabled:opacity-50"
-                title="Clear the dates, then press Apply to see every ticket"
+                className="inline-flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-700 pb-2.5"
+                title="Clear the dates to see every ticket"
               >
                 <X className="w-3 h-3" /> Clear dates
               </button>
             )}
-            <p className="basis-full text-[11px] text-gray-400 -mt-1">
-              Leave the dates blank to see every ticket — a range only narrows the list,
-              and also hides any ticket whose date cannot be read.
-            </p>
+            {/* On the filters' row, pushed right; the hint below takes a row of its own. */}
             {soldTickets && soldTickets.length > 0 && (
               <div className="ml-auto flex items-center gap-2">
                 <button
                   onClick={downloadTickets}
                   disabled={exportingTickets || loadingTickets}
                   className="flex items-center gap-1.5 bg-[#1e3a5f] hover:bg-[#16304f] text-white rounded-lg px-4 py-2 text-sm font-semibold disabled:opacity-60"
-                  title="The tickets listed below — billed and unbilled — as an Excel sheet. Uses saved figures: additional markup typed here counts once the billing is saved."
+                  title="The tickets listed below, under the same filters, as an Excel sheet. Uses saved figures: additional markup typed here counts once the billing is saved."
                 >
                   {exportingTickets
                     ? <><RefreshCw className="w-4 h-4 animate-spin" /> Downloading…</>
@@ -822,6 +860,10 @@ export default function CustomerDetailPage() {
                 </button>
               </div>
             )}
+            <p className="basis-full text-[11px] text-gray-400 -mt-1">
+              Leave the dates blank to see every ticket — a range only narrows the list,
+              and also hides any ticket whose date cannot be read.
+            </p>
           </div>
 
           {retagNote && (
@@ -850,7 +892,9 @@ export default function CustomerDetailPage() {
                 <Ticket className="w-7 h-7 text-gray-300" />
               </div>
               <p className="text-sm font-medium text-gray-600">Could not load tickets</p>
-              <p className="text-xs text-gray-400 mt-1">Press Apply to try again.</p>
+              <button onClick={() => applyRange()} className="text-xs text-[#1e3a5f] font-semibold hover:underline mt-1">
+                Try again
+              </button>
             </div>
           ) : (
             <>
@@ -909,8 +953,10 @@ export default function CustomerDetailPage() {
                 <div className="px-4 py-3 border-b border-gray-100">
                   <p className="text-xs font-semibold text-gray-700">
                     {rangeLabel
-                      ? `${soldTickets.length} tickets by ${dateField === "travel" ? "travel" : "issue"} date ${rangeLabel} for `
-                      : `All ${soldTickets.length} tickets for `}
+                      ? `${soldTickets.length} ${statusWord}tickets by ${dateField === "travel" ? "travel" : "issue"} date ${rangeLabel} for `
+                      : statusWord
+                        ? `${soldTickets.length} ${statusWord}tickets for `
+                        : `All ${soldTickets.length} tickets for `}
                     {customer.first_name} {customer.last_name ?? ""}
                   </p>
                   <p className="text-[10px] text-gray-400 mt-0.5">
@@ -921,9 +967,17 @@ export default function CustomerDetailPage() {
                       ? `${customer.billing_type} — 18% GST on ${customer.billing_type === "reseller" ? "gross + markup" : "markup only"}`
                       : "not set — no GST applied"}
                     . Edit Additional Markup to recalculate. Totals above cover every row
-                    shown, tickets already billed included; Save Billing charges only the
-                    rows you tick.
+                    shown{billedFilter === "unbilled" ? "" : ", tickets already billed included"}; Save
+                    Billing charges only the rows you tick.
                   </p>
+                  {corporateRows > 0 && (
+                    <p className="text-[10px] text-indigo-700 mt-1">
+                      {corporateRows} {corporateRows === 1 ? "ticket is" : "tickets are"} paid by{" "}
+                      {customer.first_name}&apos;s employer — listed here so every ticket is in one place, but
+                      billed from Corporate Invoicing and left out of the totals above. Switch the
+                      Corporate column to Direct to bill one here instead.
+                    </p>
+                  )}
                 </div>
                 <div className="overflow-x-auto">
                   <table className="w-full">
@@ -964,12 +1018,17 @@ export default function CustomerDetailPage() {
                                 <Ticket className="w-7 h-7 text-gray-300" />
                               </div>
                               <p className="text-sm font-medium text-gray-600">
-                                {rangeLabel ? "No tickets in this date range" : "No tickets for this customer yet"}
+                                {rangeLabel ? "No tickets in this date range"
+                                  : billedFilter === "unbilled" ? "Nothing left to bill"
+                                  : billedFilter === "billed" ? "No billed tickets yet"
+                                  : "No tickets for this customer yet"}
                               </p>
                               <p className="text-xs text-gray-400 mt-1">
                                 {rangeLabel
-                                  ? `No tickets matched this customer's name ${rangeLabel}. Clear the dates to see every ticket.`
-                                  : "No uploaded ticket is tagged to this customer or matches their passenger name."}
+                                  ? `No ${statusWord}tickets matched this customer's name ${rangeLabel}. Clear the dates to see every ticket.`
+                                  : billedFilter
+                                    ? `No ${statusWord}ticket is tagged to this customer or matches their passenger name. Set Status to “Billed & unbilled” to see every ticket.`
+                                    : "No uploaded ticket is tagged to this customer or matches their passenger name."}
                               </p>
                             </div>
                           </td>
@@ -979,15 +1038,18 @@ export default function CustomerDetailPage() {
                           const c = rowCalc(t, additional[t.id] ?? "", discounts[t.id] ?? "", customer.billing_type);
                           const totalInc = INCENTIVE_TYPE_COLS.reduce((s, col) => s + (t.incentive_breakdown?.[col.key] ?? 0), 0);
                           const isSel = selected.has(t.id);
+                          const corp = t.paid_by_corporate;
                           return (
-                            <tr key={t.id} className={`border-b border-gray-50 hover:bg-blue-50/30 ${isSel ? "bg-emerald-50/40" : idx % 2 === 0 ? "bg-white" : "bg-gray-50/30"}`}>
+                            <tr key={t.id} className={`border-b border-gray-50 hover:bg-blue-50/30 ${isSel ? "bg-emerald-50/40" : corp ? "bg-indigo-50/30" : idx % 2 === 0 ? "bg-white" : "bg-gray-50/30"}`}>
                               <td className="px-3 py-2 text-center">
                                 <input
                                   type="checkbox"
                                   checked={isSel}
-                                  disabled={t.is_billed}
+                                  disabled={t.is_billed || !!corp}
                                   onChange={() => toggleRow(t.id)}
-                                  title={t.is_billed ? "Already billed" : undefined}
+                                  title={corp
+                                    ? `${corp} pays for this ticket — bill it from Corporate Invoicing`
+                                    : t.is_billed ? "Already billed" : undefined}
                                   className="accent-emerald-500 cursor-pointer align-middle disabled:cursor-not-allowed disabled:opacity-40"
                                 />
                               </td>
@@ -1024,8 +1086,9 @@ export default function CustomerDetailPage() {
                                   step="any"
                                   value={additional[t.id] ?? ""}
                                   onChange={(e) => setAdditional((prev) => ({ ...prev, [t.id]: e.target.value }))}
+                                  disabled={!!corp}
                                   placeholder="0"
-                                  className="w-24 border border-gray-200 rounded px-2 py-1 text-[11px] focus:outline-none focus:ring-1 focus:ring-[#1e3a5f]/40 bg-white"
+                                  className="w-24 border border-gray-200 rounded px-2 py-1 text-[11px] focus:outline-none focus:ring-1 focus:ring-[#1e3a5f]/40 bg-white disabled:bg-gray-50 disabled:text-gray-300"
                                 />
                               </td>
                               <td className="px-3 py-2">
@@ -1034,14 +1097,27 @@ export default function CustomerDetailPage() {
                                   step="any"
                                   value={discounts[t.id] ?? ""}
                                   onChange={(e) => setDiscounts((prev) => ({ ...prev, [t.id]: e.target.value }))}
+                                  disabled={!!corp}
                                   placeholder="0"
-                                  className="w-24 border border-gray-200 rounded px-2 py-1 text-[11px] focus:outline-none focus:ring-1 focus:ring-rose-400/50 bg-white"
+                                  className="w-24 border border-gray-200 rounded px-2 py-1 text-[11px] focus:outline-none focus:ring-1 focus:ring-rose-400/50 bg-white disabled:bg-gray-50 disabled:text-gray-300"
                                 />
                               </td>
                               <GstCells split={c.split} />
                               <td className="px-3 py-2 text-[11px] font-semibold text-gray-800">{money(c.total)}</td>
                               <td className="px-3 py-2 whitespace-nowrap">
-                                {t.is_billed ? (
+                                {corp ? (
+                                  // Whose bill it is, and whether that bill has gone out.
+                                  <span className="flex flex-col gap-0.5">
+                                    <span className={`inline-block w-fit text-[10px] font-semibold px-2 py-0.5 rounded-full border ${
+                                      t.is_billed
+                                        ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                        : "bg-indigo-50 text-indigo-700 border-indigo-200"
+                                    }`}>
+                                      {t.is_billed ? "Billed in corporate" : "Corporate pays"}
+                                    </span>
+                                    <span className="text-[10px] text-gray-500 max-w-48 truncate" title={corp}>{corp}</span>
+                                  </span>
+                                ) : t.is_billed ? (
                                   <span className="inline-block bg-emerald-50 text-emerald-700 text-[10px] font-semibold px-2 py-0.5 rounded-full border border-emerald-200">Billed</span>
                                 ) : (
                                   <span className="inline-block bg-gray-100 text-gray-500 text-[10px] font-semibold px-2 py-0.5 rounded-full">Not Billed</span>

@@ -131,7 +131,7 @@ export const PARTY: Record<PartyKind, PartyConfig> = {
     masterHref: "/user-master/employee-master",
     masterLabel: "Employee Master",
     billingHref: "/customers",
-    billingLabel: "Customer Billing",
+    billingLabel: "Customer Invoicing",
     detailHref: (id) => `/customers/${id}`,
     templateFile: "customer_template.xlsx",
     templateColumns:

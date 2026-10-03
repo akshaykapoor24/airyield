@@ -2237,6 +2237,60 @@ async def get_batch_file_url(
     return {"url": url, "file_name": source_file}
 
 
+async def _bills_blocking_delete(db: AsyncSession, file_name: str, on_bills) -> dict:
+    """The 409 body for an upload whose tickets are on saved bills.
+
+    Structured, so the screen can lay it out as a list grouped by who each bill was
+    raised to, with a link to that party's Billing Info. `message` is the same thing as
+    one plain sentence, for any caller that just shows text.
+    """
+    from app.models.agency import Agency
+
+    def ids(col):
+        return {getattr(b, col) for b in on_bills if getattr(b, col)}
+
+    corporates = dict((await db.execute(
+        select(Corporate.id, Corporate.company).where(Corporate.id.in_(ids("corporate_id") or {-1}))
+    )).all())
+    customers = dict((await db.execute(
+        select(Customer.id, func.concat(Customer.first_name, " ", func.coalesce(Customer.last_name, "")))
+        .where(Customer.id.in_(ids("customer_id") or {-1}))
+    )).all())
+    agencies = dict((await db.execute(
+        select(Agency.id, Agency.name).where(Agency.id.in_(ids("agency_id") or {-1}))
+    )).all())
+
+    bills = []
+    for b in on_bills:
+        if b.corporate_id:
+            kind, pid, name = "corporate", b.corporate_id, corporates.get(b.corporate_id)
+        elif b.customer_id:
+            kind, pid, name = "customer", b.customer_id, customers.get(b.customer_id)
+        else:
+            kind, pid, name = "agency", b.agency_id, agencies.get(b.agency_id)
+        bills.append({
+            "id": b.id, "name": b.billing_name,
+            "date": b.billing_date.isoformat() if b.billing_date else None,
+            "tickets": b.tickets,
+            "party_type": kind, "party_id": pid, "party_name": (name or "").strip() or None,
+        })
+
+    tickets = sum(b["tickets"] for b in bills)
+    plural = "s" if len(bills) != 1 else ""
+    return {
+        "code": "upload_on_saved_bills",
+        "file_name": file_name,
+        "ticket_count": tickets,
+        "bills": bills,
+        "message": (
+            f"{file_name} can't be deleted: {tickets} of its ticket{'s' if tickets != 1 else ''} "
+            f"{'are' if tickets != 1 else 'is'} on {len(bills)} saved bill{plural} "
+            f"({', '.join('#' + str(b['id']) for b in bills)}). Delete {'those bills' if plural else 'that bill'} "
+            "from Billing Info first, then delete this upload."
+        ),
+    }
+
+
 @router.delete("/batches/{batch_id}")
 async def delete_batch(
     batch_id: str,
@@ -2261,17 +2315,23 @@ async def delete_batch(
         raise HTTPException(status_code=404, detail="Upload not found.")
 
     if batch.billing_batch_id:
-        billed = (await db.execute(
-            select(func.count(), func.min(UploadedTicket.billing_id))
-            .where(UploadedTicket.batch_id == batch.billing_batch_id,
-                   UploadedTicket.billing_id.isnot(None))
-        )).one()
-        if billed[0]:
-            raise HTTPException(
-                status_code=409,
-                detail=(f"{billed[0]} row(s) from this upload are on billing #{billed[1]}. "
-                        "Delete that billing first, then delete this upload."),
-            )
+        from app.models.billing import Billing
+
+        # EVERY bill, not just the first: naming one meant deleting it only to be refused
+        # again for the next, once per bill.
+        on_bills = (await db.execute(
+            select(Billing.id, Billing.billing_name, Billing.billing_date,
+                   Billing.customer_id, Billing.corporate_id, Billing.agency_id,
+                   func.count(UploadedTicket.id).label("tickets"))
+            .join(UploadedTicket, UploadedTicket.billing_id == Billing.id)
+            .where(UploadedTicket.batch_id == batch.billing_batch_id)
+            .group_by(Billing.id)
+            .order_by(Billing.id)
+        )).all()
+        if on_bills:
+            raise HTTPException(status_code=409, detail=await _bills_blocking_delete(
+                db, batch.source_file or "this upload", on_bills,
+            ))
         await db.execute(
             delete(UploadedTicket).where(UploadedTicket.batch_id == batch.billing_batch_id)
         )

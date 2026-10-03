@@ -796,10 +796,7 @@ export default function CorporateDetailPage() {
                 <X className="w-3 h-3" /> Clear dates
               </button>
             )}
-            <p className="basis-full text-[11px] text-gray-400 -mt-1">
-              Leave the dates blank to see every ticket — a range only narrows the list,
-              and also hides any ticket whose date cannot be read.
-            </p>
+            {/* On the filters' row, pushed right; the hint below takes a row of its own. */}
             {soldTickets && soldTickets.length > 0 && (
               <div className="ml-auto flex items-center gap-2">
                 <button
@@ -821,6 +818,10 @@ export default function CorporateDetailPage() {
                 </button>
               </div>
             )}
+            <p className="basis-full text-[11px] text-gray-400 -mt-1">
+              Leave the dates blank to see every ticket — a range only narrows the list,
+              and also hides any ticket whose date cannot be read.
+            </p>
           </div>
 
           {retagNote && (

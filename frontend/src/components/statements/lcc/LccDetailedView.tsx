@@ -4,8 +4,9 @@ import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateA
 import {
   Upload, RefreshCw, Trash2, Download, Eye, ArrowLeft, AlertTriangle,
   ChevronLeft, ChevronRight, FolderOpen, CheckCircle2, Loader2, Clock, XCircle,
-  X, Search, SlidersHorizontal, ChevronDown, ChevronUp,
+  X, Search, SlidersHorizontal, ChevronDown, ChevronUp, ExternalLink, Lock,
 } from "lucide-react";
+import Link from "next/link";
 import api from "@/lib/api";
 import { inr } from "@/lib/money";
 import MultiSelectDropdown from "@/components/ui/MultiSelectDropdown";
@@ -14,8 +15,22 @@ import toast from "react-hot-toast";
 import LccUploadWizard from "./LccUploadWizard";
 import LccBillingWorklist from "./LccBillingWorklist";
 
+/** One saved bill that holds tickets from an upload being deleted — the 409's `bills`. */
+type BlockingBill = {
+  id: number; name: string; date: string | null; tickets: number;
+  party_type: "corporate" | "customer" | "agency"; party_id: number | null; party_name: string | null;
+};
+/** Why an upload cannot be deleted yet: its tickets are on saved bills. */
+type DeleteBlock = { file_name: string; ticket_count: number; bills: BlockingBill[] };
+
+const PARTY_PAGE: Record<BlockingBill["party_type"], { label: string; href: (id: number) => string }> = {
+  corporate: { label: "Corporate Invoicing", href: (id) => `/corporates/${id}` },
+  customer: { label: "Customer Invoicing", href: (id) => `/customers/${id}` },
+  agency: { label: "Agency Invoicing", href: (id) => `/billing/agency/${id}` },
+};
+
 const PAGE = 50;
-const SELECT_CLS = "border border-slate-200 rounded-lg px-2 py-1.5 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-400";
+const SELECT_CLS ="border border-slate-200 rounded-lg px-2 py-1.5 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-400";
 const TEXT_CLS = "pl-8 pr-3 py-1.5 border border-slate-200 rounded-lg text-xs w-36 bg-white focus:outline-none focus:ring-1 focus:ring-blue-400";
 const DATE_CLS = "border border-slate-200 rounded-md px-1.5 py-1 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-400";
 
@@ -191,11 +206,101 @@ function FilterControl({ f, fvals, setFvals, facets }: {
   );
 }
 
+/**
+ * Why an upload can't be deleted yet: some of its tickets are on saved bills, and
+ * deleting the upload would delete the tickets those bills were raised from. Grouped by
+ * whoever each bill was raised to, because that party's Billing Info is where the bill
+ * is deleted.
+ */
+function DeleteBlockedPopup({ block, onClose }: { block: DeleteBlock; onClose: () => void }) {
+  const groups: { key: string; type: BlockingBill["party_type"]; id: number | null; name: string | null; bills: BlockingBill[] }[] = [];
+  for (const b of block.bills) {
+    const key = `${b.party_type}-${b.party_id}`;
+    const g = groups.find((x) => x.key === key);
+    if (g) g.bills.push(b);
+    else groups.push({ key, type: b.party_type, id: b.party_id, name: b.party_name, bills: [b] });
+  }
+  const many = (n: number, one: string, other: string) => (n === 1 ? one : other);
+  const tickets = block.ticket_count;
+  const bills = block.bills.length;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-md max-h-[85vh] flex flex-col">
+        <div className="px-5 pt-5 pb-3">
+          <div className="flex items-center gap-2.5 mb-2">
+            <Lock className="w-5 h-5 text-amber-500" />
+            <h2 className="text-sm font-semibold text-slate-800">This upload can&apos;t be deleted yet</h2>
+          </div>
+          <p className="text-xs text-slate-600 leading-relaxed">
+            {tickets} {many(tickets, "ticket", "tickets")} from “{block.file_name}” {many(tickets, "is", "are")} already
+            on {bills} saved {many(bills, "bill", "bills")}. Deleting the upload would remove the tickets
+            {" "}{many(bills, "that bill was", "those bills were")} raised from, so {many(bills, "the bill has", "the bills have")} to
+            be deleted first.
+          </p>
+        </div>
+
+        <div className="px-5 overflow-y-auto space-y-2.5">
+          {groups.map((g) => (
+            <div key={g.key} className="rounded-lg border border-slate-200">
+              <div className="flex items-center justify-between gap-2 px-3 py-2 bg-slate-50 border-b border-slate-100 rounded-t-lg">
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold text-slate-800 truncate">{g.name ?? "Unknown party"}</p>
+                  <p className="text-[10px] text-slate-400">{PARTY_PAGE[g.type].label}</p>
+                </div>
+                {g.id != null && (
+                  // A new tab, so this page is still here to delete the upload from after.
+                  <Link href={PARTY_PAGE[g.type].href(g.id)} target="_blank"
+                    className="shrink-0 inline-flex items-center gap-1 text-[11px] font-semibold text-blue-600 hover:text-blue-800">
+                    Open <ExternalLink className="w-3 h-3" />
+                  </Link>
+                )}
+              </div>
+              <ul className="divide-y divide-slate-100">
+                {g.bills.map((b) => (
+                  <li key={b.id} className="flex items-center justify-between gap-3 px-3 py-1.5 text-[11px]">
+                    <span className="min-w-0 truncate" title={b.name}>
+                      <span className="font-mono text-slate-400">#{b.id}</span>{" "}
+                      <span className="text-slate-700">{b.name}</span>
+                    </span>
+                    <span className="shrink-0 text-slate-400 tabular-nums">
+                      {b.date ? `${b.date.split("-").reverse().join("-")} · ` : ""}
+                      {b.tickets} {many(b.tickets, "ticket", "tickets")}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+
+        <div className="px-5 pt-3 pb-5">
+          <p className="text-[11px] font-semibold text-slate-600 mb-1">To delete this upload:</p>
+          <ol className="text-[11px] text-slate-500 list-decimal pl-4 space-y-0.5 mb-4">
+            <li>Open {many(groups.length, "it", "each one")} above and go to its <b>Billing Info</b> tab.</li>
+            <li>Delete the {many(bills, "bill", "bills")} listed — {many(bills, "its", "their")} tickets become unbilled again.</li>
+            <li>Come back here and delete this upload.</li>
+          </ol>
+          <div className="flex justify-end">
+            <button onClick={onClose} className="px-4 py-1.5 text-xs font-semibold text-slate-700 border border-slate-200 rounded-lg hover:bg-slate-50">
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function LccDetailedView({ apiBase, title }: { apiBase: string; title: string }) {
   const [batches, setBatches] = useState<Batch[]>([]);
   const [loading, setLoading] = useState(true);
   const [wizardOpen, setWizardOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Batch | null>(null);
+  // Set when the server refuses the delete because the upload's tickets are on saved
+  // bills; the delete popup then explains that instead of asking to confirm.
+  const [deleteBlock, setDeleteBlock] = useState<DeleteBlock | null>(null);
+  const closeDelete = () => { setDeleteTarget(null); setDeleteBlock(null); };
   const [deleting, setDeleting] = useState(false);
   const [selected, setSelected] = useState<Batch | null>(null);
   // The billing worklist is a third view, alongside the uploads list and the records
@@ -338,7 +443,16 @@ export default function LccDetailedView({ apiBase, title }: { apiBase: string; t
       // drop its filters too, or they leak onto the next upload you open.
       if (selected?.batch_id === deleteTarget.batch_id) closeBatch();
       fetchBatches();
-    } catch { toast.error("Failed to delete."); }
+    } catch (e) {
+      // The server says why. Tickets on saved bills come back as a list, shown in the
+      // popup itself; anything else is a sentence.
+      const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+      if (detail && typeof detail === "object" && "bills" in detail) {
+        setDeleteBlock(detail as DeleteBlock);
+      } else {
+        toast.error(typeof detail === "string" ? detail : "Failed to delete.");
+      }
+    }
     finally { setDeleting(false); }
   };
 
@@ -671,13 +785,17 @@ export default function LccDetailedView({ apiBase, title }: { apiBase: string; t
         </div>
       )}
 
-      {deleteTarget && (
+      {deleteTarget && deleteBlock && (
+        <DeleteBlockedPopup block={deleteBlock} onClose={closeDelete} />
+      )}
+
+      {deleteTarget && !deleteBlock && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div className="bg-white rounded-xl shadow-xl w-full max-w-sm p-5">
             <div className="flex items-center gap-2.5 mb-2"><AlertTriangle className="w-5 h-5 text-red-500" /><h2 className="text-sm font-semibold text-slate-800">Delete this upload?</h2></div>
             <p className="text-xs text-slate-500 mb-4">This permanently removes “{deleteTarget.source_file || "upload"}” and all its rows. This cannot be undone.</p>
             <div className="flex justify-end gap-2">
-              <button onClick={() => setDeleteTarget(null)} className="px-3 py-1.5 text-xs font-medium text-slate-500 border border-slate-200 rounded-lg hover:bg-slate-50">Cancel</button>
+              <button onClick={closeDelete} className="px-3 py-1.5 text-xs font-medium text-slate-500 border border-slate-200 rounded-lg hover:bg-slate-50">Cancel</button>
               <button onClick={confirmDelete} disabled={deleting} className="px-4 py-1.5 text-xs font-semibold text-white bg-red-600 rounded-lg hover:bg-red-700 disabled:opacity-50">{deleting ? "Deleting…" : "Delete"}</button>
             </div>
           </div>
