@@ -207,7 +207,7 @@ def counterparty(remarks: str, own_name: str | None = None) -> str | None:
     """The payer's or payee's name out of a remark, or None.
 
     Skips type codes, UTRs, IFSCs, dates and the account holder's own name (an outgoing
-    IMPS names the sender first: "MMT/IMPS/…/MONEYYATRA/AKASH…"). The first token left
+    IMPS names the sender first: "MMT/IMPS/…/ACMETRAVELS/AKASH…"). The first token left
     with three or more letters is the name.
     """
     if not remarks:

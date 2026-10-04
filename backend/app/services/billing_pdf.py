@@ -348,7 +348,7 @@ def _invoice_date(billing):
 
 
 def _invoice_number(billing, agency: dict) -> str:
-    """'MY/26-27/0099' — a prefix, the Indian financial year, and the serial.
+    """'AT/26-27/0099' — a prefix, the Indian financial year, and the serial.
 
     The financial year runs April to March, so an invoice dated August 2026 sits
     in 26-27 — read from the invoice date, `billing_date`. Derived from the billing

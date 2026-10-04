@@ -49,7 +49,7 @@ ACCOUNT_COLUMNS = [
 def pax(bdate, btime, pnr, first, last, dep, arr, depdate, flight,
         base, tax, fee, total, other="", ptype=""):
     return dict(zip(PAX_COLUMNS, [
-        "IN00002059", "MONEYYATRA", bdate, btime, pnr, first, last, ptype,
+        "IN00002059", "ACMETRAVELS", bdate, btime, pnr, first, last, ptype,
         dep, arr, depdate, "IX", flight, "INR", base, tax, fee, other, total,
     ]))
 
@@ -57,7 +57,7 @@ def pax(bdate, btime, pnr, first, last, dep, arr, depdate, flight,
 def acct(txn_id, date, ttype, pnr, parent, amount, note, gst_no="", gst_co="",
          fee_code="", email="", phone="", agent="refundadmin"):
     return dict(zip(ACCOUNT_COLUMNS, [
-        "IN00002059", "MONEYYATRA", txn_id, "8894431", date, ttype,
+        "IN00002059", "ACMETRAVELS", txn_id, "8894431", date, ttype,
         "AG" if pnr else "", pnr or "Statement Balance", pnr, parent, "INR",
         amount, "INR", phone, note, email, gst_co, gst_no, email,
         "SNDL1880", "", fee_code, agent,

@@ -40,6 +40,8 @@ DERIVED_COLUMNS = {
     "tp-gds": [(56, "Format", "__format__")],
     "tp-lcc": [(44, "Format", "__format__")],
     "tp-api": [(93, "Format", "__format__")],
+    # Payment Module's MO statement: the tp-gds columns plus Booking ID, so one further on.
+    "mo-gds": [(57, "Format", "__format__")],
 }
 
 # Record keys that describe the row rather than fill a column.

@@ -5,6 +5,7 @@ from app.api.v1 import report_download, sell_reconciliation, income_board, reven
 from app.api.v1 import sales_flown, risk_board
 from app.api.v1 import platform_invoices
 from app.api.v1 import bank_statements
+from app.api.v1 import payment_reconciliation, payment_module
 
 router = APIRouter()
 
@@ -78,6 +79,12 @@ router.include_router(commission.router, prefix="/commission/vendor", tags=["Ven
 # Buy-vs-sell reconciliation for the non-BSP sources, on the same terms: /bsp-reconciliation
 # answers a different question against different storage and is left untouched.
 router.include_router(sell_reconciliation.router, prefix="/reconciliation/vendor", tags=["Vendors - Reconciliation"])
+# Vendors data → Payment Module: a vendor's bill (tp-gds) against our mid-office record
+# (mo-gds). Its own literal prefix; the MO uploads themselves go through /statements/mo-gds.
+router.include_router(payment_reconciliation.router, prefix="/payment-module/reconciliation", tags=["Vendors - Payment Module"])
+# Checks, decisions, payable, payments, outstanding, MO vendor corrections. Literal paths
+# only, none of them under /reconciliation, so the two routers never collide.
+router.include_router(payment_module.router, prefix="/payment-module", tags=["Vendors - Payment Module"])
 router.include_router(customer_statements.router, prefix="/customer-statements", tags=["Customer Statements"])
 router.include_router(series.router, prefix="/series-contracts", tags=["Vendors - Series/SIT/MICE/Group Contracts"])
 router.include_router(notifications.router, prefix="/notifications", tags=["Notifications"])

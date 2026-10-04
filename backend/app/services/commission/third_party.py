@@ -47,6 +47,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.statement_batch_supplier import StatementBatchSupplier
 from app.models.statement_row import STATEMENT_MODELS
+from app.services import statement_balance
+from app.services.commission.mo_index import MoTicket, load_mo_index
 from app.services.commission.calc_row import (
     KIND_ISSUE, KIND_REFUND, KIND_SKIP, BatchInfo, CalcRow, DeclaredAmounts,
 )
@@ -83,8 +85,10 @@ INVOICE_TYPE = "Sales"
 # What the user can actually do about a withheld third-party row. BSP's advice ("upload the
 # TGQ HMPR") is meaningless here: there is no second document to join, only the vendor.
 NEEDS_DATA_REMEDY = (
-    "This consolidator's statement does not print it. Ask them to include the column, or "
-    "narrow the deal so it does not depend on it."
+    "This consolidator's statement does not print it. Upload your MO statement for this "
+    "vendor under Vendors data → Payment Module (its class, sector and travel date are used "
+    "where the vendor's are blank), ask the consolidator to include the column, or narrow "
+    "the deal so it does not depend on it."
 )
 
 # Rounding slack on the vendor's own arithmetic. Paise-level; anything wider would hide a
@@ -186,6 +190,10 @@ def build_declared(data: dict) -> DeclaredAmounts:
 
 def classify(data: dict) -> tuple[str, str | None]:
     """(kind, reason) from the statement's own Status column."""
+    # The statement's own OLD/BALANCE/total line (services/statement_balance.py) — money with
+    # no booking behind it. Priced as a ticket it came back "unmatched" and sat in the gaps.
+    if data.get(statement_balance.ROW_KIND_KEY) in statement_balance.ROW_KINDS:
+        return KIND_SKIP, "Statement balance line — not a booking"
     status = (_s(data, "ticket_status") or "").upper()
     if status in _SKIP_STATUS:
         return KIND_SKIP, _SKIP_REASON.get(status, f"{status} — not a sale")
@@ -199,10 +207,29 @@ def classify(data: dict) -> tuple[str, str | None]:
     return KIND_ISSUE, None
 
 
-def build_calc_row(row, supplier_name: str | None, supplier_id: int | None) -> CalcRow:
-    """One `third_party_gds` / `third_party_lcc` row → a CalcRow."""
+def build_calc_row(row, supplier_name: str | None, supplier_id: int | None,
+                   mo: MoTicket | None = None) -> CalcRow:
+    """One `third_party_gds` / `third_party_lcc` row → a CalcRow.
+
+    `mo` is the same ticket in the workspace's mid-office statement (services/commission/
+    mo_index.py). Where the vendor prints nothing, its class, sector and travel date are
+    used — the vendor's own value always wins — and the row says which ones came from MO.
+    None leaves the row exactly as the statement has it.
+    """
     data = dict(row.data or {})
     kind, kind_reason = classify(data)
+
+    from_mo: list[str] = []
+    if mo is not None:
+        for key, label, value in (("booking_class", "class", mo.booking_class),
+                                  ("sector", "sector", mo.sector),
+                                  ("segment_type", "airline category", mo.segment_type)):
+            if not _s(data, key) and value:
+                data[key] = value
+                from_mo.append(label)
+        if not _d(data, "travel_date") and mo.travel_date:
+            data["travel_date"] = mo.travel_date.isoformat()
+            from_mo.append("travel date")
 
     booking_class = _s(data, "booking_class")
     # The master's spelling, stamped at ingest by services/tp_airline_resolution. The file's
@@ -245,6 +272,10 @@ def build_calc_row(row, supplier_name: str | None, supplier_id: int | None) -> C
 
     if kind_reason:
         ctx.note(kind_reason)
+    if from_mo:
+        ctx.note(f"{', '.join(from_mo).capitalize()} taken from the MO statement"
+                 f"{f' ({mo.source_file})' if mo and mo.source_file else ''} — the "
+                 f"vendor's statement does not print {'it' if len(from_mo) == 1 else 'them'}.")
 
     # Per row, never per statement: another consolidator prints Class, and this one may
     # print it on some lines.
@@ -340,7 +371,14 @@ class ThirdPartyAdapter:
         link = await self.supplier_for_batch(db, tenant_id, batch_id)
         name = link.supplier_name if link else None
         supplier_id = link.supplier_id if link else None
-        return [build_calc_row(r, name, supplier_id) for r in rows]
+        # GDS only: the Payment Module's MO statement is the GDS statement's counterpart.
+        # Built once per run, like BSP's TGQ index; empty when the vendor has no MO upload.
+        index = None
+        if self.source == "tp-gds" and supplier_id is not None:
+            index = await load_mo_index(db, tenant_id, user_id, supplier_id)
+        return [build_calc_row(r, name, supplier_id,
+                               mo=index.lookup(r.data or {}) if index else None)
+                for r in rows]
 
     async def cumulative_provider(self, db: AsyncSession, tenant_id: int, user_id: int):
         """None → the engine's default (a scan of uploaded tickets).

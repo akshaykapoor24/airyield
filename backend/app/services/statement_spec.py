@@ -116,8 +116,9 @@ _TGQ_TOTAL_ROW = {
 # ── Third Party ──────────────────────────────────────────────────────────────
 # `summary` does double duty: it is the totals slab AND the only way these columns get
 # money formatting, because `money_fields()` is (split divide_fields ∪ summary fields) and
-# the third-party tables do not split. The declared-total block stays empty for them —
-# `_summary` gates it on `_splits(model)` — which is right: the export has no total line.
+# the third-party tables do not split. The GDS export has no grand-total line, but it does
+# carry OLD/BALANCE lines (`balance_lines`), from which `_summary` declares the period's
+# Net Amount as closing − opening.
 _TP_SUMMARY = [
     {"field": "base_fare",         "label": "Basic Fare"},
     {"field": "yq",                "label": "YQ"},
@@ -248,6 +249,10 @@ STATEMENT_SPECS: dict[str, dict] = {
     # it the B2B deal has nothing to match against. The Supplier master, not Agency Master:
     # it is the same list `deals.supplier_name` is picked from, so both sides of the match
     # name the same thing. Same opt-in discipline as `requires_airline_id`.
+    # `balance_lines` — the export carries its own OLD/BALANCE lines (services/
+    # statement_balance.py), stamped at ingest and kept out of entries and totals here.
+    # `captures_controls` — each upload records its control figures (rows read, rows saved,
+    # opening/closing balance, optional expected totals) for the Payment Module's checks.
     "tp-gds": {
         "label": "GDS",
         "parser": "tp-gds",
@@ -256,6 +261,8 @@ STATEMENT_SPECS: dict[str, dict] = {
         "resolve_airline": True,
         "requires_supplier": True,
         "supports_mapping": True,
+        "balance_lines": True,
+        "captures_controls": True,
         "filters": _TP_GDS_FILTERS,
         "summary": _TP_SUMMARY,
     },
@@ -268,6 +275,32 @@ STATEMENT_SPECS: dict[str, dict] = {
         "requires_supplier": True,
         "supports_mapping": True,
         "filters": _TP_LCC_FILTERS,
+        "summary": _TP_SUMMARY,
+    },
+    # MO (mid-office) statement — the workspace's OWN record of what a consolidator billed,
+    # uploaded under Vendors data → Payment Module and reconciled against that vendor's
+    # `tp-gds` upload (services/payment_reconciliation.py). Not a vendor statement: no
+    # commission run, no revenue projection and no report-download sheet reads it.
+    #
+    # Its own builder (`mo-gds` in services/flat_statement.py) but the SAME Third Party GDS
+    # columns plus a Booking ID, so a Third Party GDS file loads identically on both sides
+    # and the two are compared field for field. A mid-office export with a different layout
+    # changes only that builder.
+    #
+    # `requires_supplier` is kept: an MO file is one vendor's account (one file per vendor),
+    # which is how the reconciliation pairs it with that vendor's statement and how a ticket
+    # found under the wrong vendor is recognised.
+    "mo-gds": {
+        "label": "MO Statement",
+        "parser": "mo-gds",
+        "columns": _flat.MO_GDS_DISPLAY,
+        "fold_taxes": False,
+        "resolve_airline": True,
+        "requires_supplier": True,
+        "supports_mapping": True,
+        "balance_lines": True,
+        "captures_controls": True,
+        "filters": _TP_GDS_FILTERS,
         "summary": _TP_SUMMARY,
     },
     # Third Party API — an aggregator (MakeMyTrip, TBO) settles HOTELS, FLIGHTS, TRAINS,
@@ -394,6 +427,27 @@ def requires_supplier(slug: str) -> bool:
     """
     s = spec_for(slug)
     return bool(s and s.get("requires_supplier"))
+
+
+def balance_lines(slug: str) -> bool:
+    """Does this export carry its own opening/closing balance lines?
+
+    True for the third-party GDS statement and the Payment Module's MO statement. Their
+    `row_kind`-stamped rows (services/statement_balance.py) are kept out of the entries
+    count, the records grid and the totals, exactly as a TGQ export's grand-total line is.
+    """
+    s = spec_for(slug)
+    return bool(s and s.get("balance_lines"))
+
+
+def captures_controls(slug: str) -> bool:
+    """Does each upload record its control figures (statement_batch_controls)?
+
+    Rows read and saved, the opening/closing balance and any expected totals the uploader
+    declared — what the Payment Module's completeness checks are computed from.
+    """
+    s = spec_for(slug)
+    return bool(s and s.get("captures_controls"))
 
 
 def supports_mapping(slug: str) -> bool:

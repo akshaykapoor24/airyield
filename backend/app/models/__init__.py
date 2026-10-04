@@ -39,7 +39,7 @@ from app.models.ticket_adjustment import TicketAdjustment
 from app.models.airline_adjustment import AirlineADM, AirlineACM, AirlineRA, ADJUSTMENT_MODELS
 from app.models.statement_row import (
     TgqHmpr, Ndc, LccDi, LccDividedPnr, LccFlownReport, LccCtaBta,
-    ThirdPartyGds, ThirdPartyLcc, ThirdPartyApi, STATEMENT_MODELS,
+    ThirdPartyGds, ThirdPartyLcc, ThirdPartyApi, MidOfficeGds, STATEMENT_MODELS,
 )
 from app.models.lcc_detailed import LccDetailed, LccDetailedBatch
 from app.models.lcc_detailed_batch_file import LccDetailedBatchFile
@@ -54,6 +54,12 @@ from app.models.bsp_statement import BspStatement, BspStatementRow, BspTaxBreaku
 from app.models.bsp_summary import BspSummaryStatement, BspSummaryRow
 from app.models.ticket_reconciliation import TicketReconciliation
 from app.models.sell_reconciliation import SellReconciliation, SellReconciliationRun
+# Vendors data → Payment Module: vendor bill vs our mid-office record, and what was paid.
+from app.models.payment_reconciliation import PaymentReconciliation, PaymentReconciliationRun
+from app.models.payment_ledger import (
+    MoVendorCorrection, PaymentItem, VendorAccount, VendorPayment,
+)
+from app.models.statement_batch_control import StatementBatchControl
 from app.models.deal_batch import DealBatch
 from app.models.agency import Agency
 from app.models.agency_entity import AgencyEntity
@@ -134,7 +140,7 @@ __all__ = [
     "TicketAdjustment",
     "AirlineADM", "AirlineACM", "AirlineRA", "ADJUSTMENT_MODELS",
     "TgqHmpr", "Ndc", "LccDi", "LccDividedPnr", "LccFlownReport", "LccCtaBta",
-    "ThirdPartyGds", "ThirdPartyLcc", "ThirdPartyApi", "STATEMENT_MODELS",
+    "ThirdPartyGds", "ThirdPartyLcc", "ThirdPartyApi", "MidOfficeGds", "STATEMENT_MODELS",
     "LccDetailed", "LccDetailedBatch", "LccBatchAirlineId", "StatementBatchAirlineId",
     "StatementBatchSupplier", "StatementBatchBilling",
     "CommissionRun", "CommissionCalculation",
@@ -142,6 +148,9 @@ __all__ = [
     "BspStatement", "BspStatementRow", "BspTaxBreakup", "BspParseError",
     "BspSummaryStatement", "BspSummaryRow",
     "TicketReconciliation",
+    "PaymentReconciliation", "PaymentReconciliationRun",
+    "MoVendorCorrection", "PaymentItem", "VendorAccount", "VendorPayment",
+    "StatementBatchControl",
     "DealBatch",
     "Agency", "AgencyEntity", "AgencyLoginId", "AgencyTerms", "AgencyLedger",
     "Entity", "LoginId", "TenantAirline", "IataCommission", "IataCommissionApproval",

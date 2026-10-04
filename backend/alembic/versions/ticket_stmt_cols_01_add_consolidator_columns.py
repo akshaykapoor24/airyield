@@ -1,7 +1,7 @@
 """An uploaded ticket carries what a consolidator's own statement prints.
 
 Until now `uploaded_tickets` could hold our template's columns and a BSP export's,
-but not an Indian consolidator's — Globe, Akbar, Riya, TSI and the rest issue a
+but not an Indian consolidator's — Globe, Akbar, Riya and the rest issue a
 weekly statement with a vocabulary of its own. Uploading one meant either losing
 four money columns or forcing them into fields that mean something else, and the
 near-misses were the dangerous option: a service charge landing in

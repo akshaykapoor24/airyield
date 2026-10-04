@@ -31,7 +31,7 @@ LINES = [
     ("S67242945", "01/Sep/2026", "01/09/26 05:03:54 PM", "NEFT-HDFCH01229825964-ADITI DHAR-0001F", "", "17,920.00", "22,45,647.17"),
     ("S68355106", "01/Sep/2026", "01/09/26 06:23:38 PM", "BIL/ONL/001242784076/AIR IQ PRI/MONEYYAT", "14,017.70", "", "22,31,629.47"),
     ("S78984896", "02/Sep/2026", "02/09/26 03:35:25 PM", "INF/INFT/045724293821/UNICORN", "63,000.00", "", "21,68,629.47"),
-    ("S79565846", "02/Sep/2026", "02/09/26 04:29:26 PM", "MMT/IMPS/624516076528/MONEYYATRA/AKASH", "20,000.00", "", "21,48,629.47"),
+    ("S79565846", "02/Sep/2026", "02/09/26 04:29:26 PM", "MMT/IMPS/624516076528/ACMETRAVELS/AKASH", "20,000.00", "", "21,48,629.47"),
     ("S81134634", "02/Sep/2026", "02/09/26 06:28:00 PM", "BIL/BPAY/FI25046935/ICICI BANK CRED//41020", "3,00,000.00", "", "18,48,629.47"),
     ("S81153910", "02/Sep/2026", "02/09/26 06:29:34 PM", "RTGS/ICICR42026090200569477/INDB0000018", "2,00,000.00", "", "16,48,629.47"),
     ("S81298133", "02/Sep/2026", "02/09/26 06:39:15 PM", "NEFT-SBIN226245450523-VISION PLUS SECU", "", "52,981.00", "17,01,610.47"),
@@ -49,7 +49,7 @@ def icici_xlsx() -> bytes:
     ws = wb.active
     ws.append([])
     ws.append(["Detailed Statement"])
-    ws.append(["Name:", "MONEY YATRA", "", "", "", "Account Currency:", "INR"])
+    ws.append(["Name:", "ACME TRAVELS", "", "", "", "Account Currency:", "INR"])
     ws.append(["Address:", "C-1/120,JANAKPURI,NEAR ALLAHABAD BANK,NEW DELHI,110058,DELHI,INDIA", "", "", "", "A/C Branch:", "NEW DELHI - JANAKPURI"])
     ws.append(["A/C No:", "008705006910", "", "", "", "Branch Address:", "MAHATTA TOWERS, 54, B-BLOCK"])
     ws.append(["A/C Type:", "CAA", "", "", "", "Cust Id:", "525294042"])
@@ -81,7 +81,7 @@ class ParseStatementTests(unittest.TestCase):
         cls.st = bs.parse_statement(icici_xlsx(), "OpTransactionHistory.xlsx")
 
     def test_account_details_come_from_the_header_block(self):
-        self.assertEqual(self.st.account_name, "MONEY YATRA")
+        self.assertEqual(self.st.account_name, "ACME TRAVELS")
         self.assertEqual(self.st.account_no, "008705006910")
         self.assertEqual(self.st.ifsc, "ICIC0000087")
         self.assertEqual(self.st.bank_name, "ICICI Bank")
@@ -119,14 +119,14 @@ class RemarksTests(unittest.TestCase):
             "INF/INFT/045724293821/UNICORN": "UNICORN",
             "BIL/BPAY/FI25046935/ICICI BANK CRED//41020": "ICICI BANK CRED",
             # The sender of an outgoing IMPS is the account holder — skipped.
-            "MMT/IMPS/624516076528/MONEYYATRA/AKASH": "AKASH",
+            "MMT/IMPS/624516076528/ACMETRAVELS/AKASH": "AKASH",
             # No name at all: a transfer code, a reference and a date.
             "TRF/NA/054859/ICI/31.08.2026": None,
             "RTGS/ICICR42026090200569477/INDB0000018": None,
         }
         for remark, want in cases.items():
             with self.subTest(remark=remark):
-                self.assertEqual(bs.counterparty(remark, "MONEY YATRA"), want)
+                self.assertEqual(bs.counterparty(remark, "ACME TRAVELS"), want)
 
     def test_categories(self):
         self.assertEqual(bs.guess_category("NEFT-HDFC-ADITI DHAR", "in"), "receipt")
@@ -138,7 +138,7 @@ class RemarksTests(unittest.TestCase):
     def test_payment_mode_and_reference(self):
         self.assertEqual(bs._mode("NEFT-HDFCH01229825964-ADITI DHAR"), "neft")
         self.assertEqual(bs._mode("RTGS-KKBKR22026090324637579-ORIX CORP"), "rtgs")
-        self.assertEqual(bs._mode("MMT/IMPS/624516076528/MONEYYATRA/AKASH"), "imps")
+        self.assertEqual(bs._mode("MMT/IMPS/624516076528/ACMETRAVELS/AKASH"), "imps")
         self.assertEqual(bs._mode("INF/INFT/045724293821/UNICORN"), "transfer")
         self.assertEqual(bs.reference("NEFT-HDFCH01229825964-ADITI DHAR-0001F"), "HDFCH01229825964")
 

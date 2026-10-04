@@ -17,6 +17,7 @@ import math
 import re
 import uuid
 from datetime import datetime
+from decimal import Decimal
 
 import pandas as pd
 from fastapi import (
@@ -43,6 +44,8 @@ from app.models.user import User
 from app.services import flat_statement as _flat
 from app.services import income_board
 from app.services import sector_split, spec_mapping, spreadsheet, statement_spec as spec
+from app.services import statement_balance
+from app.models.statement_batch_control import StatementBatchControl
 from app.services import statement_supplier_selection as supplier_selection
 from app.services import tp_airline_resolution as tp_airline
 # Kept under the old private name: tests (test_tp_api_spec) and this router call it so.
@@ -77,6 +80,16 @@ def _resolve(slug: str):
 
 def _scope(model, user: User):
     return (model.tenant_id == user.tenant_id, model.created_by_id == user.id)
+
+
+def _not_balance_row(model):
+    """The statement's own OLD/BALANCE/total lines are summaries, not entries.
+
+    Stamped at ingest (`data.row_kind`, services/statement_balance.py) for the types whose
+    spec declares `balance_lines`. Kept out of every count, list and sum here for the same
+    reason a TGQ export's `is_total` line is.
+    """
+    return model.data[statement_balance.ROW_KIND_KEY].astext.is_(None)
 
 
 def _splits(model) -> bool:
@@ -115,6 +128,8 @@ def _record_conds(model, slug: str, user: User, batch_id: str | None, request: R
         conds.append(model.batch_id == batch_id)
     if _splits(model):
         conds.append(model.is_total.is_(False))
+    if spec.balance_lines(slug):
+        conds.append(_not_balance_row(model))
     for field, (f, value) in _active_filters(slug, request).items():
         col = model.data[field].astext
         conds.append(col == value if f.get("type") == "select" else col.ilike(f"%{value}%"))
@@ -248,12 +263,97 @@ def _detect_df(content: bytes, filename: str, score_fn):
         df.dropna(how="all", inplace=True)
         score = score_fn([str(c) for c in df.columns])
         if best is None or score > best[0]:
+            # Carried on the frame rather than returned beside it, so the existing callers
+            # are untouched; the control-figure capture needs it to read the preamble.
+            df.attrs["header_row"] = hr
             best = (score, df)
     if best is None:
         raise HTTPException(status_code=400, detail=f"Could not read the file: {last_err}. Upload a valid .xlsx, .xls or .csv.")
     if best[0] < _MIN_MATCHED_COLUMNS:
         raise HTTPException(status_code=400, detail="This doesn't look like a valid statement — too few recognised columns.")
     return best[1]
+
+
+def _preamble_opening(content: bytes, filename: str, header_row: int | None) -> Decimal | None:
+    """The statement's OLD/opening line, read off the rows ABOVE the header.
+
+    Everything above the header is discarded on a normal read, and that is where a running
+    account prints its opening balance ("OLD" | 627257). A marker cell followed by a number
+    — or one cell holding both — is the opening; a title row ("TICKET STATEMENT") has no
+    number after it and is ignored. Best effort: any failure means "not printed".
+    """
+    if not header_row:
+        return None
+    try:
+        cells = spreadsheet.read_table(content, filename, header_row=header_row).preamble
+    except Exception:  # noqa: BLE001 — a preamble we cannot read is a preamble we skip
+        return None
+    for i, c in enumerate(cells):
+        text = " ".join(str(c).upper().split())
+        if not any(text == m or text.startswith(m + " ") for m in statement_balance.OPENING_MARKERS):
+            continue
+        same_cell = statement_balance.to_decimal(text.split()[-1]) if " " in text else None
+        if same_cell is not None:
+            return same_cell
+        if i + 1 < len(cells):
+            nxt = statement_balance.to_decimal(cells[i + 1])
+            if nxt is not None:
+                return nxt
+    return None
+
+
+def _control_fields(control, objs: list | None = None) -> dict | None:
+    """What the upload wizard's done screen compares: what was declared vs what landed."""
+    if control is None:
+        return None
+    tickets = [o for o in (objs or [])
+               if not (o.data or {}).get(statement_balance.ROW_KIND_KEY)]
+    net = sum((statement_balance.to_decimal((o.data or {}).get("net_amount")) or Decimal("0")
+               for o in tickets), Decimal("0"))
+    return {
+        "file_rows": control.file_rows, "loaded_rows": control.loaded_rows,
+        "ticket_rows": len(tickets), "ticket_net": _money_str(net),
+        "expected_count": control.expected_count,
+        "expected_amount": _money_str(control.expected_amount)
+        if control.expected_amount is not None else None,
+        "opening_balance": _money_str(control.opening_balance)
+        if control.opening_balance is not None else None,
+        "closing_balance": _money_str(control.closing_balance)
+        if control.closing_balance is not None else None,
+    }
+
+
+def _to_decimal_form(value: str | None, label: str) -> Decimal | None:
+    """An optional numeric form field ('1,23,456.78' allowed), or 400 when it is not one."""
+    if value is None or not str(value).strip():
+        return None
+    d = statement_balance.to_decimal(value)
+    if d is None:
+        raise HTTPException(status_code=400, detail=f"{label} must be a number.")
+    return d
+
+
+def _control_row(slug: str, user: User, batch_id: str, *, content: bytes, filename: str,
+                 header_row: int | None, file_rows: int, objs: list,
+                 expected_count: int | None, expected_amount: Decimal | None):
+    """The upload's control figures (models/statement_batch_control.py), or None for types
+    that do not capture them. Written in the same transaction as the rows."""
+    if not spec.captures_controls(slug):
+        return None
+    closing = None
+    for o in objs:
+        data = o.data or {}
+        if data.get(statement_balance.ROW_KIND_KEY) == "closing":
+            closing = statement_balance.to_decimal(data.get("net_amount")) or closing
+    opening = _preamble_opening(content, filename, header_row)
+    return StatementBatchControl(
+        tenant_id=user.tenant_id, created_by_id=user.id, slug=slug, batch_id=batch_id,
+        file_rows=file_rows, loaded_rows=len(objs), header_row=header_row,
+        opening_balance=opening, opening_source="file" if opening is not None else None,
+        closing_balance=closing,
+        expected_count=expected_count if (expected_count or 0) > 0 else None,
+        expected_amount=expected_amount,
+    )
 
 
 def _build_rows(model, slug: str, prov: dict, data: dict, taxes: list[dict], seq: int,
@@ -746,6 +846,10 @@ async def confirm_statement(
     header_row: int = Form(...),
     file_digest: str = Form(...),
     edits: str = Form(default="{}"),
+    # Optional control totals the uploader declares (the vendor's covering note) — kept for
+    # the completeness check on the types that capture controls, ignored by the rest.
+    expected_count: int | None = Form(default=None),
+    expected_amount: str | None = Form(default=None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -787,6 +891,7 @@ async def confirm_statement(
         )
 
     df, columns, _hr = _read_for_mapping(content, file.filename or "", builder, header_row)
+    expected_amt = _to_decimal_form(expected_amount, "Expected net amount")
 
     batch_id = str(uuid.uuid4())
     uploaded_at = datetime.utcnow()
@@ -885,6 +990,12 @@ async def confirm_statement(
     db.add_all(objs)
     if supplier is not None:
         db.add(_supplier_link(current_user.tenant_id, slug, batch_id, supplier))
+    control = _control_row(
+        slug, current_user, batch_id, content=content, filename=file.filename or "",
+        header_row=_hr, file_rows=int(len(df)), objs=objs,
+        expected_count=expected_count, expected_amount=expected_amt)
+    if control is not None:
+        db.add(control)
     await _project(db, slug, current_user, batch_id)
     await db.commit()
     return {
@@ -892,6 +1003,10 @@ async def confirm_statement(
         "type": slug,
         "file_name": file.filename,
         "inserted": len(objs),
+        # The statement's own balance lines among `inserted` — summaries, not entries.
+        "balance_rows": sum(1 for o in objs
+                            if (o.data or {}).get(statement_balance.ROW_KIND_KEY)),
+        "controls": _control_fields(control, objs),
         "matched_columns": len(colmap),
         "source_rows": source_rows,
         "edited_rows": edited_rows,
@@ -917,6 +1032,8 @@ async def upload_statement(
     file: UploadFile = File(...),
     tenant_airline_ids: list[int] = Form(default=[]),
     supplier_id: int | None = Form(default=None),
+    expected_count: int | None = Form(default=None),
+    expected_amount: str | None = Form(default=None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1031,6 +1148,13 @@ async def upload_statement(
         ))
     if supplier is not None:
         db.add(_supplier_link(current_user.tenant_id, slug, batch_id, supplier))
+    control = _control_row(
+        slug, current_user, batch_id, content=content, filename=file.filename or "",
+        header_row=df.attrs.get("header_row") if parser_name else None,
+        file_rows=int(len(df)), objs=objs, expected_count=expected_count,
+        expected_amount=_to_decimal_form(expected_amount, "Expected net amount"))
+    if control is not None:
+        db.add(control)
     await _project(db, slug, current_user, batch_id)
     await db.commit()
     return {
@@ -1038,6 +1162,9 @@ async def upload_statement(
         "type": slug,
         "file_name": file.filename,
         "inserted": len(objs),
+        "balance_rows": sum(1 for o in objs
+                            if (o.data or {}).get(statement_balance.ROW_KIND_KEY)),
+        "controls": _control_fields(control, objs),
         "matched_columns": matched,
         "source_rows": source_rows,
         "excluded_rows": excluded_rows,
@@ -1118,7 +1245,7 @@ async def list_records(
     # is the schema version, so a mismatch means fields the current parser extracts are
     # simply absent from `data` — which renders as blank cells rather than as an error.
     # Batch-scoped for the same reason as above.
-    current_fmt = _flat.CURRENT_SOURCE_FORMATS.get(slug)
+    current_fmt = _flat.CURRENT_SOURCE_FORMATS.get(spec.parser(slug) or slug)
     if current_fmt and batch_id:
         stale = await db.scalar(
             select(func.count()).select_from(model).where(
@@ -1159,6 +1286,18 @@ async def _summary(db, model, slug, user, batch_id, conds, sum_specs, has_filter
         elif len(totals) > 1:
             note = "This upload has more than one Total line — showing computed figures only."
 
+    # A running-account statement declares its period net through its own balances:
+    # opening + Σ Net Amount = closing. Show the file's figure against the computed one,
+    # the same ✓/≠ the TGQ total line gets.
+    balance = None
+    if spec.balance_lines(slug) and batch_id:
+        balance = await _statement_balance(db, model, slug, user, batch_id)
+        net = statement_balance.derived_ticket_net(
+            _opt_dec(balance.get("opening")), _opt_dec(balance.get("closing")),
+            _opt_dec(balance.get("payments")))
+        if net is not None and "net_amount" in fields:
+            declared = {**(declared or {}), "net_amount": _money_str(net)}
+
     leg_count = agg.n or 0
     source_rows = leg_count
     if _splits(model):
@@ -1176,7 +1315,49 @@ async def _summary(db, model, slug, user, batch_id, conds, sum_specs, has_filter
         "declared_note": note,
         "row_count": source_rows,
         "leg_count": leg_count,
+        # {opening, closing, payments, opening_source} for statements that carry their
+        # own balances.
+        "balance": balance,
     }
+
+
+def _opt_dec(v) -> Decimal | None:
+    return statement_balance.to_decimal(v)
+
+
+async def _statement_balance(db, model, slug, user, batch_id: str) -> dict:
+    """The upload's opening, closing and in-period payments, as strings at file precision.
+
+    The closing comes from the stamped BALANCE row and the payments from its LESS PAYMENT
+    rows; the opening from the OLD row when the file kept one as a row, else from the
+    control figures captured off the preamble at upload (or typed in later). Any may be None.
+    """
+    rows = (await db.execute(
+        select(model.data).where(
+            model.batch_id == batch_id, *_scope(model, user),
+            model.data[statement_balance.ROW_KIND_KEY].astext.isnot(None))
+        .order_by(model.id.asc())
+    )).scalars().all()
+    figures = statement_balance.account_figures(
+        ((data or {}).get(statement_balance.ROW_KIND_KEY), (data or {}).get("net_amount"))
+        for data in rows)
+    out: dict = {
+        "opening": str(figures["opening"]) if figures["opening"] is not None else None,
+        "closing": str(figures["closing"]) if figures["closing"] is not None else None,
+        "payments": str(figures["payments"]) if figures["payments"] is not None else None,
+        "opening_source": "file" if figures["opening"] is not None else None,
+    }
+    ctl = (await db.execute(
+        select(StatementBatchControl).where(
+            StatementBatchControl.slug == slug, StatementBatchControl.batch_id == batch_id,
+            StatementBatchControl.tenant_id == user.tenant_id)
+    )).scalar_one_or_none()
+    if ctl is not None:
+        if out["opening"] is None and ctl.opening_balance is not None:
+            out["opening"], out["opening_source"] = str(ctl.opening_balance), ctl.opening_source
+        if out["closing"] is None and ctl.closing_balance is not None:
+            out["closing"] = str(ctl.closing_balance)
+    return out
 
 
 @router.get("/{slug}/records/facets")
@@ -1350,7 +1531,7 @@ async def reprocess_batch(
         "skipped_no_raw": skipped,
         "commission_cleared": cleared,
         "airline_resolved_rows": airline_rows if stamp_airline is not None else None,
-        "source_format": _flat.CURRENT_SOURCE_FORMATS.get(slug),
+        "source_format": _flat.CURRENT_SOURCE_FORMATS.get(spec.parser(slug) or slug),
     }
 
 
@@ -1359,8 +1540,13 @@ async def list_batches(slug: str, db: AsyncSession = Depends(get_db), current_us
     """One row per upload — file name, when, how many rows, whether the file is stored."""
     slug, model = _resolve(slug)
     # Match what the drill-in actually shows: the declared grand-total line is a summary,
-    # not an entry.
-    row_count = (func.count().filter(model.is_total.is_(False)) if _splits(model) else func.count())
+    # not an entry — and so are a statement's own OLD/BALANCE lines.
+    if _splits(model):
+        row_count = func.count().filter(model.is_total.is_(False))
+    elif spec.balance_lines(slug):
+        row_count = func.count().filter(_not_balance_row(model))
+    else:
+        row_count = func.count()
     q = (
         select(
             model.batch_id,
@@ -1589,6 +1775,20 @@ async def delete_batch(slug: str, batch_id: str, db: AsyncSession = Depends(get_
             StatementBatchSupplier.tenant_id == current_user.tenant_id,
         )
     )
+    # The control figures and the Payment Module's derived state for this upload — none of
+    # it has an FK to rows that no longer exist. Paid payment items are KEPT: a payment that
+    # was made does not un-happen because its statement was deleted.
+    await db.execute(
+        delete(StatementBatchControl).where(
+            StatementBatchControl.slug == slug,
+            StatementBatchControl.batch_id == batch_id,
+            StatementBatchControl.tenant_id == current_user.tenant_id,
+        )
+    )
+    from app.services import payment_ledger
+    await payment_ledger.forget_batch(
+        db, slug=slug, tenant_id=current_user.tenant_id, user_id=current_user.id,
+        batch_id=batch_id)
     # And the billing side: the projected tickets, their statement header, and the billing
     # header itself. The rows are already gone above, so nothing is left pointing at these
     # — and an UploadedTicket left behind would show in Sold Tickets as a billable ticket

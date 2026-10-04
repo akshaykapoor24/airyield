@@ -107,6 +107,18 @@ DELETION_GROUPS: tuple[DeletionGroup, ...] = (
         ("commission_calculations", "commission_runs", "income_board_rows"),
     ),
     DeletionGroup(
+        # Ordered BEFORE the statement groups for the commission group's reason: a
+        # reconciled ticket points at vendor statement rows by bare id with no FK. The MO
+        # statement lives here rather than with the vendor statements because it is the
+        # workspace's own record, uploaded only to be checked against a vendor's bill.
+        "payment_module", "Payment Module",
+        "MO (mid-office) statements, their reconciliations against vendor statements, the "
+        "decisions taken on each billed ticket and the payments recorded to vendors.",
+        GroupCategory.RECORDS,
+        ("payment_reconciliations", "payment_reconciliation_runs", "payment_items",
+         "vendor_payments", "mo_vendor_corrections", "vendor_accounts", "mid_office_gds"),
+    ),
+    DeletionGroup(
         "bsp", "BSP statements", "BSP settlement and summary uploads with every row and tax breakup.",
         GroupCategory.RECORDS,
         ("bsp_statements", "bsp_statement_rows", "bsp_tax_breakups", "bsp_parse_errors",
@@ -126,7 +138,7 @@ DELETION_GROUPS: tuple[DeletionGroup, ...] = (
          "lcc_detailed", "lcc_detailed_batch", "lcc_batch_airline_ids",
          "lcc_detailed_batch_file",
          "statement_batch_airline_ids", "statement_batch_suppliers",
-         "statement_batch_billing"),
+         "statement_batch_billing", "statement_batch_controls"),
     ),
     DeletionGroup(
         "internal_statements", "Internal statements", "The workspace's own ticket statements.",

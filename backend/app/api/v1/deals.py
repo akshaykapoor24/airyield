@@ -1335,6 +1335,10 @@ async def confirm_upload(
         # EVERY OTHER INBOUND DEAL is exactly as before: the step-1 entity on every row, a
         # sheet Login ID winning over the deal-level one, and no picked list (the form never
         # sent one inbound until now).
+        #
+        # Inbound, a row's own Entity (the review table's cell) wins over the step-1 one.
+        # On an agency row the picked credentials belong to the step-1 entity, so a row moved
+        # to a different entity keeps only its own sheet Login ID, never the picked ones.
         if direction == DealDirection.OUTBOUND:
             row_entity = payload.entity or None
             row_login_id = (payload.login_id or r.login_id) or None
@@ -1344,11 +1348,15 @@ async def confirm_upload(
             row_login_id = r.login_id or None
             row_login_ids = None
         elif party_from_agency:
-            row_entity = payload.entity or None
-            row_login_id = (r.login_id or payload.login_id) or None
-            row_login_ids = None if r.login_id else (payload.login_ids or None)
+            row_entity = (r.entity or payload.entity) or None
+            if r.entity and r.entity != payload.entity:
+                row_login_id = r.login_id or None
+                row_login_ids = None
+            else:
+                row_login_id = (r.login_id or payload.login_id) or None
+                row_login_ids = None if r.login_id else (payload.login_ids or None)
         else:
-            row_entity = payload.entity or None
+            row_entity = (r.entity or payload.entity) or None
             row_login_id = (r.login_id or payload.login_id) or None
             row_login_ids = payload.login_ids or None
 

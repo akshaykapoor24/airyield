@@ -291,7 +291,7 @@ function formatDate(iso: string): string {
 /** Which entities this member works on — by NAME and CODE.
  *
  *  The code is not decoration: a group's entities routinely share a name (three called
- *  "yatra"), so the name alone cannot say which ones were assigned. */
+ *  "acme"), so the name alone cannot say which ones were assigned. */
 function EntitiesCell({ user }: { user: UserRow }) {
   // An older response carried names only; still show something rather than a dash.
   const list: AssignedEntity[] = user.entities?.length

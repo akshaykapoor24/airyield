@@ -75,6 +75,9 @@ const TENANT_NAV: NavItem[] = [
       { label: "Ticket Search", href: "/ticket-details", icon: Search },
       // Reconciliation moved to its own group below.
       { label: "Commission income", href: "/vendors/commission-income", icon: DollarSign },
+      // A vendor's bill checked against our mid-office (MO) record, with the commission
+      // above applied — the step before paying the consolidator.
+      { label: "Payment Module", href: "/vendors/payment-module", icon: Wallet },
     ],
   },
 

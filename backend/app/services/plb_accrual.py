@@ -730,7 +730,7 @@ def resolve_plb_rate(
     and reads that band's segment × class cell.
 
     A rate of 0 is a real answer, not an error: the sheet has live ITA-CONT and
-    UNITED/TSI lines earning 0%, and the board says NO_RATE rather than hiding
+    UNITED/ENB lines earning 0%, and the board says NO_RATE rather than hiding
     them. `explain` is what the row drawer shows.
     """
     if locked_pct is not None:
