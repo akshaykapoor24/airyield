@@ -25,7 +25,7 @@ Three things cannot be derived, and those are what live here:
 GRAIN. The first two are keyed by the identity columns of a board row —
 (airline_name, entity, channel, lob) — as normalised text, NOT by deal id. A deal
 gets superseded and re-issued every contract year; the assumption about how much
-of KLM's YFB flown revenue is commissionable outlives any one contract row, and
+of KLM's ENA flown revenue is commissionable outlives any one contract row, and
 should not have to be re-entered when the deal rolls over.
 
 Because those four are part of a UNIQUE constraint and Postgres does not dedupe

@@ -53,10 +53,21 @@ class CoverageTest(unittest.TestCase):
     def test_every_statement_model_has_its_source(self):
         by_model = {s.model: s for s in SOURCES}
         for slug, model in STATEMENT_MODELS.items():
+            if slug in registry.NOT_REPORTED:
+                continue
             with self.subTest(slug=slug):
                 self.assertIn(model, by_model)
                 self.assertEqual(by_model[model].key, slug)
                 self.assertEqual(by_model[model].storage, "spec")
+
+    def test_unreported_models_are_named_and_really_have_no_sheet(self):
+        """The exclusion list holds real slugs only, and none of them sneaks a sheet in."""
+        reported = {s.model for s in SOURCES}
+        for slug in registry.NOT_REPORTED:
+            with self.subTest(slug=slug):
+                self.assertIn(slug, STATEMENT_MODELS)
+                self.assertNotIn(STATEMENT_MODELS[slug], reported)
+                self.assertNotIn(slug, SOURCE_BY_KEY)
 
     def test_every_adjustment_model_has_its_source(self):
         by_model = {s.model: s for s in SOURCES}

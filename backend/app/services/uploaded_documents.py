@@ -76,13 +76,22 @@ SOURCES: list[DocSource] = [
     DocSource("series",      "Series / Group Contract", "Series",  SeriesDocument,       _series_bucket,  "id",       "file_name",   "created_at",  "created_by_id", None,            False, id_is_int=True, link_tpl="/vendors/series-sit-mice/new?document={id}"),
 ]
 
-# Vendor statement types (TGQ HMPR / NDC / LCC* / Third-Party) — one dedicated table each,
-# rows repeat the file_url so dedupe by batch_id.
+# The spec-driven types that are NOT vendor statements. The MO statement is the workspace's
+# own mid-office record (Vendors data → Payment Module), so it is filed with the other
+# internal uploads and links back to the tab it was uploaded on.
+_SPEC_DOC_OVERRIDES: dict[str, dict] = {
+    "mo-gds": {"category": "Internal", "link_tpl": "/vendors/payment-module?tab=mo"},
+}
+
+# Spec-driven statement types (TGQ HMPR / NDC / LCC* / Third-Party / MO) — one dedicated
+# table each, rows repeat the file_url so dedupe by batch_id.
 for _slug, _model in STATEMENT_MODELS.items():
     _label = STATEMENT_SPECS.get(_slug, {}).get("label", _slug)
+    _over = _SPEC_DOC_OVERRIDES.get(_slug, {})
     SOURCES.append(
-        DocSource(f"stmt:{_slug}", _label, "Vendor", _model, _bsp_bucket,
-                  "batch_id", "source_file", "uploaded_at", "created_by_id", None, per_row=True)
+        DocSource(f"stmt:{_slug}", _label, _over.get("category", "Vendor"), _model, _bsp_bucket,
+                  "batch_id", "source_file", "uploaded_at", "created_by_id", None, per_row=True,
+                  link_tpl=_over.get("link_tpl"))
     )
 
 SOURCE_BY_KEY: dict[str, DocSource] = {s.key: s for s in SOURCES}

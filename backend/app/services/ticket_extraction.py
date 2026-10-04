@@ -179,7 +179,7 @@ _COL_ALIASES: dict[str, list[str]] = {
     "business_email":       ["businessemailaddress", "business_email"],
     "entity_address":       ["entityaddressline1", "entity_address"],
     # ── consolidator statements ───────────────────────────────────────────────
-    # An Indian consolidator's own statement (Globe, Akbar, Riya, TSI…) prints a
+    # An Indian consolidator's own statement (Globe, Akbar, Riya…) prints a
     # different vocabulary from both our template and a BSP export: a document
     # number of its own, taxes broken out by IATA code, and its service charge and
     # refund fee as named columns. None of these had a home before, so a file like

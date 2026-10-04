@@ -62,6 +62,7 @@ from app.models.customer_statement import CustomerStatement
 from app.models.deal import Deal
 from app.models.income_summary import IncomeSummary
 from app.models.lcc_detailed import LccDetailed
+from app.models.payment_ledger import VendorPayment
 from app.models.series import SeriesContract
 from app.models.statement_row import STATEMENT_MODELS
 from app.models.ticket_adjustment import TicketAdjustment
@@ -109,6 +110,9 @@ _LABEL_OVERRIDES = {
     "tp-gds": "Third Party GDS",
     "tp-lcc": "Third Party LCC",
     "tp-api": "Third Party API",
+    # Not a vendor statement — the Payment Module's mid-office record. Its spec label
+    # already reads well on its own; named here so the console wording is on the record.
+    "mo-gds": "MO Statement",
 }
 
 USAGE_SOURCES += [
@@ -121,6 +125,8 @@ USAGE_SOURCES += [
 ]
 
 USAGE_SOURCES += [
+    # A payment recorded to a vendor is work the workspace did, like a billing.
+    UsageSource("vendor_payments",    "Vendor Payments",    VendorPayment),
     UsageSource("income_summaries",   "Income Summaries",   IncomeSummary),
     UsageSource("billings",           "Billings",           Billing),
     UsageSource("bank_statements",    "Bank Statements",    BankStatementRow),
@@ -167,6 +173,12 @@ EXCLUDED_TABLES: frozenset[str] = frozenset({
     # the same reasoning for the buy-vs-sell answer: it is recomputed from a vendor
     # statement row and the tickets already counted on both sides
     "sell_reconciliations", "sell_reconciliation_runs",
+    # and for the Payment Module's vendor-vs-MO answer: recomputed from a vendor upload and
+    # an MO upload that are both counted already. Its ledger items, MO vendor corrections
+    # and confirmed vendor accounts are state about those same uploads, and an upload's
+    # control figures are state about an upload already counted.
+    "payment_reconciliations", "payment_reconciliation_runs",
+    "payment_items", "mo_vendor_corrections", "vendor_accounts", "statement_batch_controls",
     # the income board is a projection of rows already counted above — one line per
     # priced settlement document, rebuilt by POST /dashboard/income/rebuild — so
     # counting it would count every statement a second time

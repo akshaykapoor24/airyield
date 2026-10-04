@@ -23,7 +23,7 @@ class AssignedEntity(BaseModel):
     """One entity a member is assigned to, as User management shows it.
 
     THE CODE AND THE LOGIN IDs ARE PART OF IT, not extras: a group's entities routinely
-    share a name (three of them called "yatra"), so a list of names alone cannot say which
+    share a name (three of them called "acme"), so a list of names alone cannot say which
     ones a member actually works on — the code is what tells them apart. And a member's
     access really means the entity AND the login IDs / IATA numbers under it, which is what
     they will see in My Profile, so the admin screen shows the same thing.

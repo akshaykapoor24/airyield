@@ -15,7 +15,7 @@
 // that is wrong before a round trip.
 //
 // A DUPLICATE IS THE SAME CODE (ignoring case) OR THE SAME GSTIN — never the name, since
-// a group's entities often share one ("yatra" TSI / YOL / MICE), and never the PAN, since
+// a group's entities often share one ("acme" NORTH / SOUTH / MICE), and never the PAN, since
 // one PAN holds a GSTIN in each state it registers in.
 
 import { useState, useEffect, useCallback } from "react";

@@ -103,7 +103,23 @@ type SaveResp = {
   /** Null unless the type has a row filter; false means its column was never mapped, so
    *  nothing was classified and nothing was skipped. */
   filter_column_mapped: boolean | null;
+  /** The statement's own OLD/BALANCE/payment lines among `inserted`. */
+  balance_rows?: number;
+  /** Control figures, for the types that capture them (`captureControls`). */
+  controls?: {
+    file_rows: number | null;
+    loaded_rows: number | null;
+    ticket_rows: number;
+    ticket_net: string | null;
+    expected_count: number | null;
+    expected_amount: string | null;
+    opening_balance: string | null;
+    closing_balance: string | null;
+  } | null;
 };
+
+const fmtAmt = (v: string | number | null | undefined) =>
+  v == null || v === "" ? "—" : `₹${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
 
 const SKIP = "";        // "— not in file —"
 const PAGE = 25;
@@ -148,8 +164,46 @@ function StepBar({ step }: { step: Step }) {
   );
 }
 
+/** The done screen's completeness lines: tickets vs balance lines, and what was declared. */
+function ControlsSummary({ controls, balanceRows }: {
+  controls: NonNullable<SaveResp["controls"]>; balanceRows: number;
+}) {
+  const lines: { ok: boolean | null; text: string }[] = [];
+  lines.push({
+    ok: null,
+    text: `${controls.ticket_rows} ticket${controls.ticket_rows === 1 ? "" : "s"}`
+      + (balanceRows ? ` + ${balanceRows} balance line${balanceRows === 1 ? "" : "s"}` : "")
+      + ` · net ${fmtAmt(controls.ticket_net)}`,
+  });
+  if (controls.opening_balance != null || controls.closing_balance != null) {
+    lines.push({ ok: null, text: `Opening ${fmtAmt(controls.opening_balance)} · closing ${fmtAmt(controls.closing_balance)}` });
+  }
+  if (controls.expected_count != null) {
+    lines.push({
+      ok: controls.expected_count === controls.ticket_rows,
+      text: `Expected ${controls.expected_count} records, loaded ${controls.ticket_rows}`,
+    });
+  }
+  if (controls.expected_amount != null) {
+    const diff = Math.abs(Number(controls.expected_amount) - Number(controls.ticket_net ?? 0));
+    lines.push({
+      ok: diff <= 1,
+      text: `Expected ${fmtAmt(controls.expected_amount)}, loaded ${fmtAmt(controls.ticket_net)}`,
+    });
+  }
+  return (
+    <div className="mt-2 space-y-0.5">
+      {lines.map((l, i) => (
+        <p key={i} className={`text-xs ${l.ok === null ? "text-slate-600" : l.ok ? "text-emerald-600" : "text-amber-600"}`}>
+          {l.ok === null ? "" : l.ok ? "✓ " : "≠ "}{l.text}
+        </p>
+      ))}
+    </div>
+  );
+}
+
 export default function StatementUploadWizard({
-  apiBase, title, requireSupplier = false, doneHint, onClose, onDone,
+  apiBase, title, requireSupplier = false, captureControls = false, doneHint, onClose, onDone,
 }: {
   apiBase: string;
   title: string;
@@ -158,6 +212,10 @@ export default function StatementUploadWizard({
    *  against the answer. Off for NDC: an airline's own export names its carrier, so there is
    *  nothing for the uploader to declare and asking would be a question with no purpose. */
   requireSupplier?: boolean;
+  /** Payment Module only — ask for the statement's expected record count and net amount
+   *  (the vendor's covering note), so the import can be checked against them. Mirrors
+   *  `captures_controls` in the backend spec, which is what stores them. */
+  captureControls?: boolean;
   /** One line on the success screen telling the user where the rows went. */
   doneHint?: string;
   onClose: () => void;
@@ -179,6 +237,9 @@ export default function StatementUploadWizard({
   // See StatementAgencyField.
   const supplierId = requireSupplier ? agency?.supplier_id ?? null : null;
   const inputRef = useRef<HTMLInputElement>(null);
+  // Optional control totals (captureControls). Kept as typed; parsed once on save.
+  const [expectedCount, setExpectedCount] = useState("");
+  const [expectedAmount, setExpectedAmount] = useState("");
 
   // Mapping
   const [search, setSearch] = useState("");
@@ -413,6 +474,12 @@ export default function StatementUploadWizard({
       fd.append("header_row", String(extracted.header_row));
       fd.append("file_digest", extracted.file_digest);
       fd.append("edits", JSON.stringify(edits));
+      if (captureControls) {
+        const count = parseInt(expectedCount.replace(/[^\d]/g, ""), 10);
+        if (count > 0) fd.append("expected_count", String(count));
+        const amount = expectedAmount.replace(/[,\s₹]/g, "");
+        if (amount) fd.append("expected_amount", amount);
+      }
       const { data } = await api.post<SaveResp>(`${apiBase}/confirm`, fd);
       setSaved(data);
       setStep("done");
@@ -481,6 +548,30 @@ export default function StatementUploadWizard({
                 <input ref={inputRef} type="file" accept=".xlsx,.xls,.csv,.tsv,.txt"
                   className="hidden" onChange={(e) => pickFile(e.target.files?.[0] ?? null)} />
               </div>
+
+              {captureControls && (
+                <div className="mt-4 rounded-lg border border-slate-200 p-3">
+                  <p className="text-xs font-semibold text-slate-700">Control totals <span className="font-normal text-slate-400">(optional)</span></p>
+                  <p className="text-[11px] text-slate-400 mt-0.5">
+                    What the statement should hold — from the vendor&apos;s covering note. The upload is
+                    checked against them, alongside the statement&apos;s own opening and closing balance.
+                  </p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-2">
+                    <label className="block">
+                      <span className="text-[11px] text-slate-500">Expected records (tickets)</span>
+                      <input value={expectedCount} onChange={(e) => setExpectedCount(e.target.value)}
+                        inputMode="numeric" placeholder="e.g. 37"
+                        className="mt-1 w-full border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400" />
+                    </label>
+                    <label className="block">
+                      <span className="text-[11px] text-slate-500">Expected net amount (₹)</span>
+                      <input value={expectedAmount} onChange={(e) => setExpectedAmount(e.target.value)}
+                        inputMode="decimal" placeholder="e.g. 3,33,171.43"
+                        className="mt-1 w-full border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400" />
+                    </label>
+                  </div>
+                </div>
+              )}
 
               <p className="text-[11px] text-slate-400 mt-3">
                 Any layout works — you will map the columns on the next step. Press
@@ -831,6 +922,7 @@ export default function StatementUploadWizard({
                   — no money moved on them, so there is nothing to reconcile.
                 </p>
               )}
+              {saved.controls && <ControlsSummary controls={saved.controls} balanceRows={saved.balance_rows ?? 0} />}
               <p className="text-xs text-slate-500 mt-1">
                 {saved.edited_rows > 0
                   ? `${saved.edited_rows} row${saved.edited_rows === 1 ? " was" : "s were"} saved with your corrections. `

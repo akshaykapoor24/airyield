@@ -29,7 +29,6 @@ import { missingFields, missingMessage, notifyRequired } from "@/lib/requiredFie
 // ═══════════════════════════════════════════════════════════════════════════════
 // An incoming B2B upload's Supplier Name is picked from the user's own Agency Master —
 // see lib/vendorAgency.ts, shared with Create Deal.
-const ENTITIES       = ["ATB", "TSI", "YOL"];
 const CONTRACT_YEARS = ["Calendar year", "Financial year"];
 const TRIGGER_TYPES  = ["Flown", "Sales"];
 const PAYOUT_TYPES   = ["Flown", "Sales"];
@@ -133,7 +132,7 @@ const CONTRACT_COLS_ALL = [
   {key:"c__valid_to",      label:"Contract Valid To"},
   {key:"c__trigger_type",  label:"Trigger Type"},
   {key:"c__payout_type",   label:"Payout Type"},
-  {key:"c__entity_lcc",    label:"Entity"},
+  {key:"c__entity",    label:"Entity"},
   {key:"c__login_id",      label:"Login ID"},
   {key:"c__iata_commission", label:"IATA Commission (%)"},
 ];
@@ -174,7 +173,7 @@ const MT_CONTRACT_COLS_ALL: {key:string;label:string}[] = [
   {key:"c__valid_to",        label:"Contract Valid To"},
   {key:"c__trigger_type",    label:"Trigger Type"},
   {key:"c__payout_type",     label:"Payout Type"},
-  {key:"c__entity_lcc",      label:"Entity"},
+  {key:"c__entity",      label:"Entity"},
   {key:"c__login_id",        label:"Login ID"},
   {key:"c__iata_commission", label:"IATA Commission (%)"},
   {key:"c__supplier_name",   label:"Supplier"},
@@ -194,7 +193,7 @@ const mtContractSample=(key:string):string=>({
   __dealno:"1", c__airline_type:"GDS", c__airline_name:"Air France",
   c__contract_year:"Calendar year", c__business_type:"B2B",
   c__valid_from:"2026-01-01", c__valid_to:"2026-12-31",
-  c__trigger_type:"Sales", c__payout_type:"Sales", c__entity_lcc:"ATB",
+  c__trigger_type:"Sales", c__payout_type:"Sales",
 }[key] ?? "");
 
 // Ancillary & Segment Incentive aren't in INCENTIVE_FIELDS (custom-rendered), so list
@@ -224,7 +223,6 @@ const MT_SELECT_OPTIONS: Record<string,string[]> = {
   ...FIELD_OPTIONS,
   c__airline_type:  ["GDS","LCC"],
   c__business_type: BUSINESS_TYPES,
-  c__entity_lcc:    ENTITIES,
   siTargetType:     ["Amount","Percentage"],
   siClass:          ["All","Economy","Premium","Business"],
   siFlightType:     ["All","Domestic","International"],
@@ -1004,7 +1002,7 @@ const CELL_PLACEHOLDER: Record<string, string> = {
   "c__valid_to":      "",
   "c__trigger_type":  "Flown / Sales",
   "c__payout_type":   "Flown / Sales",
-  "c__entity_lcc":    "ATB / TSI / YOL",
+  "c__entity":        "Entity",
   "c__business_type": "B2B / B2C / B2E",
   "c__login_id":      "Agent login ID",
   "c__iata_commission": "IATA %",
@@ -1020,10 +1018,11 @@ const CELL_PLACEHOLDER: Record<string, string> = {
 
 type ColGroup={label:string;color:string;cols:{key:string;label:string}[]};
 
-function getColMeta(key:string):{type:"date"|"select"|"number"|"text";options?:string[]}{
+// `entityOptions` are the step-1 entity choices — see the page's stepEntityOptions.
+function getColMeta(key:string,entityOptions:string[]):{type:"date"|"select"|"number"|"text";options?:string[]}{
   if(key==="c__deal_tag")return{type:"select",options:DEAL_TAG_OPTIONS};
   if(key==="c__valid_from"||key==="c__valid_to")return{type:"date"};
-  if(key==="c__entity_lcc")return{type:"select",options:ENTITIES};
+  if(key==="c__entity")return{type:"select",options:entityOptions};
   if(CONTRACT_COL_OPTIONS[key])return{type:"select",options:CONTRACT_COL_OPTIONS[key]};
   return{type:"text"};
 }
@@ -1060,9 +1059,14 @@ function ReviewTable({
   onOpenInclExclType, onRemoveInclExclType,
   selectedIncentives, onOpenIncentiveData,
   filterText, selectedRows, onToggleRow, onToggleAllFiltered,
+  entityOptions, lockedCols,
 }:{
   rows:ReviewRow[];
   colGroups:ColGroup[];
+  /** The step-1 entity choices — the Entity cell offers exactly these. */
+  entityOptions:string[];
+  /** Columns fixed by step 1 that the save ignores per row — shown, not editable. */
+  lockedCols:string[];
   onChange:(idx:number,key:string,val:string)=>void;
   onDelete:(idx:number)=>void;
   onAdd:()=>void;
@@ -1200,13 +1204,23 @@ function ReviewTable({
     const val = getCellValue(row,colKey);
     const change = (v:string)=>onChange(idx,colKey,v);
 
-    // Entity dropdown
-    if(colKey==="c__entity_lcc"){
+    if(lockedCols.includes(colKey)){
+      return(
+        <td key={colKey} className="px-2 py-1 border-l border-gray-100" title="Set in Deal Details — go back to change it">
+          <span className="text-[11px] text-gray-500 whitespace-nowrap">{val||"—"}</span>
+        </td>
+      );
+    }
+
+    // Entity dropdown — the same choices step 1 offered. A sheet value outside them
+    // is still shown, so it is visibly there to change rather than silently saved.
+    if(colKey==="c__entity"){
+      const opts=val&&!entityOptions.includes(val)?[val,...entityOptions]:entityOptions;
       return(
         <td key={colKey} className="px-1 py-1 border-l border-gray-100">
           <select value={val} onChange={e=>change(e.target.value)} className={sel}>
             <option value="">—</option>
-            {ENTITIES.map(e=><option key={e} value={e}>{e}</option>)}
+            {opts.map(e=><option key={e} value={e}>{e}</option>)}
           </select>
         </td>
       );
@@ -1584,6 +1598,48 @@ export default function UploadDealPage(){
     : agencyLoginIds.length===0    ? "No login IDs for this entity"
     :                                "Select…";
 
+  // What the review table's Entity and Login ID columns are filled from and offer: the
+  // entity and credentials picked in step 1 — the scoped agency's outgoing, the picked
+  // supplier's on incoming B2B, the user's own profile entities on any other incoming deal.
+  const stepEntity        = outbound ? scopeSel.entity : entity;
+  const stepLoginIds      = outbound ? scopeSel.loginIds : agencyParty ? loginIds : [];
+  const stepLoginValue    = stepLoginIds.join(", ");
+  const stepEntityOptions = outbound ? (scopeSel.entity ? [scopeSel.entity] : [])
+                          : agencyParty ? agencyEntityNames
+                          : entityOptions;
+  // Outgoing, the server files every row under the scoped agency's entity, and under its
+  // login IDs when any were picked (api/v1/deals.py::confirm_upload), whatever the row
+  // says. Those cells are shown read-only in review, so an edit cannot be silently dropped.
+  const lockedPartyCols = outbound ? (stepLoginIds.length ? ["c__entity","c__login_id"] : ["c__entity"]) : [];
+
+  // Fills a row's Entity / Login ID from step 1. Incoming, a sheet Entity naming one of the
+  // step-1 options is kept (normalized); anything else becomes the step-1 entity. The
+  // picked credentials belong to the step-1 entity, so they go only on rows filed under
+  // it, and a Login ID the sheet already has is not overwritten unless it is locked.
+  const fillStepParty=(extra:Record<string,string>):Record<string,string>=>{
+    const sheetEntity=(extra["c__entity"]??"").trim();
+    const known=sheetEntity?stepEntityOptions.find(o=>o.toLowerCase()===sheetEntity.toLowerCase()):undefined;
+    const rowEntity=outbound?stepEntity:(known??(stepEntity||sheetEntity));
+    const underStepEntity=!stepEntity||rowEntity===stepEntity;
+    return{
+      ...extra,
+      c__entity:   rowEntity,
+      c__login_id: lockedPartyCols.includes("c__login_id")
+        ? stepLoginValue
+        : extra["c__login_id"]||(underStepEntity?stepLoginValue:""),
+    };
+  };
+
+  // Moving a row onto another entity takes the step-1 credentials off it (they belong to
+  // the step-1 entity); moving it back puts them back if the cell was left empty.
+  const withEntityChange=(extra:Record<string,string>,next:string):Record<string,string>=>{
+    const login=extra["c__login_id"]??"";
+    if(!stepLoginValue||!stepEntity) return{...extra,c__entity:next};
+    if(next!==stepEntity&&login===stepLoginValue) return{...extra,c__entity:next,c__login_id:""};
+    if(next===stepEntity&&!login)                 return{...extra,c__entity:next,c__login_id:stepLoginValue};
+    return{...extra,c__entity:next};
+  };
+
   // Direction is fixed by the entry point (Incoming vs Outgoing repo) — read it from
   // the ?direction query param instead of asking. Outgoing deals are B2B only at the
   // contract level; who they reach is the scope above.
@@ -1804,18 +1860,19 @@ export default function UploadDealPage(){
   },[selectedRows]);
 
   // ── Table row helpers ──────────────────────────────────────────────────────
-  const handleRowChange=useCallback((idx:number,key:string,val:string)=>{
+  const handleRowChange=(idx:number,key:string,val:string)=>{
     setRows(prev=>prev.map((r,i)=>{
       if(i!==idx)return r;
+      if(key==="c__entity")return{...r,extra:withEntityChange(r.extra,val)};
       if(key.startsWith("inc::")||key.startsWith("ie::")||key.startsWith("c__"))
         return{...r,extra:{...r.extra,[key]:val}};
       return{...r,[key]:val};
     }));
-  },[]);
+  };
   const handleDeleteRow=useCallback((idx:number)=>setRows(prev=>prev.filter((_,i)=>i!==idx)),[]);
   const handleAddRow=()=>{
     const newIdx=rows.length;
-    setRows(prev=>[...prev,{...EMPTY_ROW(),row_order:prev.length,extra:{c__deal_tag:dealTag==="adhoc"?"Adhoc":"Standard"}}]);
+    setRows(prev=>[...prev,{...EMPTY_ROW(),row_order:prev.length,extra:fillStepParty({c__deal_tag:dealTag==="adhoc"?"Adhoc":"Standard"})}]);
     if(selectedInclExcl.length>0){
       setRowInclExcl(prev=>({...prev,[newIdx]:{types:selectedInclExcl,data:{},viceVersa:{}}}));
     }
@@ -1832,6 +1889,7 @@ export default function UploadDealPage(){
     if(!bulkColKey||bulkColValue==="")return;
     setRows(prev=>prev.map((r,i)=>{
       if(!selectedRows.has(i))return r;
+      if(bulkColKey==="c__entity")return{...r,extra:withEntityChange(r.extra,bulkColValue)};
       if(bulkColKey.startsWith("inc::")||bulkColKey.startsWith("ie::")||bulkColKey.startsWith("c__"))
         return{...r,extra:{...r.extra,[bulkColKey]:bulkColValue}};
       return{...r,[bulkColKey]:bulkColValue};
@@ -1892,6 +1950,7 @@ export default function UploadDealPage(){
           });
           if(!r.extra["c__business_type"] && dealType==="b2b") r.extra["c__business_type"] = "B2B";
           r.extra["c__deal_tag"] = dealTag==="adhoc"?"Adhoc":"Standard";
+          r.extra = fillStepParty(r.extra);
         });
         setRows(converted);
         if(selectedInclExcl.length>0){
@@ -1963,7 +2022,7 @@ export default function UploadDealPage(){
       const merged=mtParsed.rows.map((pr,i)=>({
         ...pr,
         row_order:i,
-        extra:{...pr.extra, ...(mappedRows[i]?.extra??{}), c__deal_tag:dealTag==="adhoc"?"Adhoc":"Standard"},
+        extra:fillStepParty({...pr.extra, ...(mappedRows[i]?.extra??{}), c__deal_tag:dealTag==="adhoc"?"Adhoc":"Standard"}),
       }));
       setRows(merged);
       setRowInclExcl(mtParsed.rowInclExcl);
@@ -1998,7 +2057,7 @@ export default function UploadDealPage(){
         finalRowInclExcl[i]={types,data:xlsData,viceVersa:fromXLS?.viceVersa??{}};
       }
     }
-    setRows(rowsWithContract.map(r=>({...r,extra:{...r.extra,c__deal_tag:dealTag==="adhoc"?"Adhoc":"Standard"}})));
+    setRows(rowsWithContract.map(r=>({...r,extra:fillStepParty({...r.extra,c__deal_tag:dealTag==="adhoc"?"Adhoc":"Standard"})})));
     setRowInclExcl(finalRowInclExcl);
     setFilterText("");setSelectedRows(new Set());setBulkColKey("");setBulkColValue("");
     setStep(3);
@@ -2082,7 +2141,8 @@ export default function UploadDealPage(){
           // Outgoing takes the entity and credentials from the scoped AGENCY;
           // incoming keeps `entity` meaning your own filing entity from My Profile.
           entity:          (outbound?scopeSel.entity:entity)||null,
-          entity_lcc:      getContractVal("c__entity_lcc")||null,
+          // Retired, as on Create Deal — the Entity column is a per-row `entity` now.
+          entity_lcc:      null,
           business_type:   (outbound?(getContractVal("c__business_type")||KIND_BUSINESS_TYPE[scopeKind]):getContractVal("c__business_type"))||null,
           // Outgoing: the scoped agency's credentials. Incoming B2B: the picked
           // supplier's credentials from Agency Master — the server puts them only on rows
@@ -2126,8 +2186,10 @@ export default function UploadDealPage(){
               // path these equal the deal-level values (the backend falls back on null).
               airline_type:   r.extra["c__airline_type"]||null,
               business_type:  r.extra["c__business_type"]||null,
-              entity_lcc:     r.extra["c__entity_lcc"]||null,
-              login_id:       r.extra["c__login_id"]||null,
+              entity:         r.extra["c__entity"]||null,
+              // The step-1 credentials left as filled are sent as no row value, so the
+              // server applies the picked `login_ids` list rather than a joined string.
+              login_id:       (stepLoginValue&&r.extra["c__login_id"]===stepLoginValue?null:r.extra["c__login_id"])||null,
               iata_commission:r.extra["c__iata_commission"]||null,
               deal_maker_name:r.extra["c__deal_maker_name"]||null,
               supplier_name:  r.extra["c__supplier_name"]||null,
@@ -2664,14 +2726,14 @@ export default function UploadDealPage(){
                   <option value="">Column to edit…</option>
                   {colGroups.filter(g=>g.label!=="Incl / Excl"&&g.label!=="Incentive Data"&&g.label!=="Source").map(g=>(
                     <optgroup key={g.label} label={g.label}>
-                      {g.cols.filter(c=>c.key!=="__incl_excl__"&&c.key!=="__incentive_data__"&&c.key!=="__src__"&&c.key!=="__airline_master__").map(c=>(
+                      {g.cols.filter(c=>c.key!=="__incl_excl__"&&c.key!=="__incentive_data__"&&c.key!=="__src__"&&c.key!=="__airline_master__"&&!lockedPartyCols.includes(c.key)).map(c=>(
                         <option key={c.key} value={c.key}>{c.label}</option>
                       ))}
                     </optgroup>
                   ))}
                 </select>
                 {bulkColKey&&(()=>{
-                  const meta=getColMeta(bulkColKey);
+                  const meta=getColMeta(bulkColKey,stepEntityOptions);
                   if(meta.type==="date")return(
                     <input type="date" value={bulkColValue} onChange={e=>setBulkColValue(e.target.value)}
                       className="border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400"/>
@@ -2734,6 +2796,8 @@ export default function UploadDealPage(){
               selectedRows={selectedRows}
               onToggleRow={handleToggleRow}
               onToggleAllFiltered={handleToggleAllFiltered}
+              entityOptions={stepEntityOptions}
+              lockedCols={lockedPartyCols}
             />
           </div>
 

@@ -15,6 +15,7 @@ import StatementAgencyField, { agencyBlockReason } from "@/components/statements
 import type { VendorAgency } from "@/lib/vendorAgency";
 import NdcBillingWorklist from "@/components/statements/ndc/NdcBillingWorklist";
 import TpApiBillingWorklist from "@/components/statements/tpapi/TpApiBillingWorklist";
+import { ChecksBadge, ChecksPanel, type CheckResult } from "@/components/statements/StatementChecks";
 
 const PAGE = 50;
 // The API rejects anything below 3 recognised columns (_MIN_MATCHED_COLUMNS in
@@ -77,6 +78,12 @@ type Summary = {
   declared_note: string | null;
   row_count: number;
   leg_count: number;
+  /** Running-account statements only (Third Party GDS, MO): the file's own balance lines.
+   *  Their net — closing − opening + payments — is what `declared.net_amount` carries. */
+  balance?: {
+    opening: string | null; closing: string | null; payments: string | null;
+    opening_source: string | null;
+  } | null;
 };
 type RecordsResponse = {
   total: number; columns: Column[]; rows: Row[];
@@ -285,7 +292,7 @@ function Stat({ label, value, sub, accent }: { label: string; value: string; sub
  * they disagree.
  */
 function SummarySlab({ summary }: { summary: Summary }) {
-  const { fields, computed, declared, declared_comparable, declared_note, row_count, leg_count } = summary;
+  const { fields, computed, declared, declared_comparable, declared_note, row_count, leg_count, balance } = summary;
   const split = leg_count > row_count;
   return (
     <div className="mb-3">
@@ -315,6 +322,17 @@ function SummarySlab({ summary }: { summary: Summary }) {
         })}
       </div>
       {declared_note && <p className="mt-1.5 text-[11px] text-amber-700">{declared_note}</p>}
+      {balance && (balance.opening != null || balance.closing != null) && (
+        <p className="mt-1.5 text-[11px] text-slate-500">
+          Statement balance: opening {fmtMoney(balance.opening)}
+          {balance.opening_source === "user" && <span className="text-slate-400"> (entered)</span>}
+          {balance.payments != null && <> · less payments {fmtMoney(balance.payments)}</>}
+          {" "}· closing {fmtMoney(balance.closing)}
+          {balance.opening == null && (
+            <span className="text-slate-400"> — the file printed no opening balance, so its net cannot be checked</span>
+          )}
+        </p>
+      )}
       {declared && !declared_comparable && (
         <p className="mt-1.5 text-[11px] text-slate-400">
           Filters are active — these totals cover the filtered rows only, so they are not comparable to the file&apos;s own Total line.
@@ -326,7 +344,7 @@ function SummarySlab({ summary }: { summary: Summary }) {
 
 export default function AdjustmentStatementsView({
   apiBase, slug, title, requiresAirlineId, requiresSupplier, supportsMapping,
-  supportsBilling, billingWorklist, doneHint,
+  supportsBilling, billingWorklist, doneHint, checks, captureControls,
 }: {
   apiBase: string; slug: string; title: string; blurb?: string;
   /** LCC types only — see lib/statements.ts. Drives the mandatory Airline picker in
@@ -347,6 +365,13 @@ export default function AdjustmentStatementsView({
   billingWorklist?: "ndc" | "tp-api";
   /** One line on the wizard's success screen saying where the imported rows went. */
   doneHint?: string;
+  /** Payment Module tabs only. Adds a CHECKS column — completeness, continuity and vendor
+   *  checks per upload — read from `api` for statement type `slug`. Absent everywhere else,
+   *  which makes no request and renders no column. */
+  checks?: { api: string; slug: string };
+  /** Payment Module tabs only. The upload wizard asks for optional expected records and
+   *  net amount, and compares them on its done screen. */
+  captureControls?: boolean;
 }) {
   const [batches, setBatches] = useState<Batch[]>([]);
   const [loading, setLoading] = useState(true);
@@ -358,6 +383,8 @@ export default function AdjustmentStatementsView({
   // drill-in. Local state rather than a route, matching `selected` — and matching what
   // LccDetailedView does for the same screen.
   const [billingTarget, setBillingTarget] = useState<Batch | null>(null);
+  const [checkResults, setCheckResults] = useState<Record<string, CheckResult>>({});
+  const [checksTarget, setChecksTarget] = useState<string | null>(null);
 
   // drill-in records
   const [columns, setColumns] = useState<Column[]>([]);
@@ -381,10 +408,12 @@ export default function AdjustmentStatementsView({
 
   const hasFilters = Object.values(fvals).some(Boolean);
   const hasSelects = filters.some((f) => f.type === "select");
-  // File · [Airline] · [Agency] · Uploaded · Entries · [Billing] · Uploaded by · Actions.
+  // File · [Airline] · [Agency] · Uploaded · Entries · [Checks] · [Billing] · Uploaded by · Actions.
   // Computed rather than a literal, so adding a column can't leave the empty-state row short.
   const batchCols = 5 + (requiresAirlineId ? 1 : 0) + (requiresSupplier ? 1 : 0)
-                      + (supportsBilling ? 1 : 0);
+                      + (checks ? 1 : 0) + (supportsBilling ? 1 : 0);
+  const checksApi = checks?.api;
+  const checksSlug = checks?.slug;
 
   const fetchBatches = useCallback(async () => {
     setLoading(true);
@@ -397,6 +426,19 @@ export default function AdjustmentStatementsView({
     setSelected(null); setFvals({}); setFilters([]); setFacets({}); setSummary(null);
     fetchBatches();
   }, [fetchBatches, slug]);
+
+  // Every upload's checks in one request. Re-read whenever the list is — an upload or a
+  // delete changes the previous-statement continuity of its neighbours too.
+  const fetchChecks = useCallback(async () => {
+    if (!checksApi || !checksSlug) return;
+    try {
+      const { data } = await api.get<Record<string, CheckResult>>(checksApi, { params: { slug: checksSlug } });
+      setCheckResults(data);
+    } catch {
+      // The column shows a dash; the uploads list itself is unaffected.
+    }
+  }, [checksApi, checksSlug]);
+  useEffect(() => { fetchChecks(); }, [fetchChecks, batches]);
 
   const loadRecords = useCallback(async (batchId: string, offset: number) => {
     setRloading(true);
@@ -665,6 +707,7 @@ export default function AdjustmentStatementsView({
               {requiresSupplier && <th className="text-left px-3 py-2.5 font-semibold">Agency</th>}
               <th className="text-left px-3 py-2.5 font-semibold">Uploaded</th>
               <th className="text-right px-3 py-2.5 font-semibold">Entries</th>
+              {checks && <th className="text-left px-3 py-2.5 font-semibold">Checks</th>}
               {supportsBilling && <th className="text-left px-3 py-2.5 font-semibold">Billing</th>}
               <th className="text-left px-3 py-2.5 font-semibold">Uploaded by</th>
               <th className="text-right px-3 py-2.5 font-semibold">Actions</th>
@@ -729,6 +772,11 @@ export default function AdjustmentStatementsView({
                 )}
                 <td className="px-3 py-2 text-xs text-slate-500 whitespace-nowrap">{fmtDate(b.uploaded_at)}</td>
                 <td className="px-3 py-2 text-right tabular-nums text-slate-700">{b.row_count.toLocaleString()}</td>
+                {checks && (
+                  <td className="px-3 py-2">
+                    <ChecksBadge result={checkResults[b.batch_id]} onOpen={() => setChecksTarget(b.batch_id)} />
+                  </td>
+                )}
                 {supportsBilling && (
                   <td className="px-3 py-2 whitespace-nowrap">
                     {/* No "still importing" branch, unlike LccDetailedView's version of
@@ -796,10 +844,15 @@ export default function AdjustmentStatementsView({
       {uploadOpen && (supportsMapping
         ? <StatementUploadWizard
             apiBase={apiBase} title={title} requireSupplier={requiresSupplier}
-            doneHint={doneHint}
+            doneHint={doneHint} captureControls={captureControls}
             onClose={() => setUploadOpen(false)}
             onDone={() => { setUploadOpen(false); fetchBatches(); }} />
         : <UploadModal apiBase={apiBase} title={title} requiresAirlineId={requiresAirlineId} requiresSupplier={requiresSupplier} onClose={() => setUploadOpen(false)} onDone={() => { setUploadOpen(false); fetchBatches(); }} />)}
+
+      {checksApi && checksTarget && checkResults[checksTarget] && (
+        <ChecksPanel key={checksTarget} api={checksApi} result={checkResults[checksTarget]}
+          onClose={() => setChecksTarget(null)} onChanged={fetchChecks} />
+      )}
 
       {deleteTarget && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">

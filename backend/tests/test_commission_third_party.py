@@ -240,5 +240,61 @@ class TestVariance(unittest.TestCase):
         self.assertEqual(_variance(ctx, 1000.0, 500.0), {})
 
 
+# ── Payment Module step 6E: class / sector / travel date from the MO statement ──
+from datetime import date  # noqa: E402
+
+from app.services.commission.mo_index import MoTicket, fold_rows  # noqa: E402
+
+
+class TestMoEnrichment(unittest.TestCase):
+    """The vendor prints no class on any row; the MO record of the same ticket does."""
+
+    def test_mo_class_fills_the_blank_and_lifts_skip_class(self):
+        mo = MoTicket(booking_class="V", sector="DEL/IST", travel_date=date(2026, 8, 17),
+                      source_file="GLOBE OUR 08 15.xls")
+        ctx = build_calc_row(FakeRow(dict(TURKISH)), "Globe", 751, mo=mo)
+        self.assertEqual(ctx.booking_class, "V")
+        self.assertNotIn(SKIP_CLASS, ctx.skip_criteria)
+        self.assertNotIn("class", ctx.skipped_labels)
+        self.assertTrue(any("taken from the MO statement" in n for n in ctx.notes))
+
+    def test_the_vendors_own_values_always_win(self):
+        mo = MoTicket(booking_class="V", sector="BOM/DXB", travel_date=date(2027, 1, 1))
+        ctx = build_calc_row(FakeRow({**TURKISH, "booking_class": "Y"}), "Globe", 751, mo=mo)
+        self.assertEqual((ctx.booking_class, ctx.sector), ("Y", "DEL/IST/MAD/MLA/IST/DEL"))
+        self.assertEqual(ctx.travel_date, date(2026, 8, 8))
+
+    def test_a_blank_travel_date_is_filled_from_mo(self):
+        mo = MoTicket(travel_date=date(2026, 8, 24))
+        ctx = build_calc_row(FakeRow({**ETIHAD, "travel_date": None}), "Globe", 751, mo=mo)
+        self.assertEqual(ctx.travel_date, date(2026, 8, 24))
+
+    def test_without_mo_nothing_changes(self):
+        ctx = build_calc_row(FakeRow(dict(TURKISH)), "Globe", 751)
+        self.assertIsNone(ctx.booking_class)
+        self.assertIn(SKIP_CLASS, ctx.skip_criteria)
+
+    def test_the_index_keeps_the_newest_upload_and_checks_the_prefix(self):
+        rows = [  # newest upload first, as the loader orders them
+            ("new", "new.xls", {"ticket_prefix": "235", "ticket_number": "4848358656",
+                                "booking_class": "V", "sector": "DEL/IST"}),
+            ("old", "old.xls", {"ticket_prefix": "235", "ticket_number": "4848358656",
+                                "booking_class": "K"}),
+            ("new", "new.xls", {"cancellation_markup": "BALANCE", "net_amount": "5"}),
+        ]
+        index = fold_rows(rows)
+        self.assertEqual(len(index), 1)
+        hit = index.lookup({"ticket_prefix": "235", "ticket_number": "4848358656"})
+        self.assertEqual((hit.booking_class, hit.batch_id), ("V", "new"))
+        self.assertIsNone(index.lookup({"ticket_prefix": "125", "ticket_number": "4848358656"}))
+        self.assertIsNotNone(index.lookup({"ticket_number": "235 4848358656"}))
+
+    def test_the_statements_balance_line_is_never_priced(self):
+        kind, reason = classify({"cancellation_markup": "BALANCE", "net_amount": "960428.43",
+                                 "row_kind": "closing"})
+        self.assertEqual(kind, KIND_SKIP)
+        self.assertIn("balance line", reason)
+
+
 if __name__ == "__main__":
     unittest.main()

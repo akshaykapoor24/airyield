@@ -88,7 +88,7 @@ def entity_problem(state, gst, pan) -> tuple[Optional[str], Optional[str], Optio
 async def _code_taken(db: AsyncSession, user_id: int, code: str, exclude_id: int | None = None) -> bool:
     """Is this code already used by one of the owner's entities, IGNORING CASE?
 
-    Case-blind because "TSI" and "tsi" are the same code to anyone reading a report; the
+    Case-blind because "ABC" and "abc" are the same code to anyone reading a report; the
     old check was an exact compare and let both in. Mirrors uq_user_entities_user_code_ci.
     """
     q = select(UserEntity.id).where(

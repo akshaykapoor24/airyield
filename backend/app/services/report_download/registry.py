@@ -181,6 +181,13 @@ SOURCES: tuple[ReportSource, ...] = (
 
 SOURCE_BY_KEY: dict[str, ReportSource] = {s.key: s for s in SOURCES}
 
+# Spec-driven tables that are in STATEMENT_MODELS but are NOT vendor statements, and so
+# have no sheet. `mo-gds` is the Payment Module's mid-office record — the workspace's own
+# books, parsed in the Third Party GDS shape. Exporting it beside `tp-gds` would put every
+# ticket in the workbook twice and count it twice in Combined. Named here, not silently
+# skipped, so the registry test can still prove every OTHER model has its sheet.
+NOT_REPORTED: frozenset[str] = frozenset({"mo-gds"})
+
 
 def get_source(key: str) -> ReportSource:
     """The source for ``key``; raises KeyError for an unknown type (callers validate input)."""

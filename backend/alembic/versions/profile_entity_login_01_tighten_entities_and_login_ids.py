@@ -9,7 +9,7 @@ MY PROFILE → ENTITIES (`user_entities`)
     than guessed, and the Edit form asks for it.
 
   * CODE IS UNIQUE IGNORING CASE. `uq_user_entities_user_code` was on (user_id, code), so
-    "TSI" and "tsi" could both be saved. Replaced by a unique index on
+    "ABC" and "abc" could both be saved. Replaced by a unique index on
     (user_id, lower(code)).
 
   * GSTIN IS UNIQUE per owner. It is the one identifier that genuinely names ONE

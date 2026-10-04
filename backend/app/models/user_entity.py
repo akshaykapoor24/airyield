@@ -12,7 +12,7 @@ class UserEntity(Base):
 
     WHAT MAKES TWO ENTITIES THE SAME. Code, ignoring case, and GSTIN — both unique per
     owner (migration profile_entity_login_01). NOT the name: a group's entities often share
-    one ("yatra" TSI, "yatra" YOL, "yatra" MICE). NOT the PAN either: a GSTIN is the state
+    one ("acme" NORTH, "acme" SOUTH, "acme" MICE). NOT the PAN either: a GSTIN is the state
     code + the PAN + a 13th character counting that PAN's registrations in that state, so
     one PAN legitimately appears on an entity per state — and even twice in one state.
     """

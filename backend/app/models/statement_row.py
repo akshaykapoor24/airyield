@@ -1,4 +1,4 @@
-"""Spec-driven vendor statement tables — one dedicated table per type.
+"""Spec-driven statement tables — one dedicated table per type.
 
 Each statement type gets its OWN table (so its data is easy to find/query):
 ``tgq_hmpr`` now; NDC / LCC / GDS later. They share a mixin — provenance + a ``data``
@@ -6,6 +6,13 @@ JSONB (the fixed columns, keyed by the spec's normalized field names) + a ``taxe
 JSONB array (the folded ``Tax_TypeN`` / ``TaxN`` pairs, so any number of taxes is
 supported with no fixed Tax1..Tax20 columns). Slug → dedicated model via
 ``STATEMENT_MODELS`` (same pattern as ``ADJUSTMENT_MODELS`` for ADM/ACM/RA).
+
+NOT EVERY TYPE HERE IS A VENDOR STATEMENT. ``mo-gds`` is the workspace's OWN mid-office
+record, uploaded under Vendors data → Payment Module to be checked against the vendor's
+bill. It shares this registry because it shares the router, the parser and the upload
+wizard — not because it is something a vendor sent. Code that means "what a vendor sent"
+(the report download, the revenue board, commission) keeps its own explicit slug list
+rather than looping over this dict.
 """
 from datetime import datetime
 
@@ -222,6 +229,19 @@ class ThirdPartyApi(_BillingMixin, _NormalizedBase, Base):
     bill_pax_source: Mapped[str | None] = mapped_column(String(8), nullable=True)   # file|default|user
 
 
+class MidOfficeGds(_NormalizedBase, Base):
+    """MO (mid-office / internal) statement — the workspace's own record of the bookings
+    a consolidator billed, uploaded under Vendors data → Payment Module.
+
+    Parsed with the Third Party GDS builder for now (services/flat_statement.py `tp-gds`),
+    so it has exactly that table's shape. It is the OTHER side of the payment check in
+    services/payment_reconciliation.py: the vendor's bill (`third_party_gds`) against what
+    our own books say. Nothing else reads it — it is not a sale, not priced by commission
+    income, and not part of the vendor-statement report.
+    """
+    __tablename__ = "mid_office_gds"
+
+
 # slug → its dedicated table/model. Add a new type here (+ a spec entry + a migration).
 STATEMENT_MODELS: dict[str, type] = {
     "tgq-hmpr": TgqHmpr,
@@ -235,4 +255,6 @@ STATEMENT_MODELS: dict[str, type] = {
     "tp-gds": ThirdPartyGds,
     "tp-lcc": ThirdPartyLcc,
     "tp-api": ThirdPartyApi,
+    # Payment Module's internal side — see MidOfficeGds and the module docstring.
+    "mo-gds": MidOfficeGds,
 }

@@ -39,12 +39,12 @@ from app.services.billing_pdf import (  # noqa: E402
 )
 
 TENANT = N(
-    name="Money Yatra", domain="moneyyatra.com",
+    name="Acme Travels", domain="acmetravels.example",
     gst_number="07AASFM5646A1Z6", pan_number="AASFM5646A",
     address="C-1/120, JANAKPURI", city="NEW DELHI", state="Delhi", pincode="110058",
     phone="9911194525\n9810316453", logo_path=None,
 )
-USER = N(full_name="A User", email="mail.moneyyatra@gmail.com")
+USER = N(full_name="A User", email="accounts@acmetravels.example")
 
 CORPORATE = N(
     company="ORIX CORPORATION INDIA LIMITED", first_name=None, last_name=None, title=None,
@@ -174,10 +174,10 @@ class TestSupplierBlock(unittest.TestCase):
 class TestLetterhead(unittest.TestCase):
     def test_the_supplier_identity_is_printed(self):
         text = render()
-        self.assertIn("Money Yatra", text)
+        self.assertIn("Acme Travels", text)
         self.assertIn("GST NO. : 07AASFM5646A1Z6", text)
         self.assertIn("C-1/120, JANAKPURI", text)
-        self.assertIn("Email : mail.moneyyatra@gmail.com", text)
+        self.assertIn("Email : accounts@acmetravels.example", text)
 
     def test_both_phone_numbers_are_printed(self):
         text = render()
@@ -202,12 +202,12 @@ class TestInvoiceNumber(unittest.TestCase):
 
     def test_the_financial_year_runs_april_to_march(self):
         agency = supplier_block(TENANT, USER)
-        self.assertEqual(_invoice_number(_billing(), agency), "MY/26-27/0099")
+        self.assertEqual(_invoice_number(_billing(), agency), "AT/26-27/0099")
         # March is still the PREVIOUS financial year.
         march = _billing(created_at=datetime(2026, 3, 31))
-        self.assertEqual(_invoice_number(march, agency), "MY/25-26/0099")
+        self.assertEqual(_invoice_number(march, agency), "AT/25-26/0099")
         april = _billing(created_at=datetime(2026, 4, 1))
-        self.assertEqual(_invoice_number(april, agency), "MY/26-27/0099")
+        self.assertEqual(_invoice_number(april, agency), "AT/26-27/0099")
 
     def test_a_one_word_name_uses_its_first_two_letters(self):
         self.assertTrue(_invoice_number(_billing(), {"name": "gtmvantage"}).startswith("GT/"))
@@ -218,7 +218,7 @@ class TestInvoiceNumber(unittest.TestCase):
     def test_the_financial_year_comes_from_the_billing_date_not_the_save_date(self):
         # Saved on 2 April, but dated 31 March: it belongs to the year it is dated in.
         bill = _billing(created_at=datetime(2026, 4, 2), billing_date=date(2026, 3, 31))
-        self.assertEqual(_invoice_number(bill, supplier_block(TENANT, USER)), "MY/25-26/0099")
+        self.assertEqual(_invoice_number(bill, supplier_block(TENANT, USER)), "AT/25-26/0099")
 
 
 class TestBillingDate(unittest.TestCase):
@@ -430,8 +430,8 @@ class TestTheClosingBlock(unittest.TestCase):
 
     def test_the_terms_name_the_supplier(self):
         text = render()
-        self.assertIn("in favour of Money Yatra", text)
-        self.assertIn("FOR MONEY YATRA", text)
+        self.assertIn("in favour of Acme Travels", text)
+        self.assertIn("FOR ACME TRAVELS", text)
         self.assertIn("Authorised Signatory", text)
 
     def test_jurisdiction_follows_the_supplier_state(self):

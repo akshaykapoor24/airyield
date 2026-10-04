@@ -135,8 +135,8 @@ async def list_login_ids(
         q = q.where(UserLoginId.entity_id == entity_id)
     if search and search.strip():
         term = f"%{search.strip()}%"
-        # The entity's name, code and city are searchable too — "tsi" should find every
-        # IATA number under TSI, which is how these are looked up.
+        # The entity's name, code and city are searchable too — "abc" should find every
+        # IATA number under ABC, which is how these are looked up.
         q = q.outerjoin(UserEntity, UserEntity.id == UserLoginId.entity_id).where(or_(
             UserLoginId.login_id.ilike(term),
             UserLoginId.city.ilike(term),

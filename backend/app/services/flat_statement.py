@@ -40,6 +40,8 @@ import re
 from datetime import datetime
 from typing import Callable
 
+from app.services import statement_balance
+
 
 def norm(header) -> str:
     h = str(header).lower().replace("'", "").replace("’", "")
@@ -223,7 +225,7 @@ _FIELD_GROUP = {
     "segment_type": "Carrier",
     # Document
     "pnr": "Document", "airline_pnr": "Document", "gds_pnr": "Document",
-    "booking_reference": "Document", "ticket_number": "Document",
+    "booking_reference": "Document", "ticket_number": "Document", "booking_id": "Document",
     "ticket_status": "Document", "transaction_type": "Document",
     "booking_type": "Document", "username": "Document", "issuing_office": "Document",
     "invoice_number": "Document",
@@ -479,6 +481,12 @@ def _derive_tp_gds(data: dict) -> None:
             data["total_fare"] = to_number_str(f"{gross:.2f}")
             data["total_fare_source"] = "derived"
 
+    # THE STATEMENT'S OWN BALANCE LINES. The real export ends with `BALANCE <closing>` in
+    # its last two columns, which maps to a row with money and no booking. Stamped here —
+    # not guessed later — so every reader (entries count, totals, commission, the Payment
+    # Module) agrees on what is a ticket, and a reprocess re-stamps it.
+    statement_balance.tag(data)
+
 
 def _derive_tp_lcc(data: dict) -> None:
     _normalize_common(data)
@@ -561,6 +569,32 @@ TP_GDS_DISPLAY = register(
 )
 
 
+# ── MO (mid-office) statement — Vendors data → Payment Module ────────────────
+# The workspace's own record of what a consolidator billed, reconciled ticket by ticket
+# against that consolidator's tp-gds statement. Exactly the Third Party GDS columns, so one
+# file loads identically on both sides, plus the one thing only the mid-office has: the
+# BOOKING ID it invoiced the ticket under — what proves a billed ticket was itself billed on
+# (services/payment_reconciliation.py's "Not billed in MO" check).
+def _with_after(columns: list[tuple[str, str]], after: str,
+                extra: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    i = next(n for n, (field, _h) in enumerate(columns) if field == after) + 1
+    return columns[:i] + extra + columns[i:]
+
+
+_MO_GDS_COLUMNS = _with_after(_TP_GDS_COLUMNS, "invoice_number", [("booking_id", "Booking ID")])
+_MO_GDS_ALIASES = {
+    **_TP_GDS_ALIASES,
+    # `docno` is a mid-office's invoice/document number ("IS26/1067"), which is what a
+    # booking is billed under; `doc_no` stays the ticket number, as in every other type.
+    "booking_id": ["booking_id", "bookingid", "booking_no", "bookingno", "booking_number",
+                   "bookingnumber", "booking_ref", "bookingref", "booking_reference",
+                   "bookingreference", "file_no", "fileno", "file_number", "docno"],
+}
+MO_GDS_DISPLAY = register(
+    "mo-gds", _MO_GDS_COLUMNS, _MO_GDS_ALIASES, "mid-office-gds-v1", _derive_tp_gds,
+)
+
+
 # ── Third Party LCC ──────────────────────────────────────────────────────────
 # STILL SPECULATIVE — no real third-party LCC export has been supplied. It inherits the
 # shared alias fixes and the date/number/passenger derivation, but its column list is the
@@ -625,7 +659,11 @@ TP_LCC_DISPLAY = register(
 # Format labels the current parsers produce. A batch stamped with anything else was
 # ingested by an older schema and its `data` is missing fields the current one extracts —
 # api/v1/statements.py offers it a Reprocess rather than silently showing blanks.
+#
+# Keyed by PARSER name, not statement slug — the router resolves a slug through its spec's
+# `parser` first. Today the two coincide for every entry.
 CURRENT_SOURCE_FORMATS = {
     "tp-gds": "third-party-gds-v2",
     "tp-lcc": "third-party-lcc-v2",
+    "mo-gds": "mid-office-gds-v1",
 }

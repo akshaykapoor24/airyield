@@ -73,6 +73,10 @@ class ExtractedRow(BaseModel):
     airline_type:     Optional[str] = None
     business_type:    Optional[str] = None
     entity_lcc:       Optional[str] = None
+    # The review table's Entity cell: one of the step-1 entity options (the picked
+    # supplier's Agency Master entities on incoming B2B, My Profile entities otherwise).
+    # Wins over the deal-level `entity` on its own row; ignored outbound.
+    entity:           Optional[str] = None
     login_id:         Optional[str] = None
     deal_maker_name:  Optional[str] = None
     supplier_name:    Optional[str] = None
