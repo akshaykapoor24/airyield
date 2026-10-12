@@ -19,6 +19,7 @@ from app.schemas.agency_entity import (
     AgencyEntityCreate, AgencyEntityUpdate, AgencyEntityRead, BulkUploadResult,
 )
 from app.services import spreadsheet
+from app.services.agency_code import code_resolver
 
 router = APIRouter()
 
@@ -237,7 +238,8 @@ async def bulk_upload_entities(
 ):
     content = await file.read()
     filename = (file.filename or "").lower()
-    required = {"AGENCY", "NAME", "CODE", "CHANNELS"}
+    # AGENCY or AGENCY_CODE names the agency; the check below wants one of them.
+    required = {"NAME", "CODE", "CHANNELS"}
 
     def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         df.columns = [
@@ -259,6 +261,8 @@ async def bulk_upload_entities(
                 df_try = spreadsheet.read_df(content, filename, header_row)
                 df_try = _normalize_columns(df_try)
                 missing = required - set(df_try.columns)
+                if not {"AGENCY", "AGENCY_CODE"} & set(df_try.columns):
+                    missing = missing | {"AGENCY (or AGENCY_CODE)"}
                 last_missing = missing
                 if not missing:
                     df = df_try
@@ -269,9 +273,9 @@ async def bulk_upload_entities(
 
         if df is None:
             detail = (
-                "Missing required columns: AGENCY, NAME, CODE, CHANNELS. Check that the header is in the first few rows."
+                "Missing required columns: NAME, CODE, CHANNELS and AGENCY or AGENCY_CODE. Check that the header is in the first few rows."
                 if last_missing is None else
-                f"Missing required columns: {sorted(last_missing)}. Required: AGENCY, NAME, CODE, CHANNELS"
+                f"Missing required columns: {sorted(last_missing)}. Required: NAME, CODE, CHANNELS and AGENCY or AGENCY_CODE"
             )
             raise HTTPException(status_code=400, detail=detail)
     except Exception as e:
@@ -281,6 +285,7 @@ async def bulk_upload_entities(
 
     agencies = (await db.execute(select(Agency).where(Agency.user_id == current_user.id))).scalars().all()
     resolve_agency = _agency_resolver(agencies)
+    resolve_code = code_resolver(agencies)
 
     total = len(df)
     success = 0
@@ -289,14 +294,22 @@ async def bulk_upload_entities(
     for i, row in df.iterrows():
         row_num = i + used_header_row + 2
         agency_raw = _cell(row.get("AGENCY"))
+        agency_code_raw = _cell(row.get("AGENCY_CODE"))
         name = _cell(row.get("NAME"))
         code = _cell(row.get("CODE"))
-        if not agency_raw or not name or not code:
-            errors.append(f"Row {row_num}: AGENCY, NAME and CODE are required.")
+        if not (agency_raw or agency_code_raw) or not name or not code:
+            errors.append(f"Row {row_num}: AGENCY (or AGENCY_CODE), NAME and CODE are required.")
             continue
-        agency, why = resolve_agency(
-            agency_raw, _cell(row.get("AGENCY_BRANCH")), _cell(row.get("CHANNELS")),
-        )
+        # The code is exact, so it wins when both are filled. A BOTH entity scope
+        # does not pick a channel, so it leaves a two-channel code ambiguous.
+        if agency_code_raw:
+            scope_raw = norm_channel(_cell(row.get("CHANNELS")))
+            agency, why = resolve_code(agency_code_raw, scope_raw if scope_raw in CHANNELS else None)
+            agency_raw = agency_raw or agency_code_raw
+        else:
+            agency, why = resolve_agency(
+                agency_raw, _cell(row.get("AGENCY_BRANCH")), _cell(row.get("CHANNELS")),
+            )
         if agency is None:
             errors.append(f"Row {row_num}: {why}")
             continue
@@ -315,9 +328,11 @@ async def bulk_upload_entities(
                 name=name,
                 code=code,
                 channels=_validate_scope(agency, row.get("CHANNELS")),
-                address=_cell(row.get("ADDRESS")) or None,
-                state=_cell(row.get("STATE")) or None,
-                city=_cell(row.get("CITY")) or None,
+                # Blank means "same as the agency", as on the Add Entity form —
+                # an entity is an office of the branch and usually sits there.
+                address=_cell(row.get("ADDRESS")) or agency.address,
+                state=_cell(row.get("STATE")) or agency.state,
+                city=_cell(row.get("CITY")) or agency.city,
                 is_active=is_active,
             ))
             await db.commit()
@@ -344,9 +359,11 @@ async def download_entity_template():
     # CHANNELS is GDS | LCC | BOTH and must sit inside the agency's own scope. It
     # doubles as the tie-breaker when one branch is onboarded on both channels as
     # two agencies: the row lands under the agency whose channel it names.
-    ws.append(["AGENCY", "AGENCY_BRANCH", "NAME", "CODE", "CHANNELS", "ADDRESS", "STATE", "CITY", "ACTIVE"])
-    ws.append(["Lords Travels", "DEL", "Lords Delhi HO", "DEL-001", "GDS", "12 CP", "Delhi", "New Delhi", "yes"])
-    ws.append(["Lords Travels", "DEL", "Lords Delhi Sales", "DEL-002", "LCC", "8 Nehru Place", "Delhi", "New Delhi", "yes"])
+    # AGENCY_CODE (AG-0001) may stand in for AGENCY + AGENCY_BRANCH and wins when
+    # set. ADDRESS / STATE / CITY left blank are taken from the agency.
+    ws.append(["AGENCY_CODE", "AGENCY", "AGENCY_BRANCH", "NAME", "CODE", "CHANNELS", "ADDRESS", "STATE", "CITY", "ACTIVE"])
+    ws.append(["", "Lords Travels", "DEL", "Lords Delhi HO", "DEL-001", "GDS", "12 CP", "Delhi", "New Delhi", "yes"])
+    ws.append(["AG-0001", "", "", "Lords Delhi Sales", "DEL-002", "LCC", "", "", "", "yes"])
 
     bio = BytesIO()
     wb.save(bio)

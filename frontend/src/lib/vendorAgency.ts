@@ -22,6 +22,10 @@ export type VendorAgency = {
   branch_code: string;
   channels: string;             // GDS | LCC (| legacy BOTH)
   supplier_id: number | null;   // the supplier-master row it was copied from; null if typed by hand
+  agency_code: string | null;   // AG-0001 … — the Supplier Code a tabbed deal template carries
+  // Typed in by hand and sent to the platform admin. Still fully usable for deals —
+  // they match statements by name until the approval back-fills supplier_id.
+  supplier_request_status?: "pending" | "approved" | "rejected" | null;
   is_active: boolean;
 };
 
@@ -68,6 +72,9 @@ export function vendorAgencyOptions(all: VendorAgency[], keepId?: number | null)
     let label = baseLabel(a);
     if ((counts.get(label) ?? 0) > 1) label = `${a.name} — ${a.branch_name || a.branch_code} (${a.branch_code}) · ${a.channels}`;
     if (!a.is_active) label += " (inactive)";
+    // Listed like any other — deals can be loaded for it today — but say why it has
+    // no supplier record yet, so nobody mistakes it for a typo'd duplicate.
+    else if (a.supplier_id == null && a.supplier_request_status === "pending") label += " (awaiting approval)";
     byLabel.set(label, a);
     byId.set(a.id, label);
   }

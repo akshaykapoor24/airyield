@@ -23,6 +23,8 @@ venv.bak/
 uploads/
 # Generated Report download workbooks (local-storage fallback; see config.REPORTS_LOCAL_DIR)
 report_files/
+# Received email and attachments (local-storage fallback; see config.MAIL_LOCAL_DIR) — real mail, never commit
+mail_files/
 
 # ─── Distribution / packaging ─────────────────────────────────────────────────
 dist/

@@ -34,7 +34,7 @@ export default function LoginPage() {
       if (msg.toLowerCase().includes("verify")) setNeedsVerify(true);
       return;
     }
-    router.push("/dashboard");
+    router.push("/dashboard/revenue");
   };
 
   const handleResend = async () => {

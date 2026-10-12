@@ -2,66 +2,52 @@
 
 // Customer data → Statement.
 //
-// The selling-side view of the ticket book: every statement, and every ticket
-// across them. Same data as Internal Statement — one `ticket_statements` /
-// `uploaded_tickets` pair, not a second copy — but entered through a form that
-// asks WHO the tickets were sold to instead of which vendor file they came from.
-// That tag is what the customer-side commission run prices against.
+// The selling-side view of the ticket book, laid out like Vendors data → Statements:
+// one tab per kind of customer the tickets were sold to — B2B (agencies), Corporate and
+// Direct — each with its own uploads list, Template and Upload Statement. Same data as
+// Internal Statement (one `ticket_statements` / `uploaded_tickets` pair, not a copy),
+// entered through the wizard in "customer" mode, which records WHO the tickets were sold
+// to; that tag is what the customer-side commission run prices against.
+//
+// Statements are only added by upload here. Punching single tickets in by hand stays in
+// the sidebar's Internal Statement module.
 
 import { useState } from "react";
-import Link from "next/link";
-import { FilePlus, Layers, Ticket, Upload } from "lucide-react";
-import StatementsView from "@/components/tickets/StatementsView";
+import { Briefcase, Building2, Ticket, User } from "lucide-react";
+import StatementsView, { type StatementCustomerType } from "@/components/tickets/StatementsView";
 import AllTicketsView from "@/components/tickets/AllTicketsView";
 
-type View = "statements" | "tickets";
+type Tab = StatementCustomerType | "tickets";
 
-const VIEWS: { id: View; label: string; hint: string; icon: typeof Layers }[] = [
-  { id: "statements", label: "Statement wise", hint: "Grouped by upload or entry batch", icon: Layers },
-  { id: "tickets",    label: "All tickets",    hint: "Every ticket, flat across statements", icon: Ticket },
+const TABS: { id: Tab; label: string; hint: string; icon: typeof Ticket }[] = [
+  { id: "agency",    label: "B2B",         hint: "Tickets sold to your sub-agencies (Agency Master)", icon: Building2 },
+  { id: "corporate", label: "Corporate",   hint: "Tickets sold to corporates (Corporate Master)",     icon: Briefcase },
+  { id: "direct",    label: "Direct",      hint: "Tickets sold to direct customers (Employee Master)", icon: User },
+  { id: "tickets",   label: "All tickets", hint: "Every ticket, flat across statements",             icon: Ticket },
 ];
 
 export default function CustomerStatementPage() {
-  const [view, setView] = useState<View>("statements");
+  const [tab, setTab] = useState<Tab>("agency");
 
   return (
-    <div className="space-y-5">
-      <div className="flex items-start justify-between gap-3 flex-wrap">
-        <div>
-          <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-0.5">Customer Data</p>
-          <h1 className="text-xl font-bold text-gray-900 uppercase tracking-wide">Statement</h1>
-          <p className="text-xs text-gray-500 mt-0.5">
-            {view === "statements"
-              ? "Tickets you sold, grouped by statement — tagged B2B, corporate or direct"
-              : "Every ticket you sold, across all statements"}
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Link
-            href="/customers/statements/create"
-            className="flex items-center gap-1.5 px-4 py-2 border border-gray-200 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-50"
-          >
-            <FilePlus className="w-3.5 h-3.5" />
-            Create Ticket
-          </Link>
-          <Link
-            href="/customers/statements/upload"
-            className="flex items-center gap-1.5 px-4 py-2 bg-[#1e3a5f] text-white rounded-lg text-sm font-semibold hover:bg-[#16304f]"
-          >
-            <Upload className="w-3.5 h-3.5" />
-            Upload Statement
-          </Link>
-        </div>
+    <div className="space-y-4">
+      <div>
+        <h1 className="text-lg font-bold text-gray-900 leading-tight">Statement</h1>
+        <p className="text-xs text-gray-500 mt-0.5">
+          {tab === "tickets"
+            ? "Every ticket you sold, across all statements"
+            : "Tickets you sold, one statement per upload — by who they were sold to"}
+        </p>
       </div>
 
       <div className="flex items-center gap-1 border-b border-gray-200">
-        {VIEWS.map(({ id, label, hint, icon: Icon }) => (
+        {TABS.map(({ id, label, hint, icon: Icon }) => (
           <button
             key={id}
-            onClick={() => setView(id)}
+            onClick={() => setTab(id)}
             title={hint}
             className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors ${
-              view === id
+              tab === id
                 ? "border-[#1e3a5f] text-[#1e3a5f]"
                 : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
             }`}
@@ -72,12 +58,11 @@ export default function CustomerStatementPage() {
         ))}
       </div>
 
-      {/* Both stay mounted so switching back keeps filters and page position. */}
-      <div className={view === "statements" ? "" : "hidden"}>
-        <StatementsView showCustomer />
-      </div>
-      <div className={view === "tickets" ? "" : "hidden"}>
-        <AllTicketsView />
+      {/* One list, re-filtered per tab (keyed so each tab starts with clean filters);
+          All tickets stays mounted so switching back keeps its page position. */}
+      {tab !== "tickets" && <StatementsView key={tab} showCustomer customerType={tab} allowDelete apiBase="/tickets" />}
+      <div className={tab === "tickets" ? "" : "hidden"}>
+        <AllTicketsView allowDelete />
       </div>
     </div>
   );

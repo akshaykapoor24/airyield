@@ -246,3 +246,16 @@ class SoldTicketsResponse(BaseModel):
     tickets: list[SoldTicketRead]
     summary: SoldTicketsSummary
     place_of_supply: Optional[PlaceOfSupplyRead] = None
+
+
+class EmployeeCodeSuggestion(BaseModel):
+    """What auto mode would issue now. `pattern` reads like EMP-####."""
+    code: str
+    pattern: str
+
+
+class EmployeeCodeCheck(BaseModel):
+    """A hand-typed code as it would be stored, or why it cannot be."""
+    code: str
+    pattern: Optional[str] = None
+    error: Optional[str] = None

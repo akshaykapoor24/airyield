@@ -20,7 +20,7 @@ const INDIA_AIRPORTS = new Set([
  * server will fill in. Display only — a derived value is never posted, because
  * posting it would make it indistinguishable from a deliberate choice.
  */
-function predictSegmentType(sector: string): "Domestic" | "International" | null {
+export function predictSegmentType(sector: string): "Domestic" | "International" | null {
   const [origin, dest] = sector.trim().toUpperCase().split("/");
   if (!origin || !dest) return null;
   return INDIA_AIRPORTS.has(origin) && INDIA_AIRPORTS.has(dest) ? "Domestic" : "International";

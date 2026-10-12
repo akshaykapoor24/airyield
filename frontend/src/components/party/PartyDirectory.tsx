@@ -489,34 +489,57 @@ export default function PartyDirectory({ kind, mode }: { kind: PartyKind; mode: 
                     className={`border-b border-gray-50 hover:bg-blue-50/40 transition-colors group cursor-pointer ${idx % 2 === 0 ? "bg-white" : "bg-gray-50/30"}`}
                   >
                     <td className={`${CELL} min-w-40`}>
+                      {/* Name on its own line(s), codes underneath — the code chip used to sit
+                          beside the name and squeeze it onto two lines. Width is fixed on an
+                          inner div because an auto-layout table ignores a cell's max-width. */}
+                      <div className="w-60">
                       <div className="flex items-center gap-1.5">
-                        <span className="font-semibold text-[12px] text-gray-800">{partyName(p)}</span>
-                        {!isMaster && <ChevronRight className="w-3 h-3 text-gray-300 group-hover:text-[#1e3a5f]" />}
+                        <span className="font-semibold text-[12px] text-gray-800 leading-snug line-clamp-2"
+                          title={partyName(p)}>{partyName(p)}</span>
+                        {!isMaster && <ChevronRight className="w-3 h-3 shrink-0 text-gray-300 group-hover:text-[#1e3a5f]" />}
                       </div>
                       {isCorporate ? (
-                        (corporateTypeShortLabel(p.corporate_type) || p.customer_code || p.account_code) && (
-                          <p className={SUBLINE}>
-                            {[
-                              corporateTypeShortLabel(p.corporate_type) && (
-                                <span key="type" title={corporateTypeLabel(p.corporate_type)}>{corporateTypeShortLabel(p.corporate_type)}</span>
-                              ),
-                              p.customer_code && <span key="code" className="font-mono text-gray-500" title="Customer Code">{p.customer_code}</span>,
-                              p.account_code && <span key="acc" className="font-mono text-gray-500" title="Account Code">A/c {p.account_code}</span>,
-                            ].filter(Boolean).map((part, i) => <span key={i}>{i > 0 && " · "}{part}</span>)}
-                          </p>
+                        (p.corporate_code || corporateTypeShortLabel(p.corporate_type) || p.customer_code || p.account_code) && (
+                          <div className="flex items-center gap-1.5 flex-wrap mt-1">
+                            {p.corporate_code && (
+                              <span className="px-1.5 py-px rounded bg-sky-50 ring-1 ring-sky-100 text-sky-700 text-[10px] font-mono font-semibold whitespace-nowrap" title="Corporate Code">
+                                {p.corporate_code}
+                              </span>
+                            )}
+                            {(corporateTypeShortLabel(p.corporate_type) || p.customer_code || p.account_code) && (
+                              <span className="text-[10px] text-gray-400 whitespace-nowrap">
+                                {[
+                                  corporateTypeShortLabel(p.corporate_type) && (
+                                    <span key="type" title={corporateTypeLabel(p.corporate_type)}>{corporateTypeShortLabel(p.corporate_type)}</span>
+                                  ),
+                                  p.customer_code && <span key="code" className="font-mono text-gray-500" title="Customer Code">{p.customer_code}</span>,
+                                  p.account_code && <span key="acc" className="font-mono text-gray-500" title="Account Code">A/c {p.account_code}</span>,
+                                ].filter(Boolean).map((part, i) => <span key={i}>{i > 0 && " · "}{part}</span>)}
+                              </span>
+                            )}
+                          </div>
                         )
                       ) : (
                         (p.employee_code || p.customer_code || p.account_code || p.title) && (
-                          <p className={SUBLINE}>
-                            {[
-                              p.employee_code && <span key="emp" className="font-mono text-gray-500">{p.employee_code}</span>,
-                              p.customer_code && <span key="cust" className="font-mono text-gray-500" title="Customer Code">{p.customer_code}</span>,
-                              p.account_code && <span key="acc" className="font-mono text-gray-500" title="Account Code">A/c {p.account_code}</span>,
-                              p.title,
-                            ].filter(Boolean).map((part, i) => <span key={i}>{i > 0 && " · "}{part}</span>)}
-                          </p>
+                          <div className="flex items-center gap-1.5 flex-wrap mt-1">
+                            {p.employee_code && (
+                              <span className="px-1.5 py-px rounded bg-sky-50 ring-1 ring-sky-100 text-sky-700 text-[10px] font-mono font-semibold whitespace-nowrap" title="Employee Code">
+                                {p.employee_code}
+                              </span>
+                            )}
+                            {(p.customer_code || p.account_code || p.title) && (
+                              <span className={`${SUBLINE} mt-0 whitespace-nowrap`}>
+                                {[
+                                  p.customer_code && <span key="cust" className="font-mono text-gray-500" title="Customer Code">{p.customer_code}</span>,
+                                  p.account_code && <span key="acc" className="font-mono text-gray-500" title="Account Code">A/c {p.account_code}</span>,
+                                  p.title,
+                                ].filter(Boolean).map((part, i) => <span key={i}>{i > 0 && " · "}{part}</span>)}
+                              </span>
+                            )}
+                          </div>
                         )
                       )}
+                      </div>
                     </td>
                     {isCorporate ? (
                       <LocationCell city={p.city} state={p.state} />

@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import String, DateTime, Boolean, Numeric, Integer, ForeignKey, Text
+from sqlalchemy import String, DateTime, Boolean, Numeric, Integer, ForeignKey, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
@@ -23,6 +23,11 @@ class Corporate(Base):
     passenger by name and gets its tickets through its customers instead.
     """
     __tablename__ = "corporates"
+    __table_args__ = (
+        # One corporate code per corporate within the owner's book. See
+        # services/corporate_code.py.
+        UniqueConstraint("tenant_id", "created_by_id", "corporate_code", name="uq_corporates_owner_code"),
+    )
 
     id:            Mapped[int]      = mapped_column(primary_key=True)
     tenant_id:     Mapped[int | None] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=True, index=True)
@@ -30,6 +35,10 @@ class Corporate(Base):
 
     company:       Mapped[str | None] = mapped_column(String(255), nullable=True)   # the corporate's NAME — required by the API
     corporate_type: Mapped[str | None] = mapped_column(String(50), nullable=True)   # 'proprietorship' | 'private_limited' | … (see api/v1/corporates.py)
+    # OUR identifier — issued CO-0001, CO-0002 … unless typed in, in which case the
+    # typed code's pattern is the one later auto codes continue. Unique per owner.
+    # Nullable only for rows created before it; the migration backfilled them.
+    corporate_code: Mapped[str | None] = mapped_column(String(30), nullable=True, index=True)
     # The user's own references for this corporate, both optional and NOT identifiers (no
     # unique index — `company` is what identifies a corporate). `customer_code` is stored
     # trimmed + uppercased, like customers.employee_code and agencies.customer_code;

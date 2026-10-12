@@ -271,6 +271,10 @@ class ConfirmUploadPayload(DealScopeFields):
     source_agent:    Optional[str]  = None  # auto-set from filename if omitted
     deal_tag:        Optional[str]  = "standard"  # "standard" | "adhoc"
     direction:       str            = "inbound"   # "inbound" (received) | "outbound" (floated to a sub-agency)
+    # What Step 1 picked — "airline" | "b2b". Authoritative when sent: before it existed
+    # the kind was inferred from business_type, which a flat sheet without a Business
+    # Type column leaves blank, so a B2B upload saved as airline deals and dropped its agency.
+    deal_type:       Optional[str]  = None
     issue_date:      Optional[str]  = None   # ISO string "2026-03-18"
     notes:           Optional[str]  = None
     # deal header (same as new deal form)

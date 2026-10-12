@@ -298,6 +298,126 @@ class BulkClosingPreviewPayload(BaseModel):
 # UPLOAD FLOW  — Step 1: extract,  Step 2: confirm
 # ══════════════════════════════════════════════════════════════════════════════
 
+class SupplierCheckResult(BaseModel):
+    status: str                         # match | mismatch | unknown
+    message: str
+    found: Optional[str] = None
+    found_agency_ids: list[int] = []
+    basis: str = "name"                 # name | code
+
+
+@router.post("/upload/check-supplier", response_model=SupplierCheckResult)
+async def check_deal_supplier(
+    file: UploadFile = File(...),
+    agency_id: int = Form(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Before an incoming B2B upload is extracted: is the file from the picked supplier?
+
+    Read-only and cheap — it reads names and a Supplier Code column, nothing more. See
+    services/deal_supplier_check.py for what counts as evidence and why a mismatch is
+    only reported on strong evidence.
+    """
+    agency = (await db.execute(
+        select(Agency).where(Agency.id == agency_id, Agency.user_id == current_user.id)
+    )).scalar_one_or_none()
+    if agency is None:
+        raise HTTPException(status_code=404, detail="Supplier agency not found in your Agency Master.")
+    return await _party_verdict(db, current_user, file, agency=agency)
+
+
+@router.post("/upload/check-scope", response_model=SupplierCheckResult)
+async def check_deal_scope(
+    file: UploadFile = File(...),
+    agency_id: int | None = Form(default=None),
+    corporate_id: int | None = Form(default=None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Before an OUTGOING upload is extracted: is this file for the picked customer?
+
+    The same check as incoming, pointed at the deal's scope instead of its supplier: the
+    customer's code in a code column wins when present, otherwise names decide. Attaching
+    Akbar's PLB sheet to a deal for Bhasin is reported as Akbar's file, and a file naming
+    no one is "unknown" — the user confirms it rather than it passing silently.
+    """
+    if (agency_id is None) == (corporate_id is None):
+        raise HTTPException(status_code=400, detail="Send exactly one of agency_id or corporate_id.")
+    if agency_id is not None:
+        agency = (await db.execute(
+            select(Agency).where(Agency.id == agency_id, Agency.user_id == current_user.id)
+        )).scalar_one_or_none()
+        if agency is None:
+            raise HTTPException(status_code=404, detail="That agency is not in your Agency Master.")
+        return await _party_verdict(db, current_user, file, agency=agency)
+    corporate = (await db.execute(select(Corporate).where(
+        Corporate.id == corporate_id, Corporate.tenant_id == current_user.tenant_id,
+        Corporate.created_by_id == current_user.id,
+    ))).scalar_one_or_none()
+    if corporate is None:
+        raise HTTPException(status_code=404, detail="That corporate is not in your Corporate Master.")
+    return await _party_verdict(db, current_user, file, corporate=corporate)
+
+
+async def _party_verdict(db: AsyncSession, user: User, file: UploadFile, *,
+                         agency: Agency | None = None, corporate: Corporate | None = None
+                         ) -> "SupplierCheckResult":
+    """Does `file` belong to this agency (or corporate)? One check for both directions.
+
+    The picked party is the candidate; everyone else the file could plausibly be from or
+    for is a rival: the user's other agencies, their corporates, and the supplier master.
+    services/deal_supplier_check.check weighs the evidence.
+    """
+    from app.models.airline import Airline
+    from app.services import deal_supplier_check as dsc
+
+    content = await file.read(50 * 1024 * 1024 + 1)
+    if len(content) > 50 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="File exceeds 50 MB limit")
+    text = dsc.read_file_text(content, file.filename or "upload")
+
+    if agency is not None:
+        selected = dsc.Candidate(label=agency.name.strip(), name=agency.name,
+                                 agency_ids=[agency.id], code=agency.agency_code)
+    else:
+        selected = dsc.Candidate(label=(corporate.company or "").strip(), name=corporate.company or "",
+                                 code=corporate.corporate_code)
+    mine = selected.name.strip().lower()
+
+    by_name: dict[str, dsc.Candidate] = {}
+    siblings: list[dsc.Candidate] = []
+    for a in (await db.execute(select(Agency).where(Agency.user_id == user.id))).scalars():
+        key = a.name.strip().lower()
+        if key == mine:
+            # The same vendor's other branches / channels are not "another party" by
+            # name — but a code column can name one of them (Delhi's code, Mumbai picked).
+            if agency is not None and a.id != agency.id and a.agency_code:
+                label = f"{a.name.strip()} — {a.branch_name or a.branch_code} · {a.channels}"
+                siblings.append(dsc.Candidate(label=label, name=a.name, agency_ids=[a.id], code=a.agency_code))
+            continue
+        c = by_name.setdefault(key, dsc.Candidate(label=a.name.strip(), name=a.name, code=a.agency_code))
+        c.agency_ids.append(a.id)
+    # Corporates: an outgoing sheet meant for one corporate can name another. Counted as
+    # the user's own parties (they rank like agencies), but never offered as a "switch".
+    for c in (await db.execute(select(Corporate).where(
+        Corporate.tenant_id == user.tenant_id, Corporate.created_by_id == user.id,
+    ))).scalars():
+        key = (c.company or "").strip().lower()
+        if key and key != mine and key not in by_name:
+            by_name[key] = dsc.Candidate(label=c.company.strip(), name=c.company, code=c.corporate_code,
+                                         agency_ids=[])
+    # Vendors not onboarded here can still be who the file is from.
+    for (n,) in (await db.execute(select(Supplier.name).distinct())).all():
+        key = (n or "").strip().lower()
+        if key and key != mine and key not in by_name:
+            by_name[key] = dsc.Candidate(label=n.strip(), name=n)
+
+    airline_names = [n for (n,) in (await db.execute(select(Airline.name))).all() if n]
+    verdict = dsc.check(text, selected, list(by_name.values()), airline_names, code_owners=siblings)
+    return SupplierCheckResult(**verdict.__dict__)
+
+
 @router.post("/upload/extract", response_model=ExtractionPreview)
 async def extract_deal_file(
     file: UploadFile = File(...),
@@ -348,6 +468,9 @@ def _fallback_valid_to(valid_from: date, contract_year: str) -> date:
 async def ai_extract_deals(
     file: UploadFile = File(...),
     valid_from: str | None = Form(default=None),
+    # Incoming B2B: the supplier picked in step 1. A multi-supplier spreadsheet (a
+    # vendor comparison with a Source column) is narrowed to that supplier's rows.
+    agency_id: int | None = Form(default=None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -367,14 +490,25 @@ async def ai_extract_deals(
     file.file = _io.BytesIO(chunk)  # type: ignore[assignment]
     await file.seek(0)
 
-    result = await AIDealExtractionService.extract(file)
+    supplier_name = None
+    if agency_id is not None:
+        agency = (await db.execute(
+            select(Agency).where(Agency.id == agency_id, Agency.user_id == current_user.id)
+        )).scalar_one_or_none()
+        supplier_name = agency.name if agency else None
+
+    result = await AIDealExtractionService.extract(file, supplier_name=supplier_name)
     if result.get("unreadable"):
         # Better an honest refusal than a wrong-but-plausible layout — the
         # column-mapping path handles anything this parser can't.
+        is_sheet = (file.filename or "").lower().endswith((".xlsx", ".xlsm", ".xls", ".csv"))
         raise HTTPException(
             status_code=422,
-            detail="This PDF's table structure could not be read. "
-                   "Turn off AI Extraction and use column mapping instead.",
+            detail=("No deal table could be found in this spreadsheet — it needs a header row "
+                    "naming the airline and rate columns. Turn off AI Extraction and use column "
+                    "mapping instead." if is_sheet else
+                    "This PDF's table structure could not be read. "
+                    "Turn off AI Extraction and use column mapping instead."),
         )
     deals = [AIDeal(**d) for d in result.get("deals", [])]
 
@@ -1207,7 +1341,11 @@ async def confirm_upload(
 
     # Floated (outbound) deals are always B2B — you can't float a deal back to an airline.
     direction = DealDirection.OUTBOUND if (payload.direction or "").lower() == "outbound" else DealDirection.INBOUND
-    use_b2b = bool(payload.business_type) or direction == DealDirection.OUTBOUND
+    use_b2b = (
+        (payload.deal_type or "").strip().lower() == "b2b"
+        or bool(payload.business_type)
+        or direction == DealDirection.OUTBOUND
+    )
     batch_id = str(uuid.uuid4())
 
     # WHO this deal is for. Outbound only; inbound is forced to ALL. The label it
@@ -1945,6 +2083,87 @@ async def list_deal_batches(
     ]
 
 
+class BatchDeleteResult(BaseModel):
+    batch_id: str
+    deals_deleted: int
+    statements_deleted: int
+
+
+@router.delete("/batches/{batch_id}", response_model=BatchDeleteResult)
+async def delete_deal_batch(
+    batch_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Delete one uploaded statement (batch) and every deal that came in with it.
+
+    What goes, in one transaction:
+      * the batch's DealStatement rows — and through deals.statement_id ON DELETE
+        CASCADE, every deal on them with its incentives, slabs and rules;
+      * the approval records of those deals. deal_approvals points at a deal by
+        (deal_type, deal_id) with no foreign key, so nothing would remove them;
+      * the batch row itself.
+    What stays: commission and income-board rows keep their numbers and lose only
+    the link (their deal FKs are ON DELETE SET NULL) — a statement already billed
+    against must not silently rewrite history.
+
+    The source file in storage is removed after the commit, best-effort: a file
+    that outlives its batch is harmless, a batch that outlives a failed delete is not.
+    """
+    batch = await db.scalar(
+        select(DealBatch).where(
+            DealBatch.batch_id == batch_id,
+            DealBatch.tenant_id == current_user.tenant_id,
+            DealBatch.created_by_id == current_user.id,
+        )
+    )
+    if batch is None:
+        raise HTTPException(status_code=404, detail="Statement not found")
+
+    statements = (await db.execute(
+        select(DealStatement).where(
+            DealStatement.batch_id == batch_id,
+            DealStatement.tenant_id == current_user.tenant_id,
+            DealStatement.created_by_id == current_user.id,
+        )
+    )).scalars().all()
+    statement_ids = [st.id for st in statements]
+
+    deal_ids: list[int] = []
+    if statement_ids:
+        deal_ids = [i for (i,) in (await db.execute(
+            select(UnifiedDeal.id).where(UnifiedDeal.statement_id.in_(statement_ids))
+        )).all()]
+
+    if deal_ids:
+        approvals = (await db.execute(
+            select(DealApproval)
+            .options(selectinload(DealApproval.steps))
+            .where(DealApproval.deal_type == "unified", DealApproval.deal_id.in_(deal_ids))
+        )).scalars().all()
+        for appr in approvals:
+            for step in appr.steps:
+                await db.delete(step)
+            await db.delete(appr)
+        await db.flush()
+
+    for st in statements:
+        await db.delete(st)          # ORM + DB cascade take the deals with it
+    file_url = batch.file_url
+    await db.delete(batch)
+    await db.commit()
+
+    if file_url:
+        try:
+            from app.services import gcs as gcs_service
+            from app.config import settings
+            await gcs_service.delete_blob(file_url, settings.GCS_DEALS_BUCKET_NAME)
+        except Exception:
+            logging.getLogger(__name__).warning("deal batch %s: source file not removed", batch_id, exc_info=True)
+
+    return BatchDeleteResult(batch_id=batch_id, deals_deleted=len(deal_ids), statements_deleted=len(statements))
+
+
 @router.get("/batches/{batch_id}", response_model=DealBatchRead)
 async def get_deal_batch(
     batch_id: str,
@@ -2126,6 +2345,9 @@ async def _update_unified_deal(
     #     model_fields_set is what distinguishes "not sent" from "sent as null".
     #     Re-deriving the ids from the scope afterwards means no client payload can
     #     reach the CHECK at all — it degrades to a backstop against direct SQL.
+    # Who the outgoing deal is FOR, before the edit — its entity and credentials belong to
+    # that party, so moving the deal to another one must not carry them over (see 1d).
+    previous_scope = (deal.scope_type, deal.agency_id, deal.corporate_id, deal.agency_entity_id)
     if "scope_type" in payload.model_fields_set and payload.scope_type is not None:
         scope = await _resolve_scope(
             db, current_user, deal.direction,
@@ -2161,10 +2383,37 @@ async def _update_unified_deal(
         vendor_agency = await _resolve_vendor_agency(
             db, current_user, deal.direction, deal.deal_type.value, payload.vendor_agency_id,
         )
+        previous_agency_id = deal.vendor_agency_id
         deal.vendor_agency_id = vendor_agency.id if vendor_agency is not None else None
         if vendor_agency is not None:
             deal.supplier_name = vendor_agency.name
             deal.supplier_id = vendor_agency.supplier_id
+
+        # Entity and Login IDs belong to the AGENCY, so on this path — only the full
+        # Create Deal form sends vendor_agency_id — they are taken exactly as sent,
+        # null included. The generic loop above drops nulls (exclude_none), which left
+        # a deal moved from Lords to Riya still carrying Lords' entity and mirror ID,
+        # and made clearing either field by hand impossible. The inline repository
+        # edits never send vendor_agency_id, so their partial payloads are unaffected.
+        agency_changed = deal.vendor_agency_id != previous_agency_id
+        for field in ("entity", "login_id", "login_ids"):
+            if field in payload.model_fields_set:
+                setattr(deal, field, getattr(payload, field))
+            elif agency_changed:
+                setattr(deal, field, None)
+
+    # 1d. The same rule for an OUTGOING deal's customer: its entity and login ids are the
+    #     scoped agency's, so when the scope is part of the edit they are taken exactly as
+    #     sent (nulls included — the generic loop above drops them), and when the party
+    #     itself changed (agency A -> agency B, or agency -> corporate / common) anything
+    #     not resent is cleared rather than left pointing at the previous customer.
+    if deal.direction == DealDirection.OUTBOUND and "scope_type" in payload.model_fields_set:
+        scope_changed = previous_scope != (deal.scope_type, deal.agency_id, deal.corporate_id, deal.agency_entity_id)
+        for field in ("entity", "login_id", "login_ids"):
+            if field in payload.model_fields_set:
+                setattr(deal, field, getattr(payload, field))
+            elif scope_changed:
+                setattr(deal, field, None)
 
     # 2. Rebuild incentive/slab/rule rows only when the edit touched them.
     touches_relations = (

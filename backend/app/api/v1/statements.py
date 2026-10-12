@@ -555,6 +555,7 @@ def _supplier_link(tenant_id: int, slug: str, batch_id: str, supplier) -> Statem
         supplier_id=supplier.id, supplier_name=supplier.name,
         supplier_code=supplier.code,
         supplier_branch=supplier.branch or supplier.city,
+        agency_id=getattr(supplier, "agency_id", None),
     )
 
 
@@ -565,10 +566,53 @@ def _supplier_fields(supplier) -> dict:
         "supplier_name": supplier.name if supplier else None,
         "supplier_code": supplier.code if supplier else None,
         "supplier_branch": (supplier.branch or supplier.city) if supplier else None,
+        "agency_id": getattr(supplier, "agency_id", None) if supplier else None,
     }
 
 
-async def _supplier_selection(db: AsyncSession, slug: str, supplier_id: int | None):
+# The channel a third-party statement trades on — its agency must be onboarded on it.
+_SLUG_CHANNEL = {"tp-gds": "GDS", "tp-lcc": "LCC"}
+
+
+async def _agency_counterparty(db: AsyncSession, slug: str, agency_id: int, user: User):
+    """The picked Agency Master row, as the counterparty a batch is linked to.
+
+    Checked the way services/statement_agency_selection.py lays down: this user's own
+    agency, active, and trading on the statement's channel (a GDS statement against an
+    agency's LCC row would be priced against the wrong deal). An agency AWAITING approval
+    is allowed: it has no supplier-master row yet, so the batch carries supplier_id None
+    and matches deals by name — exactly as that agency's deals do — until approval
+    back-fills it (api/v1/suppliers.py::approve_supplier).
+    """
+    from types import SimpleNamespace
+    from app.models.supplier import Supplier
+    from app.services import statement_agency_selection as agency_sel
+
+    channel = _SLUG_CHANNEL.get(slug)
+    try:
+        agency = await agency_sel.resolve_for_upload(db, user, agency_id)
+        if channel:
+            agency_sel.resolve_agency_choice(agency, channel)
+        elif agency is None:
+            agency_sel.resolve_agency_choice(None, "")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    supplier = None
+    if agency.supplier_id is not None:
+        supplier = (await db.execute(select(Supplier).where(Supplier.id == agency.supplier_id))).scalar_one_or_none()
+    return SimpleNamespace(
+        id=supplier.id if supplier else None,
+        name=agency.name,
+        code=(supplier.code if supplier else None) or agency.agency_code or agency.branch_code,
+        branch=agency.branch_name or (supplier.branch if supplier else None),
+        city=agency.city,
+        agency_id=agency.id,
+    )
+
+
+async def _supplier_selection(db: AsyncSession, slug: str, supplier_id: int | None,
+                              agency_id: int | None = None, user: User | None = None):
     """The Supplier master row this upload is attributed to, or None for types that don't
     need one.
 
@@ -582,6 +626,8 @@ async def _supplier_selection(db: AsyncSession, slug: str, supplier_id: int | No
     """
     if not spec.requires_supplier(slug):
         return None
+    if agency_id is not None and user is not None:
+        return await _agency_counterparty(db, slug, agency_id, user)
     try:
         return await supplier_selection.resolve(db, supplier_id)
     except ValueError as exc:
@@ -710,6 +756,10 @@ async def extract_statement(
     slug: str,
     file: UploadFile = File(...),
     supplier_id: int | None = Form(default=None),
+    # The Agency Master row picked on upload. Preferred over supplier_id: it is
+    # channel-checked, works for agencies awaiting approval, and carries the vendor
+    # service charge the SF columns are checked against.
+    agency_id: int | None = Form(default=None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -720,7 +770,7 @@ async def extract_statement(
     """
     slug, _model = _resolve(slug)
     builder = _mapping_capable(slug)
-    supplier = await _supplier_selection(db, slug, supplier_id)
+    supplier = await _supplier_selection(db, slug, supplier_id, agency_id, current_user)
 
     content = await file.read()
     max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
@@ -843,6 +893,10 @@ async def confirm_statement(
     file: UploadFile = File(...),
     column_map: str = Form(...),
     supplier_id: int | None = Form(default=None),
+    # The Agency Master row picked on upload. Preferred over supplier_id: it is
+    # channel-checked, works for agencies awaiting approval, and carries the vendor
+    # service charge the SF columns are checked against.
+    agency_id: int | None = Form(default=None),
     header_row: int = Form(...),
     file_digest: str = Form(...),
     edits: str = Form(default="{}"),
@@ -861,7 +915,7 @@ async def confirm_statement(
     """
     slug, model = _resolve(slug)
     builder = _mapping_capable(slug)
-    supplier = await _supplier_selection(db, slug, supplier_id)
+    supplier = await _supplier_selection(db, slug, supplier_id, agency_id, current_user)
 
     try:
         colmap = json.loads(column_map or "{}")
@@ -1032,6 +1086,10 @@ async def upload_statement(
     file: UploadFile = File(...),
     tenant_airline_ids: list[int] = Form(default=[]),
     supplier_id: int | None = Form(default=None),
+    # The Agency Master row picked on upload. Preferred over supplier_id: it is
+    # channel-checked, works for agencies awaiting approval, and carries the vendor
+    # service charge the SF columns are checked against.
+    agency_id: int | None = Form(default=None),
     expected_count: int | None = Form(default=None),
     expected_amount: str | None = Form(default=None),
     db: AsyncSession = Depends(get_db),
@@ -1049,7 +1107,7 @@ async def upload_statement(
     """
     slug, model = _resolve(slug)
     airlines = await _airline_selection(db, slug, current_user, tenant_airline_ids)
-    supplier = await _supplier_selection(db, slug, supplier_id)
+    supplier = await _supplier_selection(db, slug, supplier_id, agency_id, current_user)
 
     content = await file.read()
     max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
@@ -1181,6 +1239,47 @@ async def upload_statement(
     }
 
 
+async def _annotate_service_fees(db: AsyncSession, slug: str, user: User, rows, out_rows: list[dict],
+                                 batch_id: str | None) -> dict:
+    """Adds `__kind__` / `__checks__` to each served row (services/statement_sf_check.py)
+    and returns the batch-level summary — over the WHOLE batch when one is open, not just
+    this page, so "3 rows overcharged" means the statement, not the screen."""
+    from app.models.agency import Agency
+    from app.services import statement_sf_check as sfc
+
+    batch_ids = {r.batch_id for r in rows}
+    links = {l.batch_id: l for l in (await db.execute(
+        select(StatementBatchSupplier).where(
+            StatementBatchSupplier.slug == slug,
+            StatementBatchSupplier.tenant_id == user.tenant_id,
+            StatementBatchSupplier.batch_id.in_(batch_ids),
+        )
+    )).scalars().all()}
+    agency_ids = {l.agency_id for l in links.values() if l.agency_id}
+    agencies = {a.id: a for a in (await db.execute(
+        select(Agency).where(Agency.id.in_(agency_ids), Agency.user_id == user.id)
+    )).scalars().all()} if agency_ids else {}
+    agreements = {bid: sfc.agreement_for(agencies.get(l.agency_id)) for bid, l in links.items()}
+
+    for row, out in zip(rows, out_rows):
+        out.update(sfc.check_row(row.data or {}, agreements.get(row.batch_id)))
+
+    summary_rows = out_rows
+    if batch_id:
+        _slug, model = _resolve(slug)
+        all_rows = (await db.execute(select(model.data).where(
+            model.batch_id == batch_id, *_scope(model, user)))).scalars().all()
+        summary_rows = [sfc.check_row(d or {}, agreements.get(batch_id)) for d in all_rows]
+
+    ag = agreements.get(batch_id) if batch_id else None
+    link = links.get(batch_id) if batch_id else None
+    return {
+        **sfc.summarize(summary_rows),
+        "agreement": ag.label if ag else None,
+        "agency_linked": bool(link and link.agency_id),
+    }
+
+
 @router.get("/{slug}/records")
 async def list_records(
     slug: str,
@@ -1219,6 +1318,11 @@ async def list_records(
     out_rows = [flatten_record(slug, r) for r in rows]
 
     payload = {"total": total or 0, "limit": limit, "offset": offset, "columns": cols, "rows": out_rows}
+
+    # Third-party statements: each row's kind (issue / refund) and, where the agency has a
+    # vendor service charge on record, whether its SF and GST On SF agree with it.
+    if slug in _SLUG_CHANNEL and rows:
+        payload["sf_check"] = await _annotate_service_fees(db, slug, current_user, rows, out_rows, batch_id)
 
     filters = spec.filter_specs(slug)
     if filters:
@@ -1645,6 +1749,7 @@ async def list_batches(slug: str, db: AsyncSession = Depends(get_db), current_us
             "supplier_name": suppliers[r.batch_id].supplier_name if r.batch_id in suppliers else None,
             "supplier_branch": suppliers[r.batch_id].supplier_branch if r.batch_id in suppliers else None,
             "supplier_code": suppliers[r.batch_id].supplier_code if r.batch_id in suppliers else None,
+            "agency_id": suppliers[r.batch_id].agency_id if r.batch_id in suppliers else None,
             # None for the types with no billing flow, so the shared view renders no column.
             "billing": _billing_fields(billing.get(r.batch_id)) if spec.supports_billing(slug) else None,
         }
@@ -1671,6 +1776,90 @@ async def get_batch_file_url(
     from app.services import gcs
     url = await gcs.generate_signed_url(row.file_url, _bucket(), expiry_minutes=60, inline=inline)
     return {"url": url, "file_name": row.source_file}
+
+
+class RecordEdit(BaseModel):
+    """{field: new value} for the cells being changed. Only display columns are editable."""
+    fields: dict[str, str | None]
+
+
+# Row editing is offered where a person reconciles the file line by line against a
+# consolidator: the third-party statements. Other types are system exports (BSP, airline
+# LCC) whose rows should be fixed by re-uploading, not hand-edited.
+_EDITABLE_SLUGS = {"tp-gds", "tp-lcc"}
+
+
+@router.patch("/{slug}/records/{record_id}")
+async def edit_record(
+    slug: str,
+    record_id: int,
+    payload: RecordEdit,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Correct cells of one statement row.
+
+    `data` changes; `raw_data` — the line as the vendor sent it — never does, so what the
+    consolidator actually printed stays recoverable. Each edited field is listed in
+    `data["__edited__"]` so the view can mark it.
+
+    After the edit the row is re-derived exactly as at upload (bare numbers, ISO dates, the
+    joined passenger name, a derived total fare), and its commission figure is CLEARED:
+    a figure priced off the old values must not keep being summed. Re-running commission
+    on the statement prices it again.
+    """
+    from app.services import flat_statement
+
+    slug, model = _resolve(slug)
+    if slug not in _EDITABLE_SLUGS:
+        raise HTTPException(status_code=400, detail="Rows of this statement type can't be edited — re-upload the file instead.")
+    obj = (await db.execute(
+        select(model).where(model.id == record_id, *_scope(model, current_user))
+    )).scalar_one_or_none()
+    if not obj:
+        raise HTTPException(status_code=404, detail="Record not found.")
+
+    editable = {c["field"] for c in spec.columns(slug) if not str(c["field"]).startswith("__")}
+    unknown = sorted(set(payload.fields) - editable)
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Not an editable column: {', '.join(unknown)}.")
+
+    data = dict(obj.data or {})
+    old_joined = " ".join(p for p in (data.get("first_name"), data.get("last_name")) if p)
+    edited = {f for f in str(data.get("__edited__") or "").split(",") if f}
+    for field, value in payload.fields.items():
+        value = (value or "").strip()
+        if value:
+            data[field] = value
+        else:
+            data.pop(field, None)
+        edited.add(field)
+
+    # Values the upload DERIVED must follow the edit, or they keep describing the old row:
+    # the passenger name when it was only First + Last joined, and a computed total fare.
+    if ({"first_name", "last_name"} & payload.fields.keys()
+            and data.get("passenger_name") in (old_joined, None) and "passenger_name" not in payload.fields):
+        data.pop("passenger_name", None)
+    if data.get("total_fare_source") == "derived" and "total_fare" not in payload.fields:
+        data.pop("total_fare", None)
+        data.pop("total_fare_source", None)
+    builder = flat_statement.get(spec.parser(slug) or "")
+    derive = getattr(builder, "_derive", None) if builder else None
+    if derive:
+        derive(data)
+
+    # A comma string, not a list: every other value in `data` is text, and readers
+    # (exports, facets) treat it that way.
+    data["__edited__"] = ",".join(sorted(edited))
+    obj.data = data
+    await _clear_commission(db, slug, current_user, row_ids=[obj.id])
+    await db.commit()
+    await db.refresh(obj)
+
+    out = flatten_record(slug, obj)
+    if slug in _SLUG_CHANNEL:
+        await _annotate_service_fees(db, slug, current_user, [obj], [out], None)
+    return out
 
 
 @router.delete("/{slug}/records/{record_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -167,7 +167,13 @@ function TicketReviewTable({
  * One flow rather than two copies, so the wizard, the column mapping and the
  * review grid can never drift apart between the two entry points.
  */
-export default function UploadTicketsPage({ mode = "internal" }: { mode?: "internal" | "customer" } = {}) {
+export default function UploadTicketsPage({ mode = "internal", apiBase = "/tickets", listHref }: {
+  mode?: "internal" | "customer";
+  /** "/internal-tickets" on Internal Statement — its own tables. */
+  apiBase?: string;
+  /** Where "view statements" goes after a save; the section's list by default. */
+  listHref?: string;
+} = {}) {
   const isCustomer = mode === "customer";
   const sectionBase = useStatementSectionBase();
   const router = useRouter();
@@ -190,6 +196,14 @@ export default function UploadTicketsPage({ mode = "internal" }: { mode?: "inter
   const [agency,        setAgency]        = useState("");
   // Customer mode only: WHO the tickets were sold to.
   const [tag,           setTag]           = useState<CustomerTag>(EMPTY_TAG);
+  // Opened from a Customer data → Statement tab (B2B / Corporate / Direct): start on that
+  // customer type. Read once on mount from the URL — not useSearchParams, which would need
+  // a Suspense boundary around every page that renders this wizard.
+  useEffect(() => {
+    if (!isCustomer || typeof window === "undefined") return;
+    const t = new URLSearchParams(window.location.search).get("customer_type");
+    if (t === "agency" || t === "corporate" || t === "direct") setTag({ ...EMPTY_TAG, customerType: t });
+  }, [isCustomer]);
   const [statementName, setStatementName] = useState("");
   const [agencyOptions, setAgencyOptions] = useState<string[]>([]);
   // The statement must record WHICH onboarded agency it belongs to, not just a
@@ -259,7 +273,7 @@ export default function UploadTicketsPage({ mode = "internal" }: { mode?: "inter
     setDownloading(true);
     try {
       const typeParam = statementType.toLowerCase();
-      const resp = await api.get(`/tickets/template/download?type=${typeParam}`, { responseType: "blob" });
+      const resp = await api.get(`${apiBase}/template/download?type=${typeParam}`, { responseType: "blob" });
       const url  = URL.createObjectURL(resp.data as Blob);
       const a    = downloadLinkRef.current!;
       a.href     = url;
@@ -293,7 +307,7 @@ export default function UploadTicketsPage({ mode = "internal" }: { mode?: "inter
     if (opts.headerRow !== null && opts.headerRow !== undefined) {
       form.append("header_row", String(opts.headerRow));
     }
-    const { data } = await api.post<ExtractionPreview>("/tickets/upload/extract", form);
+    const { data } = await api.post<ExtractionPreview>(`${apiBase}/upload/extract`, form);
     return data;
   }, [statementType]);
 
@@ -406,7 +420,7 @@ export default function UploadTicketsPage({ mode = "internal" }: { mode?: "inter
     setError(null);
     try {
       const { data } = await api.post<{ batch_id: string; created_count: number }>(
-        "/tickets/upload/confirm",
+        `${apiBase}/upload/confirm`,
         {
           file_name:      preview.file_name,
           rows,
@@ -430,7 +444,7 @@ export default function UploadTicketsPage({ mode = "internal" }: { mode?: "inter
         try {
           const fd = new FormData();
           fd.append("file", storedFile);
-          const res = await api.post(`/tickets/statements/${data.batch_id}/file`, fd, {
+          const res = await api.post(`${apiBase}/statements/${data.batch_id}/file`, fd, {
             headers: { "Content-Type": "multipart/form-data" },
           });
           console.log("[GCS] Ticket file upload SUCCESS | response=", res.data);
@@ -534,7 +548,7 @@ export default function UploadTicketsPage({ mode = "internal" }: { mode?: "inter
               Upload Another
             </button>
             <button
-              onClick={() => router.push(sectionBase)}
+              onClick={() => router.push(listHref ?? sectionBase)}
               className="flex items-center gap-2 px-4 py-2 bg-[#1e3a5f] text-white rounded-lg text-sm font-medium hover:bg-[#16304f]"
             >
               <FileSpreadsheet className="w-4 h-4" /> View Ticket Repository

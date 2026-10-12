@@ -3,9 +3,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
-  AlertCircle, Building2, ChevronRight, RefreshCw, Search, Ticket, X,
+  AlertCircle, Building2, ChevronRight, RefreshCw, Search, Ticket, Trash2, X,
 } from "lucide-react";
 import api from "@/lib/api";
+import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import { useStatementSectionBase } from "@/lib/statementSection";
 import Pagination from "@/components/ui/Pagination";
 import { inr, type TicketRow } from "@/lib/ticketFields";
@@ -54,7 +55,10 @@ const SELECT =
  * rows, so the statement-wise view's load-everything-and-filter-in-the-browser
  * approach does not carry over here.
  */
-export default function AllTicketsView() {
+export default function AllTicketsView({ allowDelete = false }: {
+  /** A delete button per row. Off by default, so the /tickets screens stay as they were. */
+  allowDelete?: boolean;
+} = {}) {
   // Row click must stay in whichever section this list is rendered in.
   const sectionBase = useStatementSectionBase();
   const router = useRouter();
@@ -72,6 +76,7 @@ export default function AllTicketsView() {
   const [status, setStatus] = useState("");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<TicketWithStatement | null>(null);
 
   useEffect(() => {
     const t = setTimeout(() => setDebounced(search), 300);
@@ -292,7 +297,17 @@ export default function AllTicketsView() {
                     <td className="px-4 py-2 text-xs text-right font-semibold text-emerald-700 tabular-nums whitespace-nowrap">
                       {inr(t.calculated_incentive)}
                     </td>
-                    <td className="px-4 py-2 text-right">
+                    <td className="px-4 py-2 text-right whitespace-nowrap">
+                      {allowDelete && (
+                        <button
+                          type="button"
+                          title="Delete this ticket"
+                          onClick={(e) => { e.stopPropagation(); setDeleteTarget(t); }}
+                          className="p-1.5 mr-1 rounded-md text-gray-300 hover:text-red-600 hover:bg-red-50 transition-colors"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                       <ChevronRight className="w-4 h-4 text-gray-300 group-hover:text-[#1e3a5f] transition-colors inline" />
                     </td>
                   </tr>
@@ -325,6 +340,29 @@ export default function AllTicketsView() {
             onPageChange={setPageNo}
           />
         </div>
+      )}
+
+      {deleteTarget && (
+        <ConfirmDialog
+          title="Delete ticket?"
+          confirmLabel="Delete ticket"
+          onClose={() => setDeleteTarget(null)}
+          onConfirm={async () => {
+            // A ticket on a bill is refused by the server; the dialog shows why.
+            await api.delete(`/tickets/uploads/${deleteTarget.id}`);
+            setDeleteTarget(null);
+            if (page && page.rows.length === 1 && pageNo > 1) setPageNo(pageNo - 1);
+            else await fetchPage();
+          }}
+        >
+          <p>
+            Ticket <b className="font-mono">{deleteTarget.ticket_number ?? "—"}</b>
+            {deleteTarget.pax_name ? <> — {deleteTarget.pax_name}</> : null} will be permanently deleted,
+            with its deal calculation. It is removed from its statement{" "}
+            <b>{deleteTarget.statement_name || deleteTarget.statement_agency || deleteTarget.file_name}</b>;
+            the statement and its other tickets stay.
+          </p>
+        </ConfirmDialog>
       )}
     </div>
   );

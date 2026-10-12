@@ -61,6 +61,7 @@ from app.models.bsp_summary import BspSummaryRow
 from app.models.customer_statement import CustomerStatement
 from app.models.deal import Deal
 from app.models.income_summary import IncomeSummary
+from app.models.internal_ticket import InternalTicketStatement, InternalUploadedTicket
 from app.models.lcc_detailed import LccDetailed
 from app.models.payment_ledger import VendorPayment
 from app.models.series import SeriesContract
@@ -85,7 +86,10 @@ class UsageSource:
 USAGE_SOURCES: list[UsageSource] = [
     UsageSource("deals",               "Deals",                Deal),
     UsageSource("tickets",             "Tickets",              UploadedTicket),
-    UsageSource("ticket_statements",   "Internal Statements",  TicketStatement),
+    UsageSource("ticket_statements",   "Customer Ticket Statements", TicketStatement),
+    # Internal Statement's own pair (models/internal_ticket.py), counted on its own.
+    UsageSource("internal_ticket_statements", "Internal Statements", InternalTicketStatement),
+    UsageSource("internal_tickets",    "Internal Tickets",     InternalUploadedTicket),
     UsageSource("customer_statements", "Customer Statements",  CustomerStatement),
     UsageSource("bsp",                 "BSP",                  BspStatementRow),
     UsageSource("bsp_summary",         "BSP Summary",          BspSummaryRow),
@@ -194,6 +198,12 @@ EXCLUDED_TABLES: frozenset[str] = frozenset({
     # of it — an AI call is made on behalf of a deal or statement already counted, and a
     # stored file is the upload behind rows already counted
     "ai_usage_events", "stored_objects",
+    # email intake: a connected mailbox is configuration, like a login id — the documents
+    # it brings in are counted where they land (statements, deals)
+    "mail_connections",
+    # …and the mail itself is input, not output: a statement that arrived by email is counted
+    # once, as statement rows, when it is saved — counting the email too would count it twice
+    "mail_messages", "mail_attachments",
     # config / master data owned by the workspace
     "users", "customers", "corporates", "entities", "user_entities",
     "user_login_ids", "login_ids", "agencies", "agency_entities",

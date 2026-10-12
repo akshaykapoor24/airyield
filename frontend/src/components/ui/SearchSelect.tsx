@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, Search } from "lucide-react";
+import { ChevronDown, Plus, Search } from "lucide-react";
 
 /**
  * Single-select dropdown with a search box, over a plain list of strings.
@@ -11,7 +11,7 @@ import { ChevronDown, Search } from "lucide-react";
  * master records is unusable. Styled to match the AirlinePicker panel.
  */
 export default function SearchSelect({
-  value, options, onChange, placeholder, disabled, invalid, allowCustom,
+  value, options, onChange, placeholder, disabled, invalid, allowCustom, onAddNew, addNewLabel,
 }: {
   value: string;
   options: string[];
@@ -21,6 +21,10 @@ export default function SearchSelect({
   invalid?: boolean;
   /** Keep what the user typed even when it matches nothing in the list. */
   allowCustom?: boolean;
+  /** Shows a "+ Add new" footer; called with whatever is in the search box. */
+  onAddNew?: (query: string) => void;
+  /** Footer label, e.g. "Add new agency". */
+  addNewLabel?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -99,6 +103,20 @@ export default function SearchSelect({
               </li>
             ))}
           </ul>
+          {onAddNew && (
+            <div className="border-t border-gray-100 p-1">
+              <button
+                type="button"
+                onClick={() => { onAddNew(query.trim()); setOpen(false); setQuery(""); }}
+                className="w-full flex items-center gap-1.5 text-left px-2 py-1.5 text-[11px] font-semibold text-sky-700 hover:bg-sky-50 rounded"
+              >
+                <Plus className="w-3.5 h-3.5 shrink-0" />
+                <span className="truncate">
+                  {query.trim() ? `${addNewLabel || "Add new"}: "${query.trim()}"` : addNewLabel || "Add new"}
+                </span>
+              </button>
+            </div>
+          )}
           {value && (
             <div className="border-t border-gray-100 p-1">
               <button

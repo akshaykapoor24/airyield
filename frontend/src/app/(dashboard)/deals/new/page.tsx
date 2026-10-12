@@ -596,8 +596,12 @@ export default function NewDealPage() {
     if (!agencyParty) return;
     if (!suppressAgencyResetRef.current) setLoginIds([]);
     if (!agencyId || !agencyEntityId) { setAgencyLoginIds([]); return; }
-    api.get<{ id: number; login_id: string; entity_id: number | null }[]>("/agency-login-ids/", { params: { agency_id: agencyId, entity_id: agencyEntityId, limit: 1000 } })
-      .then(r => setAgencyLoginIds(r.data))
+    // The whole agency, then narrowed here: a login id saved WITHOUT an entity (the
+    // field is optional in Agency Master) belongs to every entity of the agency, and an
+    // entity_id filter on the server could never return it. Deactivated ones are not offered.
+    api.get<{ id: number; login_id: string; entity_id: number | null; is_active?: boolean }[]>("/agency-login-ids/", { params: { agency_id: agencyId, limit: 1000 } })
+      .then(r => setAgencyLoginIds(r.data.filter(l =>
+        l.is_active !== false && (l.entity_id == null || l.entity_id === agencyEntityId))))
       .catch(() => setAgencyLoginIds([]));
   }, [agencyParty, agencyId, agencyEntityId]);
 

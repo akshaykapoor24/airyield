@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Plus, Upload, Search, RefreshCw, X, CheckCircle, XCircle, AlertCircle, MinusCircle, User, Save, Trash2, FileText, FileSpreadsheet, ChevronRight, Building2, Calendar, Hash, History, Pencil, Plane, List } from "lucide-react";
 import api from "@/lib/api";
+import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import { IncentiveTabContent, InclExclTabContent, IEFieldValue, CONTINENTS, COUNTRY_GROUPS, IncentiveRulesModal } from "@/components/deals/IncentiveInclExclShared";
 
 // ── types ── batch ─────────────────────────────────────────────────────────
@@ -879,7 +880,7 @@ export default function DealsPage() {
   type DealFilter = "all" | DealType | "agency" | "corporate" | "common";
   const [dealTypeFilter, setDealTypeFilter] = useState<DealFilter>("all");
   const [page,       setPage]       = useState(1);
-  const [repoView,   setRepoView]   = useState<"statement" | "airline" | "all">("statement"); // default to first tab
+  const [repoView,   setRepoView]   = useState<"statement" | "airline" | "all">("all"); // default to first tab — All Deals
 
   // history panel
   const [historyDealId,   setHistoryDealId]   = useState<number | null>(null);
@@ -894,6 +895,9 @@ export default function DealsPage() {
   // delete
   const [deleteTarget,    setDeleteTarget]    = useState<DealRepositoryItem | null>(null);
   const [deleteLoading,   setDeleteLoading]   = useState(false);
+  // Statement/Agency Wise: the batch whose statement — and every deal on it — is
+  // about to be deleted. The request runs inside ConfirmDialog.
+  const [batchToDelete,   setBatchToDelete]   = useState<DealBatch | null>(null);
 
   // combined incentive + incl/excl edit popup
   const [incentiveRulesPopup, setIncentiveRulesPopup] = useState<{
@@ -1133,9 +1137,9 @@ export default function DealsPage() {
           {/* ── Repository view switcher ──────────────────────────────────── */}
           <div className="flex items-center gap-1 bg-white border border-gray-200 rounded-xl p-1 w-fit">
             {([
+              { key: "all",       label: "All Deals",             icon: List },
               { key: "statement", label: "Statement/Agency Wise", icon: Building2 },
               { key: "airline",   label: "Airline Wise",          icon: Plane },
-              { key: "all",       label: "All Deals",             icon: List },
             ] as const).map(v => (
               <button key={v.key} onClick={() => setRepoView(v.key)}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
@@ -1395,8 +1399,14 @@ export default function DealsPage() {
                         {formatDate(b.created_at)}
                       </td>
 
-                      {/* Arrow */}
-                      <td className="px-2 py-3 text-right">
+                      {/* Delete + arrow. stopPropagation: the row itself opens the statement. */}
+                      <td className="px-2 py-3 text-right whitespace-nowrap">
+                        <button
+                          onClick={e => { e.stopPropagation(); setBatchToDelete(b); }}
+                          title="Delete this statement and all its deals"
+                          className="p-1.5 mr-1 rounded-lg text-red-400 hover:text-red-600 hover:bg-red-50 transition-colors">
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
                         <ChevronRight className="w-4 h-4 text-gray-300 group-hover:text-[#1e3a5f] transition-colors inline" />
                       </td>
                     </tr>
@@ -1405,6 +1415,32 @@ export default function DealsPage() {
               </tbody>
             </table>
           </div>
+          )}
+
+          {batchToDelete && (
+            <ConfirmDialog
+              title="Delete statement"
+              confirmLabel={`Delete statement + ${batchToDelete.deal_count} deal${batchToDelete.deal_count === 1 ? "" : "s"}`}
+              onConfirm={async () => {
+                await api.delete(`/deals/batches/${encodeURIComponent(batchToDelete.batch_id)}`);
+                await fetchDeals();
+              }}
+              onClose={() => setBatchToDelete(null)}
+            >
+              <p>
+                Delete the statement from{" "}
+                <span className="font-semibold text-gray-900">{batchToDelete.supplier_name || "this source"}</span>
+                {batchToDelete.file_name && <span className="text-gray-400"> ({batchToDelete.file_name})</span>}?
+              </p>
+              <p>
+                All <span className="font-semibold text-gray-900">{batchToDelete.deal_count}</span> deal
+                {batchToDelete.deal_count === 1 ? "" : "s"} uploaded with it — including active ones — and
+                their approvals are deleted too, along with the uploaded file. This cannot be undone.
+              </p>
+              <p className="text-gray-400">
+                Commission already calculated against these deals keeps its amounts; it just stops pointing at a deal.
+              </p>
+            </ConfirmDialog>
           )}
 
           {/* ── All Deal: flat per-deal table ───────────────────────────────── */}

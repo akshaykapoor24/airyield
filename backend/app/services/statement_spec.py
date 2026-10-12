@@ -137,14 +137,14 @@ _TP_GDS_FILTERS = [
     {"field": "customer_name",       "label": "Customer",  "type": "select"},
     {"field": "ticket_number",       "label": "Ticket No", "type": "text"},
     {"field": "pnr",                 "label": "PNR",       "type": "text"},
-    {"field": "passenger_name",      "label": "Passenger", "type": "text"},
+    {"field": "passenger_name",      "label": "Name",      "type": "text"},
 ]
 _TP_LCC_FILTERS = [
     {"field": "airline_master_name", "label": "Airline",   "type": "select"},
     {"field": "ticket_status",       "label": "Status",    "type": "select"},
     {"field": "customer_name",       "label": "Customer",  "type": "select"},
     {"field": "pnr",                 "label": "PNR",       "type": "text"},
-    {"field": "passenger_name",      "label": "Passenger", "type": "text"},
+    {"field": "passenger_name",      "label": "Name",      "type": "text"},
 ]
 
 
@@ -678,8 +678,27 @@ def money_fields(slug: str) -> set[str]:
     return out
 
 
+# The header row a consolidator's ticket statement actually carries (Triumphh's GDS
+# export, the format Third Party statements arrive in). The download template uses it
+# verbatim so a filled template and a real statement are the same file shape — every
+# header here is already in flat_statement's alias map. Shared by GDS and LCC on request:
+# both arrive from the same consolidators in the same layout.
+THIRD_PARTY_TEMPLATE_HEADERS = [
+    "Week", "Booked Date", "Customer Name", "Customer ID", "Airline Name", "Airline Category",
+    "S PNR", "Airline PNR", "CRS PNR", "TicketPrefix", "Ticket No", "Status", "Booking Type",
+    "Username", "Pax Type", "First Name", "Last Name", "Sector", "Flight No", "Trip Type",
+    "Travel Type", "Payment Mode", "Class", "Issuing Office", "Airline Code", "Date of Travel",
+    "Basic Fare", "YQ Fare", "Other Taxes", "SSR Amount", "Reschedule Charges",
+    "Agent Commission", "Incentive", "TDS Amount", "Service Charge", "SF", "GST On SF",
+    "Agent Penalty", "Cancellation Markup", "Net Amount",
+]
+_TEMPLATE_OVERRIDES = {"tp-gds": THIRD_PARTY_TEMPLATE_HEADERS, "tp-lcc": THIRD_PARTY_TEMPLATE_HEADERS}
+
+
 def template_headers(slug: str) -> list[str]:
     """Fixed headers with the Tax_Type/Tax pairs re-inserted, for a blank upload template."""
+    if slug in _TEMPLATE_OVERRIDES:
+        return list(_TEMPLATE_OVERRIDES[slug])
     s = spec_for(slug)
     if not s:
         return []

@@ -12,6 +12,7 @@ celery_app = Celery(
         "app.workers.commission_tasks",
         "app.workers.lcc_tasks",
         "app.workers.report_tasks",
+        "app.workers.mail_tasks",
     ],
 )
 
@@ -29,3 +30,15 @@ celery_app.conf.task_soft_time_limit = 2 * 60 * 60   # 2h — raises SoftTimeLim
 celery_app.conf.task_time_limit = 2 * 60 * 60 + 300  # hard kill 5 min later
 # Recycle worker children periodically so PyMuPDF C-level memory can't accumulate.
 celery_app.conf.worker_max_tasks_per_child = 20
+
+# ── Scheduled jobs (celery beat) ────────────────────────────────────────────
+# The first periodic job in the stack: run ONE `celery beat` process beside the workers.
+# Email intake checks connected mailboxes for mail from onboarded senders; a worker must
+# consume the `mail` queue (architecture/02 §2.4).
+celery_app.conf.beat_schedule = {
+    "mail-sync-all": {
+        "task": "mail.sync_all",
+        "schedule": max(1, settings.MAIL_POLL_MINUTES) * 60.0,
+        "options": {"queue": "mail", "expires": max(1, settings.MAIL_POLL_MINUTES) * 60.0},
+    },
+}

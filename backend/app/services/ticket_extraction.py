@@ -265,6 +265,9 @@ NUMERIC_COLS = {
     # sell_fare / sell_tax_yq / sale_yr and the named ancillaries, and none of
     # these four is one of them.
     "oc_tax", "raf", "serv_charge", "gst_sell",
+    # a punched ticket's commission sheet — recorded only, like the four above
+    "comm_paid", "plb_recd", "incentive_paid", "plb_paid", "disc_recall",
+    "serv_charge_2", "serv_charge_3", "supp_serv_charge_1", "supp_serv_charge_2", "card_charge", "supp_serv_gst",
 }
 
 # ── Columns split across multi-sector legs ───────────────────────────────────
@@ -336,6 +339,65 @@ def _leg_classes(raw: str | None, n: int) -> list[str]:
     while len(parts) < n:
         parts.append(parts[-1] if parts else "")
     return parts
+
+
+def _keep_multi_sector_whole(rows: list[dict]) -> list[dict]:
+    """The other answer to a multi-sector row: keep it as ONE row, legs inside it.
+
+    For a section that records SALES rather than pricing deals (Internal Statement),
+    a ticket is one line on the customer's statement and one line on their invoice,
+    and dividing its money equally across legs would invent per-leg fares nobody
+    charged. So nothing is divided; the legs survive in `segments`, one entry each,
+    for any later reader that does need them.
+
+    SEGMENT TYPE IS THE TICKET'S, NOT THE FIRST LEG'S: International when ANY leg is.
+    DEL/DXB DXB/BOM starts and ends in India and is still an international ticket,
+    which comparing only the first and last airport would get wrong. A per-leg
+    segment type the caller punched outranks detection for that leg.
+    """
+    out: list[dict] = []
+    for row in rows:
+        legs, status = sector_split.leg_sectors(row.get("sector"))
+        n = len(legs)
+        row.setdefault("split_type", "normal")
+        if n <= 1 or status == sector_split.UNPARSED:
+            out.append(row)
+            continue
+
+        raw_segments = row.get("segments")
+        segments = raw_segments if isinstance(raw_segments, list) and len(raw_segments) == n else None
+        if segments is None:
+            classes = _leg_classes(row.get("booking_class"), n)
+            flights = sector_split.tokens(row.get("flight_no"), n)
+            journeys = sector_split.tokens(row.get("travel_dt"), n)
+            segments = []
+            for i, leg in enumerate(legs):
+                origin, _, destination = leg.partition("/")
+                segments.append({
+                    "origin": origin, "destination": destination,
+                    "flight_no": flights[i] if i < len(flights) else None,
+                    "class": classes[i] or None,
+                    "travel_date": (journeys[i] if i < len(journeys) else None)
+                                   or (row.get("departure_datetime") if i == 0 else None),
+                    "segment_type": None,
+                })
+
+        leg_types = [
+            seg.get("segment_type") or _detect_segment_type_from_sector(legs[i])
+            for i, seg in enumerate(segments)
+        ]
+        segments = [{**seg, "segment_type": leg_types[i]} for i, seg in enumerate(segments)]
+        if any((t or "").lower() == "international" for t in leg_types):
+            row["segment_type"] = "International"
+        elif leg_types and all((t or "").lower() == "domestic" for t in leg_types):
+            row["segment_type"] = "Domestic"
+
+        first_date = segments[0].get("travel_date")
+        if first_date and not row.get("departure_datetime"):
+            row["departure_datetime"] = _normalize_date(first_date)
+        row["segments"] = segments
+        out.append(row)
+    return out
 
 
 def _split_multi_sector_rows(rows: list[dict]) -> list[dict]:
@@ -865,7 +927,9 @@ def derive_ticket_row(row: dict[str, Any], is_airline: bool) -> dict[str, Any]:
     return row
 
 
-def derive_ticket_rows(rows: list[dict[str, Any]], is_airline: bool) -> list[dict[str, Any]]:
+def derive_ticket_rows(
+    rows: list[dict[str, Any]], is_airline: bool, *, split_legs: bool = True,
+) -> list[dict[str, Any]]:
     """derive_ticket_row over a list, plus the multi-sector split.
 
     The manual entry path only. It splits BOTH statement types, because a ticket
@@ -874,9 +938,12 @@ def derive_ticket_rows(rows: list[dict[str, Any]], is_airline: bool) -> list[dic
     TicketExtractionService.extract deliberately does NOT call this — it runs
     derive_ticket_row itself and splits only B2B, so an uploaded BSP file still
     lands as one row per ticket document.
+
+    `split_legs=False` keeps each ticket as one row instead — see
+    _keep_multi_sector_whole for who wants that and why.
     """
     out = [derive_ticket_row(dict(r), is_airline) for r in rows]
-    return _split_multi_sector_rows(out)
+    return _split_multi_sector_rows(out) if split_legs else _keep_multi_sector_whole(out)
 
 
 class TicketExtractionService:
@@ -889,6 +956,7 @@ class TicketExtractionService:
         statement_type: str = "B2B",
         sheet_name: str | None = None,
         header_row: int | None = None,
+        split_legs: bool = True,
     ) -> dict:
         """
         Parse spreadsheet bytes and return a preview dict.
@@ -1049,9 +1117,10 @@ class TicketExtractionService:
                 f"(row {where}). Importing them would double every figure in the batch."
             )
 
-        # Multi-sector splitting (B2B style — only when not airline BSP format)
+        # Multi-sector splitting (B2B style — only when not airline BSP format), or
+        # one row per ticket for a caller that records sales (see split_legs).
         if not is_airline:
-            rows = _split_multi_sector_rows(rows)
+            rows = _split_multi_sector_rows(rows) if split_legs else _keep_multi_sector_whole(rows)
 
         return {
             **base,

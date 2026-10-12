@@ -25,7 +25,12 @@ from app.schemas.customer import (
     CustomerCreate, CustomerUpdate, CustomerRead, CustomerBulkUploadResult,
     CustomerBulkCreate, CustomerListItem, PlaceOfSupplyRead, RelinkRequest, RelinkResult,
     SoldTicketRead, SoldTicketsResponse, SoldTicketsSummary,
+    EmployeeCodeSuggestion, EmployeeCodeCheck,
 )
+# The employee code is issued in the user's current pattern unless typed — see the
+# service, including why the duplicate check runs on the TYPED code, not the issued one.
+from app.services import employee_code as emp_codes
+from app.services.agency_code import normalise as norm_code, parse as parse_code
 from app.schemas.billing import BillingCreate, BillingUpdate, BillingRead, BillingListItem
 from app.services.billing_pdf import build_billing_pdf, load_logo, supplier_block
 from app.services.party_dedupe import CustomerDuplicates, name_key
@@ -364,6 +369,11 @@ async def create_customer(
     )
     if clash:
         raise HTTPException(status_code=409, detail=clash)
+    # Only now, after the duplicate check judged the person on what was TYPED.
+    try:
+        employee_code = (await emp_codes.allocator(db, current_user)).resolve(employee_code, "\x00new", "")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     customer = Customer(
         tenant_id=current_user.tenant_id,
@@ -456,6 +466,7 @@ async def bulk_upload_customers(
     # already has AND what earlier rows of THIS sheet have claimed, so re-importing
     # the same file — or a file that lists someone twice — is caught either way.
     duplicates = await CustomerDuplicates.load(db, current_user)
+    codes = await emp_codes.allocator(db, current_user)
 
     for i, row in df.iterrows():
         row_num = i + used_header_row + 2
@@ -500,6 +511,12 @@ async def bulk_upload_customers(
         )
         if clash:
             errors.append(f"{row_prefix}: {clash}")
+            continue
+        # Blank = issue the next; typed = checked and padded to the pattern.
+        try:
+            employee_code = codes.resolve(employee_code, f"\x00row{i}", "")
+        except ValueError as e:
+            errors.append(f"{row_prefix}: {e}")
             continue
 
         values = _apply_inheritance({
@@ -572,6 +589,7 @@ async def bulk_create_customers(
     # browser's answer is a courtesy and this is the boundary: it re-checks against the
     # master AND against the rest of this batch.
     duplicates = await CustomerDuplicates.load(db, current_user)
+    codes = await emp_codes.allocator(db, current_user)
 
     for i, row in enumerate(payload.rows):
         # The wizard sends only the rows it kept, so its sheet-line numbers cannot
@@ -595,6 +613,11 @@ async def bulk_create_customers(
         )
         if clash:
             errors.append(f"{row_prefix}: {clash}")
+            continue
+        try:
+            employee_code = codes.resolve(employee_code, f"\x00row{i}", "")
+        except ValueError as e:
+            errors.append(f"{row_prefix}: {e}")
             continue
 
         # THE FIX. A hand-added employee picks the corporate's terms up from
@@ -746,6 +769,33 @@ async def relink_corporates(
     )
 
 
+@router.get("/next-code", response_model=EmployeeCodeSuggestion)
+async def next_employee_code(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The code auto mode would issue now. A preview, not a reservation."""
+    code, pattern = await emp_codes.suggest(db, current_user)
+    return EmployeeCodeSuggestion(code=code, pattern=pattern)
+
+
+@router.get("/check-code", response_model=EmployeeCodeCheck)
+async def check_employee_code(
+    code: str,
+    exclude_id: Optional[int] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """A hand-typed code as it would be stored, the pattern it sets, or why not."""
+    alloc = await emp_codes.allocator(db, current_user, exclude_id=exclude_id)
+    try:
+        stored = alloc.resolve(code, f"#{exclude_id}" if exclude_id else "\x00new", "")
+    except ValueError as e:
+        return EmployeeCodeCheck(code=norm_code(code), error=str(e))
+    parsed = parse_code(stored)
+    return EmployeeCodeCheck(code=stored, pattern=parsed[0].example if parsed else None)
+
+
 @router.get("/template")
 async def download_customer_template():
     from openpyxl import Workbook
@@ -757,6 +807,8 @@ async def download_customer_template():
     # Category columns LAST, so a file made from any older template is still valid here.
     # Columns are read by header name, so the codes' positions do not break old files.
     # CUSTOMER_CODE and ACCOUNT_CODE left blank take the linked corporate's.
+    # EMPLOYEE_CODE left blank is issued by the system in your current pattern (EMP-0001
+    # to start); a typed one with a number sets the pattern later blanks continue.
     headers = [
         "FIRST_NAME", "LAST_NAME", "EMPLOYEE_CODE", "CUSTOMER_CODE", "ACCOUNT_CODE", "COMPANY", "TITLE", "PHONE", "EMAIL",
         "GST_REGISTERED", "GST_NO", "PAN_NO",
@@ -884,6 +936,17 @@ async def update_customer(
     # the identity it holds right now.
     if "employee_code" in data:
         data["employee_code"] = _clean_upper(data["employee_code"])
+        if data["employee_code"] == obj.employee_code:
+            data.pop("employee_code")          # resent unchanged by the form — a no-op
+        elif not data["employee_code"]:
+            raise HTTPException(status_code=400, detail="Employee code cannot be blank.")
+        else:
+            try:
+                data["employee_code"] = (await emp_codes.allocator(db, current_user, exclude_id=obj.id)).resolve(
+                    data["employee_code"], f"#{obj.id}", "",
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
     if "customer_code" in data:
         data["customer_code"] = _clean_upper(data["customer_code"])
     if "account_code" in data:

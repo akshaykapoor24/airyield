@@ -28,6 +28,7 @@ from app.services.pdf_table_rows import (
     DocLayout,
     DocRow,
     build_layout,
+    build_layout_from_sheet,
     chunk_rows,
     render_chunk,
 )
@@ -389,6 +390,109 @@ def _row_code(row: DocRow, cm) -> str | None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# DETERMINISTIC FAST PATH — rows Python can read exactly, without the model
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Measured on the four sample sheets, ~94% of deal rows are plain: every rate cell
+# is one number with an optional calc basis ("2.75%(B+YQ)", "5% (B)", "1.25% Basic",
+# "8.50", "0.0%") or a NIL / dash. For those the model adds nothing but latency,
+# cost and a chance to mistype — so Python builds the very same compact row the
+# model would have returned, and only the rest (CNP +2.25%, 3+5%, two rates in one
+# cell, "-do-") go to the model. Mirror's sheet needs no model call at all.
+
+_SIMPLE_RATE_RE = re.compile(
+    r"""^\s*(?P<p>\d+(?:\.\d+)?)\s*%?\s*
+        (?:\(?\s*(?P<base>B|BF|BASIC|BASE\s*FARE)(?P<tax>(?:\s*\+\s*(?:YQ|YR))*)\s*\)?)?\s*$""",
+    re.I | re.X,
+)
+_ANY_PCT_RE = re.compile(r"\d\s*%")
+_NIL_RE = re.compile(r"^\s*(?:-+|NIL|N/?A)?\s*$", re.I)
+_CABIN_SLOTS = (
+    (re.compile(r"^(eco\s*/\s*prem|prem\s*/\s*eco)", re.I), ("ECO", "PEY")),
+    (re.compile(r"^all\b", re.I), ("ECO", "PEY", "BUS")),
+    (re.compile(r"^(prem(ium)?(\s*eco(nomy)?)?)\b", re.I), ("PEY",)),
+    (re.compile(r"^(eco(nomy)?)\b", re.I), ("ECO",)),
+    (re.compile(r"^(bizz?|business|first)", re.I), ("BUS",)),
+)
+
+
+def _simple_cell(text: str | None) -> tuple[bool, dict | None]:
+    """(is it simple?, the {"p","cc"} slot or None for NIL/blank)."""
+    t = (text or "").replace("\n", " ").strip()
+    if _NIL_RE.match(t):
+        return True, None
+    m = _SIMPLE_RATE_RE.match(t)
+    if not m:
+        return False, None
+    cc = None
+    if m.group("base"):
+        # Canonical order whatever the sheet printed: Akbar writes "B+YR+YQ", and
+        # anything but "B+YQ+YR" falls through norm_calc to plain Basic.
+        taxes = set(re.findall(r"YQ|YR", (m.group("tax") or "").upper()))
+        cc = "B" + "".join(f"+{t}" for t in ("YQ", "YR") if t in taxes)
+    return True, {"p": float(m.group("p")), "cc": cc}
+
+
+def deterministic_compact(row: DocRow, cm) -> dict | None:
+    """The compact row for a plain row, or None when the model is needed.
+
+    Produces exactly the shape the model returns, so expand_row — every rule about
+    sections, validity, LCC names and calc bases — applies unchanged."""
+    if cm is None or not row.expects_deals:
+        return None
+
+    def cell(ci):
+        return (row.cells[ci] or "") if ci is not None and ci < len(row.cells) else ""
+
+    slots: dict[str, dict | None] = {"ECO": None, "PEY": None, "BUS": None}
+    if cm.cabin is not None and cm.commission is not None:
+        ok, rate = _simple_cell(cell(cm.commission))
+        cabin = cell(cm.cabin).replace("\n", " ").strip()
+        targets = next((t for rx, t in _CABIN_SLOTS if rx.match(cabin)), None)
+        if not ok or targets is None:
+            return None
+        for t in targets:
+            slots[t] = rate
+    else:
+        for slot, ci in (("ECO", cm.eco), ("PEY", cm.pey), ("BUS", cm.bus)):
+            if ci is None:
+                continue
+            ok, rate = _simple_cell(cell(ci))
+            if not ok:
+                return None
+            slots[slot] = rate
+    if not any(slots.values()):
+        return None
+
+    # A dedicated VALID ON / Applicable-on column overrides the code in the cell —
+    # the same rule the prompt gives the model.
+    valid_on = cell(cm.valid_on).replace("\n", " ").strip()
+    if valid_on:
+        ok, parsed = _simple_cell("0 " + valid_on)
+        if ok and parsed and parsed["cc"]:
+            for slot in slots.values():
+                if slot is not None:
+                    slot["cc"] = parsed["cc"]
+
+    name = re.sub(r"\s+", " ", cell(cm.airline)).strip()
+    if not name:
+        return None
+    iata_ok, iata = _simple_cell(cell(cm.iata)) if cm.iata is not None else (True, None)
+    vt = re.sub(r"\s+", " ", cell(cm.validity)).strip() or None
+    return {
+        "n": row.n,
+        "al": name,
+        "cd": None,                       # expand_row reads the code cell itself
+        "iata": iata["p"] if iata_ok and iata else None,
+        "vt": vt,
+        "vt_iso": None,                   # Python's own parse is authoritative anyway
+        "ft": None,                       # section / name / remark rules decide
+        "rmk": re.sub(r"\s+", " ", cell(cm.remarks)).strip()[:150] or None,
+        "cl": slots,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # EXPANSION — one compact row becomes up to three deal objects
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -403,6 +507,7 @@ class Stats:
         self.unresolved = 0
         self.failed_chunks = 0
         self.total_chunks = 0
+        self.deterministic = 0          # rows read by Python, no model call
 
     def as_dict(self) -> dict:
         return {k: v for k, v in self.__dict__.items()}
@@ -464,8 +569,10 @@ def expand_row(compact: dict, row: DocRow, stats: Stats, cm=None) -> list[dict]:
     # above needs to see "(INTL)" and `_canon_airline` needs the sheet's own
     # spelling for LCC_NAMES — this module never renames anything, it only
     # carries the code out so the API layer can resolve the master with it.
-    from app.services.airline_resolver import clean_airline_code
-    airline_code = _row_code(row, cm) or clean_airline_code(compact.get("cd"))[0]
+    from app.services.airline_resolver import bare_designator, clean_airline_code
+    # The last fallback is the name cell itself: some sheets print only "VS" there.
+    airline_code = (_row_code(row, cm) or clean_airline_code(compact.get("cd"))[0]
+                    or bare_designator(name))
 
     remark = (compact.get("rmk") or "").strip()[:150] or None
     iata = canon_pct(compact.get("iata"))
@@ -685,11 +792,14 @@ async def _single_row_fallback(client, header, cm, row: DocRow, stats: Stats) ->
 # ORCHESTRATION
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def _run_chunks(layout: DocLayout, stats: Stats) -> list[dict]:
+async def _run_chunks(layout: DocLayout, stats: Stats, rows: list[DocRow] | None = None) -> list[dict]:
     from app.config import settings
 
+    rows = layout.rows if rows is None else rows
+    if not rows:
+        return []
     chunks = chunk_rows(
-        layout.rows,
+        rows,
         layout.colmap,
         rows_per_chunk=settings.AI_EXTRACT_ROWS_PER_CHUNK,
         max_chars=settings.AI_EXTRACT_CHUNK_MAX_CHARS,
@@ -778,12 +888,30 @@ def _confidence(stats: Stats, deal_count: int) -> float:
 
 class AIDealExtractionService:
     @staticmethod
-    async def extract(file: UploadFile) -> dict:
+    async def extract(file: UploadFile, supplier_name: str | None = None) -> dict:
+        """`supplier_name`: the supplier this upload is for. A spreadsheet with a
+        Source / Supplier column keeps only that supplier's rows."""
         content = await file.read()
         await file.seek(0)
         filename = file.filename or ""
 
-        layout = build_layout(content)
+        is_sheet = filename.lower().endswith((".xlsx", ".xlsm", ".xls", ".csv"))
+        if is_sheet:
+            from app.services.deal_supplier_check import supplier_cell_matches
+            keep = (lambda cell: supplier_cell_matches(cell, supplier_name)) if supplier_name else None
+            layout = build_layout_from_sheet(content, filename, keep)
+        else:
+            layout = build_layout(content)
+
+        # A multi-supplier sheet with nothing for the picked supplier: say so plainly
+        # rather than "unreadable" — the sheet was read fine, it just isn't theirs.
+        if is_sheet and not layout.rows and layout.skipped_suppliers:
+            found = ", ".join(sorted(layout.skipped_suppliers))
+            return {
+                "deals": [], "file_name": filename, "confidence": 0.0, "unreadable": False,
+                "warning": (f"No rows for {supplier_name} in this sheet's supplier column — it lists "
+                            f"{found}. Pick the right supplier, or check the file."),
+            }
         if not layout.ok:
             # Never fall through to raw text: a wrong-but-plausible layout is
             # worse than an honest refusal, and the column-mapping path exists
@@ -804,7 +932,19 @@ class AIDealExtractionService:
             layout.rows = layout.rows[: settings.AI_EXTRACT_MAX_SOURCE_ROWS]
 
         stats = Stats()
-        compact_rows = await _run_chunks(layout, stats)
+        # Plain rows are read here; only the rest cost a model call.
+        compact_rows: list[dict] = []
+        for_model: list[DocRow] = []
+        for row in layout.rows:
+            local = deterministic_compact(row, layout.colmap)
+            if local is not None:
+                compact_rows.append(local)
+                stats.deterministic += 1
+            elif row.expects_deals or any(_ANY_PCT_RE.search(c or "") for c in row.cells):
+                for_model.append(row)
+            # else: no percentage in any cell ("EGYPT AIR NIL NIL NIL", "Airport
+            # Assistance Fee RS.1000/-") — the model could only answer "no deal".
+        compact_rows += await _run_chunks(layout, stats, for_model)
 
         by_n = {r.n: r for r in layout.rows}
         deals: list[dict] = []
@@ -837,6 +977,12 @@ class AIDealExtractionService:
         ))
 
         warning = _build_warning(layout, stats, capped_from, page_capped_from)
+        if layout.skipped_suppliers:
+            left_out = sum(layout.skipped_suppliers.values())
+            listed = ", ".join(f"{k} {v}" for k, v in sorted(layout.skipped_suppliers.items()))
+            note = (f"Only {supplier_name}'s rows were read — {left_out} row(s) from other "
+                    f"suppliers in this sheet were left out ({listed}).")
+            warning = f"{note} {warning}" if warning else note
         logger.info(
             "ai-extract done file=%s engine=%s rows=%s deals=%s stats=%s",
             filename, layout.used_table_engine, len(layout.rows), len(deals), stats.as_dict(),

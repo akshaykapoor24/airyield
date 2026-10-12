@@ -6,6 +6,7 @@ from app.api.v1 import sales_flown, risk_board
 from app.api.v1 import platform_invoices
 from app.api.v1 import bank_statements
 from app.api.v1 import payment_reconciliation, payment_module
+from app.api.v1 import mail, mail_inbox
 
 router = APIRouter()
 
@@ -21,6 +22,9 @@ router.include_router(airports.router, prefix="/airports", tags=["Airports"])
 router.include_router(routes.router, prefix="/routes", tags=["Routes"])
 router.include_router(deals.router, prefix="/deals", tags=["Deals"])
 router.include_router(tickets.router, prefix="/tickets", tags=["Tickets"])
+# Internal Statement's own ticket tables — the same endpoints over internal_* tables.
+from app.api.v1 import internal_tickets  # noqa: E402
+router.include_router(internal_tickets.router, prefix="/internal-tickets", tags=["Internal Statement"])
 router.include_router(income.router, prefix="/income", tags=["Income"])
 router.include_router(documents.router, prefix="/documents", tags=["Documents"])
 router.include_router(reports.router, prefix="/reports", tags=["Reports"])
@@ -91,3 +95,16 @@ router.include_router(notifications.router, prefix="/notifications", tags=["Noti
 # Its own literal prefix, never under /statements (see the ordering note above).
 router.include_router(report_download.router, prefix="/report-download", tags=["Workspace - Report Download"])
 router.include_router(bank_statements.router, prefix="/bank-statements", tags=["Accounting - Bank Statement"])
+# Email intake (architecture/). Its own literal prefix, like report_download.
+router.include_router(mail.router, prefix="/mail", tags=["Email Intake"])
+router.include_router(mail_inbox.router, prefix="/mail", tags=["Email Intake - Inbox"])
+
+# Service charges for a hand-punched ticket, quoted from User master (Create Ticket).
+from app.api.v1 import ticket_charges  # noqa: E402
+router.include_router(ticket_charges.router, prefix="/ticket-charges", tags=["Internal Statement"])
+
+# A Third Party GDS vendor statement against Internal Statement, sale with sale and
+# refund with refund. Its own segment, so it never collides with /reconciliation/vendor/{source}.
+from app.api.v1 import vendor_internal_reconciliation  # noqa: E402
+router.include_router(vendor_internal_reconciliation.router, prefix="/reconciliation/vendor-internal",
+                      tags=["Vendors - Reconciliation"])

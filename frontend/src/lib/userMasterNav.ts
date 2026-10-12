@@ -18,6 +18,8 @@ export type UserMasterTab = {
   label: string;
   icon: LucideIcon;
   blurb: string;
+  /** Short line shown under the page title. Omit for a title-only heading. */
+  subtitle?: string;
 };
 
 export const USER_MASTER_NAV: UserMasterTab[] = [
@@ -32,6 +34,7 @@ export const USER_MASTER_NAV: UserMasterTab[] = [
     label: "Agency Master",
     icon: Building2,
     blurb: "Onboard the agencies you float deals to, then their entities and airline login IDs / IATA codes.",
+    subtitle: "Your onboarded agencies, with their entities and login IDs.",
   },
   {
     slug: "corporate-master",

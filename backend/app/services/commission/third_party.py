@@ -63,6 +63,14 @@ _REFUND_STATUS = {"REFUNDED", "REFUND", "RFND", "REFUND PROCESSED", "REFUNDED-FU
                   "REFUNDED-PARTIAL"}
 _SKIP_STATUS = {"CANCELLED", "CANCELED", "CANCEL", "VOID", "VOIDED", "FAILED",
                 "PENDING", "HOLD", "ON HOLD", "EXPIRED", "REJECTED"}
+# For COMMISSION, a consolidator's CANCELLED line is a refund, not a non-sale: the vendor
+# prints a cancellation as a second line against the SAME ticket number with every amount
+# negative (Triumphh's GDS export: 235-4848358656 CONFIRMED +66,250, then CANCELLED
+# −66,250), so it must reverse what the issue earned. Skipping it left the issue's
+# commission standing on a ticket handed back. Opt-in (classify's `cancelled_as_refund`)
+# because the shared sets above are read by the income board, report downloads and
+# payment reconciliation, which each keep cancellations apart on purpose.
+_CANCELLED_STATUS = {"CANCELLED", "CANCELED", "CANCEL"}
 _SKIP_REASON = {
     "CANCELLED": "Cancelled booking — not a sale",
     "CANCELED": "Cancelled booking — not a sale",
@@ -188,13 +196,16 @@ def build_declared(data: dict) -> DeclaredAmounts:
     return declared
 
 
-def classify(data: dict) -> tuple[str, str | None]:
-    """(kind, reason) from the statement's own Status column."""
+def classify(data: dict, cancelled_as_refund: bool = False) -> tuple[str, str | None]:
+    """(kind, reason) from the statement's own Status column. `cancelled_as_refund` —
+    set by the commission build — reads CANCELLED as the reversal it is (see above)."""
     # The statement's own OLD/BALANCE/total line (services/statement_balance.py) — money with
     # no booking behind it. Priced as a ticket it came back "unmatched" and sat in the gaps.
     if data.get(statement_balance.ROW_KIND_KEY) in statement_balance.ROW_KINDS:
         return KIND_SKIP, "Statement balance line — not a booking"
     status = (_s(data, "ticket_status") or "").upper()
+    if cancelled_as_refund and status in _CANCELLED_STATUS:
+        return KIND_REFUND, None
     if status in _SKIP_STATUS:
         return KIND_SKIP, _SKIP_REASON.get(status, f"{status} — not a sale")
     if status in _REFUND_STATUS:
@@ -217,7 +228,7 @@ def build_calc_row(row, supplier_name: str | None, supplier_id: int | None,
     None leaves the row exactly as the statement has it.
     """
     data = dict(row.data or {})
-    kind, kind_reason = classify(data)
+    kind, kind_reason = classify(data, cancelled_as_refund=True)
 
     from_mo: list[str] = []
     if mo is not None:

@@ -47,7 +47,7 @@ function TypePill({ type }: { type: StatementType }) {
  * click. That keeps the two outcomes predictable instead of guessing from a
  * name collision, and the mode pill above the input says which is active.
  */
-function StatementNameCombo({
+export function StatementNameCombo({
   name, target, options, onPickExisting, onTypeName,
 }: {
   name: string;
@@ -199,7 +199,7 @@ function StatementNameCombo({
 /** Picks the party for the chosen customer type. Reuses AgencySelect's shell so
  *  the filing row keeps one visual language; only the list and the label change.
  *  A direct customer is never marked invalid — a walk-in may have no record. */
-function CustomerPartySelect({
+export function CustomerPartySelect({
   tag, setTag, touched,
 }: {
   tag: CustomerTag; setTag: (t: CustomerTag) => void; touched: boolean;

@@ -8,7 +8,7 @@ import {
   AlertCircle, ChevronLeft, RefreshCw, RotateCcw, Save,
 } from "lucide-react";
 import api from "@/lib/api";
-import { useStatementSectionBase } from "@/lib/statementSection";
+import { STATEMENT_ENTRY_BASE, useStatementSectionBase } from "@/lib/statementSection";
 import { apiError } from "@/components/userMaster/shared";
 import TicketFilingCard, {
   NEW_STATEMENT, type StatementOption,
@@ -42,7 +42,13 @@ const isBlank = (v: unknown) => v === null || v === undefined || v === "";
  * "customer" asks who the ticket was sold to and tags the row for the commission
  * run; "internal" keeps the vendor statement-type + agency filing card.
  */
-export default function CreateTicketPage({ mode = "internal" }: { mode?: "internal" | "customer" } = {}) {
+export default function CreateTicketPage({ mode = "internal", apiBase = "/tickets", listHref }: {
+  mode?: "internal" | "customer";
+  /** "/internal-tickets" on Internal Statement — its own tables. */
+  apiBase?: string;
+  /** Where to land after saving; the new statement's detail screen by default. */
+  listHref?: string;
+} = {}) {
   const isCustomer = mode === "customer";
   // Saving must return to the section the user is actually in.
   const sectionBase = useStatementSectionBase();
@@ -81,7 +87,7 @@ export default function CreateTicketPage({ mode = "internal" }: { mode?: "intern
     api.get<{ id: number; name: string }[]>("/suppliers/?limit=5000")
       .then((r) => setAgencyOptions(r.data.map((s) => s.name)))
       .catch(() => {});
-    api.get<StatementOption[]>("/tickets/statements")
+    api.get<StatementOption[]>(`${apiBase}/statements`)
       .then((r) => setStatements(r.data))
       .catch(() => {});
   }, []);
@@ -127,7 +133,7 @@ export default function CreateTicketPage({ mode = "internal" }: { mode?: "intern
   const requestPreview = useCallback(
     async (rows: Draft[], signal?: AbortSignal) => {
       const { data } = await api.post<TicketExtractionPreview>(
-        "/tickets/manual/preview",
+        `${apiBase}/manual/preview`,
         { rows, statement_type: effectiveType },
         { signal },
       );
@@ -211,7 +217,7 @@ export default function CreateTicketPage({ mode = "internal" }: { mode?: "intern
 
       const batchId = isNew
         ? (await api.post<{ batch_id: string; created_count: number }>(
-            "/tickets/upload/confirm",
+            `${apiBase}/upload/confirm`,
             {
               file_name: MANUAL_ENTRY_FILE_NAME,
               rows: out,
@@ -226,11 +232,13 @@ export default function CreateTicketPage({ mode = "internal" }: { mode?: "intern
             },
           )).data.batch_id
         : (await api.post<{ batch_id: string; created_count: number }>(
-            `/tickets/statements/${target}/tickets`, { rows: out },
+            `${apiBase}/statements/${target}/tickets`, { rows: out },
           )).data.batch_id;
 
       const rowWord = `${out.length} row${out.length !== 1 ? "s" : ""}`;
-      if (runCalcNow) {
+      // Deal calculation is a Customer-data feature: it writes ticket_calculations rows
+      // that point at the customer ticket table, so it is not run on Internal Statement's.
+      if (runCalcNow && apiBase === "/tickets") {
         try {
           const { data: calc } = await api.patch<{ matched: number; unmatched: number }>(
             "/tickets/uploads/run-all-calculation", null, { params: { batch_id: batchId } },
@@ -243,7 +251,7 @@ export default function CreateTicketPage({ mode = "internal" }: { mode?: "intern
         toast.success(`Ticket saved — ${rowWord}`);
       }
 
-      router.push(`${sectionBase}/${batchId}`);
+      router.push(listHref ?? `${sectionBase}/${batchId}`);
     } catch (e) {
       toast.error(apiError(e));
       setSaving(false);
@@ -275,7 +283,7 @@ export default function CreateTicketPage({ mode = "internal" }: { mode?: "intern
             <RotateCcw className="w-3.5 h-3.5" /> Clear form
           </button>
           <Link
-            href="/customers/statements/upload"
+            href={`${STATEMENT_ENTRY_BASE}/upload`}
             className="px-3 py-2 border border-gray-200 rounded-lg text-xs text-gray-600 hover:bg-gray-50"
           >
             Have a file? Upload instead

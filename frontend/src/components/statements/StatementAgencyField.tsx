@@ -20,21 +20,32 @@ import toast from "react-hot-toast";
 import LccPartyPicker, { type PartyOption } from "@/components/statements/lcc/LccPartyPicker";
 import { type VendorAgency, loadVendorAgencies } from "@/lib/vendorAgency";
 
-/** Why `agency` cannot be uploaded against, or null when it can. */
+/** Why `agency` cannot be uploaded against, or null when it can.
+ *
+ *  An agency AWAITING approval is uploadable now: the server links the statement to the
+ *  agency itself and matches deals by its name until the approval fills in the supplier
+ *  row — exactly how that agency's deals already work (api/v1/statements.py). */
 export function agencyBlockReason(agency: VendorAgency | null): string | null {
   if (!agency) {
     return "Select the agency this statement came from — the file itself doesn't name your consolidator.";
   }
-  if (agency.supplier_id == null) {
-    return `${agency.name} is awaiting approval in the supplier master. Statements can be uploaded against it once your platform admin approves it.`;
-  }
   return null;
 }
 
-export default function StatementAgencyField({ value, onChange, className }: {
+/** Third-party GDS statements come from GDS agencies, LCC ones from LCC agencies. */
+export function channelForApiBase(apiBase: string): "GDS" | "LCC" | null {
+  if (apiBase.endsWith("/tp-gds")) return "GDS";
+  if (apiBase.endsWith("/tp-lcc")) return "LCC";
+  return null;
+}
+
+export default function StatementAgencyField({ value, onChange, className, channel }: {
   value: VendorAgency | null;
   onChange: (agency: VendorAgency | null) => void;
   className?: string;
+  /** Only agencies onboarded on this channel are offered (legacy BOTH rows count). A GDS
+   *  statement priced against a vendor's LCC row would use the wrong deal. */
+  channel?: "GDS" | "LCC" | null;
 }) {
   const [agencies, setAgencies] = useState<VendorAgency[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -50,9 +61,9 @@ export default function StatementAgencyField({ value, onChange, className }: {
   // sublabel = branch · code · channel: one vendor is onboarded once per branch and per
   // channel, so a label stopping at the name would render identical options.
   const active = useMemo(
-    () => agencies.filter((a) => a.is_active).sort((x, y) =>
+    () => agencies.filter((a) => a.is_active && (!channel || a.channels === channel || a.channels === "BOTH")).sort((x, y) =>
       x.name.localeCompare(y.name) || (x.branch_name || x.branch_code).localeCompare(y.branch_name || y.branch_code)),
-    [agencies],
+    [agencies, channel],
   );
   const options: PartyOption<"agency">[] = useMemo(
     () => active.map((a) => ({
@@ -77,7 +88,8 @@ export default function StatementAgencyField({ value, onChange, className }: {
         value={value?.id ?? null}
         onChange={(o) => onChange(o ? active.find((a) => a.id === o.value) ?? null : null)}
         disabled={active.length === 0}
-        placeholder={active.length ? "Select the consolidator who sent this…" : "Agency Master is empty"}
+        placeholder={active.length ? "Select the consolidator who sent this…"
+          : channel ? `No ${channel} agencies in your Agency Master` : "Agency Master is empty"}
         searchPlaceholder="Search your Agency Master…"
         emptyLabel="No agencies yet — add them under User master → Agency Master."
       />
@@ -88,12 +100,17 @@ export default function StatementAgencyField({ value, onChange, className }: {
         own contract.
       </p>
       {pending && (
-        <p className="text-[11px] text-amber-600 mt-2">{agencyBlockReason(value)}</p>
+        <p className="text-[11px] text-amber-600 mt-2">
+          {value!.name} is awaiting approval in the supplier master. The statement uploads now
+          and matches its deals by name; it links to the supplier record automatically once
+          your platform admin approves it.
+        </p>
       )}
       {loaded && active.length === 0 && (
         <p className="text-[11px] text-amber-600 mt-2">
-          Your Agency Master is empty. Onboard the consolidator under User master → Agency
-          Master before uploading.
+          {channel
+            ? `No active ${channel} agency in your Agency Master. Onboard the consolidator on the ${channel} channel under User master → Agency Master before uploading.`
+            : "Your Agency Master is empty. Onboard the consolidator under User master → Agency Master before uploading."}
         </p>
       )}
     </div>

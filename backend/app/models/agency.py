@@ -99,6 +99,13 @@ class Agency(Base):
             "user_id", "name", "branch_code", "channels",
             name="uq_agencies_user_name_branch_channel",
         ),
+        # One agency code per vendor branch: its GDS and LCC rows share it, nothing
+        # else may. The sibling rule is enforced in services/agency_code.py; this is
+        # the backstop that stops two rows on one channel ever holding the same code.
+        UniqueConstraint(
+            "user_id", "agency_code", "channels",
+            name="uq_agencies_user_code_channel",
+        ),
     )
 
     id:            Mapped[int]        = mapped_column(primary_key=True)
@@ -132,6 +139,13 @@ class Agency(Base):
     )
     branch_code:   Mapped[str]        = mapped_column(String(50),  nullable=False)   # copied from supplier.code, else "MAIN"
     branch_name:   Mapped[str | None] = mapped_column(String(255), nullable=True)    # supplier.branch or city, display only
+
+    # OUR identifier for this agency — issued by the system in the user's current
+    # pattern (AG-0001, AG-0002 …) unless typed in by hand, in which case the typed
+    # code's pattern becomes the one the next auto code continues. Shared by the GDS
+    # and LCC rows of one branch and by nothing else. See services/agency_code.py.
+    # Nullable only for rows created before it existed; the migration backfilled them.
+    agency_code:   Mapped[str | None] = mapped_column(String(30), nullable=True, index=True)
 
     # The user's own references for this agency, both optional. NEITHER IS AN IDENTIFIER:
     # one vendor branch is a GDS row and an LCC row here, and both usually carry the same

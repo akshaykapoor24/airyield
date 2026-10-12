@@ -81,6 +81,17 @@ export type TicketRow = {
   raf?:                 number | null;
   serv_charge?:         number | null;
   gst_sell?:            number | null;
+  plb_recd?:            number | null;
+  incentive_paid?:      number | null;
+  plb_paid?:            number | null;
+  disc_recall?:         number | null;
+  serv_charge_2?:       number | null;
+  serv_charge_3?:       number | null;
+  supp_serv_charge_1?:  number | null;
+  supp_serv_charge_2?:  number | null;
+  card_charge?:         number | null;
+  comm_paid?:           number | null;
+  supp_serv_gst?:       number | null;
   doc_no?:              string | null;
   doc_date?:            string | null;
   reference?:           string | null;
@@ -364,6 +375,14 @@ export const TICKET_FIELDS: TicketField[] = [
   { key: "tds_sell",           label: "TDS", mapLabel: "TDS Sell", shortLabel: "TDS Sell",             type: "number", group: "commission", onlyFor: "B2B", mappable: true, reviewCol: true, editable: true },
   { key: "adm",               label: "ADM / Recall", mapLabel: "ADM", shortLabel: "ADM",     type: "number", group: "commission", onlyFor: "B2B", mappable: true, reviewCol: true, editable: true },
   { key: "refund_type",        label: "Refund Type",     type: "text", group: "commission", onlyFor: "AIRLINE", editable: true },
+  // The rest of the desk software's commission sheet — punched on Create Ticket,
+  // editable afterwards, recorded only. Recall is adm. Commission paid is its own
+  // column: dis_sell is the supplier's Discount, a RECEIVED figure deducted from the bill.
+  { key: "comm_paid",          label: "Commission Paid", type: "number", group: "commission", editable: true },
+  { key: "plb_recd",          label: "PLB Received",    type: "number", group: "commission", editable: true },
+  { key: "incentive_paid",     label: "Incentive Paid",  type: "number", group: "commission", editable: true },
+  { key: "plb_paid",           label: "PLB Paid",        type: "number", group: "commission", editable: true },
+  { key: "disc_recall",        label: "Discount Recall", type: "number", group: "commission", editable: true },
 
   // ── Ancillaries & Service Charges ─────────────────────────────────────────
   { key: "seat_selection",     label: "Seat Selection", shortLabel: "Seat Sel.",  type: "number", group: "ancillary", onlyFor: "B2B", mappable: true, reviewCol: true, editable: true,
@@ -383,6 +402,12 @@ export const TICKET_FIELDS: TicketField[] = [
     hint: "The consolidator's own fee. Recorded only — not an incentive base." },
   { key: "raf",                label: "RAF", mapLabel: "RAF / Refund Admin Fee", type: "number", group: "ancillary", mappable: true, reviewCol: true, editable: true,
     hint: "Refund administration fee, charged on a credit note." },
+  { key: "serv_charge_2",      label: "Service Charge 2", type: "number", group: "ancillary", editable: true },
+  { key: "serv_charge_3",      label: "Service Charge 3", type: "number", group: "ancillary", editable: true },
+  { key: "supp_serv_charge_1", label: "Supplier Service Charge 1", type: "number", group: "ancillary", editable: true },
+  { key: "supp_serv_charge_2", label: "Supplier Service Charge 2", type: "number", group: "ancillary", editable: true },
+  { key: "card_charge",        label: "Card Charges",    type: "number", group: "ancillary", editable: true },
+  { key: "supp_serv_gst",      label: "Supplier GST on Charges", type: "number", group: "ancillary", editable: true },
 
   // ── GST & Payment ─────────────────────────────────────────────────────────
   { key: "cgst_sell",          label: "CGST", mapLabel: "CGST Sell",            type: "number", group: "gst_payment", onlyFor: "B2B", mappable: true, reviewCol: true, editable: true },

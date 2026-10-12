@@ -33,7 +33,7 @@ export type AgencyEntityRow = {
 };
 
 type AgencyOpt = {
-  id: number; name: string; branch_name: string | null; branch_code: string; channels: string;
+  id: number; name: string; agency_code: string | null; branch_name: string | null; branch_code: string; channels: string;
   // The branch's own address. An entity is an office of its branch and in the
   // ordinary case sits at the same place, so these seed every new entity row
   // rather than being retyped once per entity.
@@ -43,7 +43,7 @@ type AgencyOpt = {
 /** Label an agency by branch AND channel — a vendor is onboarded once per branch
  *  and once per channel, and an entity belongs to exactly one of those rows. */
 const agencyLabel = (a: AgencyOpt) =>
-  `${a.name} — ${a.branch_name || a.branch_code} · ${a.channels}`;
+  `${a.agency_code ? `${a.agency_code} · ` : ""}${a.name} — ${a.branch_name || a.branch_code} · ${a.channels}`;
 
 /** Which scopes an entity of this agency may have. */
 const scopeOptions = (channels: string | undefined): string[] =>
@@ -415,7 +415,7 @@ function EntityModal({
           </div>
         </div>
       ) : (
-        <UploadBox resource="agency-entities" templateName="agency_entity_template.xlsx" columns="AGENCY, AGENCY_BRANCH, NAME, CODE, CHANNELS, ADDRESS, STATE, CITY, ACTIVE" onDone={onSaved} />
+        <UploadBox resource="agency-entities" templateName="agency_entity_template.xlsx" columns="AGENCY_CODE or AGENCY + AGENCY_BRANCH, NAME, CODE, CHANNELS, ADDRESS, STATE, CITY (blank = agency's), ACTIVE" onDone={onSaved} />
       )}
     </ModalShell>
   );

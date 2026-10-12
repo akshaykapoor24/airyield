@@ -56,8 +56,19 @@ class StatementBatchSupplier(Base):
     # endpoint, so this is a backstop against direct SQL rather than a workflow: removing a
     # vendor that a tenant's statements are attributed to would erase the provenance of
     # every commission figure derived from them, and failing loudly is the better outcome.
-    supplier_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("suppliers.id", ondelete="RESTRICT"), nullable=False, index=True,
+    # NULLABLE since the upload is picked from Agency Master: an agency typed in by hand
+    # has no supplier-master row until the platform admin approves it, and its statements
+    # must still be uploadable. Such a batch matches deals by NAME (the snapshot below),
+    # exactly as that agency's deals do, and approve_supplier back-fills this column.
+    supplier_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("suppliers.id", ondelete="RESTRICT"), nullable=True, index=True,
+    )
+
+    # The Agency Master row the uploader picked — one branch on one channel. It carries
+    # the vendor service charge (services/service_fee.py) the statement's SF / GST On SF
+    # columns are checked against. SET NULL: deleting an agency must not delete history.
+    agency_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("agencies.id", ondelete="SET NULL"), nullable=True, index=True,
     )
 
     # SNAPSHOT, and the reason this is not a bare join row: it keeps the uploads list and

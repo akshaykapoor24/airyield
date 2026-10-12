@@ -15,6 +15,7 @@ ecosystem.config.cjs
 # ─── Internal docs (user guides, .docx drafts, screenshots) ───────────────────
 # Kept out of the repo deliberately: only frontend/ and backend/ ship to GitHub.
 docs/
+architecture/
 
 # ─── OS artifacts ─────────────────────────────────────────────────────────────
 .DS_Store

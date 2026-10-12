@@ -31,6 +31,7 @@ from app.models.tenant import Tenant
 from app.schemas.corporate import (
     CorporateCreate, CorporateUpdate, CorporateRead, CorporateBulkUploadResult,
     CorporateBulkCreate, CorporateListItem, CorporateSoldTicketsResponse,
+    CorporateCodeSuggestion, CorporateCodeCheck,
 )
 from app.core.india_tax import canonical_state, pan_error, tax_id_error
 from app.schemas.customer import PlaceOfSupplyRead, SoldTicketRead, SoldTicketsSummary
@@ -65,6 +66,10 @@ from app.services.party_markup import (
     pax_of as _pax_of,
 )
 from app.services import spreadsheet
+
+# Our own corporate identifier, issued in the user's current pattern. See the service.
+from app.services import corporate_code as corp_codes  # noqa: E402
+from app.services.agency_code import normalise as norm_code, parse as parse_code  # noqa: E402
 
 router = APIRouter()
 
@@ -294,6 +299,7 @@ def _corporate_list_query(current_user: User, search: Optional[str], ticket_stat
             Corporate.first_name.ilike(term),
             Corporate.last_name.ilike(term),
             Corporate.customer_code.ilike(term),
+            Corporate.corporate_code.ilike(term),
             Corporate.account_code.ilike(term),
         ))
 
@@ -359,11 +365,20 @@ async def create_corporate(
     if clash:
         raise HTTPException(status_code=409, detail=clash)
 
+    # Blank = issue the next one in the user's pattern.
+    try:
+        corporate_code = (await corp_codes.allocator(db, current_user)).resolve(
+            payload.corporate_code, "\x00new", "",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     corporate = Corporate(
         tenant_id=current_user.tenant_id,
         created_by_id=current_user.id,
         company=company,
         corporate_type=_norm_corporate_type(payload.corporate_type),
+        corporate_code=corporate_code,
         customer_code=_clean_upper(payload.customer_code),
         account_code=_clean(payload.account_code),
         phone=(payload.phone or "").strip() or None,
@@ -445,6 +460,8 @@ async def bulk_upload_corporates(
     # already has AND what earlier rows of THIS sheet have claimed, so re-importing the
     # same file — or a file that lists one company twice — is caught either way.
     duplicates = await CorporateDuplicates.load(db, current_user)
+    codes = await corp_codes.allocator(db, current_user)
+    new_template = "CUSTOMER_CODE" in df.columns
 
     for i, row in df.iterrows():
         row_num = i + used_header_row + 2
@@ -487,14 +504,26 @@ async def bulk_upload_corporates(
             continue
 
         try:
+            corporate_code = codes.resolve(
+                _cell(row, "CORPORATE_CODE") if new_template else None, f"\x00row{i}", "",
+            )
+        except ValueError as e:
+            errors.append(f"{row_prefix}: {e}")
+            continue
+
+        try:
             corporate = Corporate(
                 tenant_id=current_user.tenant_id,
                 created_by_id=current_user.id,
                 company=company,
                 corporate_type=_norm_corporate_type(_cell(row, "CORPORATE_TYPE")),
-                # CUSTOMER_CODE is the template's header; CORPORATE_CODE is what templates
-                # downloaded before the rename call it, so those files still import.
-                customer_code=_clean_upper(_cell(row, "CUSTOMER_CODE") or _cell(row, "CORPORATE_CODE")),
+                corporate_code=corporate_code,
+                # Templates from before the rename call the CUSTOMER code CORPORATE_CODE.
+                # Only a sheet that also has CUSTOMER_CODE is the new template, where
+                # CORPORATE_CODE is ours (blank = issue one).
+                customer_code=_clean_upper(
+                    _cell(row, "CUSTOMER_CODE") if new_template else _cell(row, "CORPORATE_CODE")
+                ),
                 account_code=_cell(row, "ACCOUNT_CODE"),
                 phone=_cell(row, "PHONE"),
                 email=_cell(row, "EMAIL"),
@@ -551,6 +580,7 @@ async def bulk_create_corporates(
     # browser's answer is a courtesy and this is the boundary: it re-checks against the
     # master AND against the rest of this batch.
     duplicates = await CorporateDuplicates.load(db, current_user)
+    codes = await corp_codes.allocator(db, current_user)
 
     for i, row in enumerate(payload.rows):
         # The wizard labels rows by their line in the sheet, but it only sends the
@@ -577,11 +607,18 @@ async def bulk_create_corporates(
             continue
 
         try:
+            corporate_code = codes.resolve(row.corporate_code, f"\x00row{i}", "")
+        except ValueError as e:
+            errors.append(f"{row_prefix}: {e}")
+            continue
+
+        try:
             db.add(Corporate(
                 tenant_id=current_user.tenant_id,
                 created_by_id=current_user.id,
                 company=company,
                 corporate_type=_norm_corporate_type(row.corporate_type),
+                corporate_code=corporate_code,
                 customer_code=_clean_upper(row.customer_code),
                 account_code=_clean(row.account_code),
                 phone=(row.phone or "").strip() or None,
@@ -620,7 +657,7 @@ async def download_corporate_template():
     # made from any earlier template is still a valid (if shorter) version of this one.
     # Columns are read by header name, so the two codes' position does not break old files.
     headers = [
-        "COMPANY", "CORPORATE_TYPE", "CUSTOMER_CODE", "ACCOUNT_CODE", "PHONE", "EMAIL",
+        "COMPANY", "CORPORATE_TYPE", "CORPORATE_CODE", "CUSTOMER_CODE", "ACCOUNT_CODE", "PHONE", "EMAIL",
         "ADDRESS", "CITY", "STATE", "PINCODE", "COUNTRY",
         "GST_REGISTERED", "GST_NO", "PAN_NO",
         "MARKUP_TYPE", "MARKUP_VALUE", "BILLING_TYPE",
@@ -634,11 +671,13 @@ async def download_corporate_template():
     # A made-up GSTIN that PASSES _tax_problem: a Maharashtra code, a company PAN (4th
     # letter C) and a correct check digit. The previous sample failed all three checks,
     # so uploading the template unchanged rejected its own first row.
-    ws.append(["Acme Pvt Ltd", "Private Limited", "ACME", "ACC-3001", "9876543210", "accounts@acme.com",
+    # CORPORATE_CODE: blank = the system issues the next (CO-0001 …); a typed code
+    # with a number sets the pattern later blanks continue.
+    ws.append(["Acme Pvt Ltd", "Private Limited", "", "ACME", "ACC-3001", "9876543210", "accounts@acme.com",
                "12 MG Road, Andheri East", "Mumbai", "Maharashtra", "400069", "India",
                "Registered", "27ABCCA1234F1Z6", "ABCCA1234F", "percentage", "10", "reseller",
                *acme_categories])
-    ws.append(["Beta Traders", "Proprietorship", "", "", "9123456780", "info@betatraders.in",
+    ws.append(["Beta Traders", "Proprietorship", "", "", "", "9123456780", "info@betatraders.in",
                "Shop 4, Sector 18", "Noida", "Uttar Pradesh", "201301", "India",
                "Unregistered", "", "", "fixed", "500", "agency",
                *no_categories])
@@ -652,6 +691,34 @@ async def download_corporate_template():
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": 'attachment; filename="corporate_template.xlsx"'},
     )
+
+
+# Declared BEFORE /{corporate_id} so the paths are not swallowed by it.
+@router.get("/next-code", response_model=CorporateCodeSuggestion)
+async def next_corporate_code(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The code auto mode would issue now. A preview, not a reservation."""
+    code, pattern = await corp_codes.suggest(db, current_user)
+    return CorporateCodeSuggestion(code=code, pattern=pattern)
+
+
+@router.get("/check-code", response_model=CorporateCodeCheck)
+async def check_corporate_code(
+    code: str,
+    exclude_id: Optional[int] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """A hand-typed code as it would be stored, the pattern it sets, or why not."""
+    alloc = await corp_codes.allocator(db, current_user, exclude_id=exclude_id)
+    try:
+        stored = alloc.resolve(code, f"#{exclude_id}" if exclude_id else "\x00new", "")
+    except ValueError as e:
+        return CorporateCodeCheck(code=norm_code(code), error=str(e))
+    parsed = parse_code(stored)
+    return CorporateCodeCheck(code=stored, pattern=parsed[0].example if parsed else None)
 
 
 # Declared BEFORE /{corporate_id} so the path is not swallowed by it.
@@ -724,6 +791,15 @@ async def update_corporate(
         data["company"] = company
     if "corporate_type" in data:
         data["corporate_type"] = _norm_corporate_type(data["corporate_type"])
+    if "corporate_code" in data:
+        if not norm_code(data["corporate_code"]):
+            raise HTTPException(status_code=400, detail="Corporate code cannot be blank.")
+        try:
+            data["corporate_code"] = (await corp_codes.allocator(db, current_user, exclude_id=obj.id)).resolve(
+                data["corporate_code"], f"#{obj.id}", "",
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
     if "customer_code" in data:
         data["customer_code"] = _clean_upper(data["customer_code"])
     if "account_code" in data:

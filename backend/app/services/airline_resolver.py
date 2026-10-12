@@ -428,6 +428,23 @@ class AirlineIndex:
         display = strip_channel_qualifier(raw_name) or (raw_name or "").strip()
         key = airline_match_key(raw_name)
         code, code_multi = clean_airline_code(raw_code)
+
+        # THE NAME CELL IS THE CODE. Some sheets (Vicky's) print only the designator
+        # in the airline column — "VS", "BA", "EK" — and have no code column at all.
+        # Read as a name, "VS" is compatible with nothing and every row lands in
+        # CONFLICT against its own carrier. A bare designator that agrees with the
+        # code cell (or stands alone) IS the carrier; it identifies, it is not a
+        # rename, so the name-first rule is not being bent.
+        bare = bare_designator(raw_name)
+        if bare and (code is None or code == bare):
+            row = self._by_code.get(bare)
+            if row is not None:
+                return AirlineMatch(
+                    status=RESOLVED, airline_id=row.id, canonical_name=row.name,
+                    display_name=row.name, code=bare,
+                    note=f"The sheet names this airline by its code {bare}.",
+                )
+            code = code or bare
         # From the name too, so extract-time and confirm-time agree even though
         # the code arrives at confirm already reduced to one designator.
         multi = code_multi or _lists_multiple_carriers(raw_name)
@@ -482,9 +499,42 @@ class AirlineIndex:
                 note=f"Not in the airline master — will be added as {display} ({code}) when you save.",
             )
 
+        # No exact name and no code: "Vietjet Airlines" for master "VIETJET AIR",
+        # "Myanmar Intl" for "MYANMAR AIRWAYS INTERNATIONAL". Taken only when exactly
+        # ONE master row is compatible under the same measured gate split_carriers
+        # uses, and said so in the note — several candidates stays unresolved.
+        # Never for a multi-carrier cell: "AF/KLM/DL" is three airlines, which
+        # split_carriers handles; a near match would silently keep only one.
+        if not code and key and not multi and looks_like_airline_name(display):
+            near = [rows[0] for k, rows in self._by_key.items()
+                    if len(rows) == 1 and names_compatible(key, k)]
+            if len(near) == 1:
+                row = near[0]
+                return AirlineMatch(
+                    status=RESOLVED, airline_id=row.id, canonical_name=row.name,
+                    display_name=display, code=row.iata_code,
+                    note=f"Matched to {row.name} by a similar name — check it is the same airline.",
+                )
+
         note = ("No airline code on this row, so it cannot be added to the master — "
                 "add the code, or pick an existing airline.") if looks_like_airline_name(display) else None
         return AirlineMatch(status=UNRESOLVED, display_name=display, code=code, note=note)
+
+
+_BARE_CODE_RE = re.compile(r"^[A-Z0-9]{2}$")
+
+
+def bare_designator(name: str | None) -> str | None:
+    """'VS' -> 'VS'; 'Virgin Atlantic' / 'AF/KLM/DL' / 'Vs' -> None.
+
+    Upper-case only and exactly two characters, with at least one letter: that is
+    how a sheet prints an IATA designator, and it keeps short real names out."""
+    s = strip_channel_qualifier(name) or (name or "").strip()
+    # "AI (INTL)" — a scope tag after the designator is not part of it.
+    s = _ALL_PARENS.sub(" ", s).strip()
+    if _BARE_CODE_RE.match(s) and any(ch.isalpha() for ch in s):
+        return s
+    return None
 
 
 def _carrier_parts(cell: str | None) -> list[str]:
