@@ -65,6 +65,12 @@ from app.services.ticket_extraction import (
 
 router = APIRouter()
 
+# Multi-sector tickets become one row per leg, money divided — what deal matching
+# needs, since a deal prices one segment type and one class per row. Internal
+# Statement records sales instead and turns this off in its copy of this module
+# (api/v1/internal_tickets.py), so there a ticket stays one row, as on the statement.
+SPLIT_MULTI_SECTOR = True
+
 # Mirrors MAX_SEND_ROWS / MAX_SELECTION in the LCC worklist, so the two bulk
 # controls in this product refuse at the same size.
 MAX_RETAG_TICKETS = 500
@@ -201,6 +207,7 @@ async def extract_ticket_file(
             statement_type=statement_type,
             sheet_name=sheet_name,
             header_row=header_row,
+            split_legs=SPLIT_MULTI_SECTOR,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
@@ -476,6 +483,17 @@ async def _build_uploaded_tickets(
             raf=row.raf,
             serv_charge=row.serv_charge,
             gst_sell=row.gst_sell,
+            comm_paid=row.comm_paid,
+            plb_recd=row.plb_recd,
+            incentive_paid=row.incentive_paid,
+            plb_paid=row.plb_paid,
+            disc_recall=row.disc_recall,
+            serv_charge_2=row.serv_charge_2,
+            serv_charge_3=row.serv_charge_3,
+            supp_serv_charge_1=row.supp_serv_charge_1,
+            supp_serv_charge_2=row.supp_serv_charge_2,
+            card_charge=row.card_charge,
+            supp_serv_gst=row.supp_serv_gst,
             doc_no=row.doc_no,
             doc_date=row.doc_date,
             reference=row.reference,
@@ -820,7 +838,9 @@ async def preview_manual_tickets(
         d["row_order"] = d.get("row_order") or i
         raw.append(d)
 
-    derived = derive_ticket_rows(raw, is_airline=(statement_type == "AIRLINE"))
+    derived = derive_ticket_rows(
+        raw, is_airline=(statement_type == "AIRLINE"), split_legs=SPLIT_MULTI_SECTOR,
+    )
 
     return TicketExtractionPreview(
         file_name=MANUAL_ENTRY_FILE_NAME,
@@ -887,6 +907,75 @@ async def list_ticket_statements(
         )
         for stmt, count, created_by_name in rows
     ]
+
+
+@router.delete("/statements/{batch_id}")
+async def delete_ticket_statement(
+    batch_id:     str,
+    db:           AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Delete one customer statement and every ticket under it, permanently.
+
+    What hangs off a ticket goes with it at the database: its deal calculations and
+    reconciliation rows cascade, and the statement's income summaries cascade with the
+    statement. Links held by OTHER records (a BSP row's matched ticket, an LCC row's
+    projection, an adjustment) are foreign keys with ON DELETE SET NULL, so they simply
+    let go.
+
+    TWO THINGS ARE REFUSED rather than deleted:
+      · a statement with tickets on a bill — the invoice would point at nothing. The
+        bill has to go first, exactly as for an LCC upload (lcc_detailed.py);
+      · a statement GENERATED from a vendor upload (LCC Detailed, or a statement batch
+        sent to billing). Its upload still points at it and would re-create or orphan
+        it; deleting that upload is what removes this statement properly.
+
+    Internal Statement has its own version of this endpoint over its own tables
+    (api/v1/internal_tickets.py) — this one is not in its copy's allow-list.
+    """
+    owned = (
+        TicketStatement.batch_id == batch_id,
+        TicketStatement.tenant_id == current_user.tenant_id,
+        TicketStatement.created_by_id == current_user.id,
+    )
+    stmt = (await db.execute(select(TicketStatement).where(*owned))).scalar_one_or_none()
+    if not stmt:
+        raise HTTPException(status_code=404, detail="Statement not found")
+
+    from app.models.lcc_detailed import LccDetailedBatch
+    from app.models.statement_batch_billing import StatementBatchBilling
+    lcc_src = await db.scalar(select(LccDetailedBatch.source_file).where(
+        LccDetailedBatch.billing_batch_id == batch_id))
+    link_src = await db.scalar(select(StatementBatchBilling.slug).where(
+        StatementBatchBilling.billing_batch_id == batch_id))
+    if lcc_src is not None or link_src is not None:
+        where = f"the LCC upload “{lcc_src}”" if lcc_src is not None else f"a {link_src} vendor upload"
+        raise HTTPException(
+            status_code=409,
+            detail=f"This statement was generated from {where}. Delete that upload under "
+                   f"Vendors data → Statements to remove it.",
+        )
+
+    ticket_scope = (
+        UploadedTicket.batch_id == batch_id,
+        UploadedTicket.tenant_id == current_user.tenant_id,
+        UploadedTicket.created_by_id == current_user.id,
+    )
+    billed = await db.scalar(select(func.count()).select_from(UploadedTicket).where(
+        *ticket_scope, or_(UploadedTicket.is_billed.is_(True), UploadedTicket.billing_id.isnot(None))))
+    if billed:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{billed} ticket{'s' if billed != 1 else ''} in this statement "
+                   f"{'are' if billed != 1 else 'is'} on a bill. Delete the bill first, then the statement.",
+        )
+
+    from sqlalchemy import delete as sa_delete
+    tickets = await db.scalar(select(func.count()).select_from(UploadedTicket).where(*ticket_scope))
+    await db.execute(sa_delete(UploadedTicket).where(*ticket_scope))
+    await db.execute(sa_delete(TicketStatement).where(*owned))
+    await db.commit()
+    return {"batch_id": batch_id, "deleted_tickets": tickets}
 
 
 @router.get("/statements/{batch_id}", response_model=TicketStatementRead)
@@ -1951,7 +2040,8 @@ async def delete_uploaded_ticket(
     db:        AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Permanently delete an uploaded ticket."""
+    """Permanently delete an uploaded ticket — unless it is on a bill, which would then
+    point at nothing. Its calculations and reconciliation rows cascade with it."""
     res = await db.execute(
         select(UploadedTicket).where(
             UploadedTicket.id == ticket_id,
@@ -1962,6 +2052,8 @@ async def delete_uploaded_ticket(
     ticket = res.scalar_one_or_none()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
+    if ticket.is_billed or ticket.billing_id is not None:
+        raise HTTPException(status_code=409, detail="This ticket is on a bill. Delete the bill first, then the ticket.")
     await db.delete(ticket)
     await db.commit()
 

@@ -32,6 +32,7 @@ from app.models.notification import Notification, NotificationRead
 from app.models.billing import Billing
 from app.models.uploaded_ticket import UploadedTicket
 from app.models.ticket_statement import TicketStatement
+from app.models.internal_ticket import InternalTicketStatement, InternalUploadedTicket
 from app.models.customer_statement import CustomerStatement, CustomerStatementTicket
 from app.models.income_summary import IncomeSummary
 from app.models.ticket_calculation import TicketCalculation
@@ -83,6 +84,7 @@ from app.models.iata_commission_approval import IataCommissionApproval
 from app.models.gst_configuration import GstConfiguration
 from app.models.report_export import ReportExport
 from app.models.usage_meter import AiUsageEvent, StoredObject
+from app.models.mail import MailConnection, MailMessage, MailAttachment
 from app.models.platform_invoice import PlatformInvoice
 # Accounting → Bank Statement: the tenant's own bank lines, linked to the parties that paid.
 from app.models.bank_statement import BankStatement, BankStatementRow
@@ -157,6 +159,7 @@ __all__ = [
     "GstConfiguration",
     "ReportExport",
     "AiUsageEvent", "StoredObject",
+    "MailConnection", "MailMessage", "MailAttachment",
     "PlatformInvoice",
     "BankStatement", "BankStatementRow",
     "PlbAccrualInput", "PlbAirlineSetting", "PlbAccrualSnapshot",

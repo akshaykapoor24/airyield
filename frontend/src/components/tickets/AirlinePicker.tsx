@@ -15,7 +15,7 @@ export type Airline = { id: number; name: string; iata_code: string; icao_code: 
  * match a deal, so the "not in the master" warning belongs everywhere it is used.
  */
 export default function AirlinePicker({
-  code, name, onPick, onCodeChange, invalid, required,
+  code, name, onPick, onCodeChange, invalid, required, hideLabel, inputId,
 }: {
   code: string;
   name: string;
@@ -24,6 +24,10 @@ export default function AirlinePicker({
   invalid?: boolean;
   /** A ticket cannot match a deal without an airline; a contract can still be filed. */
   required?: boolean;
+  /** For layouts that render their own side label (Internal Statement's compact form). */
+  hideLabel?: boolean;
+  /** id on the code input, so a caller can label or focus it. */
+  inputId?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -63,12 +67,15 @@ export default function AirlinePicker({
 
   return (
     <div className="min-w-0" ref={ref}>
-      <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-1">
-        Airline{required && <span className="text-red-500 ml-0.5">*</span>}
-      </label>
+      {!hideLabel && (
+        <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-1">
+          Airline{required && <span className="text-red-500 ml-0.5">*</span>}
+        </label>
+      )}
       <div className="relative">
         <div className="flex gap-1.5">
           <input
+            id={inputId}
             value={code}
             placeholder="AI"
             onChange={(e) => onCodeChange(e.target.value.toUpperCase())}

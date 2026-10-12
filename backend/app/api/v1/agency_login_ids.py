@@ -20,6 +20,8 @@ from app.schemas.agency_login_id import (
     AgencyLoginIdCreate, AgencyLoginIdUpdate, AgencyLoginIdRead, BulkUploadResult,
 )
 from app.services import spreadsheet
+from app.services.agency_airline import AGENCY_LOB, AirlineCatalog, lob_error
+from app.services.agency_code import code_resolver
 
 router = APIRouter()
 
@@ -245,6 +247,14 @@ async def create_login_id(
         raise HTTPException(status_code=400, detail=f"{label} is required.")
     vendor_id = await _validate_vendor(db, payload.vendor_id)
     entity_id = await _validate_entity(db, current_user, agency.id, payload.entity_id, channel)
+    if (problem := lob_error(payload.lob)):
+        raise HTTPException(status_code=400, detail=problem)
+    try:
+        airline_name, airline_code = (await AirlineCatalog.load(db)).resolve(
+            payload.airline_name, payload.airline_code, channel,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     obj = AgencyLoginId(
         user_id=current_user.id,
@@ -252,9 +262,9 @@ async def create_login_id(
         agency_id=agency.id,
         channel=channel,
         login_id=login_val,
-        airline_name=(payload.airline_name or "").strip() or None,
-        airline_code=(payload.airline_code or "").strip() or None,
-        lob=(payload.lob or "").strip() or None,
+        airline_name=airline_name,
+        airline_code=airline_code,
+        lob=AGENCY_LOB,
         vendor_id=vendor_id,
         entity_id=entity_id,
         is_active=payload.is_active if payload.is_active is not None else True,
@@ -272,7 +282,8 @@ async def bulk_upload_login_ids(
 ):
     content = await file.read()
     filename = (file.filename or "").lower()
-    required = {"LOGIN_ID", "AGENCY", "CHANNEL"}
+    # AGENCY or AGENCY_CODE names the agency; the check below wants one of them.
+    required = {"LOGIN_ID", "CHANNEL"}
 
     def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         df.columns = [
@@ -294,6 +305,8 @@ async def bulk_upload_login_ids(
                 df_try = spreadsheet.read_df(content, filename, header_row)
                 df_try = _normalize_columns(df_try)
                 missing = required - set(df_try.columns)
+                if not {"AGENCY", "AGENCY_CODE"} & set(df_try.columns):
+                    missing = missing | {"AGENCY (or AGENCY_CODE)"}
                 last_missing = missing
                 if not missing:
                     df = df_try
@@ -304,9 +317,9 @@ async def bulk_upload_login_ids(
 
         if df is None:
             detail = (
-                "Missing required columns: LOGIN_ID, AGENCY, CHANNEL. Check that the header is in the first few rows."
+                "Missing required columns: LOGIN_ID, CHANNEL and AGENCY or AGENCY_CODE. Check that the header is in the first few rows."
                 if last_missing is None else
-                f"Missing required columns: {sorted(last_missing)}. Required: LOGIN_ID, AGENCY, CHANNEL"
+                f"Missing required columns: {sorted(last_missing)}. Required: LOGIN_ID, CHANNEL and AGENCY or AGENCY_CODE"
             )
             raise HTTPException(status_code=400, detail=detail)
     except Exception as e:
@@ -326,6 +339,8 @@ async def bulk_upload_login_ids(
     # a vendor is onboarded once per branch, so a bare name can be ambiguous.
     agencies = (await db.execute(select(Agency).where(Agency.user_id == current_user.id))).scalars().all()
     resolve_agency = _agency_resolver(agencies)
+    resolve_code = code_resolver(agencies)
+    airlines = await AirlineCatalog.load(db)
 
     entities = (await db.execute(
         select(AgencyEntity).where(AgencyEntity.user_id == current_user.id)
@@ -348,12 +363,18 @@ async def bulk_upload_login_ids(
         row_num = i + used_header_row + 2
         login_val = _cell(row.get("LOGIN_ID"))
         agency_raw = _cell(row.get("AGENCY"))
-        if not login_val or not agency_raw:
-            errors.append(f"Row {row_num}: LOGIN_ID and AGENCY are required.")
+        code_raw = _cell(row.get("AGENCY_CODE"))
+        if not login_val or not (agency_raw or code_raw):
+            errors.append(f"Row {row_num}: LOGIN_ID and AGENCY (or AGENCY_CODE) are required.")
             continue
-        agency, why = resolve_agency(
-            agency_raw, _cell(row.get("AGENCY_BRANCH")), _cell(row.get("CHANNEL")),
-        )
+        # The code is exact, so it wins when both are filled.
+        if code_raw:
+            agency, why = resolve_code(code_raw, norm_channel(_cell(row.get("CHANNEL"))))
+            agency_raw = agency_raw or code_raw
+        else:
+            agency, why = resolve_agency(
+                agency_raw, _cell(row.get("AGENCY_BRANCH")), _cell(row.get("CHANNEL")),
+            )
         if agency is None:
             errors.append(f"Row {row_num}: {why}")
             continue
@@ -387,6 +408,17 @@ async def bulk_upload_login_ids(
                 continue
             entity_id = entity.id
 
+        if (problem := lob_error(_cell(row.get("LOB")))):
+            errors.append(f"Row {row_num}: {problem}")
+            continue
+        try:
+            airline_name, airline_code = airlines.resolve(
+                _cell(row.get("AIRLINE_NAME")), _cell(row.get("AIRLINE_CODE")), channel,
+            )
+        except ValueError as e:
+            errors.append(f"Row {row_num}: {e}")
+            continue
+
         active_raw = _cell(row.get("ACTIVE")).lower()
         is_active = active_raw not in ("0", "no", "false", "inactive", "n")
 
@@ -397,9 +429,9 @@ async def bulk_upload_login_ids(
                 agency_id=agency.id,
                 channel=channel,
                 login_id=login_val,
-                airline_name=_cell(row.get("AIRLINE_NAME")) or None,
-                airline_code=_cell(row.get("AIRLINE_CODE")) or None,
-                lob=_cell(row.get("LOB")) or None,
+                airline_name=airline_name,
+                airline_code=airline_code,
+                lob=AGENCY_LOB,
                 vendor_id=vendor_id,
                 entity_id=entity_id,
                 is_active=is_active,
@@ -423,15 +455,19 @@ async def download_login_id_template():
     # LOGIN_ID holds the mirror ID on a GDS row and the portal login / airline ID
     # on an LCC row — one column, relabelled by channel in the app.
     # AGENCY_BRANCH is only needed when a vendor is onboarded on several branches.
+    # AGENCY_CODE (AG-0001) may stand in for AGENCY + AGENCY_BRANCH and wins when set.
+    # AIRLINE_NAME or AIRLINE_CODE — either is enough, the master fills the other —
+    # must be a GDS airline on a GDS row and an LCC airline on an LCC row, as typed
+    # in the Classes & RBD master. LOB is always B2B and may be left blank.
     ws.append([
-        "CHANNEL", "LOGIN_ID", "AGENCY", "AGENCY_BRANCH", "ENTITY_CODE",
+        "CHANNEL", "LOGIN_ID", "AGENCY_CODE", "AGENCY", "AGENCY_BRANCH", "ENTITY_CODE",
         "AIRLINE_NAME", "AIRLINE_CODE", "LOB", "VENDOR", "ACTIVE",
     ])
     # VENDOR is optional and must match the Suppliers master when set, so the
     # samples leave it blank — a sample row that fails on a name this particular
     # database has never heard of teaches the wrong lesson.
-    ws.append(["GDS", "6X2K-DEL", "Lords Travels", "DEL", "DEL-001", "", "", "B2B", "", "yes"])
-    ws.append(["LCC", "6E-AGT-88213", "Lords Travels", "DEL", "DEL-001", "IndiGo", "6E", "B2B", "", "yes"])
+    ws.append(["GDS", "6X2K-DEL", "", "Lords Travels", "DEL", "DEL-001", "", "", "B2B", "", "yes"])
+    ws.append(["LCC", "6E-AGT-88213", "AG-0001", "", "", "DEL-001", "IndiGo", "6E", "B2B", "", "yes"])
 
     bio = BytesIO()
     wb.save(bio)
@@ -487,6 +523,26 @@ async def update_login_id(
         data["entity_id"] = await _validate_entity(db, current_user, target_agency, data["entity_id"], channel)
     elif obj.entity_id is not None and ("agency_id" in data or "channel" in data):
         await _validate_entity(db, current_user, target_agency, obj.entity_id, channel)
+
+    if "lob" in data:
+        if (problem := lob_error(data["lob"])):
+            raise HTTPException(status_code=400, detail=problem)
+        data["lob"] = AGENCY_LOB
+
+    # Re-check the airline whenever it or the channel moves — a GDS airline left on
+    # a credential switched to LCC is exactly the mismatch the form prevents.
+    # Compared against the stored values, not mere presence: the edit form sends
+    # every field, and a credential saved before this rule must stay editable.
+    if any(
+        (data.get(f) or None) != (getattr(obj, f) or None)
+        for f in ("airline_name", "airline_code", "channel") if f in data
+    ):
+        try:
+            data["airline_name"], data["airline_code"] = (await AirlineCatalog.load(db)).resolve(
+                data.get("airline_name", obj.airline_name), data.get("airline_code", obj.airline_code), channel,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
     if "login_id" in data:
         new_login = (data["login_id"] or "").strip()

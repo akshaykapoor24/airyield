@@ -76,10 +76,15 @@ type DetailData = {
 };
 type Comparison = { group_id: string; match_status: string; lines: { line: string; summary: number | string | null; detail: number | string | null; variance: number | string | null; ok: boolean }[] };
 
-export default function BspUploadWizard({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+export default function BspUploadWizard({ onClose, onDone, initialSummaryFile = null, initialDetailFile = null }: {
+  onClose: () => void; onDone: () => void;
+  /** Email intake → Process: the BSPlink PDFs that came with the email. */
+  initialSummaryFile?: File | null;
+  initialDetailFile?: File | null;
+}) {
   const [step, setStep] = useState(1);
-  const [summaryFile, setSummaryFile] = useState<File | null>(null);
-  const [detailFile, setDetailFile] = useState<File | null>(null);
+  const [summaryFile, setSummaryFile] = useState<File | null>(initialSummaryFile);
+  const [detailFile, setDetailFile] = useState<File | null>(initialDetailFile);
   const [groupId, setGroupId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 

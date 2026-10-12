@@ -62,6 +62,18 @@ class TicketRow(BaseModel):
     raf:                 Optional[float] = None
     serv_charge:         Optional[float] = None
     gst_sell:            Optional[float] = None
+    # Commission sheet of a punched ticket — see models/uploaded_ticket.py.
+    comm_paid:           Optional[float] = None
+    plb_recd:            Optional[float] = None
+    incentive_paid:      Optional[float] = None
+    plb_paid:            Optional[float] = None
+    disc_recall:         Optional[float] = None
+    serv_charge_2:       Optional[float] = None
+    serv_charge_3:       Optional[float] = None
+    supp_serv_charge_1:  Optional[float] = None
+    supp_serv_charge_2:  Optional[float] = None
+    card_charge:         Optional[float] = None
+    supp_serv_gst:       Optional[float] = None
     doc_no:              Optional[str]   = None
     doc_date:            Optional[str]   = None
     reference:           Optional[str]   = None
@@ -428,6 +440,17 @@ class UploadedTicketUpdate(BaseModel):
     total_refund_amount:  Optional[float] = None
     roe:                  Optional[float] = None
     nuc:                  Optional[float] = None
+    comm_paid:            Optional[float] = None
+    plb_recd:             Optional[float] = None
+    incentive_paid:       Optional[float] = None
+    plb_paid:             Optional[float] = None
+    disc_recall:          Optional[float] = None
+    serv_charge_2:        Optional[float] = None
+    serv_charge_3:        Optional[float] = None
+    supp_serv_charge_1:   Optional[float] = None
+    supp_serv_charge_2:   Optional[float] = None
+    card_charge:          Optional[float] = None
+    supp_serv_gst:        Optional[float] = None
     fop_details:          Optional[str]   = None
     cc_auth:              Optional[str]   = None
     cc_do_expiry:         Optional[str]   = None

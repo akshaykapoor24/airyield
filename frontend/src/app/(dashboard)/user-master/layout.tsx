@@ -13,13 +13,11 @@ export default function UserMasterLayout({ children }: { children: React.ReactNo
   const active = USER_MASTER_NAV.find((t) => t.slug === segment);
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-1">
+      {/* Title, plus a one-line subtitle where the section sets one. */}
       <div>
-        <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-0.5">User Master</p>
-        <h1 className="text-xl font-bold text-gray-900">{active?.label ?? "User Master"}</h1>
-        <p className="text-xs text-gray-500 mt-0.5">
-          {active?.blurb ?? "The customers, agencies and corporates you work with."}
-        </p>
+        <h1 className="text-lg font-bold text-gray-900 leading-tight">{active?.label ?? "User Master"}</h1>
+        {active?.subtitle && <p className="text-xs text-gray-500 mt-0.5">{active.subtitle}</p>}
       </div>
 
       {children}

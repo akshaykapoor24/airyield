@@ -31,8 +31,8 @@ import {
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { notifyRequired } from "@/lib/requiredFields";
-import StatementAgencyField, { agencyBlockReason } from "@/components/statements/StatementAgencyField";
-import type { VendorAgency } from "@/lib/vendorAgency";
+import StatementAgencyField, { agencyBlockReason, channelForApiBase } from "@/components/statements/StatementAgencyField";
+import { type VendorAgency, loadVendorAgencies } from "@/lib/vendorAgency";
 
 type Step = "upload" | "mapping" | "review" | "done";
 
@@ -204,6 +204,7 @@ function ControlsSummary({ controls, balanceRows }: {
 
 export default function StatementUploadWizard({
   apiBase, title, requireSupplier = false, captureControls = false, doneHint, onClose, onDone,
+  initialFile = null, initialAgencyId = null, initialControls,
 }: {
   apiBase: string;
   title: string;
@@ -220,6 +221,13 @@ export default function StatementUploadWizard({
   doneHint?: string;
   onClose: () => void;
   onDone: () => void;
+  /** Email intake → Process: the attachment to start from. Skips the drop zone and goes
+   *  straight to mapping once the consolidator (below) is known. */
+  initialFile?: File | null;
+  /** The sender's Agency Master row — the consolidator the email came from. */
+  initialAgencyId?: number | null;
+  /** Control totals read from the email's covering note ("245 tickets, net ₹12,34,567"). */
+  initialControls?: { count?: number | null; amount?: string | null };
 }) {
   const [step, setStep] = useState<Step>("upload");
   const [std, setStd] = useState<StdResp | null>(null);
@@ -300,6 +308,9 @@ export default function StatementUploadWizard({
       const fd = new FormData();
       fd.append("file", file);
       if (supplierId != null) fd.append("supplier_id", String(supplierId));
+      // The agency itself: channel-checked on the server, works while it awaits
+      // approval, and carries the vendor service charge the SF columns are checked against.
+      if (requireSupplier && agency) fd.append("agency_id", String(agency.id));
       const { data } = await api.post<ExtractResp>(`${apiBase}/extract`, fd);
       setExtracted(data);
       setColumnMap(data.suggested_mapping || {});
@@ -309,6 +320,30 @@ export default function StatementUploadWizard({
     } catch (e) { toast.error(errMsg(e, "Could not read the file.")); }
     finally { setBusy(false); }
   };
+
+  // ── Opened from an email ──────────────────────────────────────────────────
+  // The file and the sender's agency are pre-filled; once both are known the wizard reads the
+  // file itself, so the user's first screen is the mapping. An agency that cannot be used
+  // (not found, awaiting supplier-master approval) leaves the user on the upload step to pick.
+  const autoStarted = useRef(false);
+  useEffect(() => {
+    if (initialFile) setFile(initialFile);
+    if (initialControls?.count != null) setExpectedCount(String(initialControls.count));
+    if (initialControls?.amount) setExpectedAmount(initialControls.amount);
+    if (requireSupplier && initialAgencyId != null) {
+      loadVendorAgencies()
+        .then((list) => { const a = list.find((x) => x.id === initialAgencyId); if (a) setAgency(a); })
+        .catch(() => { /* the picker loads its own list; the user can choose there */ });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  useEffect(() => {
+    if (!initialFile || autoStarted.current || step !== "upload" || !file) return;
+    if (requireSupplier && agencyBlockReason(agency)) return;
+    autoStarted.current = true;
+    void doExtract();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [file, agency]);
 
   // ── Mapping ───────────────────────────────────────────────────────────────
   const setMap = (field: string, col: string) =>
@@ -471,6 +506,9 @@ export default function StatementUploadWizard({
       fd.append("file", file);
       fd.append("column_map", JSON.stringify(columnMap));
       if (supplierId != null) fd.append("supplier_id", String(supplierId));
+      // The agency itself: channel-checked on the server, works while it awaits
+      // approval, and carries the vendor service charge the SF columns are checked against.
+      if (requireSupplier && agency) fd.append("agency_id", String(agency.id));
       fd.append("header_row", String(extracted.header_row));
       fd.append("file_digest", extracted.file_digest);
       fd.append("edits", JSON.stringify(edits));
@@ -510,7 +548,8 @@ export default function StatementUploadWizard({
                   wrong pick is not visible anywhere later. The values are rows in the
                   user's own Agency Master. */}
               {requireSupplier && (
-                <StatementAgencyField value={agency} onChange={setAgency} className="mb-4" />
+                <StatementAgencyField value={agency} onChange={setAgency} className="mb-4"
+                  channel={channelForApiBase(apiBase)} />
               )}
 
               <div

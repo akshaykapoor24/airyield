@@ -60,6 +60,11 @@ class ColumnMap:
     valid_on: int | None = None
     validity: int | None = None
     remarks: int | None = None
+    # Spreadsheets only so far: a vendor-comparison sheet lists several suppliers'
+    # deals side by side (a "Source" column), and some name the scope in its own
+    # column ("TYPE" = INTL / DOM) instead of in the airline name.
+    supplier: int | None = None
+    scope: int | None = None
 
     @property
     def rate_columns(self) -> tuple[int, ...]:
@@ -83,6 +88,10 @@ class DocLayout:
     forward_filled: int = 0
     split_merged: int = 0
     section_spans: list[tuple[int, int, str]] = field(default_factory=list)
+    # Spreadsheet only: which sheet was read, and rows left out because they
+    # belong to a different supplier — {supplier cell: row count}.
+    sheet_title: str | None = None
+    skipped_suppliers: dict[str, int] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -104,7 +113,9 @@ class Chunk:
 
 HEADER_TOKENS = {
     "AIRLINE", "AIRLINENAME", "CODE", "AIRLINECODE", "IATA", "ECO", "ECONOMY",
-    "PECOM", "PECO", "PEY", "BUS", "BUSFRST", "BUSINESS", "CABINTYPE", "CABIN",
+    "PECOM", "PECO", "PEY", "BUS", "BUSFRST", "BUSFIRST", "BUSINESS", "BUSINESSFIRST",
+    "PREMIUMECONOMY", "PREMECO", "CABINTYPE", "CABIN",
+    "AL", "PLBECO", "PLBPREECO", "PLBPECO", "PLBPEY", "PLBBUS", "APPLICABLE",
     "COMMISSION", "APPLICABLEON", "VALIDON", "VALIDITY", "TRAVELVALIDITY",
     "REMARKS", "REMARK", "REMARKSCONDITIONSIFANY",
 }
@@ -130,8 +141,18 @@ def _find_header(rows: list[tuple[str, ...]]) -> tuple[int | None, tuple[str, ..
 
 
 def _is_repeat_header(cells: tuple[str, ...], header: tuple[str, ...]) -> bool:
-    """Continuation banners on pages 2..N repeat the header verbatim."""
-    return tuple(_norm(c) for c in cells) == tuple(_norm(c) for c in header)
+    """Continuation banners on pages 2..N repeat the header verbatim — or partly:
+    a header drawn as two physical rows (Mirror's) has its labels merged down into
+    the second, so once merges are expanded that row repeats some labels and leaves
+    the rest blank. Every non-empty cell sitting under its own header label is
+    still a header, never data."""
+    norm_cells = tuple(_norm(c) for c in cells)
+    norm_head = tuple(_norm(c) for c in header)
+    if norm_cells == norm_head:
+        return True
+    filled = [(i, c) for i, c in enumerate(norm_cells) if c]
+    return (len(filled) >= 2
+            and all(i < len(norm_head) and c == norm_head[i] for i, c in filled))
 
 
 def build_colmap(header: tuple[str, ...]) -> ColumnMap:
@@ -140,28 +161,35 @@ def build_colmap(header: tuple[str, ...]) -> ColumnMap:
     cm = ColumnMap()
     for i, raw in enumerate(header):
         h = _norm(raw)
-        if h in ("AIRLINE", "AIRLINENAME") and cm.airline is None:
+        if h in ("AIRLINE", "AIRLINENAME", "AL", "CARRIER") and cm.airline is None:
             cm.airline = i
         elif h in ("CODE", "AIRLINECODE") and cm.code is None:
             cm.code = i
         elif h == "IATA" and cm.iata is None:
             cm.iata = i
-        elif h in ("ECO", "ECONOMY") and cm.eco is None:
+        elif h in ("ECO", "ECONOMY", "PLBECO") and cm.eco is None:
             cm.eco = i
-        elif h in ("PECOM", "PECO", "PEY") and cm.pey is None:
+        elif h in ("PECOM", "PECO", "PEY", "PREMIUMECONOMY", "PREMECO",
+                   "PLBPREECO", "PLBPECO", "PLBPEY") and cm.pey is None:
             cm.pey = i
-        elif h in ("BUS", "BUSFRST", "BUSINESS") and cm.bus is None:
+        # "BUS/FIRST" (Vicky) reads BUSFIRST once normalised — the same column Akbar
+        # spells "BUS/FRST".
+        elif h in ("BUS", "BUSFRST", "BUSFIRST", "BUSINESS", "BUSINESSFIRST", "PLBBUS") and cm.bus is None:
             cm.bus = i
         elif h in ("CABINTYPE", "CABIN") and cm.cabin is None:
             cm.cabin = i
         elif h == "COMMISSION" and cm.commission is None:
             cm.commission = i
-        elif h in ("VALIDON", "APPLICABLEON") and cm.valid_on is None:
+        elif h in ("VALIDON", "APPLICABLEON", "APPLICABLE") and cm.valid_on is None:
             cm.valid_on = i
         elif h in ("VALIDITY", "TRAVELVALIDITY") and cm.validity is None:
             cm.validity = i
         elif h.startswith("REMARK") and cm.remarks is None:
             cm.remarks = i
+        elif h in ("SOURCE", "SUPPLIER", "VENDOR", "CONSOLIDATOR") and cm.supplier is None:
+            cm.supplier = i
+        elif h in ("TYPE", "SECTOR", "SCOPE") and cm.scope is None:
+            cm.scope = i
 
     # Fall back to position 0 for the airline column — every observed layout
     # leads with it, and without it forward-fill and chunk nudging are blind.
@@ -256,12 +284,14 @@ def is_noise_row(cells: tuple[str, ...], cm: ColumnMap) -> bool:
         return True
     if _row_expects_deals(cells, cm):
         return False
+    # A deal needs at least an airline and a rate. One lonely cell with no rate
+    # anywhere is a banner, a note or a T&C sentence — and so is one text repeated
+    # across a merged span (Vicky's "DEAL" over its three class columns), however
+    # many cells the span now fills.
+    if len(set(non_empty)) == 1:
+        return True
     if len(non_empty) > 2:
         return False
-    # A deal needs at least an airline and a rate. One lonely cell with no rate
-    # anywhere is a banner, a note or a T&C sentence.
-    if len(non_empty) == 1:
-        return True
     return any(NOISE_RE.search(c) for c in non_empty)
 
 
@@ -361,9 +391,78 @@ def forward_fill_identity(rows: list[DocRow], cm: ColumnMap) -> tuple[list[DocRo
 STRATEGIES = ("lines_strict", "lines", "text")
 
 
-def _extract_with_strategy(content: bytes, strategy: str
+# ══════════════════════════════════════════════════════════════════════════════
+# MERGED CELLS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _col_centres(table) -> list[float] | None:
+    """The x-centre of each column, from the first row whose cells are all present
+    (no merge in it). That row is the column grid every merged cell is read against."""
+    for row in table.rows:
+        if row.cells and all(c is not None for c in row.cells):
+            return [(c[0] + c[2]) / 2 for c in row.cells]
+    return None
+
+
+def fill_merged_cells(table, texts: list[list[str | None]], rate_cols: set[int]) -> int:
+    """Copy a merged cell's text into every grid position it covers.
+
+    `table.extract()` returns a merged cell's text once, at its top-left position,
+    and None for every other position it covers — distinct from "" for a cell that
+    is genuinely blank. Read as blanks, merges lose rates outright. The Vicky sheet
+    is built on them: one "5% (B)" spanning BUS/FIRST, P.ECO and ECO means 5% on all
+    three classes, "2.75%" spanning BUS and P.ECO with "1.75%" under ECO means two
+    rates, and an airline / validity cell spanning two rows governs both.
+
+    Each cell's bbox says exactly what it covers, so nothing is guessed:
+      across  — only between RATE columns. A banner spanning the page width must stay
+                one cell, or section and noise detection stop recognising it.
+      down    — any column. A vertically merged airline, validity or remark applies
+                to every row it spans.
+    Returns how many positions were filled.
+    """
+    centres = _col_centres(table)
+    if centres is None:
+        return 0
+    rows = table.rows
+    filled = 0
+    for i, row in enumerate(rows):
+        for j, bbox in enumerate(row.cells or []):
+            if bbox is None or texts[i][j] is None:
+                continue
+            x0, y0, x1, y1 = bbox
+            # Across: the columns to the right whose centre lies inside this cell.
+            if j in rate_cols:
+                k = j + 1
+                while (k < len(row.cells) and row.cells[k] is None and k in rate_cols
+                       and x0 <= centres[k] <= x1):
+                    texts[i][k] = texts[i][j]
+                    filled += 1
+                    k += 1
+            # Down: the rows below whose middle lies inside this cell.
+            r = i + 1
+            while r < len(rows):
+                below = rows[r]
+                if j >= len(below.cells) or below.cells[j] is not None:
+                    break
+                mid = (below.bbox[1] + below.bbox[3]) / 2
+                if not (y0 <= mid <= y1):
+                    break
+                if texts[r][j] is None:
+                    texts[r][j] = texts[i][j]
+                    filled += 1
+                r += 1
+    return filled
+
+
+def _extract_with_strategy(content: bytes, strategy: str, rate_cols: set[int] | None = None
                            ) -> tuple[list[tuple[int, tuple[str, ...]]], list[int], int]:
-    """Return (page, cells) pairs plus the column count seen on each page."""
+    """Return (page, cells) pairs plus the column count seen on each page.
+
+    With `rate_cols` (known only once the header is mapped), merged cells are
+    expanded first — see fill_merged_cells. Without it, merges read as blanks,
+    which is what header detection was tuned on.
+    """
     import fitz  # PyMuPDF
 
     raw: list[tuple[int, tuple[str, ...]]] = []
@@ -374,7 +473,13 @@ def _extract_with_strategy(content: bytes, strategy: str
             tables = page.find_tables(strategy=strategy)
             best_cols = 0
             for table in tables:
-                for cells in table.extract():
+                texts = [list(r) for r in table.extract()]
+                if rate_cols is not None:
+                    try:
+                        fill_merged_cells(table, texts, rate_cols)
+                    except Exception:
+                        logger.exception("merged-cell fill failed on page %s", pno)
+                for cells in texts:
                     cells = tuple((c or "").strip() for c in cells)
                     raw.append((pno, cells))
                     best_cols = max(best_cols, len(cells))
@@ -433,7 +538,7 @@ def build_layout(content: bytes) -> DocLayout:
         return DocLayout()
 
     cm = build_colmap(chosen.header)
-    raw, _, _ = _extract_with_strategy(content, chosen.used_table_engine)
+    raw, _, _ = _extract_with_strategy(content, chosen.used_table_engine, set(cm.rate_columns))
 
     # Merged cabin rows are split before anything is numbered.
     raw, split_count = split_merged_rows(raw, cm)
@@ -485,6 +590,150 @@ def build_layout(content: bytes) -> DocLayout:
     chosen.split_merged = split_count
     chosen.section_spans = spans
     return chosen
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SPREADSHEETS — the same rows, read from Excel instead of a PDF
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Deal sheets also arrive as Excel, often too free-form for column mapping (vendor
+# comparison sheets, house formats). They are tables already, so there is no
+# geometry to reconstruct: read the cells, find the header with the same rules as
+# a PDF, and hand the rows to the same pipeline — fast path, model, expansion.
+
+_SCOPE_WORDS = {"INTL": "INTL", "INTERNATIONAL": "INTL", "DOM": "DOM", "DOMESTIC": "DOM"}
+
+
+def _sheet_cell(value, number_format: str | None) -> str:
+    """One cell as the text a person sees. A %-formatted 0.02 is "2%", not "0.02";
+    a whole float is "14", not "14.0"."""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, (int, float)):
+        if number_format and "%" in number_format:
+            return f"{round(value * 100, 4):g}%"
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+        return f"{value:g}" if isinstance(value, float) else str(value)
+    if hasattr(value, "strftime"):
+        return value.strftime("%d %b %Y")
+    return str(value).strip()
+
+
+def _sheet_grids(content: bytes, filename: str) -> list[tuple[str, list[tuple[str, ...]]]]:
+    """(sheet name, rows of text cells) for every sheet. .xlsx keeps number formats;
+    legacy .xls and CSV go through pandas and lose them (see build_layout_from_sheet)."""
+    name = (filename or "").lower()
+    grids: list[tuple[str, list[tuple[str, ...]]]] = []
+    if name.endswith((".xlsx", ".xlsm")):
+        import openpyxl
+        wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True, read_only=True)
+        for ws in wb.worksheets:
+            rows = [tuple(_sheet_cell(c.value, getattr(c, "number_format", None)) for c in r)
+                    for r in ws.iter_rows()]
+            grids.append((ws.title, rows))
+        wb.close()
+        return grids
+    import pandas as pd
+    if name.endswith(".csv"):
+        frames = {"Sheet1": pd.read_csv(io.BytesIO(content), header=None, dtype=object)}
+    else:
+        frames = pd.read_excel(io.BytesIO(content), sheet_name=None, header=None, dtype=object)
+    for title, df in frames.items():
+        df = df.where(df.notna(), None)
+        grids.append((str(title), [tuple(_sheet_cell(v, None) for v in r) for r in df.values.tolist()]))
+    return grids
+
+
+def build_layout_from_sheet(content: bytes, filename: str, keep_supplier=None) -> DocLayout:
+    """Parse an Excel deal sheet into the same DocLayout a PDF produces.
+
+    `keep_supplier(cell) -> bool` filters a multi-supplier sheet down to the
+    supplier the upload is for. Without it every row is kept. The rows it drops
+    are counted per supplier in `layout.skipped_suppliers` so the caller can say
+    what was left out — never silently.
+
+    The first sheet with a recognisable header wins; vendor sheets keep one table
+    per file, and mixing column maps from two sheets would mislabel rates.
+    """
+    try:
+        grids = _sheet_grids(content, filename)
+    except Exception:
+        logger.exception("could not read spreadsheet %s", filename)
+        return DocLayout()
+
+    for title, grid in grids:
+        grid = [tuple(c.strip() for c in r) for r in grid]
+        grid = [r for r in grid if any(r)]
+        if not grid:
+            continue
+        hdr_idx, header = _find_header(grid)
+        if header is None:
+            continue
+        cm = build_colmap(header)
+        if cm.airline is None:
+            continue
+
+        # "Code" on some sheets is the numeric ticket-stock code (AA = 001), not the
+        # carrier designator. A code column of digits only is no airline code.
+        if cm.code is not None:
+            vals = [r[cm.code] for r in grid[hdr_idx + 1:] if cm.code < len(r) and r[cm.code]]
+            if vals and all(v.isdigit() for v in vals):
+                cm.code = None
+
+        if cm.format_hint == "unknown":
+            continue
+
+        rows: list[DocRow] = []
+        skipped: dict[str, int] = {}
+        section: str | None = None
+        n = 0
+        dropped_noise = dropped_headers = 0
+        for cells in grid[hdr_idx + 1:]:
+            cells = tuple(list(cells) + [""] * (len(header) - len(cells)))[: len(header)]
+            found = detect_section(cells)
+            if found is not None:
+                section = found
+                continue
+            if _is_repeat_header(cells, header):
+                dropped_headers += 1
+                continue
+            if is_noise_row(cells, cm):
+                dropped_noise += 1
+                continue
+            if cm.supplier is not None and keep_supplier is not None:
+                src = cells[cm.supplier]
+                if not keep_supplier(src):
+                    skipped[src or "(blank)"] = skipped.get(src or "(blank)", 0) + 1
+                    continue
+            # A TYPE column of INTL / DOM is the row's scope. Carried in the airline
+            # cell the way PDFs print it ("AI (INTL)"), so the scope rules and the
+            # airline resolver — which strips the qualifier — need nothing new, and
+            # Air India INTL and DOM stay two deals.
+            if cm.scope is not None:
+                tag = _SCOPE_WORDS.get(re.sub(r"[^A-Z]", "", cells[cm.scope].upper()))
+                if tag and cells[cm.airline]:
+                    cells = tuple(f"{c} ({tag})" if i == cm.airline else c for i, c in enumerate(cells))
+            rows.append(DocRow(
+                n=n, page=0, cells=cells, section=section,
+                raw="\t".join(c.replace("\n", " ") for c in cells),
+                expects_deals=_row_expects_deals(cells, cm),
+            ))
+            n += 1
+
+        rows, filled = forward_fill_identity(rows, cm)
+        layout = DocLayout(
+            rows=rows, header=header, colmap=cm, col_count=len(header),
+            page_count=1, page_col_counts=[len(header)], used_table_engine="sheet",
+            dropped_noise=dropped_noise, dropped_headers=dropped_headers,
+            forward_filled=filled,
+        )
+        layout.sheet_title = title
+        layout.skipped_suppliers = skipped
+        return layout
+    return DocLayout()
 
 
 # ══════════════════════════════════════════════════════════════════════════════

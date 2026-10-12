@@ -29,18 +29,19 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import {
-  AlertTriangle, ArrowRight, Check, Clock, Edit2, PencilLine,
-  ReceiptIndianRupee, RefreshCw, Search, Trash2, Wallet,
+  AlertTriangle, ArrowRight, Check, Clock, Edit2, Filter, PencilLine,
+  Plus, ReceiptIndianRupee, RefreshCw, Search, Trash2, Wallet, X,
 } from "lucide-react";
 import api from "@/lib/api";
 import SearchSelect from "@/components/ui/SearchSelect";
+import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import {
   STATE_NAMES, canonicalState, gstinError, gstinPlaceholder, gstinTypingError,
   normaliseTaxId, panError, panTypingError,
 } from "@/lib/indiaTax";
 import {
   INPUT, LABEL, apiError,
-  ActiveBadge, UploadBox, ModalShell, Toolbar,
+  ActiveBadge, UploadBox, ModalShell,
 } from "@/components/userMaster/shared";
 
 export type Channel = "GDS" | "LCC";
@@ -82,6 +83,9 @@ export type AgencyRow = {
   contact_phone: string | null;
   contact_email: string | null;
   notes: string | null;
+  // OUR identifier, issued by the system (AG-0001 …) unless typed in. Shared by a
+  // branch's GDS and LCC rows, unique otherwise. Null only on rows nobody has saved since.
+  agency_code: string | null;
   // The user's own references — optional, not unique (a branch's GDS and LCC rows
   // usually share them). customer_code is stored uppercased; account_code as typed.
   customer_code: string | null;
@@ -295,6 +299,26 @@ function ChannelPills({ scope }: { scope: ChannelScope }) {
   );
 }
 
+/** A compact "All …" dropdown for the filter row. Highlighted while it filters. */
+function FilterSelect({
+  value, onChange, label, options,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  label: string;
+  options: [string, string][];
+}) {
+  return (
+    <select value={value} onChange={e => onChange(e.target.value)}
+      className={`text-[11px] rounded-lg border px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-sky-400 ${
+        value ? "border-sky-300 bg-sky-50 text-sky-800 font-semibold" : "border-gray-200 bg-white text-gray-600"
+      }`}>
+      <option value="">{label}</option>
+      {options.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+    </select>
+  );
+}
+
 export default function AgencyInfoSection({
   onChange, onGoTo,
 }: {
@@ -306,18 +330,17 @@ export default function AgencyInfoSection({
   const [rows, setRows] = useState<AgencyRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [apiErr, setApiErr] = useState("");
-  const [search, setSearch] = useState("");
   const [modal, setModal] = useState<AgencyRow | null | false>(false);
 
   const fetchRows = useCallback(async () => {
     setLoading(true); setApiErr("");
     try {
-      const { data } = await api.get<AgencyRow[]>("/agencies/", { params: { search } });
+      const { data } = await api.get<AgencyRow[]>("/agencies/");
       setRows(data);
       onChange?.(data.length);
     } catch (e) { setApiErr(apiError(e)); }
     finally { setLoading(false); }
-  }, [search, onChange]);
+  }, [onChange]);
 
   useEffect(() => { const t = setTimeout(fetchRows, 250); return () => clearTimeout(t); }, [fetchRows]);
 
@@ -328,12 +351,14 @@ export default function AgencyInfoSection({
     } catch { alert("Update failed."); }
   };
 
-  const del = async (id: number) => {
-    if (!confirm("Delete this agency? Its entities and login IDs will be removed too. This cannot be undone.")) return;
-    try {
-      await api.delete(`/agencies/${id}`);
-      setRows(p => { const next = p.filter(r => r.id !== id); onChange?.(next.length); return next; });
-    } catch (e) { alert(apiError(e)); }
+  // The row awaiting the delete popup. The request runs inside ConfirmDialog, which
+  // stays open with the error shown if it fails, rather than closing and alerting.
+  const [pendingDelete, setPendingDelete] = useState<AgencyRow | null>(null);
+  const confirmDelete = async () => {
+    if (!pendingDelete) return;
+    const id = pendingDelete.id;
+    await api.delete(`/agencies/${id}`);
+    setRows(p => { const next = p.filter(r => r.id !== id); onChange?.(next.length); return next; });
   };
 
   // Ask the platform admin to add this agency's vendor to the shared master.
@@ -349,20 +374,78 @@ export default function AgencyInfoSection({
     finally { setRequesting(null); }
   };
 
-  const COLUMNS = ["AGENCY", "BRANCH", "CHANNELS", "GDS TERMS", "LCC TERMS", "SERVICE RATES", "GST", "PAN", "PHONE", "MASTER", "STATUS", "ACTIONS"];
+  // Client-side filters over the loaded list — a user's book is hundreds of rows at
+  // most. The first is a pick from the agencies already onboarded rather than free
+  // text: labelled code · name — branch · channel, because one vendor is several
+  // rows (per branch, per channel) and a bare name would not say which.
+  const agencyLabel = (r: AgencyRow) =>
+    `${r.agency_code ? `${r.agency_code} · ` : ""}${r.name} — ${r.branch_name || r.city || r.branch_code} · ${r.channels}`;
+  const agencyOptions = useMemo(() => rows.map(agencyLabel), [rows]);
+  const [fAgency, setFAgency] = useState("");
+  const [fChannel, setFChannel] = useState<"" | Channel>("");
+  const [fTerms, setFTerms] = useState<"" | "cash" | "credit">("");
+  const [fMaster, setFMaster] = useState<"" | ReturnType<typeof masterState>>("");
+  const [fStatus, setFStatus] = useState<"" | "active" | "inactive">("");
+  const filtersOn = !!(fAgency || fChannel || fTerms || fMaster || fStatus);
+  const clearFilters = () => { setFAgency(""); setFChannel(""); setFTerms(""); setFMaster(""); setFStatus(""); };
+
+  const visible = useMemo(() => rows.filter(r => {
+    if (fAgency && agencyLabel(r) !== fAgency) return false;
+    if (fChannel && !channelsOf(r.channels).includes(fChannel)) return false;
+    if (fTerms && !r.terms.some(t => t.agency_type === fTerms)) return false;
+    if (fMaster && masterState(r) !== fMaster) return false;
+    if (fStatus && r.is_active !== (fStatus === "active")) return false;
+    return true;
+  }), [rows, fAgency, fChannel, fTerms, fMaster, fStatus]);
+
+  const COLUMNS = ["Agency", "Branch", "Channel", "Terms", "Service rates", "GST / PAN", "Contact", "Master", "Status", ""];
 
   return (
     <div className="space-y-3">
-      <Toolbar label="Agency" count={rows.length} search={search} setSearch={setSearch}
-        onAdd={() => setModal(null)} onRefresh={fetchRows} loading={loading} />
+      {/* One row: pick an agency, narrow by the rest, then count / refresh / add. */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <div className="w-72">
+          <SearchSelect value={fAgency} options={agencyOptions} onChange={setFAgency}
+            placeholder="All onboarded agencies" />
+        </div>
+        <Filter className="w-3.5 h-3.5 text-gray-400" />
+        <FilterSelect value={fChannel} onChange={v => setFChannel(v as "" | Channel)} label="All channels"
+          options={[["GDS", "GDS"], ["LCC", "LCC"]]} />
+        <FilterSelect value={fTerms} onChange={v => setFTerms(v as "" | "cash" | "credit")} label="All terms"
+          options={[["cash", "Cash"], ["credit", "Credit"]]} />
+        <FilterSelect value={fMaster} onChange={v => setFMaster(v as "" | ReturnType<typeof masterState>)} label="Any master status"
+          options={[["in_master", "In master"], ["pending", "Awaiting approval"], ["rejected", "Rejected"], ["unlisted", "Not requested"]]} />
+        <FilterSelect value={fStatus} onChange={v => setFStatus(v as "" | "active" | "inactive")} label="Active & inactive"
+          options={[["active", "Active"], ["inactive", "Inactive"]]} />
+        {filtersOn && (
+          <button onClick={clearFilters} className="flex items-center gap-1 text-[11px] font-semibold text-sky-600 hover:underline">
+            <X className="w-3 h-3" /> Clear
+          </button>
+        )}
+        <div className="ml-auto flex items-center gap-2">
+          <span className="text-[11px] text-gray-400">
+            {filtersOn ? `${visible.length} of ${rows.length}` : rows.length} record{rows.length !== 1 ? "s" : ""}
+          </span>
+          <button onClick={fetchRows} disabled={loading} title="Refresh"
+            className="flex items-center bg-white border border-gray-200 text-gray-600 px-2.5 py-2 rounded-lg hover:bg-gray-50 disabled:opacity-50">
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+          </button>
+          <button onClick={() => setModal(null)}
+            className="flex items-center gap-1.5 text-white px-3.5 py-2 rounded-lg text-xs font-medium" style={{ background: "#1e3a5f" }}>
+            <Plus className="w-3.5 h-3.5" /> Add Agency
+          </button>
+        </div>
+      </div>
 
       <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full">
             <thead>
               <tr style={{ background: "#1e4d8c" }}>
-                {COLUMNS.map(h => (
-                  <th key={h} className="px-3 py-2.5 text-left text-[10px] font-semibold text-white uppercase tracking-wider whitespace-nowrap">{h}</th>
+                {COLUMNS.map((h, i) => (
+                  <th key={i} className={`px-3 py-2.5 text-left text-[10px] font-semibold text-white uppercase tracking-wider whitespace-nowrap ${
+                    i === COLUMNS.length - 1 ? "sticky right-0" : ""
+                  }`} style={i === COLUMNS.length - 1 ? { background: "#1e4d8c" } : undefined}>{h}</th>
                 ))}
               </tr>
             </thead>
@@ -371,55 +454,84 @@ export default function AgencyInfoSection({
                 <tr><td colSpan={COLUMNS.length} className="px-4 py-12 text-center text-xs text-gray-400"><RefreshCw className="w-4 h-4 animate-spin mx-auto mb-2 text-gray-300" />Loading…</td></tr>
               ) : apiErr ? (
                 <tr><td colSpan={COLUMNS.length} className="px-4 py-12 text-center text-xs text-red-400">{apiErr}</td></tr>
-              ) : rows.length === 0 ? (
-                <tr><td colSpan={COLUMNS.length} className="px-4 py-12 text-center text-xs text-gray-400">No agencies yet. Add one, or upload an XLS.</td></tr>
-              ) : rows.map((r, idx) => {
+              ) : visible.length === 0 ? (
+                <tr><td colSpan={COLUMNS.length} className="px-4 py-12 text-center text-xs text-gray-400">
+                  {rows.length === 0 ? "No agencies yet. Add one, or upload an XLS." : "No agencies match these filters."}
+                </td></tr>
+              ) : visible.map(r => {
                 const byChannel = Object.fromEntries(r.terms.map(t => [t.channel, t]));
+                const scope = channelsOf(r.channels);
                 return (
-                  <tr key={r.id} className={`border-b border-gray-50 hover:bg-sky-50/30 ${idx % 2 ? "bg-gray-50/30" : "bg-white"}`}>
-                    <td className="px-3 py-2 text-[11px] font-semibold text-gray-800">
-                      {r.name}
-                      {(r.customer_code || r.account_code) && (
-                        <p className="text-[10px] font-normal font-mono text-gray-400 mt-0.5">
-                          {[r.customer_code, r.account_code && `A/c ${r.account_code}`].filter(Boolean).join(" · ")}
-                        </p>
-                      )}
+                  <tr key={r.id} className={`group border-b border-gray-100 last:border-0 hover:bg-sky-50/40 ${r.is_active ? "" : "opacity-60"}`}>
+                    {/* Name first and largest — it is what people scan for — with our
+                        code and their references on the line under it. */}
+                    {/* Width is fixed on an inner div, not the cell: in an auto-layout
+                        table a cell's max-width is ignored, so a long name stretched the
+                        column instead of wrapping. Two lines, then ellipsis. */}
+                    <td className="px-3 py-2.5">
+                      <div className="w-44">
+                      <button onClick={() => router.push(`/user-master/agency-master/${r.id}`)}
+                        className="block w-full text-left text-[12px] font-semibold text-gray-900 hover:text-sky-700 leading-snug line-clamp-2 break-words"
+                        title={r.name}>
+                        {r.name}
+                      </button>
+                      <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                        {r.agency_code && (
+                          <span className="px-1.5 py-px rounded bg-sky-50 ring-1 ring-sky-100 text-sky-700 text-[10px] font-mono font-semibold whitespace-nowrap" title="Agency Code">
+                            {r.agency_code}
+                          </span>
+                        )}
+                        {(r.customer_code || r.account_code) && (
+                          <span className="text-[10px] font-mono text-gray-400 whitespace-nowrap">
+                            {[r.customer_code, r.account_code && `A/c ${r.account_code}`].filter(Boolean).join(" · ")}
+                          </span>
+                        )}
+                      </div>
+                      </div>
                     </td>
-                    <td className="px-3 py-2 text-[11px] text-gray-600 whitespace-nowrap">
-                      {r.branch_name || r.city || "—"}
-                      <span className="text-[10px] text-gray-400 ml-1">{r.branch_code}</span>
+                    <td className="px-3 py-2.5 whitespace-nowrap">
+                      <p className="text-[11px] text-gray-700">{r.branch_name || r.city || "—"}</p>
+                      <p className="text-[10px] font-mono text-gray-400">{r.branch_code}</p>
                     </td>
-                    <td className="px-3 py-2"><ChannelPills scope={r.channels} /></td>
-                    {(["GDS", "LCC"] as Channel[]).map(ch => (
-                      <td key={ch} className="px-3 py-2">
-                        {channelsOf(r.channels).includes(ch)
-                          ? (byChannel[ch]
-                              ? <TermsCell t={byChannel[ch]} />
-                              : <button onClick={() => router.push(`/user-master/agency-master/${r.id}`)}
-                                  className="text-[10px] font-semibold text-sky-600 hover:underline">Set terms</button>)
-                          : <span className="text-[11px] text-gray-300">—</span>}
-                      </td>
-                    ))}
-                    <td className="px-3 py-2"><ServiceRatesCell r={r} /></td>
+                    <td className="px-3 py-2.5"><ChannelPills scope={r.channels} /></td>
+                    {/* One terms column: a row is one channel, so a second, almost
+                        always empty column only cost width. Legacy BOTH rows stack. */}
+                    <td className="px-3 py-2.5">
+                      <div className="flex flex-col gap-2">
+                        {scope.map(ch => byChannel[ch]
+                          ? <TermsCell key={ch} t={byChannel[ch]} />
+                          : <button key={ch} onClick={() => router.push(`/user-master/agency-master/${r.id}`)}
+                              className="text-[10px] font-semibold text-sky-600 hover:underline text-left whitespace-nowrap">Set {ch} terms</button>)}
+                      </div>
+                    </td>
+                    <td className="px-3 py-2.5"><ServiceRatesCell r={r} /></td>
                     {/* "Unregistered" and "—" say different things: the first is an
                         answer, the second is a blank nobody has filled in yet. */}
-                    <td className="px-3 py-2 text-[11px] text-gray-600">
-                      {r.gst_number || (r.gst_registered
-                        ? <span className="text-amber-600">Not entered</span>
-                        : <span className="text-gray-400">Unregistered</span>)}
+                    <td className="px-3 py-2.5 whitespace-nowrap">
+                      <p className="text-[11px] font-mono text-gray-700">
+                        {r.gst_number || (r.gst_registered
+                          ? <span className="font-sans text-amber-600">GST not entered</span>
+                          : <span className="font-sans text-gray-400">Unregistered</span>)}
+                      </p>
+                      <p className="text-[10px] font-mono text-gray-400">{r.pan_number ? `PAN ${r.pan_number}` : "No PAN"}</p>
                     </td>
-                    <td className="px-3 py-2 text-[11px] text-gray-600">{r.pan_number || "—"}</td>
-                    <td className="px-3 py-2 text-[11px] text-gray-600 max-w-40 truncate" title={r.contact_phone ?? ""}>{r.contact_phone || "—"}</td>
-                    <td className="px-3 py-2">
+                    <td className="px-3 py-2.5 max-w-[180px]">
+                      <p className="text-[11px] text-gray-700 truncate" title={r.contact_phone ?? ""}>{r.contact_phone || "—"}</p>
+                      {r.contact_email && (
+                        <p className="text-[10px] text-gray-400 truncate" title={r.contact_email}>{r.contact_email}</p>
+                      )}
+                    </td>
+                    <td className="px-3 py-2.5 whitespace-nowrap">
                       <MasterCell
                         row={r}
                         busy={requesting === r.id}
                         onRequest={() => requestMaster(r)}
                       />
                     </td>
-                    <td className="px-3 py-2"><ActiveBadge active={r.is_active} onClick={() => toggle(r)} /></td>
-                    <td className="px-3 py-2">
-                      <div className="flex items-center gap-1">
+                    <td className="px-3 py-2.5 whitespace-nowrap"><ActiveBadge active={r.is_active} onClick={() => toggle(r)} /></td>
+                    {/* Pinned right so the actions stay reachable however wide the table scrolls. */}
+                    <td className="px-2 py-2.5 sticky right-0 bg-white group-hover:bg-sky-50 shadow-[-6px_0_6px_-6px_rgba(0,0,0,0.12)]">
+                      <div className="flex items-center gap-0.5">
                         {/* The way through to Invoicing, as on Employee / Corporate Master. */}
                         <button onClick={() => router.push(`/billing/agency/${r.id}`)}
                           className="p-1.5 hover:bg-green-50 rounded-lg text-green-600"
@@ -428,7 +540,7 @@ export default function AgencyInfoSection({
                           className="p-1.5 hover:bg-emerald-50 rounded-lg text-emerald-500 hover:text-emerald-700"
                           title="Account — payments, terms history and billing cycles"><Wallet className="w-3.5 h-3.5" /></button>
                         <button onClick={() => setModal(r)} className="p-1.5 hover:bg-blue-50 rounded-lg text-blue-400 hover:text-blue-600" title="Edit"><Edit2 className="w-3.5 h-3.5" /></button>
-                        <button onClick={() => del(r.id)} className="p-1.5 hover:bg-red-50 rounded-lg text-red-400 hover:text-red-600" title="Delete"><Trash2 className="w-3.5 h-3.5" /></button>
+                        <button onClick={() => setPendingDelete(r)} className="p-1.5 hover:bg-red-50 rounded-lg text-red-400 hover:text-red-600" title="Delete"><Trash2 className="w-3.5 h-3.5" /></button>
                       </div>
                     </td>
                   </tr>
@@ -438,6 +550,24 @@ export default function AgencyInfoSection({
           </table>
         </div>
       </div>
+
+      {pendingDelete && (
+        <ConfirmDialog
+          title="Delete agency"
+          confirmLabel="Delete agency"
+          onConfirm={confirmDelete}
+          onClose={() => setPendingDelete(null)}
+        >
+          <p>
+            Delete <span className="font-semibold text-gray-900">{pendingDelete.name}</span>{" "}
+            <span className="text-gray-400">
+              ({[pendingDelete.agency_code, pendingDelete.branch_name || pendingDelete.city || pendingDelete.branch_code, pendingDelete.channels]
+                .filter(Boolean).join(" · ")})
+            </span>?
+          </p>
+          <p>Its entities and login IDs will be removed too. This cannot be undone.</p>
+        </ConfirmDialog>
+      )}
 
       {modal !== false && (
         <AgencyModal agency={modal} onClose={() => setModal(false)}
@@ -568,6 +698,7 @@ function AgencyModal({
     contact_phone: agency?.contact_phone ?? "",
     contact_email: agency?.contact_email ?? "",
     notes: agency?.notes ?? "",
+    agency_code: agency?.agency_code ?? "",
     customer_code: agency?.customer_code ?? "",
     account_code: agency?.account_code ?? "",
     // Both service rates, held as strings like every other input here. A stored 0
@@ -584,6 +715,44 @@ function AgencyModal({
     is_active: agency?.is_active ?? true,
   });
   const set = (k: keyof typeof form, v: string | boolean) => setForm(p => ({ ...p, [k]: v }));
+
+  // ── Agency Code ──────────────────────────────────────────────────────────
+  // System-generated by default: the box shows what the server WOULD issue and the
+  // create sends nothing, so the server issues afresh and two open forms cannot
+  // both take the number they were shown. Unticking lets the user type one; the
+  // server then checks it, pads it to the current pattern, and makes its pattern
+  // the one later auto codes continue. An edit always starts in manual mode, on
+  // the code the agency already has.
+  const [autoCode, setAutoCode] = useState(!isEdit);
+  const [codeHint, setCodeHint] = useState<{ code: string; pattern: string | null; error?: string | null; shared?: boolean } | null>(null);
+
+  useEffect(() => {
+    if (!autoCode) return;
+    const t = setTimeout(() => {
+      api.get<{ code: string; pattern: string; shared_with_sibling: boolean }>("/agencies/next-code", {
+        params: { name: form.name.trim() || undefined, branch_code: form.branch_code.trim() || undefined },
+      }).then(r => setCodeHint({ code: r.data.code, pattern: r.data.pattern, shared: r.data.shared_with_sibling }))
+        .catch(() => setCodeHint(null));
+    }, 250);
+    return () => clearTimeout(t);
+  }, [autoCode, form.name, form.branch_code]);
+
+  useEffect(() => {
+    if (autoCode) return;
+    const typed = form.agency_code.trim();
+    if (!typed || (isEdit && typed === (agency?.agency_code ?? ""))) { setCodeHint(null); return; }
+    const t = setTimeout(() => {
+      api.get<{ code: string; pattern: string | null; error: string | null }>("/agencies/check-code", {
+        params: {
+          code: typed,
+          name: form.name.trim() || undefined,
+          branch_code: form.branch_code.trim() || undefined,
+          exclude_id: agency?.id,
+        },
+      }).then(r => setCodeHint(r.data)).catch(() => setCodeHint(null));
+    }, 300);
+    return () => clearTimeout(t);
+  }, [autoCode, form.agency_code, form.name, form.branch_code, isEdit, agency]);
 
   // Live per-field problems, shown under the box being typed into. Deliberately
   // separate from `error` (which is one line above the buttons): a GSTIN whose
@@ -674,12 +843,18 @@ function AgencyModal({
     else setSupplierId(null);
   };
 
-  /** Switch to typing the agency in, carrying across whatever was already there. */
-  const startManualEntry = () => {
+  /** Switch to typing the agency in, carrying across whatever was already there.
+   *  `typedName` comes from the dropdown's "+ Add new agency" — what the user was
+   *  searching for is almost always the name they mean, so it pre-fills the box. */
+  const startManualEntry = (typedName?: string) => {
     setManualEntry(true);
     setSupplierId(null);
     setVendorName("");
-    setForm(p => ({ ...p, branch_code: p.branch_code.trim() || "MAIN" }));
+    setForm(p => ({
+      ...p,
+      name: typedName?.trim() ? typedName.trim() : p.name,
+      branch_code: p.branch_code.trim() || "MAIN",
+    }));
   };
 
   /**
@@ -775,6 +950,11 @@ function AgencyModal({
     // reserves for a hand-entered agency.
     if (!isEdit && !manualEntry && !form.branch_code.trim()) { setError("Pick a branch."); return; }
 
+    if (!autoCode && !form.agency_code.trim()) {
+      setError("Enter an agency code, or tick “Auto-generate”."); return;
+    }
+    if (!autoCode && codeHint?.error) { setError(codeHint.error); return; }
+
     const bad = taxProblem();
     if (bad) { setError(bad); return; }
 
@@ -824,6 +1004,8 @@ function AgencyModal({
           ...feeFields,
           notes: form.notes || null, is_active: form.is_active,
           customer_code: form.customer_code.trim() || null, account_code: form.account_code.trim() || null,
+          // Only when changed — re-sending the stored code would be a no-op anyway.
+          ...(form.agency_code.trim() !== (agency.agency_code ?? "") ? { agency_code: form.agency_code.trim() } : {}),
         });
         onSaved();
       } catch (e) { setError(apiError(e)); }
@@ -880,6 +1062,8 @@ function AgencyModal({
         contact_email: form.contact_email || null,
         ...feeFields,
         notes: form.notes || null,
+        // Null = let the server issue it (auto mode).
+        agency_code: autoCode ? null : form.agency_code.trim(),
         customer_code: form.customer_code.trim() || null,
         account_code: form.account_code.trim() || null,
         is_active: form.is_active,
@@ -1063,6 +1247,9 @@ function AgencyModal({
     if (!otherChannel) return;
     setReuseRequestId(created?.supplier_request_id ?? null);
     setChannels(otherChannel);
+    // Same branch, so the same code — the server reuses it for a blank auto create.
+    setAutoCode(true);
+    if (created?.agency_code) setCodeHint({ code: created.agency_code, pattern: null, shared: true });
     setCreated(null);
     setError("");
   };
@@ -1148,11 +1335,11 @@ function AgencyModal({
                 <div className="rounded-lg border border-sky-200 bg-sky-50 px-2.5 py-2 flex items-start gap-2">
                   <PencilLine className="w-3.5 h-3.5 text-sky-600 mt-0.5 shrink-0" />
                   <div className="min-w-0 flex-1">
-                    <p className="text-[11px] font-semibold text-sky-800">Entering this agency by hand</p>
+                    <p className="text-[11px] font-semibold text-sky-800">Adding a new agency</p>
                     <p className="text-[10px] text-sky-700 leading-snug mt-0.5">
-                      Fill in the details below. The agency is yours to use straight away;
-                      we will also ask the platform admin to add it to the shared list so
-                      every workspace can find it.
+                      Fill in the details below. The agency is yours to use straight away,
+                      and it goes to the supplier master as <b>pending approval</b> — once
+                      the platform admin approves it, every workspace can find it.
                     </p>
                     <button type="button"
                       onClick={() => { setManualEntry(false); setReuseRequestId(null); }}
@@ -1170,15 +1357,12 @@ function AgencyModal({
               </>
             ) : (
               <>
+                {/* "+ Add new agency" in the dropdown is the manual path: the agency
+                    is created for this user at once, and a pending request goes to
+                    the supplier master for admin approval. */}
                 <SearchSelect value={vendorName} options={vendorNames} onChange={pickVendor}
-                  placeholder="Search and select an agency" />
-                <p className="text-[10px] text-gray-400 mt-1">
-                  Details below are filled in from the master and stay editable.{" "}
-                  <button type="button" onClick={startManualEntry}
-                    className="font-semibold text-sky-600 hover:underline">
-                    Can&apos;t find it? Enter it manually
-                  </button>
-                </p>
+                  placeholder="Search and select an agency"
+                  onAddNew={q => startManualEntry(q)} addNewLabel="Add new agency" />
               </>
             )}
           </div>
@@ -1231,6 +1415,46 @@ function AgencyModal({
           </div>
         </div>
       )}
+
+      <div>
+        <div className="flex items-center justify-between">
+          <label className={LABEL}>Agency Code *</label>
+          <label className="flex items-center gap-1.5 text-[10px] text-gray-500 cursor-pointer select-none mb-1">
+            <input type="checkbox" checked={autoCode} className="accent-sky-600"
+              onChange={e => {
+                const on = e.target.checked;
+                setAutoCode(on);
+                setCodeHint(null);
+                // Going manual starts from the suggestion, so tweaking it is one keystroke.
+                if (!on && !form.agency_code.trim() && codeHint?.code) set("agency_code", codeHint.code);
+              }} />
+            Auto-generate
+          </label>
+        </div>
+        {autoCode ? (
+          <input value={codeHint?.code ?? ""} readOnly placeholder="Generating…"
+            className={`${INPUT} bg-gray-100 text-gray-600 font-mono`} />
+        ) : (
+          <input value={form.agency_code} onChange={e => set("agency_code", e.target.value.toUpperCase().replace(/\s+/g, ""))}
+            placeholder="e.g. AG-0001 or LT/DEL/001" maxLength={30}
+            className={`${INPUT} font-mono ${codeHint?.error ? "border-red-300" : ""}`} />
+        )}
+        <p className={`text-[10px] mt-1 ${codeHint?.error ? "text-red-500" : "text-gray-400"}`}>
+          {codeHint?.error
+            ? codeHint.error
+            : autoCode
+              ? codeHint?.shared
+                ? "Same code as this branch's other channel — one branch, one code."
+                : `Next in your sequence${codeHint?.pattern ? ` (${codeHint.pattern})` : ""}. Untick to type your own.`
+              : codeHint?.code && codeHint.code !== form.agency_code.trim()
+                ? `Will be saved as ${codeHint.code}, to match your pattern.`
+                : codeHint?.pattern
+                  ? `Pattern ${codeHint.pattern} — auto codes after this one will continue it.`
+                  : codeHint
+                    ? "No number in this code, so it is a one-off — auto codes keep their own sequence."
+                    : "Letters, digits and - / _ . — a number in it sets the pattern later codes follow."}
+        </p>
+      </div>
 
       {/* Both optional — neither is needed to save an agency. */}
       <div className="grid grid-cols-2 gap-3">
@@ -1464,7 +1688,7 @@ function AgencyModal({
           // that works both gets two rows. STATE is required on every row: the
           // GSTIN is checked against it.
           <UploadBox resource="agencies" templateName="agency_template.xlsx"
-            columns="NAME, BRANCH_CODE, BRANCH_NAME, CUSTOMER_CODE, ACCOUNT_CODE, ADDRESS, STATE, CITY, REGION, PAN, GST_REGISTERED, GST, PHONE, EMAIL, NOTES, CHANNELS, GDS_TYPE, GDS_LIMIT, GDS_DEPOSIT, GDS_USAGE_PCT, GDS_BILLING_CYCLE, LCC_TYPE, LCC_LIMIT, LCC_DEPOSIT, LCC_USAGE_PCT, LCC_BILLING_CYCLE, ACTIVE"
+            columns="NAME, BRANCH_CODE, BRANCH_NAME, AGENCY_CODE (blank = auto), CUSTOMER_CODE, ACCOUNT_CODE, ADDRESS, STATE, CITY, REGION, PAN, GST_REGISTERED, GST, PHONE, EMAIL, NOTES, CHANNELS, GDS_TYPE, GDS_LIMIT, GDS_DEPOSIT, GDS_USAGE_PCT, GDS_BILLING_CYCLE, LCC_TYPE, LCC_LIMIT, LCC_DEPOSIT, LCC_USAGE_PCT, LCC_BILLING_CYCLE, VENDOR_SERVICE_CHARGE_TYPE / _VALUE / _GST, CUSTOMER_SERVICE_FEE_TYPE / _VALUE / _GST, ACTIVE"
             onDone={onSaved} />
         )}
     </ModalShell>

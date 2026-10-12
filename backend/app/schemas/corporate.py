@@ -12,6 +12,7 @@ class CorporateCreate(BaseModel):
     """
     company: str
     corporate_type: Optional[str] = None    # 'proprietorship' | 'private_limited' | … (api/v1/corporates.py:_CORPORATE_TYPES)
+    corporate_code: Optional[str] = None    # ours — blank on create means issue the next
     customer_code: Optional[str] = None     # the user's own code; optional, not unique
     account_code: Optional[str] = None      # ledger code; optional, not unique
     phone: Optional[str] = None
@@ -37,6 +38,7 @@ class CorporateCreate(BaseModel):
 class CorporateUpdate(BaseModel):
     company: Optional[str] = None
     corporate_type: Optional[str] = None
+    corporate_code: Optional[str] = None    # ours — blank on create means issue the next
     customer_code: Optional[str] = None     # the user's own code; optional, not unique
     account_code: Optional[str] = None      # ledger code; optional, not unique
     phone: Optional[str] = None
@@ -60,6 +62,7 @@ class CorporateRead(BaseModel):
     id: int
     company: Optional[str] = None
     corporate_type: Optional[str] = None
+    corporate_code: Optional[str] = None    # ours — blank on create means issue the next
     customer_code: Optional[str] = None     # the user's own code; optional, not unique
     account_code: Optional[str] = None      # ledger code; optional, not unique
     # Legacy person fields — read-only, so pre-split rows still render a name.
@@ -112,6 +115,7 @@ class CorporateBulkCreateRow(BaseModel):
     """
     company: Optional[str] = None
     corporate_type: Optional[str] = None
+    corporate_code: Optional[str] = None    # ours — blank on create means issue the next
     customer_code: Optional[str] = None     # the user's own code; optional, not unique
     account_code: Optional[str] = None      # ledger code; optional, not unique
     phone: Optional[str] = None
@@ -129,6 +133,17 @@ class CorporateBulkCreateRow(BaseModel):
     # Built by the wizard from the optional <CATEGORY>_MARKUP_TYPE / _VALUE columns.
     category_markups: Optional[dict] = None
     billing_type: Optional[str] = None
+
+
+class CorporateCodeSuggestion(BaseModel):
+    code: str
+    pattern: str
+
+
+class CorporateCodeCheck(BaseModel):
+    code: str
+    pattern: Optional[str] = None
+    error: Optional[str] = None
 
 
 class CorporateBulkCreate(BaseModel):

@@ -1,15 +1,17 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
   Upload, RefreshCw, FileSpreadsheet, ChevronRight,
-  Building2, Calendar, Hash, AlertCircle, Search, X, FilePlus, SquarePen,
+  Building2, Calendar, Hash, AlertCircle, Search, X, FilePlus, SquarePen, Download, Trash2,
 } from "lucide-react";
 import api from "@/lib/api";
+import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import { CUSTOMER_TYPE_BADGE, CUSTOMER_TYPE_LABEL } from "@/lib/customerType";
 import { MANUAL_ENTRY_FILE_NAME, type StatementType } from "@/lib/ticketFields";
+import { CUSTOMER_STATEMENT_BASE, STATEMENT_ENTRY_BASE } from "@/lib/statementSection";
 
 export type TicketStatement = {
   batch_id:        string;
@@ -58,13 +60,42 @@ function CustomerBadge({ type }: { type: TicketStatement["customer_type"] }) {
 /** Statement-wise view — one row per upload/creation batch.
  *  `showCustomer` swaps the vendor Type badge for the CUSTOMER type, which is
  *  what the Customer-data view of the same rows is actually about. */
-export default function StatementsView({ onLoaded, showCustomer }: {
+/** Customer data → Statement tabs. Agency = B2B, corporate = B2E (Corporate), direct. */
+export type StatementCustomerType = "agency" | "corporate" | "direct";
+const CUSTOMER_TAB_LABEL: Record<StatementCustomerType, string> = {
+  agency: "B2B", corporate: "Corporate", direct: "Direct",
+};
+
+export default function StatementsView({
+  onLoaded, showCustomer, customerType, apiBase = "/tickets", drillIn = true, entryOverride,
+  excludeManual = false, detailBaseOverride, allowDelete = false,
+}: {
   onLoaded?: (n: number) => void;
   showCustomer?: boolean;
+  /** Customer data → Statement tab: show only this customer type's statements, with the
+   *  tab's own Template / Upload Statement actions — the layout Vendors data → Statements
+   *  uses. Statements can only be ADDED by upload here; tickets are not punched in by hand. */
+  customerType?: StatementCustomerType;
+  /** "/internal-tickets" for Internal Statement's own tables. */
+  apiBase?: string;
+  /** Rows open the statement's tickets. Off where that screen does not exist yet. */
+  drillIn?: boolean;
+  /** Base for the empty state's Upload / Create links ("/internal-statement"). */
+  entryOverride?: string;
+  /** Leave out statements made by hand-punching ("Manual Entry") — Internal Statement
+   *  lists only UPLOADED statements; its punched tickets live in its All tickets tab. */
+  excludeManual?: boolean;
+  /** Where a row opens, when not the Customer data / /tickets detail screen. */
+  detailBaseOverride?: string;
+  /** A delete button per row — the statement and every ticket under it. */
+  allowDelete?: boolean;
 }) {
   // Keep the drill-in inside whichever section the list is rendered in — both
   // routes render the same detail screen over the same rows.
-  const detailBase = showCustomer ? "/customers/statements" : "/tickets";
+  const detailBase = detailBaseOverride ?? (showCustomer ? "/customers/statements" : "/tickets");
+  // Customer data uploads in its own section (/customers/statements/upload); creating a
+  // single ticket stays in the sidebar's Internal Statement module.
+  const entryBase = entryOverride ?? (showCustomer ? CUSTOMER_STATEMENT_BASE : "/tickets");
   const router = useRouter();
   const [statements, setStatements] = useState<TicketStatement[]>([]);
   const [loading,    setLoading]    = useState(true);
@@ -76,12 +107,36 @@ export default function StatementsView({ onLoaded, showCustomer }: {
   const [filterType,   setFilterType]   = useState<string>("");
   const [filterFrom,   setFilterFrom]   = useState("");
   const [filterTo,     setFilterTo]     = useState("");
+  const [downloading,  setDownloading]  = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<TicketStatement | null>(null);
+  const linkRef = useRef<HTMLAnchorElement>(null);
+
+  // The customer statement template — the same ticket template the upload wizard maps
+  // automatically, named for the tab it was downloaded from.
+  const downloadTemplate = async () => {
+    if (!customerType) return;
+    setDownloading(true);
+    try {
+      const resp = await api.get("/tickets/template/download?type=b2b", { responseType: "blob" });
+      const url = URL.createObjectURL(resp.data as Blob);
+      const a = linkRef.current!;
+      a.href = url;
+      a.download = `${CUSTOMER_TAB_LABEL[customerType].toLowerCase()}_statement_template.xlsx`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      setError("Failed to download the template.");
+    } finally {
+      setDownloading(false);
+    }
+  };
 
   const fetchStatements = async () => {
     setLoading(true);
     setError(null);
     try {
-      const { data } = await api.get<TicketStatement[]>("/tickets/statements");
+      const { data: all } = await api.get<TicketStatement[]>(`${apiBase}/statements`);
+      const data = excludeManual ? all.filter((s) => s.file_name !== MANUAL_ENTRY_FILE_NAME) : all;
       setStatements(data);
       onLoaded?.(data.length);
     } catch {
@@ -100,7 +155,9 @@ export default function StatementsView({ onLoaded, showCustomer }: {
     if (filterAgency && s.agency !== filterAgency) return false;
     // In customer mode this select filters the CUSTOMER type; "untagged" is a
     // real, selectable state, since those rows are the ones needing attention.
-    if (filterType) {
+    // A tab fixes the customer type; the type select is hidden then.
+    if (customerType && s.customer_type !== customerType) return false;
+    if (filterType && !customerType) {
       if (showCustomer) {
         if (filterType === "untagged" ? s.customer_type != null : s.customer_type !== filterType) return false;
       } else if (s.statement_type !== filterType) return false;
@@ -116,6 +173,12 @@ export default function StatementsView({ onLoaded, showCustomer }: {
     <div className="space-y-5">
       {/* filter bar — refresh lives here so the toolbar is one row, not two */}
       <div className="flex items-center gap-2 flex-wrap">
+      <a ref={linkRef} className="hidden" />
+      {customerType && (
+        <span className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-[11px] text-gray-500 uppercase tracking-wide">
+          Uploads <span className="ml-1.5 text-sm font-bold text-gray-900 normal-case">{statements.filter(s => s.customer_type === customerType).length}</span>
+        </span>
+      )}
       {!loading && !error && statements.length > 0 && (
         <>
         <div className="relative">
@@ -127,8 +190,8 @@ export default function StatementsView({ onLoaded, showCustomer }: {
           />
         </div>
 
-        {/* Type filter */}
-        <select
+        {/* Type filter — not on a customer-type tab, which already is one */}
+        {!customerType && <select
           value={filterType} onChange={e => setFilterType(e.target.value)}
           className="py-2 px-2.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400 text-gray-600 bg-white"
         >
@@ -147,7 +210,7 @@ export default function StatementsView({ onLoaded, showCustomer }: {
               <option value="AIRLINE">Airline</option>
             </>
           )}
-        </select>
+        </select>}
 
         {/* Agency filter — derived from loaded data */}
         <select
@@ -182,7 +245,34 @@ export default function StatementsView({ onLoaded, showCustomer }: {
           <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
           Refresh
         </button>
+        {customerType && (
+          <>
+            <button
+              onClick={downloadTemplate}
+              disabled={downloading}
+              className="flex items-center gap-1.5 px-3 py-2 border border-gray-200 rounded-lg text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+            >
+              <Download className="w-3.5 h-3.5" /> {downloading ? "Downloading…" : "Template"}
+            </button>
+            <Link
+              href={`${entryBase}/upload?customer_type=${customerType}`}
+              className="flex items-center gap-1.5 px-3 py-2 bg-[#1e3a5f] text-white rounded-lg text-xs font-semibold hover:bg-[#16304f]"
+            >
+              <Upload className="w-3.5 h-3.5" /> Upload Statement
+            </Link>
+          </>
+        )}
       </div>
+
+      {/* Statements filed before customer tagging, or through Internal Statement, belong
+          to no tab — say so rather than let them vanish. */}
+      {customerType && !loading && statements.some(s => s.customer_type == null) && (
+        <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          {statements.filter(s => s.customer_type == null).length} statement(s) have no customer type (filed
+          before customer tagging, or through Internal Statement), so they appear on no tab. Their tickets
+          are still listed under All tickets.
+        </p>
+      )}
 
       {/* error */}
       {error && (
@@ -202,32 +292,36 @@ export default function StatementsView({ onLoaded, showCustomer }: {
       )}
 
       {/* empty state */}
-      {!loading && !error && statements.length === 0 && (
+      {!loading && !error && (customerType ? filtered.length === 0 && !hasFilter : statements.length === 0) && (
         <div className="flex flex-col items-center justify-center py-24 text-center">
           <div className="w-16 h-16 bg-gray-50 rounded-full flex items-center justify-center mb-4">
             <FileSpreadsheet className="w-8 h-8 text-gray-300" />
           </div>
-          <p className="text-sm font-medium text-gray-600">No ticket statements yet</p>
-          <p className="text-xs text-gray-400 mt-1 mb-5">Upload a supplier statement, or punch tickets in by hand</p>
-          <div className="flex items-center gap-3">
+          <p className="text-sm font-medium text-gray-600">
+            {customerType ? `No ${CUSTOMER_TAB_LABEL[customerType]} statements yet` : "No ticket statements yet"}
+          </p>
+          <p className="text-xs text-gray-400 mt-1 mb-5">
+            {customerType ? "Download the template, fill it in and upload it with Upload Statement." : "Upload a supplier statement, or punch tickets in by hand"}
+          </p>
+          {!customerType && <div className="flex items-center gap-3">
             <Link
-              href={`${detailBase}/upload`}
+              href={`${entryBase}/upload`}
               className="flex items-center gap-2 px-4 py-2 bg-[#1e3a5f] text-white rounded-lg text-sm font-medium hover:bg-[#16304f]"
             >
               <Upload className="w-4 h-4" /> Upload Statement
             </Link>
             <Link
-              href={`${detailBase}/create`}
+              href={`${entryOverride ?? (showCustomer ? STATEMENT_ENTRY_BASE : entryBase)}/create`}
               className="flex items-center gap-2 px-4 py-2 border border-gray-200 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-50"
             >
               <FilePlus className="w-4 h-4" /> Create Ticket
             </Link>
-          </div>
+          </div>}
         </div>
       )}
 
       {/* statements table */}
-      {!loading && !error && statements.length > 0 && (
+      {!loading && !error && (customerType ? filtered.length > 0 || hasFilter : statements.length > 0) && (
         <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
           {/* summary bar */}
           <div className="px-5 py-3 border-b border-gray-100 bg-gray-50/40 flex items-center justify-between">
@@ -269,7 +363,7 @@ export default function StatementsView({ onLoaded, showCustomer }: {
               ) : filtered.map(stmt => (
                 <tr
                   key={stmt.batch_id}
-                  onClick={() => router.push(`${detailBase}/${stmt.batch_id}`)}
+                  onClick={drillIn ? () => router.push(`${detailBase}/${stmt.batch_id}`) : undefined}
                   className="hover:bg-blue-50/40 cursor-pointer transition-colors group"
                 >
                   {/* Type badge */}
@@ -338,8 +432,18 @@ export default function StatementsView({ onLoaded, showCustomer }: {
                     {formatDateTime(stmt.created_at)}
                   </td>
 
-                  {/* Arrow */}
-                  <td className="px-4 py-2 text-right">
+                  {/* Delete (where the caller allows it) + arrow */}
+                  <td className="px-4 py-2 text-right whitespace-nowrap">
+                    {allowDelete && (
+                      <button
+                        type="button"
+                        title="Delete this statement and its tickets"
+                        onClick={(e) => { e.stopPropagation(); setDeleteTarget(stmt); }}
+                        className="p-1.5 mr-1 rounded-md text-gray-300 hover:text-red-600 hover:bg-red-50 transition-colors"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                     <ChevronRight className="w-4 h-4 text-gray-300 group-hover:text-[#1e3a5f] transition-colors inline" />
                   </td>
                 </tr>
@@ -347,6 +451,30 @@ export default function StatementsView({ onLoaded, showCustomer }: {
             </tbody>
           </table>
         </div>
+      )}
+
+      {deleteTarget && (
+        <ConfirmDialog
+          title="Delete statement?"
+          confirmLabel={`Delete statement and ${deleteTarget.ticket_count} ticket${deleteTarget.ticket_count !== 1 ? "s" : ""}`}
+          onClose={() => setDeleteTarget(null)}
+          onConfirm={async () => {
+            await api.delete(`${apiBase}/statements/${deleteTarget.batch_id}`);
+            setStatements((prev) => {
+              const next = prev.filter((s) => s.batch_id !== deleteTarget.batch_id);
+              onLoaded?.(next.length);
+              return next;
+            });
+            setDeleteTarget(null);
+          }}
+        >
+          <p>
+            <b>{deleteTarget.statement_name || deleteTarget.agency}</b>
+            {deleteTarget.file_name !== MANUAL_ENTRY_FILE_NAME && <> ({deleteTarget.file_name})</>} and all{" "}
+            <b>{deleteTarget.ticket_count}</b> ticket{deleteTarget.ticket_count !== 1 ? "s" : ""} loaded with it
+            will be permanently deleted. This cannot be undone.
+          </p>
+        </ConfirmDialog>
       )}
     </div>
   );

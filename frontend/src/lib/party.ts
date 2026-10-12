@@ -67,6 +67,9 @@ export type Party = {
   /** Both kinds — the ledger / account code this party is booked under. Optional and not
    *  unique; stored as typed (trimmed). An employee inherits their corporate's. */
   account_code?: string | null;
+  /** Corporate only — OUR identifier (CO-0001 …), system-issued unless typed in.
+   *  Unique per owner. Not inherited by employees: it names the corporate, not terms. */
+  corporate_code?: string | null;
   /** Both kinds — the user's own customer code. Optional, not unique, stored uppercased.
    *  An employee inherits their corporate's. */
   customer_code?: string | null;

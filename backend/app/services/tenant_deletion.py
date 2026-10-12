@@ -141,8 +141,11 @@ DELETION_GROUPS: tuple[DeletionGroup, ...] = (
          "statement_batch_billing", "statement_batch_controls"),
     ),
     DeletionGroup(
-        "internal_statements", "Internal statements", "The workspace's own ticket statements.",
-        GroupCategory.RECORDS, ("ticket_statements",),
+        "internal_statements", "Internal statements",
+        "The workspace's own ticket statements — Customer data's, and Internal Statement's own copy.",
+        # The internal_* pair (models/internal_ticket.py) has no FK between its two tables
+        # and nothing points into it, so it is safe beside its statement twin.
+        GroupCategory.RECORDS, ("ticket_statements", "internal_uploaded_tickets", "internal_ticket_statements"),
     ),
     DeletionGroup(
         "customer_statements", "Customer statements", "Statements issued to customers.",
@@ -184,6 +187,19 @@ DELETION_GROUPS: tuple[DeletionGroup, ...] = (
         "notifications", "Notifications",
         "Reminders and alerts shown in the notification bell, and who has read them.",
         GroupCategory.RECORDS, ("notification_reads", "notifications"),
+    ),
+    DeletionGroup(
+        # Rows only, and that is enough for credentials: they live encrypted IN these rows,
+        # so deleting the row destroys them. Revoking the grant at Google is best effort and
+        # belongs to the Disconnect action (api/v1/mail.py); a deleted workspace's tokens are
+        # unreadable either way. owner_user_id FKs users with no ON DELETE, so the users group
+        # pulls this in by itself.
+        # The stored .eml and attachment files under mail/{tenant}/ go the same way as report
+        # workbooks: a database transaction cannot delete objects, so the bucket's lifecycle
+        # rule on that prefix does.
+        "mail", "Email intake",
+        "Connected mailboxes, their encrypted access, and the email received from onboarded senders.",
+        GroupCategory.RECORDS, ("mail_attachments", "mail_messages", "mail_connections"),
     ),
     DeletionGroup(
         # Rows only. The stored workbooks under reports/{tenant}/ are left to the GCS

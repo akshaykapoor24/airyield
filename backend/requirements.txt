@@ -27,6 +27,10 @@ idna==3.11
 kombu==5.6.2
 Mako==1.3.10
 MarkupSafe==3.0.3
+# Sanitises supplier HTML mail before the Email inbox shows it (services/mail/html.py).
+nh3==0.3.7
+# Mozilla root bundle for IMAP TLS — see services/mail/imap_client.tls_context (GoDaddy on Windows).
+certifi>=2024.2.2
 numpy==2.4.4
 openai>=1.0.0
 openpyxl==3.1.5

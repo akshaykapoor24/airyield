@@ -1,8 +1,7 @@
 "use client";
 
 import { useCallback, useState } from "react";
-import Link from "next/link";
-import { ArrowRight, Building2, KeyRound, Landmark } from "lucide-react";
+import { Building2, KeyRound, Landmark } from "lucide-react";
 import AgencyInfoSection from "@/components/agency/AgencyInfoSection";
 import AgencyEntitiesSection from "@/components/agency/AgencyEntitiesSection";
 import AgencyLoginIdsSection from "@/components/agency/AgencyLoginIdsSection";
@@ -30,7 +29,7 @@ export default function AgencyOnboarding() {
   const clearHandoff = useCallback(() => setHandoffAgencyId(null), []);
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       <div className="flex items-center justify-between gap-2 border-b border-gray-200">
         <div className="flex items-center gap-1">
           {TABS.map((t) => {
@@ -39,7 +38,7 @@ export default function AgencyOnboarding() {
               <button
                 key={t.key}
                 onClick={() => { setTab(t.key); setHandoffAgencyId(null); }}
-                className={`flex items-center gap-1.5 px-3.5 py-2.5 text-xs font-semibold border-b-2 -mb-px transition-colors ${
+                className={`flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold border-b-2 -mb-px transition-colors ${
                   active ? "border-[#1e3a5f] text-[#1e3a5f]" : "border-transparent text-gray-400 hover:text-gray-600"
                 }`}>
                 <t.icon className="w-3.5 h-3.5" /> {t.label}
@@ -48,14 +47,9 @@ export default function AgencyOnboarding() {
           })}
         </div>
 
-        <Link
-          href="/customers/directory"
-          className="flex items-center gap-1.5 text-gray-500 hover:text-[#1e3a5f] text-xs font-semibold pb-2">
-          View directory <ArrowRight className="w-3.5 h-3.5" />
-        </Link>
       </div>
 
-      <div className="bg-white rounded-xl border border-gray-200 p-5">
+      <div className="bg-white rounded-xl border border-gray-200 p-4">
         {tab === "info" && <AgencyInfoSection onGoTo={goTo} />}
         {tab === "entities" && (
           <AgencyEntitiesSection initialAgencyId={handoffAgencyId} onConsumeInitial={clearHandoff} />

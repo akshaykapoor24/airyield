@@ -5,7 +5,7 @@
 // (one entity -> many login ids). In add-mode you pick the agency + entity once,
 // then add many login-id rows under them.
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { Edit2, Trash2, RefreshCw, Plus } from "lucide-react";
 import api from "@/lib/api";
 import {
@@ -14,11 +14,12 @@ import {
 } from "@/components/userMaster/shared";
 
 type AirlineOpt = { id: number; name: string; iata_code: string };
-type AgencyOpt = { id: number; name: string; branch_name: string | null; branch_code: string; channels: string };
+type AgencyOpt = { id: number; name: string; agency_code: string | null; branch_name: string | null; branch_code: string; channels: string };
 
 /** Label an agency by branch AND channel — a vendor is onboarded once per branch
  *  and once per channel, and a credential belongs to exactly one of those rows. */
-const agencyLabel = (a: AgencyOpt) => `${a.name} — ${a.branch_name || a.branch_code} · ${a.channels}`;
+const agencyLabel = (a: AgencyOpt) =>
+  `${a.agency_code ? `${a.agency_code} · ` : ""}${a.name} — ${a.branch_name || a.branch_code} · ${a.channels}`;
 
 /** A credential belongs to exactly ONE channel, never both. */
 const CHANNELS = ["GDS", "LCC"] as const;
@@ -33,8 +34,17 @@ const credentialLabel = (ch: Channel | "") =>
   ch === "GDS" ? "Mirror ID" : ch === "LCC" ? "Login ID / Airline ID" : "Login ID";
 type EntityOpt = { id: number; name: string; code: string };
 // Line of business. A DIFFERENT axis from GDS/LCC and deliberately not merged
-// with it — an agency can sell B2B on both channels.
-const LOB_OPTIONS = ["B2B", "B2C", "B2E", "MICE"];
+// with it — an agency can sell B2B on both channels. On the AGENCY master it is
+// always B2B (Employee Master is B2C, Corporate Master B2E), so the field is shown
+// fixed rather than offered as a choice.
+const AGENCY_LOB = "B2B";
+
+/** Which airlines a channel may carry, from the platform's Classes & RBD master
+ *  (`airline_class_masters.airline_type`). An airline with classes of both types
+ *  sits in both sets; one with no type tagged is in neither, so it is not offered. */
+type AirlineTypeSets = Record<Channel, Set<string>>;
+const airlinesForChannel = (all: AirlineOpt[], sets: AirlineTypeSets, ch: Channel | ""): AirlineOpt[] =>
+  ch ? all.filter(a => sets[ch].has(a.name.trim().toLowerCase())) : [];
 
 type LoginIdRowA = {
   id: number;
@@ -63,6 +73,7 @@ export default function AgencyLoginIdsSection({
 }) {
   const [rows, setRows] = useState<LoginIdRowA[]>([]);
   const [airlines, setAirlines] = useState<AirlineOpt[]>([]);
+  const [typeSets, setTypeSets] = useState<AirlineTypeSets>({ GDS: new Set(), LCC: new Set() });
   const [agencies, setAgencies] = useState<AgencyOpt[]>([]);
   const [loading, setLoading] = useState(true);
   const [apiErr, setApiErr] = useState("");
@@ -89,6 +100,11 @@ export default function AgencyLoginIdsSection({
   useEffect(() => { const t = setTimeout(fetchRows, 250); return () => clearTimeout(t); }, [fetchRows]);
   useEffect(() => {
     api.get<AirlineOpt[]>("/airlines/", { params: { limit: 1000 } }).then(r => setAirlines(r.data)).catch(() => setAirlines([]));
+    Promise.all(CHANNELS.map(ch =>
+      api.get<string[]>(`/classes/airlines-by-type/${ch}`)
+        .then(r => new Set(r.data.map(n => n.trim().toLowerCase())))
+        .catch(() => new Set<string>()),
+    )).then(([gds, lcc]) => setTypeSets({ GDS: gds, LCC: lcc }));
     fetchAgencies();
   }, [fetchAgencies]);
 
@@ -169,7 +185,7 @@ export default function AgencyLoginIdsSection({
       </div>
 
       {modal !== false && (
-        <LoginIdModal login={modal} airlines={airlines} agencies={agencies} presetAgencyId={initialAgencyId ?? null}
+        <LoginIdModal login={modal} airlines={airlines} typeSets={typeSets} agencies={agencies} presetAgencyId={initialAgencyId ?? null}
           onClose={() => setModal(false)} onSaved={() => { setModal(false); fetchRows(); }} onRefresh={fetchRows} />
       )}
     </div>
@@ -184,13 +200,14 @@ type DraftRow = {
   err?: string;
 };
 
-const emptyRow = (): DraftRow => ({ login_id: "", airline_name: "", airline_code: "", lob: "" });
+const emptyRow = (): DraftRow => ({ login_id: "", airline_name: "", airline_code: "", lob: AGENCY_LOB });
 
 function LoginIdModal({
-  login, airlines, agencies, presetAgencyId, onClose, onSaved, onRefresh,
+  login, airlines, typeSets, agencies, presetAgencyId, onClose, onSaved, onRefresh,
 }: {
   login: LoginIdRowA | null;
   airlines: AirlineOpt[];
+  typeSets: AirlineTypeSets;
   agencies: AgencyOpt[];
   presetAgencyId: number | null;
   onClose: () => void;
@@ -235,7 +252,11 @@ function LoginIdModal({
   };
   const pickChannelAdd = (c: Channel | "") => {
     setChannel(c); setEntityId(null); loadEntitiesFor(agencyId, c || undefined);
+    // An airline picked under the other channel is not valid on this one.
+    const ok = new Set(airlinesForChannel(airlines, typeSets, c).map(a => a.name));
+    setRows(p => p.map(r => (r.airline_name && !ok.has(r.airline_name) ? { ...r, airline_name: "", airline_code: "" } : r)));
   };
+  const addAirlines = useMemo(() => airlinesForChannel(airlines, typeSets, channel), [airlines, typeSets, channel]);
 
   // A single-channel agency has nothing to choose — pick it for the user.
   useEffect(() => {
@@ -250,7 +271,7 @@ function LoginIdModal({
     login_id: login?.login_id ?? "",
     airline_name: login?.airline_name ?? "",
     airline_code: login?.airline_code ?? "",
-    lob: login?.lob ?? "",
+    lob: AGENCY_LOB,
     entity_id: login?.entity_id ?? null as number | null,
     is_active: login?.is_active ?? true,
   });
@@ -258,8 +279,13 @@ function LoginIdModal({
   const pickAgencyEdit = (id: number | null) => {
     setForm(p => ({ ...p, agency_id: id, channel: "", entity_id: null })); setEntities([]);
   };
+  const editAirlines = useMemo(() => airlinesForChannel(airlines, typeSets, form.channel), [airlines, typeSets, form.channel]);
   const pickChannelEdit = (c: Channel | "") => {
-    setForm(p => ({ ...p, channel: c, entity_id: null }));
+    const ok = new Set(airlinesForChannel(airlines, typeSets, c).map(a => a.name));
+    setForm(p => ({
+      ...p, channel: c, entity_id: null,
+      ...(p.airline_name && !ok.has(p.airline_name) ? { airline_name: "", airline_code: "" } : {}),
+    }));
     loadEntitiesFor(form.agency_id, c || undefined);
   };
 
@@ -295,7 +321,7 @@ function LoginIdModal({
           login_id: r.login_id.trim(),
           airline_name: r.airline_name || null,
           airline_code: r.airline_code || null,
-          lob: r.lob || null,
+          lob: AGENCY_LOB,
           is_active: true,
         });
         created++;
@@ -361,12 +387,12 @@ function LoginIdModal({
                   const a = airlines.find(x => x.name === name);
                   setForm(p => ({ ...p, airline_name: name, airline_code: a ? a.iata_code : "" }));
                 }}
-                className={INPUT}>
-                <option value="">— Select airline —</option>
-                {form.airline_name && !airlines.some(a => a.name === form.airline_name) && (
+                className={INPUT} disabled={!form.channel}>
+                <option value="">{form.channel ? `— Select ${form.channel} airline —` : "Select a channel first"}</option>
+                {form.airline_name && !editAirlines.some(a => a.name === form.airline_name) && (
                   <option value={form.airline_name}>{form.airline_name}</option>
                 )}
-                {airlines.map(a => <option key={a.id} value={a.name}>{a.name}</option>)}
+                {editAirlines.map(a => <option key={a.id} value={a.name}>{a.name}</option>)}
               </select></div>
             <div><label className={LABEL}>Airline Code</label>
               <input value={form.airline_code} readOnly placeholder="Auto-filled"
@@ -374,13 +400,8 @@ function LoginIdModal({
                 className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm bg-gray-100 text-gray-500 cursor-not-allowed focus:outline-none" /></div>
           </div>
           <div><label className={LABEL}>LoB</label>
-            <select value={form.lob} onChange={e => set("lob", e.target.value)} className={INPUT}>
-              <option value="">— Select LoB —</option>
-              {form.lob && !LOB_OPTIONS.includes(form.lob) && (
-                <option value={form.lob}>{form.lob}</option>
-              )}
-              {LOB_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
-            </select></div>
+            <input value={AGENCY_LOB} readOnly title="Agency login IDs are always B2B"
+              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm bg-gray-100 text-gray-500 cursor-not-allowed focus:outline-none" /></div>
           <label className="flex items-center gap-2 cursor-pointer">
             <input type="checkbox" checked={form.is_active} onChange={e => set("is_active", e.target.checked)} className="w-4 h-4 rounded border-gray-300 text-sky-600 focus:ring-sky-400" />
             <span className="text-xs font-semibold text-gray-600">Active</span>
@@ -423,10 +444,16 @@ function LoginIdModal({
               {entities.map(en => <option key={en.id} value={en.id}>{en.name} ({en.code})</option>)}
             </select>
           </div>
+          {channel && addAirlines.length === 0 && (
+            <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+              No airline is tagged {channel} in the Classes &amp; RBD master yet, so the airline list is empty.
+              The platform admin sets an airline&apos;s type there.
+            </p>
+          )}
           <p className="text-[10px] text-gray-400 -mt-1">
             All credentials below are added under this agency{entityId ? " and entity" : ""} on {channel || "the chosen channel"}.
-            {channel === "GDS" && " A GDS credential is the mirror office the agency books your stock through."}
-            {channel === "LCC" && " An LCC credential is one airline's agent-portal login."}
+            {channel === "GDS" && " A GDS credential is the mirror office the agency books your stock through. Only GDS airlines are listed."}
+            {channel === "LCC" && " An LCC credential is one airline's agent-portal login. Only LCC airlines are listed."}
           </p>
 
           <div className="space-y-2.5">
@@ -447,17 +474,15 @@ function LoginIdModal({
                       const a = airlines.find(x => x.name === name);
                       setRow(i, { airline_name: name, airline_code: a ? a.iata_code : "" });
                     }}
-                    className={INPUT}>
-                    <option value="">— Airline —</option>
-                    {airlines.map(a => <option key={a.id} value={a.name}>{a.name}</option>)}
+                    className={INPUT} disabled={!channel}>
+                    <option value="">{channel ? `— ${channel} airline —` : "Select a channel first"}</option>
+                    {addAirlines.map(a => <option key={a.id} value={a.name}>{a.name}</option>)}
                   </select>
                   <input value={r.airline_code} readOnly placeholder="Code (auto)"
                     className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm bg-gray-100 text-gray-500 cursor-not-allowed focus:outline-none" />
                 </div>
-                <select value={r.lob} onChange={e => setRow(i, { lob: e.target.value })} className={INPUT}>
-                  <option value="">— LoB —</option>
-                  {LOB_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
-                </select>
+                <input value={`LoB: ${AGENCY_LOB}`} readOnly title="Agency login IDs are always B2B"
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm bg-gray-100 text-gray-500 cursor-not-allowed focus:outline-none" />
                 {r.err && <p className="text-[10px] text-red-500">{r.err}</p>}
               </div>
             ))}
@@ -477,7 +502,7 @@ function LoginIdModal({
           </div>
         </div>
       ) : (
-        <UploadBox resource="agency-login-ids" templateName="agency_login_id_template.xlsx" columns="CHANNEL, LOGIN_ID, AGENCY, AGENCY_BRANCH, ENTITY_CODE, AIRLINE_NAME, AIRLINE_CODE, LOB, VENDOR, ACTIVE" onDone={onSaved} />
+        <UploadBox resource="agency-login-ids" templateName="agency_login_id_template.xlsx" columns="CHANNEL, LOGIN_ID, AGENCY_CODE or AGENCY + AGENCY_BRANCH, ENTITY_CODE, AIRLINE_NAME or AIRLINE_CODE (must match the channel), LOB (always B2B), VENDOR, ACTIVE" onDone={onSaved} />
       )}
     </ModalShell>
   );

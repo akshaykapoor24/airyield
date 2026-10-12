@@ -97,6 +97,26 @@ class UploadedTicket(Base):
     # GST as one figure. Distinct from sale_k3 (GST on the air fare) and from the
     # cgst/sgst/igst triple — this is the tax on the service charge beside it.
     gst_sell:            Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    # The rest of a punched ticket's commission sheet, as the desk software lays it
+    # out: what was received from the supplier and what was passed on to the client
+    # (commission paid is comm_paid), the two recalls, and the client- and
+    # supplier-side charges beyond serv_charge (which is client charge 1).
+    # Recorded, never calculated on — same rule as the four above.
+    # Commission passed on to the client. NOT dis_sell: on a consolidator statement
+    # "Discount" is what the SUPPLIER gives us, so it belongs on the received side.
+    comm_paid:           Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    plb_recd:            Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    incentive_paid:      Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    plb_paid:            Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    disc_recall:         Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    serv_charge_2:       Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    serv_charge_3:       Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    supp_serv_charge_1:  Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    supp_serv_charge_2:  Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    card_charge:         Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    # GST the supplier charges on its service charges and card charges — the
+    # supplier-side twin of the cgst/sgst/igst triple, which is OUR GST to the client.
+    supp_serv_gst:       Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
     # The consolidator's own voucher, e.g. "IS26/ 1067" dated 08-Aug-26. Not
     # invoice_no / ticket_date: those belong to the airline's document, and on a
     # credit note the consolidator's date is the credit date, not the issue date.

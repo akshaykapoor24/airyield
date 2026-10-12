@@ -30,7 +30,10 @@ from app.schemas.agency import (
     AGENCY_TYPES, BILLING_CYCLES,
     AgencyCreate, AgencyUpdate, AgencyRead, AgencyOverviewRow, AgencyTermsInput,
     AgencyTermsSummary, AgencyFromSuppliers, AgencyFromSuppliersResult, BulkUploadResult,
+    AgencyCodeSuggestion, AgencyCodeCheck,
 )
+# Our own agency identifier, issued in the user's current pattern. See the service.
+from app.services import agency_code as codes
 # An agency typed in by hand is a request to add that vendor to the shared master.
 # Same queue, same rules as the Suppliers page — see the service.
 from app.services.supplier_master_request import (
@@ -524,6 +527,7 @@ async def list_agencies(
             Agency.name.ilike(term),
             Agency.branch_name.ilike(term),
             Agency.branch_code.ilike(term),
+            Agency.agency_code.ilike(term),
             Agency.city.ilike(term),
             Agency.gst_number.ilike(term),
             Agency.pan_number.ilike(term),
@@ -536,6 +540,50 @@ async def list_agencies(
     # Branch second, so a vendor's branches sit together under its name.
     q = q.order_by(Agency.name, Agency.branch_code).offset(skip).limit(limit)
     return await _with_terms(db, list((await db.execute(q)).scalars().all()))
+
+
+@router.get("/next-code", response_model=AgencyCodeSuggestion)
+async def next_agency_code(
+    name: Optional[str] = None,
+    branch_code: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The code auto mode would issue now — shown on the Add Agency form.
+
+    A preview, not a reservation: create_agency issues afresh, so two forms open at
+    once cannot both end up with the number they were shown.
+    """
+    code, pattern = await codes.suggest(db, current_user.id, name, branch_code)
+    sibling = bool(name and branch_code and await codes.sibling_code(db, current_user.id, name, branch_code))
+    return AgencyCodeSuggestion(code=code, pattern=pattern.example, shared_with_sibling=sibling)
+
+
+@router.get("/check-code", response_model=AgencyCodeCheck)
+async def check_agency_code(
+    code: str,
+    name: Optional[str] = None,
+    branch_code: Optional[str] = None,
+    exclude_id: Optional[int] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """A hand-typed code as it would be stored (normalised, padded to the current
+    pattern), the pattern it sets for the codes after it, or why it is refused.
+
+    `exclude_id` is the agency being edited, so its own current code is not a clash.
+    """
+    alloc = await codes.Allocator.load(db, current_user.id)
+    if exclude_id is not None:
+        own = await _get_scoped_agency(exclude_id, db, current_user)
+        name, branch_code = own.name, own.branch_code
+        alloc.holders = {c: k for c, k in alloc.holders.items() if c != own.agency_code}
+    try:
+        stored = alloc.resolve(code, name or "", branch_code or DEFAULT_BRANCH_CODE)
+    except ValueError as e:
+        return AgencyCodeCheck(code=codes.normalise(code), error=str(e))
+    parsed = codes.parse(stored)
+    return AgencyCodeCheck(code=stored, pattern=parsed[0].example if parsed else None)
 
 
 @router.get("/overview", response_model=list[AgencyOverviewRow])
@@ -682,6 +730,13 @@ async def create_agency(
         [_validated_terms(t.model_dump()) for t in (payload.terms or [])],
     )
 
+    # Blank = issue the next one in the user's pattern (or the sibling channel's).
+    alloc = await codes.Allocator.load(db, current_user.id)
+    try:
+        agency_code = alloc.resolve(payload.agency_code, name, branch_code)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     today = date.today()
     agency = Agency(
         user_id=current_user.id,
@@ -700,6 +755,7 @@ async def create_agency(
         contact_phone=(payload.contact_phone or "").strip() or None,
         contact_email=(payload.contact_email or "").strip() or None,
         notes=(payload.notes or "").strip() or None,
+        agency_code=agency_code,
         customer_code=_clean_customer_code(payload.customer_code),
         account_code=_clean_account_code(payload.account_code),
         channels=scope,
@@ -840,6 +896,7 @@ async def create_agencies_from_suppliers(
     today = date.today()
     created: list[Agency] = []
     skipped = 0
+    alloc = await codes.Allocator.load(db, current_user.id)
     for sid in ids:
         s = by_id.get(sid)
         if s is None:
@@ -852,6 +909,7 @@ async def create_agencies_from_suppliers(
             skipped += 1
             continue
         agency = _from_supplier(s, current_user, scope)
+        agency.agency_code = alloc.resolve(None, name, branch)
         db.add(agency)
         created.append(agency)
         existing.setdefault(key, set()).add(scope)
@@ -938,6 +996,11 @@ async def bulk_upload_agencies(
     errors: list[str] = []
 
     today = date.today()
+    alloc = await codes.Allocator.load(db, current_user.id)
+    # Templates from before Customer Code was renamed call THAT column AGENCY_CODE.
+    # Only a sheet that also has CUSTOMER_CODE is the new template, where AGENCY_CODE
+    # is our code (blank = issue one); in an old sheet it still means the customer code.
+    new_template = "CUSTOMER_CODE" in df.columns
     for i, row in df.iterrows():
         row_num = i + used_header_row + 2
         name = _cell(row.get("NAME"))
@@ -998,10 +1061,18 @@ async def bulk_upload_agencies(
                 service_fees[f"{prefix}_value"] = Decimal(str(value)) if value is not None else None
                 service_fees[f"{prefix}_gst"] = gst
 
+            try:
+                agency_code = alloc.resolve(
+                    _cell(row.get("AGENCY_CODE")) if new_template else None, name, branch_code,
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
             agency = Agency(
                 user_id=current_user.id,
                 tenant_id=current_user.tenant_id,
                 name=name,
+                agency_code=agency_code,
                 branch_code=branch_code,
                 branch_name=_cell(row.get("BRANCH_NAME")) or None,
                 address=_cell(row.get("ADDRESS")) or None,
@@ -1014,9 +1085,9 @@ async def bulk_upload_agencies(
                 contact_phone=_cell(row.get("PHONE")) or None,
                 contact_email=_cell(row.get("EMAIL")) or None,
                 notes=_cell(row.get("NOTES")) or None,
-                # CUSTOMER_CODE is the template's header; AGENCY_CODE is what templates
-                # downloaded before the rename call it, so those files still import.
-                customer_code=_clean_customer_code(_cell(row.get("CUSTOMER_CODE")) or _cell(row.get("AGENCY_CODE"))),
+                customer_code=_clean_customer_code(
+                    _cell(row.get("CUSTOMER_CODE")) if new_template else _cell(row.get("AGENCY_CODE"))
+                ),
                 account_code=_clean_account_code(_cell(row.get("ACCOUNT_CODE"))),
                 channels=scope,
                 is_active=is_active,
@@ -1061,6 +1132,12 @@ async def download_agency_template():
     # against it (07 is Delhi, 27 is Maharashtra), and characters 3-12 against PAN.
     # GST_REGISTERED may be left blank: a row with a GST is taken as registered.
     #
+    # AGENCY_CODE is OUR code for the agency, not the customer's. Leave it blank and
+    # the system issues the next one in your pattern (AG-0001 …). Type one and its
+    # pattern becomes the one later blanks continue — LT-001 here makes the next
+    # blank LT-002. A branch's second-channel row left blank reuses its first row's
+    # code, which is why the Lords LCC row below is empty.
+    #
     # THE TWO SERVICE-RATE BLOCKS POINT IN OPPOSITE DIRECTIONS and are both optional.
     #   VENDOR_SERVICE_CHARGE_*    what this agency charges US when we buy from them
     #                              — a COST, read on the Vendors data screens
@@ -1073,7 +1150,7 @@ async def download_agency_template():
     # a blank _GST is taken as exclusive. Filling a _VALUE without its _TYPE fails
     # the row rather than being ignored.
     ws.append([
-        "NAME", "BRANCH_CODE", "BRANCH_NAME", "CUSTOMER_CODE", "ACCOUNT_CODE", "ADDRESS", "STATE", "CITY", "REGION",
+        "NAME", "BRANCH_CODE", "BRANCH_NAME", "AGENCY_CODE", "CUSTOMER_CODE", "ACCOUNT_CODE", "ADDRESS", "STATE", "CITY", "REGION",
         "PAN", "GST_REGISTERED", "GST",
         "PHONE", "EMAIL", "NOTES", "CHANNELS",
         "GDS_TYPE", "GDS_LIMIT", "GDS_DEPOSIT", "GDS_USAGE_PCT", "GDS_BILLING_CYCLE",
@@ -1090,7 +1167,7 @@ async def download_agency_template():
     # them. The two are unrelated numbers pointing opposite ways, which is exactly
     # why they are separate columns.
     ws.append([
-        "Lords Travels", "DEL", "Delhi", "LORDS-DEL", "ACC-2001", "12 Connaught Place", "Delhi", "NEW DELHI", "NORTHERN REGION",
+        "Lords Travels", "DEL", "Delhi", "LT-001", "LORDS-DEL", "ACC-2001", "12 Connaught Place", "Delhi", "NEW DELHI", "NORTHERN REGION",
         "AAPFU0939F", "yes", "07AAPFU0939F1ZX", "9876543210", "ops@lords.com", "", "GDS",
         "cash", "", "10000000", "90", "monthly",
         "", "", "", "", "",
@@ -1101,7 +1178,7 @@ async def download_agency_template():
     # The same branch on the other channel, and the rates differ from its GDS row —
     # one agency row is one channel, so each carries its own.
     ws.append([
-        "Lords Travels", "DEL", "Delhi", "LORDS-DEL", "ACC-2001", "12 Connaught Place", "Delhi", "NEW DELHI", "NORTHERN REGION",
+        "Lords Travels", "DEL", "Delhi", "", "LORDS-DEL", "ACC-2001", "12 Connaught Place", "Delhi", "NEW DELHI", "NORTHERN REGION",
         "AAPFU0939F", "yes", "07AAPFU0939F1ZX", "9876543210", "ops@lords.com", "", "LCC",
         "", "", "", "", "",
         "credit", "5000000", "", "", "fortnightly",
@@ -1114,7 +1191,7 @@ async def download_agency_template():
     # Both service-rate blocks left blank: they are optional, and a blank means
     # nobody has been asked rather than "we charge nothing".
     ws.append([
-        "Lords Travels", "BOM", "Mumbai", "LORDS-BOM", "ACC-2002", "4 Nariman Point", "Maharashtra", "MUMBAI", "WESTERN REGION",
+        "Lords Travels", "BOM", "Mumbai", "", "LORDS-BOM", "ACC-2002", "4 Nariman Point", "Maharashtra", "MUMBAI", "WESTERN REGION",
         "AAPFU0939F", "yes", "27AAPFU0939F1ZV", "9876500001", "bom@lords.com", "", "GDS",
         "credit", "3000000", "", "", "monthly",
         "", "", "", "", "",
@@ -1125,7 +1202,7 @@ async def download_agency_template():
     # Not GST registered — GST_REGISTERED is "no" and the GST column stays empty.
     # We only ever buy from this one, so it carries a vendor charge and no customer fee.
     ws.append([
-        "Aadesh Travels", "MAIN", "", "", "", "", "Delhi", "NEW DELHI", "NORTHERN REGION",
+        "Aadesh Travels", "MAIN", "", "", "", "", "", "Delhi", "NEW DELHI", "NORTHERN REGION",
         "AACCA1234K", "no", "", "9876500000", "ops@aadesh.com", "", "LCC",
         "", "", "", "", "",
         "credit", "5000000", "", "", "weekly",
@@ -1200,6 +1277,24 @@ async def update_agency(
             raise HTTPException(status_code=400, detail=clash)
         data["name"] = new_name
 
+    # A new code applies to the BRANCH, so the other channel's row moves with it.
+    code_siblings: list[Agency] = []
+    if "agency_code" in data:
+        if not codes.normalise(data["agency_code"]):
+            raise HTTPException(status_code=400, detail="Agency code cannot be blank.")
+        alloc = await codes.Allocator.load(db, current_user.id)
+        alloc.holders = {c: k for c, k in alloc.holders.items() if c != obj.agency_code}
+        try:
+            data["agency_code"] = alloc.resolve(
+                data["agency_code"], data.get("name") or obj.name, obj.branch_code,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if obj.agency_code and data["agency_code"] != obj.agency_code:
+            code_siblings = (await db.execute(select(Agency).where(
+                _scope(current_user), Agency.id != obj.id, Agency.agency_code == obj.agency_code,
+            ))).scalars().all()
+
     if "customer_code" in data:
         data["customer_code"] = _clean_customer_code(data["customer_code"])
     if "account_code" in data:
@@ -1242,6 +1337,8 @@ async def update_agency(
 
     for field, value in data.items():
         setattr(obj, field, value)
+    for sib in code_siblings:
+        sib.agency_code = data["agency_code"]
 
     await db.commit()
     await db.refresh(obj)

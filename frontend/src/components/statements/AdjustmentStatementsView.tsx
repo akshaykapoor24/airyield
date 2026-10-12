@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import {
   Upload, RefreshCw, Trash2, Download, Eye, X, AlertTriangle, ArrowLeft,
   FileSpreadsheet, CheckCircle2, Loader2, ChevronLeft, ChevronRight, FolderOpen, Search, Split,
+  Pencil, Check,
 } from "lucide-react";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
@@ -11,8 +12,8 @@ import { notifyRequired } from "@/lib/requiredFields";
 import MultiSelectDropdown from "@/components/ui/MultiSelectDropdown";
 import { type TenantAirlineOpt, sameAirlineOnly, toOptions } from "@/lib/tenantAirlineOptions";
 import StatementUploadWizard from "@/components/statements/StatementUploadWizard";
-import StatementAgencyField, { agencyBlockReason } from "@/components/statements/StatementAgencyField";
-import type { VendorAgency } from "@/lib/vendorAgency";
+import StatementAgencyField, { agencyBlockReason, channelForApiBase } from "@/components/statements/StatementAgencyField";
+import { type VendorAgency, loadVendorAgencies } from "@/lib/vendorAgency";
 import NdcBillingWorklist from "@/components/statements/ndc/NdcBillingWorklist";
 import TpApiBillingWorklist from "@/components/statements/tpapi/TpApiBillingWorklist";
 import { ChecksBadge, ChecksPanel, type CheckResult } from "@/components/statements/StatementChecks";
@@ -85,9 +86,19 @@ type Summary = {
     opening_source: string | null;
   } | null;
 };
+/** Third-party statements: how this batch's SF / GST On SF compare with the agency's
+ *  vendor service charge (backend services/statement_sf_check.py). */
+type SfCheck = {
+  issued: number; refunds: number; checked: number; mismatched: number;
+  agreement: string | null; agency_linked: boolean;
+};
+/** Per-row verdict on one field the view renders. */
+type CellCheck = { status: "ok" | "mismatch"; expected: string; note: string };
+
 type RecordsResponse = {
   total: number; columns: Column[]; rows: Row[];
   filters?: FilterSpec[]; summary?: Summary; needs_reprocess?: boolean;
+  sf_check?: SfCheck;
   /** Why re-processing is offered. Absent = the original per-sector-split reason;
    *  "stale_format" = the batch was parsed by an older column spec than the one running
    *  now, so fields the current parser extracts are missing from its rows. */
@@ -111,7 +122,8 @@ function fmtMoney(v: string | number | null | undefined): string {
 }
 
 /** XLS/CSV upload modal for one adjustment type. */
-function UploadModal({ apiBase, title, requiresAirlineId, requiresSupplier, onClose, onDone }: {
+export function UploadModal({ apiBase, title, requiresAirlineId, requiresSupplier, onClose, onDone,
+  initialFile = null, initialAgencyId = null }: {
   apiBase: string;
   title: string;
   /** LCC types only — their exports name no carrier, so the ID is mandatory here. */
@@ -122,14 +134,25 @@ function UploadModal({ apiBase, title, requiresAirlineId, requiresSupplier, onCl
   requiresSupplier?: boolean;
   onClose: () => void;
   onDone: () => void;
+  /** Email intake → Process: start with this attachment and the sender's agency. */
+  initialFile?: File | null;
+  initialAgencyId?: number | null;
 }) {
-  const [file, setFile] = useState<File | null>(null);
+  const [file, setFile] = useState<File | null>(initialFile);
   const [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [airlines, setAirlines] = useState<TenantAirlineOpt[]>([]);
   const [tenantAirlineIds, setTenantAirlineIds] = useState<number[]>([]);
   const [agency, setAgency] = useState<VendorAgency | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Opened from an email: pre-pick the sender's agency (third-party types).
+  useEffect(() => {
+    if (!requiresSupplier || initialAgencyId == null) return;
+    loadVendorAgencies()
+      .then((list) => { const a = list.find((x) => x.id === initialAgencyId); if (a) setAgency(a); })
+      .catch(() => { /* the user picks it */ });
+  }, [requiresSupplier, initialAgencyId]);
 
   // Only fetched for the types that ask for it — the other statement types share this
   // modal and would be making a call they never use.
@@ -162,6 +185,7 @@ function UploadModal({ apiBase, title, requiresAirlineId, requiresSupplier, onCl
       for (const id of tenantAirlineIds) fd.append("tenant_airline_ids", String(id));
       // The supplier-master row the agency was copied from — see StatementAgencyField.
       if (requiresSupplier && agency?.supplier_id != null) fd.append("supplier_id", String(agency.supplier_id));
+      if (requiresSupplier && agency) fd.append("agency_id", String(agency.id));
       const { data } = await api.post<{ inserted: number; matched_columns: number; source_rows?: number; leg_rows?: number }>(`${apiBase}/upload`, fd);
       // Sector-split types insert more rows than the file has lines — say so, or "imported
       // 518" against a 223-line file reads like a bug.
@@ -257,7 +281,8 @@ function UploadModal({ apiBase, title, requiresAirlineId, requiresSupplier, onCl
               against, so the wrong pick would price the statement against the wrong deal.
               The values are rows in the user's own Agency Master. */}
           {requiresSupplier && (
-            <StatementAgencyField value={agency} onChange={setAgency} className="mt-4" />
+            <StatementAgencyField value={agency} onChange={setAgency} className="mt-4"
+              channel={channelForApiBase(apiBase)} />
           )}
 
           <p className="text-[11px] text-slate-400 mt-3">The original file is stored so you can download it later. Columns are matched by header name.</p>
@@ -398,6 +423,13 @@ export default function AdjustmentStatementsView({
   const [fvals, setFvals] = useState<Record<string, string>>({});
   const [facets, setFacets] = useState<Record<string, string[]>>({});
   const [summary, setSummary] = useState<Summary | null>(null);
+  const [sfCheck, setSfCheck] = useState<SfCheck | null>(null);
+  // Row editing — third-party statements only (backend api/v1/statements.py::edit_record).
+  // One row at a time: `draft` holds its cells as typed until Save sends the changed ones.
+  const rowsEditable = apiBase.endsWith("/tp-gds") || apiBase.endsWith("/tp-lcc");
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [savingRow, setSavingRow] = useState(false);
   const [needsReprocess, setNeedsReprocess] = useState(false);
   // Which of the two re-process paths this batch needs. `null` = the per-sector split;
   // "stale_format" = re-run the current column spec over the stored source rows.
@@ -440,6 +472,32 @@ export default function AdjustmentStatementsView({
   }, [checksApi, checksSlug]);
   useEffect(() => { fetchChecks(); }, [fetchChecks, batches]);
 
+  const startEdit = (r: Row) => {
+    const d: Record<string, string> = {};
+    for (const c of columns) if (!c.field.startsWith("__")) d[c.field] = r[c.field] != null ? String(r[c.field]) : "";
+    setDraft(d);
+    setEditingId(Number(r.id));
+  };
+  const saveEdit = async (r: Row) => {
+    // Only what changed goes up — an untouched cell must not be re-stamped as "edited".
+    const changed: Record<string, string> = {};
+    for (const [k, v] of Object.entries(draft)) {
+      const before = r[k] != null ? String(r[k]) : "";
+      if (v.trim() !== before.trim()) changed[k] = v;
+    }
+    if (!Object.keys(changed).length) { setEditingId(null); return; }
+    setSavingRow(true);
+    try {
+      const { data } = await api.patch<Row>(`${apiBase}/records/${r.id}`, { fields: changed });
+      setRows(prev => prev.map(x => x.id === r.id ? data : x));
+      setEditingId(null);
+      toast.success("Row updated. Re-run commission on this statement to price the change.");
+    } catch (e: unknown) {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      toast.error(msg ?? "Couldn't save the row.");
+    } finally { setSavingRow(false); }
+  };
+
   const loadRecords = useCallback(async (batchId: string, offset: number) => {
     setRloading(true);
     try {
@@ -447,7 +505,9 @@ export default function AdjustmentStatementsView({
       for (const [k, v] of Object.entries(fvals)) if (v) params[`f.${k}`] = v;
       const { data } = await api.get<RecordsResponse>(`${apiBase}/records`, { params });
       setColumns(data.columns); setRows(data.rows); setRtotal(data.total); setRoffset(offset);
+      setEditingId(null);   // a reload replaces the rows — an open edit has nothing left to save
       setFilters(data.filters ?? []); setSummary(data.summary ?? null);
+      setSfCheck(data.sf_check ?? null);
       setNeedsReprocess(!!data.needs_reprocess);
       setReprocessReason(data.reprocess_reason ?? null);
     } catch { toast.error("Failed to load rows."); }
@@ -589,6 +649,32 @@ export default function AdjustmentStatementsView({
             </div>
           )}
         </div>
+        {/* Third-party: the batch's service fee against the agency's agreed rate. */}
+        {sfCheck && (
+          <div className={`mb-3 rounded-lg border px-3 py-2 text-xs flex flex-wrap items-center gap-x-4 gap-y-1 ${
+            sfCheck.mismatched ? "border-red-200 bg-red-50 text-red-700" : "border-slate-200 bg-slate-50 text-slate-600"}`}>
+            <span>
+              <span className="font-semibold">{sfCheck.issued}</span> issued ·{" "}
+              <span className="font-semibold">{sfCheck.refunds}</span> cancelled → refund
+            </span>
+            {sfCheck.agreement ? (
+              sfCheck.mismatched ? (
+                <span className="font-semibold">
+                  {sfCheck.mismatched} of {sfCheck.checked} issued ticket{sfCheck.checked !== 1 ? "s" : ""}{" "}charge a
+                  service fee that doesn&apos;t match the agency&apos;s {sfCheck.agreement} — shown in red below.
+                </span>
+              ) : (
+                <span>Service fee matches the agency&apos;s {sfCheck.agreement} on all {sfCheck.checked} checked tickets.</span>
+              )
+            ) : (
+              <span className="text-slate-400">
+                {sfCheck.agency_linked
+                  ? "No vendor service charge on this agency's record — set it in Agency Master to check SF."
+                  : "Uploaded before agencies were linked — the service fee isn't checked."}
+              </span>
+            )}
+          </div>
+        )}
         {needsReprocess && (
           <div className="flex items-center gap-2 mb-3 px-3 py-2.5 rounded-xl border border-amber-200 bg-amber-50 text-xs text-amber-800">
             <Split className="w-4 h-4 shrink-0" />
@@ -636,22 +722,50 @@ export default function AdjustmentStatementsView({
             <table className="text-left border-collapse text-sm">
               <thead>
                 <tr className="bg-slate-50 border-b border-slate-200 text-[11px] uppercase tracking-wide text-slate-400">
+                  {rowsEditable && <th className="px-2 py-2 sticky left-0 bg-slate-50 z-10" />}
                   {columns.map((c) => <th key={c.field} className={`px-3 py-2 font-semibold whitespace-nowrap ${c.kind === "money" ? "text-right" : ""}`}>{c.header}</th>)}
                 </tr>
               </thead>
               <tbody>
                 {rloading ? (
-                  <tr><td colSpan={columns.length || 1} className="px-3 py-8 text-center text-slate-400">Loading…</td></tr>
+                  <tr><td colSpan={(columns.length || 1) + (rowsEditable ? 1 : 0)} className="px-3 py-8 text-center text-slate-400">Loading…</td></tr>
                 ) : rows.length === 0 ? (
-                  <tr><td colSpan={columns.length || 1} className="px-3 py-8 text-center text-slate-400">
+                  <tr><td colSpan={(columns.length || 1) + (rowsEditable ? 1 : 0)} className="px-3 py-8 text-center text-slate-400">
                     {hasFilters ? "No rows match these filters." : "No rows."}
                   </td></tr>
                 ) : rows.map((r) => {
                   const legs = Number(r.__legs__ ?? 1);
                   return (
-                  <tr key={r.id} className={`border-b border-slate-100 hover:bg-slate-50/60 ${legs > 1 ? "border-l-2 border-l-amber-200" : ""}`}>
+                  <tr key={r.id} className={`border-b border-slate-100 hover:bg-slate-50/60 ${legs > 1 ? "border-l-2 border-l-amber-200" : ""} ${editingId === r.id ? "bg-sky-50/60" : ""}`}>
+                    {rowsEditable && (
+                      <td className="px-2 py-1.5 whitespace-nowrap sticky left-0 bg-white z-10">
+                        {editingId === r.id ? (
+                          <span className="inline-flex gap-1">
+                            <button onClick={() => saveEdit(r)} disabled={savingRow} title="Save"
+                              className="p-1 rounded text-emerald-600 hover:bg-emerald-50 disabled:opacity-40">
+                              {savingRow ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                            </button>
+                            <button onClick={() => setEditingId(null)} disabled={savingRow} title="Cancel"
+                              className="p-1 rounded text-slate-400 hover:bg-slate-100"><X className="w-3.5 h-3.5" /></button>
+                          </span>
+                        ) : (
+                          <button onClick={() => startEdit(r)} disabled={editingId !== null} title="Edit this row"
+                            className="p-1 rounded text-slate-400 hover:text-sky-600 hover:bg-sky-50 disabled:opacity-30">
+                            <Pencil className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </td>
+                    )}
                     {columns.map((c) => {
                       const v = r[c.field];
+                      if (editingId === r.id && !c.field.startsWith("__")) {
+                        return <td key={c.field} className="px-1.5 py-1">
+                          <input value={draft[c.field] ?? ""}
+                            onChange={e => setDraft(d => ({ ...d, [c.field]: e.target.value }))}
+                            onKeyDown={e => { if (e.key === "Enter") saveEdit(r); if (e.key === "Escape") setEditingId(null); }}
+                            className={`w-full min-w-[90px] border border-sky-200 rounded px-1.5 py-1 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-sky-400 ${c.kind === "money" ? "text-right tabular-nums" : ""}`} />
+                        </td>;
+                      }
                       if (c.field === "__leg__") {
                         return <td key={c.field} className="px-3 py-1.5 text-xs whitespace-nowrap">
                           {legs > 1
@@ -661,7 +775,26 @@ export default function AdjustmentStatementsView({
                       }
                       const money = c.kind === "money";
                       const text = v != null && v !== "" ? (money ? fmtMoney(v) : String(v)) : null;
-                      return <td key={c.field} className={`px-3 py-1.5 text-xs text-slate-700 whitespace-nowrap max-w-[240px] truncate ${money ? "text-right tabular-nums" : ""}`} title={v != null ? String(v) : undefined}>{text ?? <span className="text-slate-300">—</span>}</td>;
+                      const check = (r.__checks__ as unknown as Record<string, CellCheck> | undefined)?.[c.field];
+                      const bad = check?.status === "mismatch";
+                      if (c.field === "ticket_status" && r.__kind__ === "refund") {
+                        return <td key={c.field} className="px-3 py-1.5 text-xs whitespace-nowrap" title="Cancelled — reverses the issued ticket as a refund">
+                          <span className="inline-flex items-center gap-1">
+                            <span className="text-slate-700">{text}</span>
+                            <span className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200 text-[10px] font-semibold">Refund</span>
+                          </span>
+                        </td>;
+                      }
+                      return <td key={c.field}
+                        className={`px-3 py-1.5 text-xs whitespace-nowrap max-w-[240px] truncate ${money ? "text-right tabular-nums" : ""} ${
+                          bad ? "bg-red-50 text-red-700 font-semibold ring-1 ring-inset ring-red-200" : "text-slate-700"}`}
+                        title={check ? check.note : (v != null ? String(v) : undefined)}>
+                        {String(r.__edited__ ?? "").split(",").includes(c.field) && (
+                          <span className="inline-block w-1.5 h-1.5 rounded-full bg-sky-500 mr-1 align-middle" title="Edited after upload" />
+                        )}
+                        {text ?? <span className="text-slate-300">—</span>}
+                        {bad && <span className="block text-[10px] font-normal text-red-500">expected {check!.expected}</span>}
+                      </td>;
                     })}
                   </tr>
                   );

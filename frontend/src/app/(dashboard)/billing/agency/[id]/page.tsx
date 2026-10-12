@@ -570,6 +570,7 @@ export default function AgencyBillingDetailPage() {
       ) : !agency ? null : tab === "Agency Details" ? (
         <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-6">
           <div className="grid grid-cols-2 md:grid-cols-3 gap-5">
+            <DetailRow label="Agency Code" value={agency.agency_code} />
             <DetailRow label="Agency Name" value={agency.name} />
             <DetailRow label="Branch" value={agency.branch_name || agency.city} />
             <DetailRow label="Branch Code" value={agency.branch_code} />

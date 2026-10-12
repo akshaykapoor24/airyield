@@ -28,6 +28,11 @@ def display_columns(slug: str) -> list[dict]:
     """
     parser_name = spec.parser(slug)
     cols = spec.columns(slug)
+    # Third-party statements print First Name and Last Name; "Passenger" is only the two
+    # joined (flat_statement._normalize_common), so showing it repeats both. It stays in
+    # `data` — commission and payment reconciliation read the full name from it.
+    if slug in ("tp-gds", "tp-lcc"):
+        cols = [c for c in cols if c.get("field") != "passenger_name"]
     if parser_name == "lcc":
         cols = cols + [
             {"header": "Taxes", "field": "__taxes__"},

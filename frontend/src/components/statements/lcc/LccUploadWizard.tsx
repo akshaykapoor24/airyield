@@ -151,8 +151,13 @@ function StepBar({ step }: { step: Step }) {
 }
 
 export default function LccUploadWizard({
-  apiBase, title, onClose, onDone,
-}: { apiBase: string; title: string; onClose: () => void; onDone: () => void }) {
+  apiBase, title, onClose, onDone, initialFiles = [],
+}: {
+  apiBase: string; title: string; onClose: () => void; onDone: () => void;
+  /** Email intake → Process: the attachment(s) to start from — two when the airline splits
+   *  its export into an account file and a passenger file. */
+  initialFiles?: File[];
+}) {
   const [step, setStep] = useState<Step>("upload");
   const [groups, setGroups] = useState<StdGroup[]>([]);
   const [extracted, setExtracted] = useState<ExtractResp | null>(null);
@@ -165,8 +170,8 @@ export default function LccUploadWizard({
   // splits its export into an account file and a passenger file needs both, and
   // neither is usable alone. The server decides which is which from the headers, so
   // the order they are dropped in does not matter.
-  const [fileA, setFileA] = useState<File | null>(null);
-  const [fileB, setFileB] = useState<File | null>(null);
+  const [fileA, setFileA] = useState<File | null>(initialFiles[0] ?? null);
+  const [fileB, setFileB] = useState<File | null>(initialFiles[1] ?? null);
   const [uploading, setUploading] = useState(false);
   const [expectedRows, setExpectedRows] = useState("");   // user-declared record count (optional)
   // Airline — REQUIRED. An LCC export names no carrier (no airline column, and bare

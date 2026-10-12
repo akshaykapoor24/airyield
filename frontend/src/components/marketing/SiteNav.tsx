@@ -57,7 +57,7 @@ export default function SiteNav() {
 
         {authed ? (
           <Link
-            href="/dashboard"
+            href="/dashboard/revenue"
             className="group inline-flex items-center gap-1.5 rounded-lg px-5 py-2.5 text-[15px] font-semibold text-white shadow-md shadow-brand-700/25 transition-all hover:shadow-lg hover:shadow-brand-700/30"
             style={{ background: "var(--brand-grad)" }}
           >

@@ -574,6 +574,20 @@ async def approve_supplier(
         .values(supplier_id=supplier.id)
     )
 
+    # And the third-party statements uploaded against those agencies while they waited:
+    # their batch link carries the agency but no supplier row. Same NULL-only rule.
+    from app.models.statement_batch_supplier import StatementBatchSupplier
+    await db.execute(
+        update(StatementBatchSupplier)
+        .where(
+            StatementBatchSupplier.agency_id.in_(
+                select(Agency.id).where(Agency.supplier_request_id == approval.id)
+            ),
+            StatementBatchSupplier.supplier_id.is_(None),
+        )
+        .values(supplier_id=supplier.id)
+    )
+
     approval.status = "approved"
     approval.reviewed_by_id = current_user.id
     approval.reviewed_at = datetime.utcnow()

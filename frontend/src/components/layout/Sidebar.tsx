@@ -11,7 +11,7 @@ import {
   Edit3, Users, Shield, GitMerge, Search,
   History, LayoutGrid, Contact, Layers,
   CreditCard, TrendingUp, Receipt, FileDown, PlaneTakeoff, ShieldAlert,
-  Landmark, Wallet, Banknote,
+  Landmark, Wallet, Banknote, Ticket, Upload, FilePlus, Mail, Inbox,
 } from "lucide-react";
 import { USER_MASTER_NAV, userMasterHref } from "@/lib/userMasterNav";
 import { cn } from "@/lib/utils";
@@ -84,19 +84,28 @@ const TENANT_NAV: NavItem[] = [
   {
     id: "customers", label: "Customer data", icon: Contact,
     children: [
-      // Customer directory = the sub-agencies we onboard and float deals to (NOT our own
-      // customer list). One page with in-page Onboarding / Overview tabs.
-      { label: "Customer directory", href: "/customers/directory", icon: Contact },
       { label: "Outgoing deals", href: "/deals?direction=outbound", icon: FolderOutput },
       // Statement is the ticket book on the selling side: the statement list and
-      // every ticket, with Upload Statement and Create Ticket on the page itself.
-      // It absorbed the old top-level "Internal Statement" group — the /tickets/*
-      // URLs still work and still read the same rows, they are just no longer a
-      // separate destination.
+      // every ticket. Entering tickets (Upload Statement / Create Ticket) is the
+      // Internal Statement group below; the /tickets/* URLs still work and still
+      // read the same rows, they are just no longer a separate destination.
       { label: "Statement", href: "/customers/statements", icon: FileText },
       // Reconciliation moved to its own group below.
       { label: "Income Statement", href: "/customers/income-statement", icon: DollarSign },
       // { label: "Billing and invoices", href: "/billing/agency", icon: DollarSign },
+    ],
+  },
+
+  {
+    // Where tickets are ENTERED: the Upload Statement wizard and the Create Ticket
+    // form, moved here from the Customer data → Statement header. Both run in
+    // customer mode (they ask who the tickets were sold to), so what they save is
+    // listed under Customer data → Statement, and saving lands there.
+    id: "internal-statement", label: "Internal Statement", icon: Ticket,
+    children: [
+      { label: "Statements", href: "/internal-statement/statements", icon: FileText },
+      { label: "Upload Statement", href: "/internal-statement/upload", icon: Upload },
+      { label: "Create Ticket", href: "/internal-statement/create", icon: FilePlus },
     ],
   },
 
@@ -189,6 +198,9 @@ const TENANT_NAV: NavItem[] = [
       { label: "Uploaded documents", href: "/documents", icon: FolderOpen },
       // One Excel workbook of the Vendors → Statements uploads, generated in the background.
       { label: "Report download", href: "/report-download", icon: FileDown },
+      // Email intake — mail from onboarded parties, and the mailboxes it is read from (architecture/).
+      { label: "Email inbox", href: "/email-intake/inbox", icon: Inbox },
+      { label: "Mailboxes", href: "/email-intake/mailboxes", icon: Mail },
       // TODO: wire badge to real count
       { label: "Approvals", href: "/deals/approvals", icon: CheckSquare, badge: 4 },
     ],

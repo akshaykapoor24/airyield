@@ -114,8 +114,16 @@ class TestStatusPolicy(unittest.TestCase):
         for s in ("REFUNDED", "refunded", "RFND", "Refund"):
             self.assertEqual(classify({"ticket_status": s})[0], KIND_REFUND, s)
 
-    def test_cancelled_and_void_earn_nothing(self):
-        for s in ("CANCELLED", "VOID", "PENDING", "FAILED"):
+    def test_cancelled_is_a_refund(self):
+        """A consolidator prints a cancellation as a negative line against the issued
+        ticket — it reverses the issue's commission, it is not a non-sale."""
+        for s in ("CANCELLED", "Canceled", "CANCEL"):
+            self.assertEqual(classify({"ticket_status": s}, cancelled_as_refund=True)[0], KIND_REFUND, s)
+        # Without the flag (income board, reports, payment reconciliation) it stays a skip.
+        self.assertEqual(classify({"ticket_status": "CANCELLED"})[0], KIND_SKIP)
+
+    def test_void_and_pending_earn_nothing(self):
+        for s in ("VOID", "PENDING", "FAILED"):
             kind, reason = classify({"ticket_status": s})
             self.assertEqual(kind, KIND_SKIP, s)
             self.assertTrue(reason)

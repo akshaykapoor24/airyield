@@ -88,6 +88,9 @@ class AgencyBase(BaseModel):
     # usually share them). See models/agency.py.
     customer_code: Optional[str] = None
     account_code: Optional[str] = None
+    # Our own identifier — see services/agency_code.py. On a create, blank means
+    # "issue the next one"; on a PATCH, absent means unchanged and blank is refused.
+    agency_code: Optional[str] = None
     # ── Service charge / service fee, one triple per DIRECTION ────────────────
     # An agency is a vendor on the Vendors data screens and a customer on the
     # Customer data ones, and the same money means opposite things there: what they
@@ -208,6 +211,21 @@ class AgencyRead(AgencyBase):
     terms: List[AgencyTermsSummary] = []
 
     model_config = {"from_attributes": True}
+
+
+class AgencyCodeSuggestion(BaseModel):
+    """What auto mode would issue now. `pattern` reads like AG-####."""
+    code: str
+    pattern: str
+    # True when the code is the branch's other-channel row's, reused rather than new.
+    shared_with_sibling: bool = False
+
+
+class AgencyCodeCheck(BaseModel):
+    """A hand-typed code as it would be stored, or why it cannot be."""
+    code: str
+    pattern: Optional[str] = None     # None for a code with no counter in it
+    error: Optional[str] = None
 
 
 class AgencyOverviewRow(BaseModel):

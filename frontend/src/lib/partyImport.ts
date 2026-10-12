@@ -107,7 +107,7 @@ export const IMPORT_FIELDS: Record<PartyKind, ImportField[]> = {
   customer: [
     { key: "first_name", label: "First Name", type: "text", required: true, aliases: ["firstname", "fname", "given_name", "name"] },
     { key: "last_name", label: "Last Name", type: "text", aliases: ["lastname", "lname", "surname"] },
-  { key: "employee_code", label: "Employee Code", type: "text",
+  { key: "employee_code", label: "Employee Code (blank = auto)", type: "text",
     aliases: ["emp_code", "employee_id", "staff_code", "emp_id", "payroll_id"] },
     // Blank takes the linked corporate's on save, like the account code below.
     { key: "customer_code", label: "Customer Code", type: "text",
@@ -134,8 +134,11 @@ export const IMPORT_FIELDS: Record<PartyKind, ImportField[]> = {
       key: "corporate_type", label: "Corporate Type", type: "choice",
       options: CORPORATE_TYPES, aliases: ["type", "entity_type", "legal_form", "constitution"],
     },
+    // Ours; blank in the sheet means the server issues the next one.
+    { key: "corporate_code", label: "Corporate Code (blank = auto)", type: "text",
+      aliases: ["corporate_code", "corp_code", "corporate_id"] },
     { key: "customer_code", label: "Customer Code", type: "text",
-      aliases: ["corporate_code", "corp_code", "corporate_id", "client_code"] },
+      aliases: ["cust_code", "client_code"] },
     { key: "account_code", label: "Account Code", type: "text",
       aliases: ["acc_code", "account_no", "account_id", "ledger_code", "gl_code"] },
     { key: "phone", label: "Phone / Contact", type: "text", aliases: ["contact", "mobile", "phone_no", "contact_no", "telephone"] },
