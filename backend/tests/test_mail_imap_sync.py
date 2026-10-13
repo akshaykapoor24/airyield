@@ -106,10 +106,10 @@ class FakeImap:
         return hits
 
 
-def run(server, cursors, existing=()):
+def run(server, cursors, existing=(), senders=(SENDER,)):
     with mock.patch.object(imap_client, "open_session", return_value=server):
         return imap_client._read_sync(
-            "imap.example.com", 993, "u", "p", folders=["INBOX"], cursors=cursors, senders=[SENDER],
+            "imap.example.com", 993, "u", "p", folders=["INBOX"], cursors=cursors, senders=list(senders),
             since=date(2026, 9, 8), existing={imap_client.provider_message_id("INBOX", 1, u) for u in existing},
             limit=100, max_bytes=10_000_000, lookback=date(2026, 10, 5))
 
@@ -159,6 +159,30 @@ class IndexLagTests(unittest.TestCase):
         server.add(2, SENDER, when=date(2026, 10, 1))
         first = run(server, {})
         self.assertEqual([(m.uid, m.first_sync) for m in first.messages], [(2, True)])
+
+
+class AddedSenderTests(unittest.TestCase):
+    """Reading a whole domain where one address was read before: the colleagues' earlier mail
+    arrives as an import (one summary), while recent and new mail still notifies one by one."""
+
+    def test_domain_term_backfills_quietly(self):
+        server = FakeImap()
+        server.add(1, "Manvendra <manvendra@gtmvantage.com>", when=date(2026, 9, 20))
+        server.add(2, "Rahul <rahul@gtmvantage.com>", when=date(2026, 9, 25))
+        server.add(3, "Priya <priya@gtmvantage.com>", when=date(2026, 10, 7))   # inside the lookback
+        server.add(4, "someone@gtmvantage.com.evil.example", when=date(2026, 9, 25))
+        first = run(server, {}, senders=["manvendra@gtmvantage.com"])
+        self.assertEqual([m.uid for m in first.messages], [1])
+
+        server.add(5, "Amit <amit@gtmvantage.com>", when=date(2026, 10, 8))      # new since the check
+        second = run(server, first.cursors, existing={1}, senders=["@gtmvantage.com"])
+        # 4 is fetched (IMAP FROM is a substring match) and then rejected by sync._match.
+        self.assertEqual([(m.uid, m.first_sync) for m in second.messages],
+                         [(2, True), (3, False), (4, True), (5, False)])
+        self.assertEqual(second.cursors["INBOX"]["senders"], ["@gtmvantage.com"])
+
+        again = run(server, second.cursors, existing={1, 2, 3, 5}, senders=["@gtmvantage.com"])
+        self.assertEqual(again.messages, [])                      # the reach-back runs once
 
 
 if __name__ == "__main__":

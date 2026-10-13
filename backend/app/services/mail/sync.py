@@ -2,7 +2,8 @@
 
 For one connected mailbox:
   1. build the sender registry from the owner's Agency / Corporate / Employee Master;
-  2. ask the mail server for new messages FROM those addresses only (strict mode);
+  2. ask the mail server for new messages FROM those addresses and company domains only
+     (strict mode — registry.py says which domains count);
   3. re-check the exact sender (IMAP's FROM is a substring match) — From, or Reply-To /
      Sender when accounting software sent it on the supplier's behalf;
   4. store the raw mail and attachments privately, write mail_messages / mail_attachments;
@@ -68,14 +69,15 @@ async def _owner_ids(db: AsyncSession, conn: MailConnection) -> list[int]:
     return [r[0] for r in rows]
 
 
-def _match(parsed: mime.ParsedMail, reg: registry.Registry) -> tuple[str | None, list[registry.Party]]:
-    """(address that matched, parties). From first; Reply-To / Sender only when From is not
-    a registered party — the "sent via Zoho Books on behalf of the supplier" case."""
+def _match(parsed: mime.ParsedMail, reg: registry.Registry) -> tuple[str | None, str | None, list[registry.Party]]:
+    """(address that matched, how — "address" or "domain" — and the parties). From first;
+    Reply-To / Sender only when From is not a registered party — the "sent via Zoho Books on
+    behalf of the supplier" case."""
     for addr in [parsed.from_address, *parsed.reply_to, parsed.sender_address]:
-        parties = reg.lookup(addr)
+        via, parties = reg.match(addr)
         if parties:
-            return addr, parties
-    return None, []
+            return addr, via, parties
+    return None, None, []
 
 
 def _message_owner(conn: MailConnection, parties: list[registry.Party]) -> int:
@@ -89,7 +91,7 @@ async def _store_message(db: AsyncSession, conn: MailConnection, fetched: imap_c
                          reg: registry.Registry) -> MailMessage | None:
     raw = fetched.raw or b""
     parsed = mime.parse(raw)
-    matched, parties = _match(parsed, reg)
+    matched, via, parties = _match(parsed, reg)
     if not parties:
         return None          # FROM matched a substring only; not an onboarded sender — keep nothing
 
@@ -110,7 +112,7 @@ async def _store_message(db: AsyncSession, conn: MailConnection, fetched: imap_c
         subject=parsed.subject, from_address=parsed.from_address or matched or "",
         from_name=(parsed.from_name or "")[:320] or None, matched_address=matched or "",
         to_addresses=parsed.to, cc_addresses=parsed.cc, sent_at=parsed.sent_at, received_at=received,
-        parties=[p.as_dict() for p in parties], party_type=parties[0].party_type,
+        parties=[p.as_dict(via) for p in parties], party_type=parties[0].party_type,
         body_text=parsed.text, body_html=parsed.html, snippet=parsed.snippet or None,
         size_bytes=fetched.size or len(raw), raw_locator=raw_locator, raw_sha256=raw_sha,
         attachment_count=len(parsed.attachments),
@@ -179,9 +181,12 @@ async def classify_pending(db: AsyncSession, *, tenant_id: int, connection_id: i
 async def _notify_one(db: AsyncSession, msg: MailMessage) -> None:
     party = (msg.parties or [{}])[0]
     segment = party.get("segment", "")
+    who = party.get("label") or msg.from_address
+    if party.get("via") == "domain":      # someone else at the party's company — say who
+        who = f"{msg.from_name or msg.from_address} · {who}"
     await notifications.notify(
         db, tenant_id=msg.tenant_id, user_id=msg.owner_user_id, category="mail", kind="new_mail",
-        title=f"New email from {party.get('label') or msg.from_address}" + (f" ({segment})" if segment else ""),
+        title=f"New email from {who}" + (f" ({segment})" if segment else ""),
         body=(msg.subject or "(no subject)") + (f" · {msg.attachment_count} attachment(s)" if msg.attachment_count else ""),
         link=f"/email-intake/inbox?m={msg.id}", dedupe_key=f"mail:msg:{msg.id}",
         source_type="mail_message", source_id=msg.id,
@@ -263,7 +268,7 @@ async def _read_imap(conn: MailConnection, reg: registry.Registry, existing: set
     try:
         read = await imap_client.read_new(
             conn.imap_host or "", conn.imap_port or 993, conn.imap_username or conn.email_address, password,
-            folders=folders, cursors=(conn.sync_cursor or {}).get("folders", {}), senders=reg.addresses,
+            folders=folders, cursors=(conn.sync_cursor or {}).get("folders", {}), senders=reg.search_terms,
             since=since, existing=existing, limit=settings.MAIL_SYNC_BATCH,
             max_bytes=settings.MAIL_MAX_MESSAGE_MB * 1024 * 1024,
             lookback=(datetime.utcnow() - timedelta(days=LOOKBACK_DAYS)).date(),
@@ -280,8 +285,16 @@ async def _read_cloud(db: AsyncSession, conn: MailConnection, reg: registry.Regi
     cursor = (conn.sync_cursor or {}).get("cloud") or {}
     first = not cursor.get("last_check")
     now = datetime.utcnow()
-    after = (now - timedelta(days=int(settings_.get("backfill_days") or 30))) if first else \
+    backfill_from = now - timedelta(days=int(settings_.get("backfill_days") or 30))
+    window = backfill_from if first else \
         datetime.fromisoformat(cursor["last_check"]) - timedelta(days=LOOKBACK_DAYS)
+    # A sender added since the last check — a party onboarded, or a company domain now read —
+    # has earlier mail the window never covered. Reach back to the backfill window for it, as
+    # IMAP does; stored mail is skipped, and that earlier mail is imported without a bell each.
+    terms = reg.search_terms
+    known = cursor.get("senders")
+    widen = not first and (known is None or not set(terms) <= set(known))
+    after = min(window, backfill_from) if widen else window
     skip = existing | set(cursor.get("ignored", []))
     common = dict(after=after, include_spam=bool(settings_.get("include_spam", True)), skip=skip,
                   limit=settings.MAIL_SYNC_BATCH, max_bytes=settings.MAIL_MAX_MESSAGE_MB * 1024 * 1024,
@@ -289,7 +302,7 @@ async def _read_cloud(db: AsyncSession, conn: MailConnection, reg: registry.Regi
     token = await _access_token(db, conn)
     try:
         if conn.provider == "gmail":
-            read = await cloud_readers.gmail_read(token, senders=reg.addresses, **common)
+            read = await cloud_readers.gmail_read(token, senders=terms, **common)
         else:
             read = await cloud_readers.graph_read(token, is_sender=lambda a: bool(reg.lookup(a)), **common)
     except oauth.OAuthError as exc:
@@ -298,16 +311,23 @@ async def _read_cloud(db: AsyncSession, conn: MailConnection, reg: registry.Regi
         raise _ReadFailed(str(exc)) from exc
     except httpx.HTTPError as exc:
         raise _ReadFailed("The mail provider could not be reached. New mail will be checked again shortly.") from exc
-    # More waiting than one check takes: keep the window where it was, so the next check carries
-    # on from the same point (what was stored is skipped). Otherwise move the window to now.
-    next_check = cursor.get("last_check") if read.more_waiting else now.isoformat()
+    if widen:
+        for m in read.messages:
+            if m.internaldate and m.internaldate < window:
+                m.first_sync = True
+    # More waiting than one check takes: keep the window — and the sender list, so a widened
+    # check widens again — where it was, so the next check carries on from the same point
+    # (what was stored is skipped). Otherwise move the window to now.
+    done = not read.more_waiting
     return _Read(messages=read.messages, more_waiting=read.more_waiting,
-                 cursors={"__cloud__": {"last_check": next_check, "ignored": cursor.get("ignored", [])}})
+                 cursors={"__cloud__": {"last_check": now.isoformat() if done else cursor.get("last_check"),
+                                        "senders": terms if done else known,
+                                        "ignored": cursor.get("ignored", [])}})
 
 
 async def _sync_locked(db: AsyncSession, conn: MailConnection) -> SyncResult:
     result = SyncResult()
-    reg = await registry.build(db, conn.tenant_id, await _owner_ids(db, conn))
+    reg = await registry.build(db, conn.tenant_id, await _owner_ids(db, conn), mailbox_address=conn.email_address)
     result.senders = len(reg)
     if not reg:
         conn.last_synced_at = datetime.utcnow()
@@ -380,7 +400,8 @@ async def _sync_locked(db: AsyncSession, conn: MailConnection) -> SyncResult:
         cloud = cursors.get("__cloud__", {})
         ignored = list(dict.fromkeys(list(cloud.get("ignored", [])) + [i for ids in not_ours.values() for i in ids]))
         conn.sync_cursor = {**(conn.sync_cursor or {}),
-                            "cloud": {"last_check": cloud.get("last_check"), "ignored": ignored[-imap_client._IGNORED_KEEP:]}}
+                            "cloud": {"last_check": cloud.get("last_check"), "senders": cloud.get("senders"),
+                                      "ignored": ignored[-imap_client._IGNORED_KEEP:]}}
     try:
         await classify_pending(db, tenant_id=conn.tenant_id, connection_id=conn.id)
     except Exception:  # noqa: BLE001 — classification catches up next time; the sync itself succeeded

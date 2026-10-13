@@ -3,8 +3,9 @@
 Same contract as the IMAP reader: give back raw RFC 5322 bytes for messages from onboarded
 senders, oldest first, and leave everything else alone (architecture/03 §3.3–3.4).
 
-GMAIL — strict at the source. `messages.list` takes a Gmail search, `from:(a OR b) after:<t>`,
-so mail from anyone else is never even listed. Raw bytes come from `format=raw`.
+GMAIL — strict at the source. `messages.list` takes a Gmail search,
+`from:(a@x.in OR @acme.in) after:<t>` (an "@domain" term is a whole company, registry.py), so
+mail from anyone else is never even listed. Raw bytes come from `format=raw`.
 
 MICROSOFT — Graph cannot search by a list of senders reliably, so new messages are listed with
 ONLY their sender fields selected (from / sender / replyTo), screened against the registry in

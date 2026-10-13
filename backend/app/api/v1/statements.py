@@ -10,12 +10,16 @@ original spreadsheet is stored in GCS for preview/download. Scoped per user/tena
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
 import math
+import os
 import re
+import tempfile
 import uuid
+from contextlib import suppress
 from datetime import datetime
 from decimal import Decimal
 
@@ -23,10 +27,12 @@ import pandas as pd
 from fastapi import (
     APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status,
 )
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import Numeric, case, cast, delete, func, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased, defer
+from starlette.background import BackgroundTask
 
 from app.config import settings
 from app.database import get_db
@@ -44,7 +50,7 @@ from app.models.user import User
 from app.services import flat_statement as _flat
 from app.services import income_board
 from app.services import sector_split, spec_mapping, spreadsheet, statement_spec as spec
-from app.services import statement_balance
+from app.services import statement_balance, statement_export
 from app.models.statement_batch_control import StatementBatchControl
 from app.services import statement_supplier_selection as supplier_selection
 from app.services import tp_airline_resolution as tp_airline
@@ -1776,6 +1782,152 @@ async def get_batch_file_url(
     from app.services import gcs
     url = await gcs.generate_signed_url(row.file_url, _bucket(), expiry_minutes=60, inline=inline)
     return {"url": url, "file_name": row.source_file}
+
+
+def _billing_export(slug: str):
+    """`(billing_state, extra_headers, extras)` for a type with a billing flow, else None.
+
+    The type's OWN `billing_state(row, ticket)` and the per-row columns its worklist shows
+    beside it, so the export can never describe a row differently from that screen: NDC's
+    Line (which ticket an ancillary's money is on), Third Party API's Category and Kind
+    (what it bills under, or why it does not bill).
+    """
+    if not spec.supports_billing(slug):
+        return None
+    if slug == "ndc":
+        from app.services.ndc_billing_projection import billing_state
+
+        def extras(r) -> dict:
+            s = r.bill_latch_status
+            return {"Line": statement_export.LINE_LABEL.get(s or "", s)}
+        return billing_state, ("Line",), extras
+    if slug == "tp-api":
+        from app.services.markup_categories import CATEGORY_LABELS
+        from app.services.tp_api_billing_projection import billing_state, row_category
+
+        def extras(r) -> dict:
+            cat = row_category(r.data)
+            return {"Category": CATEGORY_LABELS.get(cat, cat) if cat else "No category",
+                    "Kind": statement_export.KIND_LABEL.get(r.bill_kind or "", r.bill_kind)}
+        return billing_state, ("Category", "Kind"), extras
+    return None
+
+
+@router.get("/{slug}/batches/{batch_id}/export")
+async def export_entries(
+    slug: str,
+    batch_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The upload's entries AS STORED — one row per entry — as an .xlsx.
+
+    The other half of the check a user runs after an import: `file-url` hands back the file
+    they uploaded, this hands back what the database made of it, so the two can be laid side
+    by side. Same rows, order and columns as `/records`, and the same `f.<field>` filters, so
+    "export what I'm looking at" works; the Summary sheet says when it was filtered. See
+    services/statement_export.py.
+    """
+    slug, model = _resolve(slug)
+    first = (await db.execute(
+        select(model.source_file, model.uploaded_at)
+        .where(model.batch_id == batch_id, *_scope(model, current_user)).limit(1)
+    )).first()
+    if first is None:
+        raise HTTPException(status_code=404, detail="Upload not found.")
+
+    conds = _record_conds(model, slug, current_user, batch_id, request)
+    order = []
+    if _splits(model):
+        order += [func.coalesce(model.row_seq, model.id).asc(),
+                  func.coalesce(model.sector_index, 1).asc()]
+    order.append(model.id.asc())
+    # The verbatim/pre-split copies are the heaviest columns and flatten_record reads
+    # neither, so they are never loaded.
+    heavy = [defer(getattr(model, c)) for c in ("raw_data", "orig_data", "orig_taxes")
+             if hasattr(model, c)]
+
+    billing_export = _billing_export(slug)
+    billing = None
+    if billing_export is not None:
+        link = (await db.execute(
+            select(StatementBatchBilling).where(
+                StatementBatchBilling.slug == slug, StatementBatchBilling.batch_id == batch_id,
+                StatementBatchBilling.tenant_id == current_user.tenant_id,
+                StatementBatchBilling.created_by_id == current_user.id)
+        )).scalar_one_or_none()
+        billing = {} if link is None else {
+            "resolution_status": link.resolution_status, "billable_rows": link.billable_rows,
+            "resolved_rows": link.resolved_rows, "projected_tickets": link.projected_tickets,
+            "unlatched_rows": link.unlatched_rows,
+        }
+    # Not before billing is set up: billing_state reads an unmatched row as "Needs a party",
+    # which on an upload nobody has opened Billing for would put that on every line. The
+    # Summary says billing is not set up instead — what the uploads list says too.
+    with_billing = (billing_export is not None and bool(billing)
+                    and billing.get("resolution_status") != "none")
+    extra_headers: tuple[str, ...] = billing_export[1] if with_billing else ()
+
+    if with_billing:
+        state_fn, _, extras_fn = billing_export
+        # LEFT JOIN, as the worklist does: billing_state needs the ticket a row was
+        # projected into to tell "in billing" from "on an invoice" from "re-send".
+        T = aliased(UploadedTicket)
+        pairs = (await db.execute(
+            select(model, T).options(*heavy)
+            .outerjoin(T, T.id == model.projected_ticket_id)
+            .where(*conds).order_by(*order)
+        )).all()
+        entries = [statement_export.Entry(
+            record=flatten_record(slug, r), billing=state_fn(r, t), extras=extras_fn(r),
+        ) for r, t in pairs]
+    else:
+        rows = (await db.execute(
+            select(model).options(*heavy).where(*conds).order_by(*order)
+        )).scalars().all()
+        entries = [statement_export.Entry(record=flatten_record(slug, r)) for r in rows]
+
+    # A live COUNT with no filters — exactly how the uploads list counts this upload.
+    stored = await db.scalar(
+        select(func.count()).select_from(model)
+        .where(*_record_conds(model, slug, current_user, batch_id, None))
+    ) or 0
+    control = (await db.execute(
+        select(StatementBatchControl).where(
+            StatementBatchControl.slug == slug, StatementBatchControl.batch_id == batch_id,
+            StatementBatchControl.tenant_id == current_user.tenant_id)
+    )).scalar_one_or_none()
+
+    facts = statement_export.UploadFacts(
+        type_label=spec.spec_for(slug)["label"],
+        source_file=first.source_file,
+        stored_rows=stored,
+        uploaded_by=current_user.full_name,
+        uploaded_at=first.uploaded_at,
+        file_rows=control.file_rows if control is not None else None,
+        row_filter=spec.row_filter(slug),
+        billing=billing,
+        filters=[(f["label"], value) for f, value in _active_filters(slug, request).values()],
+    )
+
+    fd, path = tempfile.mkstemp(prefix=f"{slug}-entries-", suffix=".xlsx")
+    os.close(fd)
+    try:
+        await asyncio.get_running_loop().run_in_executor(
+            None, lambda: statement_export.write_workbook(
+                path, _display_columns(slug), entries, facts, spec.summary_fields(slug),
+                extra_headers=extra_headers, with_billing=with_billing))
+    except BaseException:
+        with suppress(OSError):
+            os.remove(path)
+        raise
+    return FileResponse(
+        path,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=statement_export.file_name(first.source_file),
+        background=BackgroundTask(os.remove, path),
+    )
 
 
 class RecordEdit(BaseModel):
