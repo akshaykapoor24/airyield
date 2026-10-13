@@ -178,7 +178,7 @@ function MailboxesInner() {
 
 function EmptyState({ canConnect, onConnect }: { canConnect: boolean; onConnect: () => void }) {
   const points = [
-    { icon: Inbox, title: "Only onboarded senders", text: "Mail from anyone not in your masters is never opened." },
+    { icon: Inbox, title: "Only onboarded senders", text: "Mail from your masters' addresses and their company domains. Anyone else is never opened." },
     { icon: Lock, title: "Read-only", text: "FareQube cannot send, delete, move or mark mail as read." },
     { icon: ShieldCheck, title: "Encrypted access", text: "Passwords and tokens are stored encrypted." },
   ];

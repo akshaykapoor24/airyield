@@ -136,6 +136,8 @@ export type MailParty = {
   party_id: number;
   label: string;
   segment: Segment;
+  /** "domain" = not the address in the master but someone else at its company domain. */
+  via?: "address" | "domain" | null;
 };
 
 export type MailAttachment = {

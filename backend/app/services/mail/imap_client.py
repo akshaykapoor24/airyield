@@ -267,8 +267,8 @@ async def test_login(host: str, port: int, username: str, password: str) -> Imap
 # ── reading new mail (the sync) ─────────────────────────────────────────────
 #
 # Strict mode (architecture/04 §4.10): the SERVER is asked for messages FROM the registry's
-# addresses, so mail from anyone else is never listed, fetched or stored. IMAP's FROM is a
-# substring match, which is why the sync re-checks the exact address after download.
+# addresses and "@domain" terms, so mail from anyone else is never listed, fetched or stored.
+# IMAP's FROM is a substring match, which is why the sync re-checks the sender after download.
 #
 # Everything is read-only: folders are opened with EXAMINE and bodies fetched with
 # BODY.PEEK[], so nothing is ever marked read, moved or flagged in the user's mailbox.
@@ -400,6 +400,7 @@ def _read_sync(host: str, port: int, username: str, password: str, *, folders: l
                     raise ImapError("folder_missing", f"The folder {folder} could not be opened.")
                 cur = cursors.get(folder)
                 first = not cur or cur.get("uidvalidity") != uidvalidity
+                earlier: set[int] = set()
                 if first:
                     uids = _search(conn, "1:*", since, senders)
                 else:
@@ -415,8 +416,12 @@ def _read_sync(host: str, port: int, username: str, password: str, *, folders: l
                         uids |= _search(conn, "1:*", lookback, senders)
                     known = set(cur.get("senders", []))
                     added = [s for s in senders if s not in known]
-                    if added:     # a party onboarded since the last check: fetch their recent mail too
-                        uids |= _search(conn, "1:*", since, added)
+                    if added:
+                        # A sender added since the last check (a party onboarded, a company domain
+                        # now read): fetch their earlier mail too, imported like a first check —
+                        # one summary, not a bell entry per old message.
+                        earlier = _search(conn, "1:*", since, added) - uids
+                        uids |= earlier
 
                 ignored = set(int(u) for u in (cur or {}).get("ignored", [])) if not first else set()
                 todo = sorted(u for u in uids
@@ -429,7 +434,7 @@ def _read_sync(host: str, port: int, username: str, password: str, *, folders: l
                     raw = _fetch_body(conn, uid, header_only=too_large)
                     result.messages.append(FetchedMessage(
                         folder=folder, uidvalidity=uidvalidity, uid=uid, internaldate=when,
-                        size=size, raw=raw, too_large=too_large, first_sync=first,
+                        size=size, raw=raw, too_large=too_large, first_sync=first or uid in earlier,
                     ))
                 remaining -= len(take)
                 complete = len(take) == len(todo)

@@ -15,7 +15,10 @@ from __future__ import annotations
 
 import asyncio
 import io
+import os
+import tempfile
 import uuid
+from contextlib import suppress
 from datetime import date, datetime, timedelta
 from typing import NamedTuple
 
@@ -23,12 +26,13 @@ import pandas as pd
 from fastapi import (
     APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status,
 )
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, column, delete, func, literal, not_, or_, select, update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import aliased
+from sqlalchemy.orm import aliased, defer
+from starlette.background import BackgroundTask
 
 from app.config import settings
 from app.database import get_db
@@ -46,6 +50,7 @@ from app.services import gcs
 from app.services import income_board
 from app.services import employee_from_passenger as emp
 from app.services import lcc_billing_projection as proj
+from app.services import lcc_export
 from app.services import lcc_merge
 from app.services import ticket_retag as retag
 from app.services import lcc_detailed_spec as spec
@@ -143,12 +148,15 @@ def _date_cond(field: str, bound: str, value: str):
             else col < datetime.combine(d + timedelta(days=1), datetime.min.time()))
 
 
-def _filter_conds(request: Request | None) -> list:
+def _filter_conds(request: Request | None, labels: list[tuple[str, str]] | None = None) -> list:
     """Declared `f.<field>` params on the request → SQLAlchemy conditions.
 
     The field name is only ever a dict key into the spec's allowlist, and the column comes
     from the pre-resolved _FILTER_COLS. Anything unknown, blank or unparseable is skipped
     rather than rejected — a stale bookmark should degrade, not 400.
+
+    `labels`, when given, collects `(label, value)` for each filter that was APPLIED — so
+    the export's Summary can never list a filter that a malformed value made a no-op.
     """
     if request is None:
         return []
@@ -161,6 +169,7 @@ def _filter_conds(request: Request | None) -> list:
         value = (raw or "").strip()
         if not f or not value:
             continue
+        before = len(conds)
 
         if f["type"] == "daterange":
             if bound in ("from", "to"):
@@ -181,15 +190,18 @@ def _filter_conds(request: Request | None) -> list:
                 conds.append(_FILTER_COLS[field] == value)
         else:
             conds.append(_FILTER_COLS[field].ilike(_like(value), escape="\\"))
+        if labels is not None and len(conds) > before:
+            labels.append((f"{f['label']} {bound}" if bound else f["label"], value))
     return conds
 
 
-def _record_conds(user: User, batch_id: str | None, request: Request | None) -> list:
+def _record_conds(user: User, batch_id: str | None, request: Request | None,
+                  labels: list[tuple[str, str]] | None = None) -> list:
     """Scope + batch + whichever declared `f.<field>` filters the request carries."""
     conds = [*_scope(LccDetailed, user)]
     if batch_id:
         conds.append(LccDetailed.batch_id == batch_id)
-    return conds + _filter_conds(request)
+    return conds + _filter_conds(request, labels)
 
 
 async def _tenant_airlines(
@@ -2235,6 +2247,80 @@ async def get_batch_file_url(
         file_url, _bucket(), expiry_minutes=60, inline=inline, content_type=content_type
     )
     return {"url": url, "file_name": source_file}
+
+
+@router.get("/batches/{batch_id}/export")
+async def export_entries(
+    batch_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The upload's entries AS STORED — one row per `lcc_detailed` record — as an .xlsx.
+
+    The other half of the check a user runs after an import: `file-url` hands back the
+    file they uploaded, this hands back what the database made of it, so the two can be
+    laid side by side. Honours the drill-in's `f.<field>` filters, so "export what I'm
+    looking at" works; the Summary sheet says when it was filtered. See services/lcc_export.py.
+    """
+    batch = await _owned_batch(batch_id, db, current_user)
+    if batch.status != "completed":
+        # A half-imported upload would export as a short file that looks like a loss.
+        raise HTTPException(
+            status_code=409,
+            detail="This upload is still being imported — export it once it has finished.")
+
+    applied: list[tuple[str, str]] = []
+    conds = _record_conds(current_user, batch_id, request, applied)
+    # raw_data is the original row verbatim and the heaviest column by far; the sheet is
+    # built from the typed columns, so it is never loaded.
+    rows = (await db.execute(
+        select(LccDetailed)
+        .options(defer(LccDetailed.raw_data), defer(LccDetailed.extra))
+        .where(*conds)
+        .order_by(LccDetailed.id)          # import order = file order
+    )).scalars().all()
+    # A live COUNT rather than the batch's counter: this is the figure being checked.
+    stored = await db.scalar(
+        select(func.count()).select_from(LccDetailed).where(LccDetailed.batch_id == batch_id)
+    ) or 0
+    files = (await _batch_files(db, [batch_id])).get(batch_id, [])
+    refs = (await _batch_airline_ids(db, [batch_id])).get(batch_id)
+    ref_ids = [ref for _, ref in refs] if refs else ([batch.airline_ref_id] if batch.airline_ref_id else [])
+    airline = " ".join(x for x in (batch.airline_code, batch.airline_name) if x)
+
+    facts = lcc_export.UploadFacts(
+        source_file=batch.source_file,
+        stored_rows=stored,
+        source_rows=batch.source_rows,
+        expected_rows=batch.expected_rows,
+        merge_stats=batch.merge_stats,
+        files=[(f["role"], f["source_file"], f["row_count"]) for f in files],
+        airline=(f"{airline} · {', '.join(ref_ids)}" if airline and ref_ids else airline) or None,
+        uploaded_by=current_user.full_name,
+        uploaded_at=batch.uploaded_at,
+        completed_at=batch.completed_at,
+        billable_rows=batch.billable_rows,
+        resolved_rows=batch.resolved_rows,
+        projected_rows=batch.projected_rows,
+        filters=applied,
+    )
+
+    fd, path = tempfile.mkstemp(prefix="lcc-entries-", suffix=".xlsx")
+    os.close(fd)
+    try:
+        await asyncio.get_running_loop().run_in_executor(
+            None, lcc_export.write_workbook, path, rows, facts)
+    except BaseException:
+        with suppress(OSError):
+            os.remove(path)
+        raise
+    return FileResponse(
+        path,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=lcc_export.file_name(batch.source_file),
+        background=BackgroundTask(os.remove, path),
+    )
 
 
 async def _bills_blocking_delete(db: AsyncSession, file_name: str, on_bills) -> dict:

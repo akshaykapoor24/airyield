@@ -4,11 +4,12 @@ import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateA
 import {
   Upload, RefreshCw, Trash2, Download, Eye, ArrowLeft, AlertTriangle,
   ChevronLeft, ChevronRight, FolderOpen, CheckCircle2, Loader2, Clock, XCircle,
-  X, Search, SlidersHorizontal, ChevronDown, ChevronUp, ExternalLink, Lock,
+  X, Search, SlidersHorizontal, ChevronDown, ChevronUp, ExternalLink, Lock, Database,
 } from "lucide-react";
 import Link from "next/link";
 import api from "@/lib/api";
 import { inr } from "@/lib/money";
+import { downloadEntries } from "@/lib/entriesExport";
 import MultiSelectDropdown from "@/components/ui/MultiSelectDropdown";
 import { type TenantAirlineOpt, sameAirlineOnly, toOptions } from "@/lib/tenantAirlineOptions";
 import toast from "react-hot-toast";
@@ -50,6 +51,9 @@ type Batch = {
   // Lines READ across every source file, as against total_rows = rows WRITTEN. They
   // differ when an airline splits its statement in two and the halves are merged.
   source_rows: number | null;
+  // Set when the import's merge pass ran; its counters account for every line read
+  // that is not an entry. Only its presence is read here — the export spells it out.
+  merge_stats: Record<string, unknown> | null;
   // Every source file behind this upload. One entry for an ordinary statement; two
   // when the airline issues an account file and a passenger file separately.
   // `source_file` / `has_file` above still describe the primary one.
@@ -105,6 +109,25 @@ function fkeys(f: FilterSpec): string[] {
 function fmtDate(s: string | null): string {
   if (!s) return "—";
   try { return new Date(s).toLocaleString(); } catch { return s; }
+}
+
+/**
+ * Lines read from the file that did not become entries, for an upload the merge did NOT
+ * reshape. A merged upload reads more lines than it writes by design (balance lines,
+ * one line per segment), so a gap there is not a loss and is not flagged.
+ */
+function unstoredLines(b: Batch): number {
+  if (b.status !== "completed" || b.merge_stats || b.source_rows == null) return 0;
+  return Math.max(0, b.source_rows - b.row_count);
+}
+
+function entriesTitle(b: Batch): string {
+  const n = b.row_count.toLocaleString();
+  if (b.status !== "completed") return `${n} rows to import`;
+  if (b.source_rows == null) return `${n} entries stored in the system`;
+  const from = `${b.source_rows.toLocaleString()} lines read from the ${(b.files?.length ?? 0) > 1 ? "files" : "file"}`;
+  return `${n} entries stored in the system · ${from}`
+    + (b.merge_stats && b.source_rows !== b.row_count ? " — merged on import; the entries download shows where every line went" : "");
 }
 
 function StatusCell({ b }: { b: Batch }) {
@@ -302,6 +325,8 @@ export default function LccDetailedView({ apiBase, title }: { apiBase: string; t
   const [deleteBlock, setDeleteBlock] = useState<DeleteBlock | null>(null);
   const closeDelete = () => { setDeleteTarget(null); setDeleteBlock(null); };
   const [deleting, setDeleting] = useState(false);
+  // batch_id of the entries export being built — a large upload takes a few seconds.
+  const [exporting, setExporting] = useState<string | null>(null);
   const [selected, setSelected] = useState<Batch | null>(null);
   // The billing worklist is a third view, alongside the uploads list and the records
   // drill-in. Kept as local state rather than a route, matching `selected`.
@@ -353,8 +378,13 @@ export default function LccDetailedView({ apiBase, title }: { apiBase: string; t
     fetchBatches();
   }, [fetchBatches]);
 
+  const importingCount = batches.filter((b) => b.status === "pending" || b.status === "processing").length;
+  const imported = batches.filter((b) => b.status === "completed");
+  const importedCount = imported.length;
+  const totalEntries = imported.reduce((s, b) => s + b.row_count, 0);
+
   // Poll while any upload is still queued/processing.
-  const hasActive = batches.some((b) => b.status === "pending" || b.status === "processing");
+  const hasActive = importingCount > 0;
   useEffect(() => {
     if (!hasActive) return;
     const t = setInterval(() => fetchBatches(true), 2000);
@@ -418,6 +448,16 @@ export default function LccDetailedView({ apiBase, title }: { apiBase: string; t
       const { data } = await api.get<{ url: string }>(`${apiBase}/batches/${b.batch_id}/file-url`, { params: { inline: false, role } });
       window.open(data.url, "_blank");
     } catch { toast.error("No stored file for this upload."); }
+  };
+
+  // Built server-side from the STORED rows, never from the uploaded file: downloadFile
+  // hands back what was uploaded, this hands back what the system holds, so the two can
+  // be laid side by side. `filters` are the drill-in's, so it exports what is on screen.
+  const exportEntries = async (b: Batch, filters: Record<string, string> = {}) => {
+    setExporting(b.batch_id);
+    try { await downloadEntries(apiBase, b.batch_id, b.source_file, filters); }
+    catch (e) { toast.error((e as Error).message); }
+    finally { setExporting(null); }
   };
 
   const previewFile = async (b: Batch, role?: string) => {
@@ -527,26 +567,34 @@ export default function LccDetailedView({ apiBase, title }: { apiBase: string; t
             {hasFilters && <span className="text-amber-600"> (filtered from {selected.row_count.toLocaleString()})</span>}
             {" "}· {fmtDate(selected.uploaded_at)}
           </span>
-          {/* One pair of buttons per source file. A merged upload has two, and a
-              single Preview button would silently only ever open one of them. */}
-          {(selected.files?.length ?? 0) > 1 ? (
-            <div className="ml-auto flex items-center gap-3">
-              {selected.files.filter((f) => f.has_file).map((f) => (
+          <div className="ml-auto flex items-center gap-3">
+            {/* One pair of buttons per source file. A merged upload has two, and a
+                single Preview button would silently only ever open one of them. */}
+            {(selected.files?.length ?? 0) > 1 ? (
+              selected.files.filter((f) => f.has_file).map((f) => (
                 <div key={f.role} className="flex items-center gap-1.5">
                   <span className="text-[11px] font-medium text-slate-400 capitalize">{f.role}</span>
                   <button onClick={() => previewFile(selected, f.role)} title={`Preview ${f.source_file ?? f.role}`}
                     className="p-1.5 text-blue-600 border border-blue-200 bg-blue-50 rounded-lg hover:bg-blue-100"><Eye className="w-3.5 h-3.5" /></button>
-                  <button onClick={() => downloadFile(selected, f.role)} title={`Download ${f.source_file ?? f.role}`}
+                  <button onClick={() => downloadFile(selected, f.role)} title={`Download the original ${f.source_file ?? f.role}`}
                     className="p-1.5 text-slate-600 border border-slate-200 rounded-lg hover:bg-slate-50"><Download className="w-3.5 h-3.5" /></button>
                 </div>
-              ))}
-            </div>
-          ) : selected.has_file && (
-            <div className="ml-auto flex items-center gap-2">
-              <button onClick={() => previewFile(selected)} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-blue-700 border border-blue-200 bg-blue-50 rounded-lg hover:bg-blue-100"><Eye className="w-3.5 h-3.5" /> Preview</button>
-              <button onClick={() => downloadFile(selected)} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-600 border border-slate-200 rounded-lg hover:bg-slate-50"><Download className="w-3.5 h-3.5" /> Download</button>
-            </div>
-          )}
+              ))
+            ) : selected.has_file && (
+              <div className="flex items-center gap-2">
+                <button onClick={() => previewFile(selected)} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-blue-700 border border-blue-200 bg-blue-50 rounded-lg hover:bg-blue-100"><Eye className="w-3.5 h-3.5" /> Preview</button>
+                <button onClick={() => downloadFile(selected)} title="The file exactly as it was uploaded"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-600 border border-slate-200 rounded-lg hover:bg-slate-50"><Download className="w-3.5 h-3.5" /> Original file</button>
+              </div>
+            )}
+            {/* The rows on screen, as stored — filtered when the grid is. */}
+            <button onClick={() => exportEntries(selected, fvals)} disabled={exporting === selected.batch_id || rtotal === 0}
+              title="Download the entries stored in the system for this upload (.xlsx)"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-emerald-700 border border-emerald-200 bg-emerald-50 rounded-lg hover:bg-emerald-100 disabled:opacity-50">
+              {exporting === selected.batch_id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Database className="w-3.5 h-3.5" />}
+              {hasFilters ? `Download ${rtotal.toLocaleString()} filtered entries` : "Download entries"}
+            </button>
+          </div>
         </div>
         {summary && <TotalsStrip summary={summary} filtered={hasFilters} />}
 
@@ -629,9 +677,18 @@ export default function LccDetailedView({ apiBase, title }: { apiBase: string; t
   return (
     <div>
       <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
-        <div className="bg-white border border-slate-200 rounded-lg px-4 py-2">
-          <span className="text-[10px] uppercase tracking-wide text-slate-400">Uploads</span>
-          <span className="ml-2 text-sm font-bold text-slate-800">{batches.length}</span>
+        <div className="flex items-center gap-2">
+          <div className="bg-white border border-slate-200 rounded-lg px-4 py-2">
+            <span className="text-[10px] uppercase tracking-wide text-slate-400">Uploads</span>
+            <span className="ml-2 text-sm font-bold text-slate-800">{batches.length}</span>
+          </div>
+          {/* Imported uploads only: an upload still importing has rows to come, not rows
+              stored, and counting its target would overstate what the system holds. */}
+          <div className="bg-white border border-slate-200 rounded-lg px-4 py-2"
+            title={`Entries stored in the system across ${importedCount.toLocaleString()} imported ${importedCount === 1 ? "upload" : "uploads"}${importingCount ? ` — ${importingCount} still importing` : ""}`}>
+            <span className="text-[10px] uppercase tracking-wide text-slate-400">Entries</span>
+            <span className="ml-2 text-sm font-bold text-slate-800 tabular-nums">{totalEntries.toLocaleString()}</span>
+          </div>
         </div>
         <div className="flex items-center gap-2">
           <button onClick={() => fetchBatches()} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-500 border border-slate-200 rounded-lg hover:bg-slate-50"><RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} /> Refresh</button>
@@ -694,7 +751,13 @@ export default function LccDetailedView({ apiBase, title }: { apiBase: string; t
                 <td className="px-3 py-2 text-xs text-slate-500 whitespace-nowrap">{fmtDate(b.uploaded_at)}</td>
                 <td className="px-3 py-2"><StatusCell b={b} /></td>
                 <td className="px-3 py-2 text-right whitespace-nowrap">
-                  <span className="tabular-nums text-slate-700">{b.row_count.toLocaleString()}</span>
+                  <span className="tabular-nums text-slate-700" title={entriesTitle(b)}>{b.row_count.toLocaleString()}</span>
+                  {/* The declared-count check below wins when there is one; otherwise flag
+                      lines read from the file that never became entries. */}
+                  {b.expected_rows == null && unstoredLines(b) > 0 && (
+                    <span title={`${unstoredLines(b).toLocaleString()} of the ${b.source_rows!.toLocaleString()} lines read from the file are not stored. A line with no value in any mapped column (such as a totals line) is skipped. Download the entries to compare.`}
+                      className="ml-1.5 inline-flex items-center gap-0.5 align-middle text-[10px] font-semibold text-amber-600"><AlertTriangle className="w-3 h-3" /> /{b.source_rows!.toLocaleString()}</span>
+                  )}
                   {b.expected_rows != null && b.status === "completed" && (
                     b.row_count === b.expected_rows ? (
                       <span title={`Matches the ${b.expected_rows.toLocaleString()} expected records`}
@@ -731,7 +794,12 @@ export default function LccDetailedView({ apiBase, title }: { apiBase: string; t
                   <button onClick={() => openBatch(b)} disabled={b.status !== "completed"} className="text-xs font-medium text-blue-600 hover:underline mr-3 disabled:text-slate-300 disabled:no-underline">Open</button>
                   {b.airline_name && <button onClick={() => openAirlineModal(b)} className="text-xs font-medium text-slate-500 hover:underline mr-3" title="Change the airline on this upload">Airline</button>}
                   {b.has_file && <button onClick={() => previewFile(b)} className="p-1 text-slate-400 hover:text-blue-600 mr-1" title="Preview file"><Eye className="w-3.5 h-3.5" /></button>}
-                  {b.has_file && <button onClick={() => downloadFile(b)} className="p-1 text-slate-400 hover:text-slate-700 mr-1" title="Download original"><Download className="w-3.5 h-3.5" /></button>}
+                  {b.has_file && <button onClick={() => downloadFile(b)} className="p-1 text-slate-400 hover:text-slate-700 mr-1" title="Download the original file, as uploaded"><Download className="w-3.5 h-3.5" /></button>}
+                  <button onClick={() => exportEntries(b)} disabled={b.status !== "completed" || exporting === b.batch_id}
+                    className="p-1 text-slate-400 hover:text-emerald-600 mr-1 disabled:text-slate-200 disabled:hover:text-slate-200"
+                    title={b.status === "completed" ? "Download the entries stored in the system (.xlsx)" : "Available once the import has finished"}>
+                    {exporting === b.batch_id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Database className="w-3.5 h-3.5" />}
+                  </button>
                   <button onClick={() => setDeleteTarget(b)} className="p-1 text-slate-400 hover:text-red-600" title="Delete upload"><Trash2 className="w-3.5 h-3.5" /></button>
                 </td>
               </tr>

@@ -165,6 +165,7 @@ class PartyOut(BaseModel):
     party_id: int
     label: str
     segment: str           # B2B | B2E | B2C
+    via: str | None = None  # address | domain — the sender's exact address, or someone else at its domain
 
 
 class AttachmentOut(BaseModel):

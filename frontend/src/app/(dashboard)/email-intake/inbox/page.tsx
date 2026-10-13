@@ -294,6 +294,8 @@ function SegmentBadge({ segment }: { segment: Segment }) {
 
 function ListRow({ item, active, onOpen }: { item: MailListItem; active: boolean; onOpen: () => void }) {
   const who = item.party?.label || item.from_name || item.from_address;
+  // Someone else at the party's company: the label alone would hide who actually wrote.
+  const person = item.party?.via === "domain" ? (item.from_name || item.from_address) : null;
   return (
     <li>
       <button onClick={onOpen}
@@ -304,7 +306,9 @@ function ListRow({ item, active, onOpen }: { item: MailListItem; active: boolean
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <span className={`text-sm truncate ${item.is_read ? "text-gray-700" : "font-semibold text-gray-900"}`}>{who}</span>
+            <span className={`text-sm truncate ${item.is_read ? "text-gray-700" : "font-semibold text-gray-900"}`}>
+              {who}{person && <span className="font-normal text-gray-500"> · {person}</span>}
+            </span>
             {item.party && <SegmentBadge segment={item.party.segment} />}
             <span className="ml-auto text-[11px] text-gray-400 shrink-0">{fmtListDate(item.received_at)}</span>
           </div>
@@ -446,6 +450,11 @@ function MessageView({ id, onBack, onLoaded, onMarkedUnread }: {
                 <SegmentBadge segment={p.segment} />
                 <span className="font-medium text-gray-800">{p.label}</span>
                 <span className="text-gray-400">· {SEGMENT_MASTER[p.segment]}</span>
+                {p.via === "domain" && (
+                  <span className="text-gray-400" title={`Not the address in the master — someone else at @${msg.from_address.split("@")[1] ?? ""}`}>
+                    · same domain
+                  </span>
+                )}
               </span>
             ))}
           </div>

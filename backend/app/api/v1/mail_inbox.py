@@ -74,7 +74,7 @@ def _party(p: dict | None) -> PartyOut | None:
     if not p:
         return None
     return PartyOut(party_type=p.get("party_type", ""), party_id=int(p.get("party_id", 0)),
-                    label=p.get("label", ""), segment=p.get("segment", ""))
+                    label=p.get("label", ""), segment=p.get("segment", ""), via=p.get("via"))
 
 
 def _list_item(m: MailMessage, mailbox: str, statements: list[DocTag] | None = None) -> MessageListItem:

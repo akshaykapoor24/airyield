@@ -4,9 +4,10 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import {
   Upload, RefreshCw, Trash2, Download, Eye, X, AlertTriangle, ArrowLeft,
   FileSpreadsheet, CheckCircle2, Loader2, ChevronLeft, ChevronRight, FolderOpen, Search, Split,
-  Pencil, Check,
+  Pencil, Check, Database,
 } from "lucide-react";
 import api from "@/lib/api";
+import { downloadEntries } from "@/lib/entriesExport";
 import toast from "react-hot-toast";
 import { notifyRequired } from "@/lib/requiredFields";
 import MultiSelectDropdown from "@/components/ui/MultiSelectDropdown";
@@ -369,7 +370,7 @@ function SummarySlab({ summary }: { summary: Summary }) {
 
 export default function AdjustmentStatementsView({
   apiBase, slug, title, requiresAirlineId, requiresSupplier, supportsMapping,
-  supportsBilling, billingWorklist, doneHint, checks, captureControls,
+  supportsBilling, billingWorklist, exportsEntries, doneHint, checks, captureControls,
 }: {
   apiBase: string; slug: string; title: string; blurb?: string;
   /** LCC types only — see lib/statements.ts. Drives the mandatory Airline picker in
@@ -388,6 +389,10 @@ export default function AdjustmentStatementsView({
   supportsBilling?: boolean;
   /** Which of the two worklists to open. Only read when `supportsBilling`. */
   billingWorklist?: "ndc" | "tp-api";
+  /** NDC and Third Party API — see lib/statements.ts. An ENTRIES total beside UPLOADS, and
+   *  a Download entries action serving the rows as stored. Absent everywhere else, which
+   *  renders neither. */
+  exportsEntries?: boolean;
   /** One line on the wizard's success screen saying where the imported rows went. */
   doneHint?: string;
   /** Payment Module tabs only. Adds a CHECKS column — completeness, continuity and vendor
@@ -403,6 +408,8 @@ export default function AdjustmentStatementsView({
   const [uploadOpen, setUploadOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Batch | null>(null);
   const [deleting, setDeleting] = useState(false);
+  // batch_id of the entries export being built — a large upload takes a few seconds.
+  const [exporting, setExporting] = useState<string | null>(null);
   const [selected, setSelected] = useState<Batch | null>(null);
   // The billing worklist is a third view, alongside the uploads list and the records
   // drill-in. Local state rather than a route, matching `selected` — and matching what
@@ -440,6 +447,9 @@ export default function AdjustmentStatementsView({
 
   const hasFilters = Object.values(fvals).some(Boolean);
   const hasSelects = filters.some((f) => f.type === "select");
+  // `row_count` is a live COUNT of stored entries (the server's list_batches), so the sum
+  // is what the system holds — not a counter that could drift from it.
+  const totalEntries = batches.reduce((s, b) => s + b.row_count, 0);
   // File · [Airline] · [Agency] · Uploaded · Entries · [Checks] · [Billing] · Uploaded by · Actions.
   // Computed rather than a literal, so adding a column can't leave the empty-state row short.
   const batchCols = 5 + (requiresAirlineId ? 1 : 0) + (requiresSupplier ? 1 : 0)
@@ -566,6 +576,16 @@ export default function AdjustmentStatementsView({
     catch { toast.error("No stored file for this upload."); }
   };
 
+  // Built server-side from the STORED rows, never from the uploaded file: downloadFile
+  // hands back what was uploaded, this hands back what the system holds, so the two can
+  // be laid side by side. `filters` are the drill-in's, so it exports what is on screen.
+  const exportEntries = async (b: Batch, filters: Record<string, string> = {}) => {
+    setExporting(b.batch_id);
+    try { await downloadEntries(apiBase, b.batch_id, b.source_file, filters); }
+    catch (e) { toast.error((e as Error).message); }
+    finally { setExporting(null); }
+  };
+
   const previewFile = async (b: Batch) => {
     try {
       const { data } = await api.get<{ url: string }>(`${apiBase}/batches/${b.batch_id}/file-url`, { params: { inline: true } });
@@ -638,14 +658,29 @@ export default function AdjustmentStatementsView({
             {hasFilters && <span className="text-amber-600"> (filtered from {selected.row_count.toLocaleString("en-IN")})</span>}
             {" "}· {fmtDate(selected.uploaded_at)}
           </span>
-          {selected.has_file && (
+          {(selected.has_file || exportsEntries) && (
             <div className="ml-auto flex items-center gap-2">
-              <button onClick={() => previewFile(selected)} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-blue-700 border border-blue-200 bg-blue-50 rounded-lg hover:bg-blue-100">
-                <Eye className="w-3.5 h-3.5" /> Preview
-              </button>
-              <button onClick={() => downloadFile(selected)} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-600 border border-slate-200 rounded-lg hover:bg-slate-50">
-                <Download className="w-3.5 h-3.5" /> Download
-              </button>
+              {selected.has_file && (
+                <>
+                  <button onClick={() => previewFile(selected)} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-blue-700 border border-blue-200 bg-blue-50 rounded-lg hover:bg-blue-100">
+                    <Eye className="w-3.5 h-3.5" /> Preview
+                  </button>
+                  <button onClick={() => downloadFile(selected)} title="The file exactly as it was uploaded"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-600 border border-slate-200 rounded-lg hover:bg-slate-50">
+                    {/* "Original file" only beside Download entries — alone, Download is unambiguous. */}
+                    <Download className="w-3.5 h-3.5" /> {exportsEntries ? "Original file" : "Download"}
+                  </button>
+                </>
+              )}
+              {/* The rows on screen, as stored — filtered when the grid is. */}
+              {exportsEntries && (
+                <button onClick={() => exportEntries(selected, fvals)} disabled={exporting === selected.batch_id || rtotal === 0}
+                  title="Download the entries stored in the system for this upload (.xlsx)"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-emerald-700 border border-emerald-200 bg-emerald-50 rounded-lg hover:bg-emerald-100 disabled:opacity-50">
+                  {exporting === selected.batch_id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Database className="w-3.5 h-3.5" />}
+                  {hasFilters ? `Download ${rtotal.toLocaleString("en-IN")} filtered entries` : "Download entries"}
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -820,9 +855,20 @@ export default function AdjustmentStatementsView({
   return (
     <div>
       <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
-        <div className="bg-white border border-slate-200 rounded-lg px-4 py-2">
-          <span className="text-[10px] uppercase tracking-wide text-slate-400">Uploads</span>
-          <span className="ml-2 text-sm font-bold text-slate-800">{batches.length}</span>
+        <div className="flex items-center gap-2">
+          <div className="bg-white border border-slate-200 rounded-lg px-4 py-2">
+            <span className="text-[10px] uppercase tracking-wide text-slate-400">Uploads</span>
+            <span className="ml-2 text-sm font-bold text-slate-800">{batches.length}</span>
+          </div>
+          {/* Every upload counts: this router imports synchronously, so an upload is listed
+              only once its rows are in — unlike LCC Detailed, nothing here is mid-import. */}
+          {exportsEntries && (
+            <div className="bg-white border border-slate-200 rounded-lg px-4 py-2"
+              title={`Entries stored in the system across ${batches.length.toLocaleString()} ${batches.length === 1 ? "upload" : "uploads"}`}>
+              <span className="text-[10px] uppercase tracking-wide text-slate-400">Entries</span>
+              <span className="ml-2 text-sm font-bold text-slate-800 tabular-nums">{totalEntries.toLocaleString()}</span>
+            </div>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <button onClick={fetchBatches} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-500 border border-slate-200 rounded-lg hover:bg-slate-50"><RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} /> Refresh</button>
@@ -959,7 +1005,14 @@ export default function AdjustmentStatementsView({
                 <td className="px-3 py-2 text-right whitespace-nowrap">
                   <button onClick={() => openBatch(b)} className="text-xs font-medium text-blue-600 hover:underline mr-3">Open</button>
                   {b.has_file && <button onClick={() => previewFile(b)} className="p-1 text-slate-400 hover:text-blue-600 mr-1" title="Preview file"><Eye className="w-3.5 h-3.5" /></button>}
-                  {b.has_file && <button onClick={() => downloadFile(b)} className="p-1 text-slate-400 hover:text-slate-700 mr-1" title="Download original"><Download className="w-3.5 h-3.5" /></button>}
+                  {b.has_file && <button onClick={() => downloadFile(b)} className="p-1 text-slate-400 hover:text-slate-700 mr-1" title="Download the original file, as uploaded"><Download className="w-3.5 h-3.5" /></button>}
+                  {exportsEntries && (
+                    <button onClick={() => exportEntries(b)} disabled={exporting === b.batch_id}
+                      className="p-1 text-slate-400 hover:text-emerald-600 mr-1 disabled:opacity-50"
+                      title="Download the entries stored in the system (.xlsx)">
+                      {exporting === b.batch_id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Database className="w-3.5 h-3.5" />}
+                    </button>
+                  )}
                   <button onClick={() => setDeleteTarget(b)} className="p-1 text-slate-400 hover:text-red-600" title="Delete upload"><Trash2 className="w-3.5 h-3.5" /></button>
                 </td>
               </tr>

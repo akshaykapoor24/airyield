@@ -59,6 +59,12 @@ export type StatementType = {
    *  Not derivable from `slug`, which is the NAV slug ("api" here, not "tp-api"), and not
    *  from `apiBase`, which is a string this component has no business parsing. */
   billingWorklist?: "ndc" | "tp-api";
+  /** "Did my upload land?" tools: an ENTRIES total beside UPLOADS, and a Download entries
+   *  action (per upload and in the drill-in) that serves the rows as STORED — an .xlsx
+   *  built from the database, as against the Download icon's original file. Backed by
+   *  `GET /statements/{slug}/batches/{id}/export`, which only the /statements router has
+   *  (ADM/ACM/RA live under /airline-adjustments and do not), hence opt-in per type. */
+  exportsEntries?: boolean;
   /** One line on the wizard's success screen telling the user where the rows went. */
   doneHint?: string;
 };
@@ -100,7 +106,7 @@ export const STATEMENT_NAV: StatementCategory[] = [
       {
         slug: "ndc", label: "NDC", kind: "spec-repo", status: "ready",
         apiBase: "/statements/ndc", supportsMapping: true, supportsBilling: true,
-        billingWorklist: "ndc",
+        billingWorklist: "ndc", exportsEntries: true,
         blurb: "NDC statements — the airline's own sales export, one row per transaction.",
         doneHint: "Open Billing on the upload to bill them, or price them under Vendors data → Commission income → BSP → NDC.",
       },
@@ -130,7 +136,7 @@ export const STATEMENT_NAV: StatementCategory[] = [
       // a figure for the whole file: an aggregator's hotel and train lines have no airline
       // deal to price against, so that screen costs the flight rows and lists the rest as
       // skipped (services/commission/tp_api.py).
-      { slug: "api", label: "API", kind: "spec-repo", status: "ready", apiBase: "/statements/tp-api", requiresSupplier: true, supportsMapping: true, supportsBilling: true, billingWorklist: "tp-api", blurb: "Aggregator booking statement (MakeMyTrip, TBO) — hotel, flight, train, bus and car in one file.", doneHint: "Open Billing on the upload to bill it — flight, hotel, train, bus and car rows each bill at the party's markup for that category. Its flight rows can also be priced under Vendors data → Commission income → Third Party → API." },
+      { slug: "api", label: "API", kind: "spec-repo", status: "ready", apiBase: "/statements/tp-api", requiresSupplier: true, supportsMapping: true, supportsBilling: true, billingWorklist: "tp-api", exportsEntries: true, blurb: "Aggregator booking statement (MakeMyTrip, TBO) — hotel, flight, train, bus and car in one file.", doneHint: "Open Billing on the upload to bill it — flight, hotel, train, bus and car rows each bill at the party's markup for that category. Its flight rows can also be priced under Vendors data → Commission income → Third Party → API." },
     ],
   },
 ];
