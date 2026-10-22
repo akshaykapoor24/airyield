@@ -197,7 +197,7 @@ export default function InternalTicketsView({
             <table className="w-full min-w-max text-xs">
               <thead>
                 <tr style={{ background: "#1e3a5f" }}>
-                  {["Doc Date", "Doc No", "Ticket No", "Pax Name", "Sector", "AL", "Customer", "Type",
+                  {["Doc Date", "Doc No", "Ticket No", "Pax Name", "Sector", "AL", "Customer", "Payable To", "Type",
                     ...(batchId ? [] : ["Source"])].map((h) => (
                     <th key={h} className="px-3 py-2 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">{h}</th>
                   ))}
@@ -239,6 +239,18 @@ export default function InternalTicketsView({
                       <td className="px-3 py-2 whitespace-nowrap text-gray-600 max-w-[180px] truncate"
                         title={t.customer_name ?? t.statement_agency ?? undefined}>
                         {t.customer_name ?? t.statement_agency ?? "—"}
+                      </td>
+                      {/* Who it was bought from (Create Ticket). Uploaded lines do not say. */}
+                      <td className="px-3 py-2 whitespace-nowrap text-gray-600 max-w-[180px] truncate" title={t.payable_to ?? undefined}>
+                        {t.payable_to ? (
+                          <>
+                            <span className={`mr-1 inline-flex px-1 py-px rounded text-[9px] font-bold ${
+                              t.payable_type === "airline" ? "bg-sky-50 text-sky-700" : "bg-violet-50 text-violet-700"}`}>
+                              {t.payable_type === "airline" ? "AL" : "B2B"}
+                            </span>
+                            {t.payable_to}
+                          </>
+                        ) : <span className="text-gray-300">—</span>}
                       </td>
                       <td className="px-3 py-2 whitespace-nowrap">
                         <span className={`inline-flex px-1.5 py-0.5 rounded text-[10px] font-bold ${
@@ -286,7 +298,7 @@ export default function InternalTicketsView({
               </tbody>
               <tfoot>
                 <tr className="bg-gray-50 border-t border-gray-200 font-semibold text-gray-700">
-                  <td className="px-3 py-2 text-[11px] uppercase tracking-wide text-gray-500" colSpan={batchId ? 8 : 9}>
+                  <td className="px-3 py-2 text-[11px] uppercase tracking-wide text-gray-500" colSpan={batchId ? 9 : 10}>
                     This page
                   </td>
                   <td className="px-3 py-2 text-right tabular-nums">{inr(totals.fare)}</td>

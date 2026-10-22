@@ -173,7 +173,8 @@ class MailMessage(Base):
     read_at:       Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # What has been done with this email's contents (services/mail/process.py):
     #   {"items": {"att:12": {"destination": "statements:tp-gds", "ref": "<batch id>", "at": …, "by": 14}},
-    #    "text_deals": {"rows": [...], "at": …}}       ← AI reading of a deal written as text, cached
+    #    "text_deals": {"rows": [...], "at": …},       ← AI reading of a deal written as text, cached
+    #    "body_items": 1}                               ← statement / deal tables and deal text in the body
     processed:     Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
     created_at:    Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
 

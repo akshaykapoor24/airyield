@@ -6,6 +6,10 @@
 //
 // The bell links here as /email-intake/inbox?m=<id>, which opens that message.
 //
+// TABS. "Pending to upload" holds email with a statement or deal not yet uploaded (or only partly);
+// once everything in it has been uploaded from "Process this email", it moves to "Uploaded".
+// "All mail" and "Statements" keep every email, with an Uploaded / Partly uploaded tag on the row.
+//
 // MAIL HTML IS HOSTILE. The server sanitises it (services/mail/html.py: no scripts, no remote
 // images) and this page still renders it inside a sandboxed iframe with scripts disabled —
 // two walls. Attachments are fetched with the session token and opened from a blob URL; the
@@ -16,7 +20,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import toast from "react-hot-toast";
 import {
-  ArrowLeft, Download, Eye, FileArchive, FileImage, FileSpreadsheet, FileText, Inbox, Mail,
+  ArrowLeft, CheckCircle2, CircleDashed, Download, Eye, FileArchive, FileImage, FileSpreadsheet, FileText, Inbox, Mail,
   MailOpen, Paperclip, RefreshCw, Search, Settings2,
 } from "lucide-react";
 import api from "@/lib/api";
@@ -36,6 +40,8 @@ const FILTERS: { key: Filter; label: string }[] = [
   { key: "all", label: "All" }, { key: "b2b", label: "B2B" }, { key: "b2e", label: "B2E" }, { key: "b2c", label: "B2C" },
 ];
 
+type Tab = "all" | "pending" | "uploaded" | "statements";
+
 export default function InboxPage() {
   return (
     <Suspense fallback={null}>
@@ -51,7 +57,7 @@ function InboxInner() {
 
   const [filter, setFilter] = useState<Filter>("all");
   const [mailbox, setMailbox] = useState<number | null>(null);
-  const [onlyStatements, setOnlyStatements] = useState(false);
+  const [tab, setTab] = useState<Tab>("all");
   const [family, setFamily] = useState<string | null>(null);
   const [unreadOnly, setUnreadOnly] = useState(false);
   const [search, setSearch] = useState("");
@@ -75,7 +81,8 @@ function InboxInner() {
       const { data } = await api.get<MailList>("/mail/messages", {
         params: {
           segment: filter === "all" ? undefined : filter, q: query || undefined, unread: unreadOnly || undefined,
-          mailbox: mailbox ?? undefined, kind: onlyStatements ? "statement" : undefined, family: family ?? undefined,
+          mailbox: mailbox ?? undefined, kind: tab === "statements" ? "statement" : undefined, family: family ?? undefined,
+          state: tab === "pending" ? "pending" : tab === "uploaded" ? "imported" : undefined,
           page, page_size: PAGE_SIZE,
         },
       });
@@ -86,7 +93,7 @@ function InboxInner() {
     } finally {
       if (!quiet) setLoading(false);
     }
-  }, [filter, query, unreadOnly, page, mailbox, onlyStatements, family]);
+  }, [filter, query, unreadOnly, page, mailbox, tab, family]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -158,23 +165,28 @@ function InboxInner() {
                        onSelect={id => { setMailbox(id); setPage(1); }} />
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-[minmax(340px,420px)_1fr] gap-4 items-start">
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(340px,460px)_1fr] gap-4 items-start">
         {/* ── list ── */}
         <section className={`rounded-2xl border border-gray-200 bg-white overflow-hidden ${selectedId ? "hidden lg:block" : ""}`}>
           <div className="p-3 border-b border-gray-100 space-y-3">
-            <div className="flex items-center gap-1 border-b border-gray-100 -mx-3 px-3 -mt-1">
-              {[
-                { key: false, label: "All mail", count: null as number | null },
-                { key: true, label: "Statements", count: list?.statements ?? null },
-              ].map(tab => (
-                <button key={String(tab.key)} onClick={() => { setOnlyStatements(tab.key); setFamily(null); setPage(1); }}
-                        className={`px-3 py-2 text-xs font-semibold border-b-2 -mb-px ${onlyStatements === tab.key ? "border-[#1e3a5f] text-gray-900" : "border-transparent text-gray-500 hover:text-gray-700"}`}>
-                  {tab.label}{tab.count !== null && <span className="ml-1.5 text-[10px] rounded-full bg-gray-100 text-gray-600 px-1.5 py-px">{tab.count}</span>}
+            {/* The baseline is an inset shadow, not a border the tabs overlap, so a narrow column can scroll the row sideways. */}
+            <div className="flex items-center -mx-3 px-1.5 -mt-1 overflow-x-auto whitespace-nowrap shadow-[inset_0_-1px_0_#f3f4f6] [scrollbar-width:none]">
+              {([
+                { key: "all", label: "All mail", count: null, pill: "", hint: undefined },
+                { key: "pending", label: "Pending to upload", count: list?.pending ?? null, pill: "bg-amber-50 text-amber-700",
+                  hint: "Emails with a statement or deal not yet uploaded" },
+                { key: "uploaded", label: "Uploaded", count: list?.imported ?? null, pill: "bg-emerald-50 text-emerald-700",
+                  hint: "Emails whose statements and deals have all been uploaded" },
+                { key: "statements", label: "Statements", count: list?.statements ?? null, pill: "bg-gray-100 text-gray-600",
+                  hint: "Every email that carries a statement" },
+              ] as { key: Tab; label: string; count: number | null; pill: string; hint?: string }[]).map(t => (
+                <button key={t.key} title={t.hint} onClick={() => { setTab(t.key); setFamily(null); setPage(1); }}
+                        className={`shrink-0 px-2.5 py-2 text-xs font-semibold border-b-2 ${tab === t.key ? "border-[#1e3a5f] text-gray-900" : "border-transparent text-gray-500 hover:text-gray-700"}`}>
+                  {t.label}{t.count !== null && <span className={`ml-1.5 text-[10px] rounded-full px-1.5 py-px ${t.pill}`}>{t.count}</span>}
                 </button>
               ))}
-              <span className="ml-auto text-[10px] text-gray-400">Deals, contracts &amp; payments next</span>
             </div>
-            {onlyStatements && (
+            {tab === "statements" && (
               <div className="flex flex-wrap gap-1.5">
                 <button onClick={() => { setFamily(null); setPage(1); }}
                         className={`text-[11px] font-medium border rounded-full px-2.5 py-0.5 ${family === null ? "bg-[#1e3a5f] text-white border-[#1e3a5f]" : "bg-white text-gray-600 border-gray-200 hover:bg-gray-50"}`}>
@@ -209,7 +221,7 @@ function InboxInner() {
           </div>
 
           {loading && !list && <div className="p-3 space-y-2">{Array.from({ length: 6 }).map((_, i) => <div key={i} className="h-16 rounded-lg bg-gray-100 animate-pulse" />)}</div>}
-          {list && list.items.length === 0 && <EmptyList filtered={filter !== "all" || unreadOnly || !!query} />}
+          {list && list.items.length === 0 && <EmptyList tab={tab} filtered={filter !== "all" || unreadOnly || !!query || !!family} />}
           <ul className="divide-y divide-gray-100 max-h-[calc(100vh-290px)] overflow-y-auto">
             {list?.items.map(item => (
               <ListRow key={item.id} item={item} active={item.id === selectedId} onOpen={() => open(item.id)} />
@@ -230,7 +242,7 @@ function InboxInner() {
         <section className={`${selectedId ? "" : "hidden lg:block"}`}>
           {selectedId
             ? <MessageView key={selectedId} id={selectedId} onBack={() => open(null)} onLoaded={markRead}
-                           onMarkedUnread={() => void load(true)} />
+                           onMarkedUnread={() => void load(true)} onImported={() => void load(true)} />
             : (
               <div className="rounded-2xl border border-gray-200 bg-white h-[calc(100vh-200px)] flex flex-col items-center justify-center text-center text-sm text-gray-400">
                 <MailOpen className="w-10 h-10 mb-3 text-gray-300" />
@@ -317,8 +329,18 @@ function ListRow({ item, active, onOpen }: { item: MailListItem; active: boolean
             {item.attachment_count > 0 && <Paperclip className="w-3.5 h-3.5 text-gray-400 shrink-0" />}
           </div>
           {item.snippet && <p className="text-xs text-gray-400 truncate mt-0.5">{item.snippet}</p>}
-          {item.statements.length > 0 && (
+          {(item.statements.length > 0 || item.imported_items > 0) && (
             <div className="flex flex-wrap gap-1 mt-1.5">
+              {item.imported ? (
+                <span className="inline-flex items-center gap-1 text-[10px] font-semibold border rounded px-1.5 py-px bg-emerald-50 text-emerald-700 border-emerald-200">
+                  <CheckCircle2 className="w-3 h-3" /> Uploaded
+                </span>
+              ) : item.imported_items > 0 && (
+                <span title="Some of this email is uploaded; open it to upload the rest"
+                      className="inline-flex items-center gap-1 text-[10px] font-semibold border rounded px-1.5 py-px bg-amber-50 text-amber-700 border-amber-200">
+                  <CircleDashed className="w-3 h-3" /> Partly uploaded
+                </span>
+              )}
               {item.statements.map(s => (
                 <span key={s.doc_type} className={`inline-flex items-center gap-1 text-[10px] font-semibold border rounded px-1.5 py-px ${familyBadge(s.family)}`}>
                   <FileSpreadsheet className="w-3 h-3" /> {s.label}
@@ -332,7 +354,25 @@ function ListRow({ item, active, onOpen }: { item: MailListItem; active: boolean
   );
 }
 
-function EmptyList({ filtered }: { filtered: boolean }) {
+const EMPTY_TAB: Record<Exclude<Tab, "all">, { title: string; text: string }> = {
+  pending:    { title: "Nothing pending to upload",
+                text: "Every statement and deal that came by email has been uploaded. You'll find those emails under Uploaded." },
+  uploaded:   { title: "Nothing uploaded yet",
+                text: "Open an email and use Process this email. Once everything in it is uploaded, it moves here." },
+  statements: { title: "No statements yet",
+                text: "Emails with a BSP, LCC, third-party or other statement attached appear here." },
+};
+
+function EmptyList({ tab, filtered }: { tab: Tab; filtered: boolean }) {
+  if (tab !== "all" && !filtered) {
+    return (
+      <div className="px-6 py-14 text-center">
+        <CheckCircle2 className="w-9 h-9 mx-auto text-gray-300" />
+        <p className="mt-3 text-sm font-medium text-gray-700">{EMPTY_TAB[tab].title}</p>
+        <p className="mt-1 text-xs text-gray-500 max-w-xs mx-auto">{EMPTY_TAB[tab].text}</p>
+      </div>
+    );
+  }
   return (
     <div className="px-6 py-14 text-center">
       <Inbox className="w-9 h-9 mx-auto text-gray-300" />
@@ -365,8 +405,8 @@ function frameDoc(html: string): string {
 </head><body>${html}</body></html>`;
 }
 
-function MessageView({ id, onBack, onLoaded, onMarkedUnread }: {
-  id: number; onBack: () => void; onLoaded: (id: number) => void; onMarkedUnread: () => void;
+function MessageView({ id, onBack, onLoaded, onMarkedUnread, onImported }: {
+  id: number; onBack: () => void; onLoaded: (id: number) => void; onMarkedUnread: () => void; onImported: () => void;
 }) {
   const [msg, setMsg] = useState<MailDetail | null>(null);
   const [html, setHtml] = useState<string | null>(null);
@@ -474,7 +514,7 @@ function MessageView({ id, onBack, onLoaded, onMarkedUnread }: {
         </div>
       </header>
 
-      <ProcessPanel key={msg.id} messageId={msg.id} />
+      <ProcessPanel key={msg.id} messageId={msg.id} onChanged={onImported} />
 
       {msg.note === "too_large" && (
         <div className="mx-6 mt-4 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-800">

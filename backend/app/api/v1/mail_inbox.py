@@ -2,7 +2,7 @@
 
     POST /mail/connections/{id}/sync     check one mailbox now
     POST /mail/sync                      "Check for new mail": every active mailbox I manage
-    GET  /mail/messages                  inbox list — filter b2b | b2e | b2c, search, unread
+    GET  /mail/messages                  inbox list — filter b2b | b2e | b2c, search, unread, imported | pending
     GET  /mail/messages/unread-count     sidebar badge
     GET  /mail/messages/{id}             headers, text, parties, attachments (marks read)
     POST /mail/messages/{id}/unread
@@ -20,7 +20,7 @@ from datetime import datetime
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from sqlalchemy import exists, func, or_, select
+from sqlalchemy import String, and_, cast, exists, func, literal, literal_column, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.mail import _is_super_admin, _limit, _load_owned, _require_enabled
@@ -77,12 +77,14 @@ def _party(p: dict | None) -> PartyOut | None:
                     label=p.get("label", ""), segment=p.get("segment", ""), via=p.get("via"))
 
 
-def _list_item(m: MailMessage, mailbox: str, statements: list[DocTag] | None = None) -> MessageListItem:
+def _list_item(m: MailMessage, mailbox: str, statements: list[DocTag] | None = None,
+               imported: bool = False) -> MessageListItem:
     return MessageListItem(
         id=m.id, subject=m.subject, from_name=m.from_name, from_address=m.from_address,
         party=_party((m.parties or [None])[0]), snippet=m.snippet, received_at=m.received_at,
         attachment_count=m.attachment_count, is_read=m.read_at is not None, mailbox=mailbox,
         connection_id=m.connection_id, statements=statements or [],
+        imported_items=len((m.processed or {}).get("items") or {}), imported=imported,
     )
 
 
@@ -92,6 +94,43 @@ def _has_statement(family: str | None = None):
     if family:
         conds.append(MailAttachment.doc_family == family)
     return exists(select(MailAttachment.id).where(*conds))
+
+
+_NO_ITEMS = literal_column("'{}'::jsonb")
+
+
+def _marks():
+    """What has been imported from the email so far (services/mail/process.py), never NULL."""
+    return func.coalesce(MailMessage.processed["items"], _NO_ITEMS)
+
+
+def _upload_files(*extra):
+    """EXISTS: an attachment the classifier recognised as a statement or a deal. MO files are
+    our own mid-office export, imported from the Payment Module rather than from the email."""
+    return exists(select(MailAttachment.id).where(
+        MailAttachment.message_id == MailMessage.id, MailAttachment.is_inline.is_(False),
+        MailAttachment.doc_kind.in_(("statement", "deal")),
+        func.coalesce(MailAttachment.doc_type, "") != "mo-gds", *extra,
+    ))
+
+
+def _imported():
+    """Uploaded: something in the email was imported, and every statement or deal file in it is
+    among what was imported.
+
+    Only attachments can hold an email back. A covering note can read like a deal, so counting
+    the body's tables and text would leave a statement email pending for ever once its file is in.
+    """
+    left = _upload_files(not_(_marks().has_key(literal("att:") + cast(MailAttachment.id, String))))
+    return and_(_marks() != _NO_ITEMS, not_(left))
+
+
+def _pending():
+    """Pending to upload: not done, and there is something to upload — a statement or deal file,
+    a table or deal text in the body (noted by the sync), or the rest of a partly imported email."""
+    work = or_(_upload_files(), _marks() != _NO_ITEMS,
+               MailMessage.processed[mail_process.BODY_ITEMS_KEY].as_integer() > 0)
+    return and_(work, not_(_imported()))
 
 
 async def _statement_tags(db: AsyncSession, message_ids: list[int]) -> dict[int, list[DocTag]]:
@@ -202,6 +241,7 @@ async def list_messages(
     mailbox: int | None = Query(default=None, description="one connected mailbox (its id)"),
     kind: str | None = Query(default=None, description="statement"),
     family: str | None = Query(default=None, description="bsp | lcc | third_party | ndc | tgq | mo | bank | unknown"),
+    state: str | None = Query(default=None, description="imported | pending — see _imported() and _pending()"),
     q: str | None = Query(default=None, max_length=200),
     unread: bool = False,
     page: int = Query(default=1, ge=1),
@@ -218,6 +258,12 @@ async def list_messages(
         conds.append(_has_statement(family))
     elif kind:
         raise HTTPException(status_code=400, detail="kind must be 'statement'.")
+    if state == "imported":
+        conds.append(_imported())
+    elif state == "pending":
+        conds.append(_pending())
+    elif state:
+        raise HTTPException(status_code=400, detail="state must be imported or pending.")
     if segment:
         ptype = _SEGMENT_TO_TYPE.get(segment.lower())
         if not ptype:
@@ -232,15 +278,20 @@ async def list_messages(
 
     total = await db.scalar(select(func.count()).select_from(MailMessage).where(*conds)) or 0
     rows = (await db.execute(
-        select(MailMessage, MailConnection.email_address)
+        select(MailMessage, MailConnection.email_address, _imported().label("imported"))
         .join(MailConnection, MailConnection.id == MailMessage.connection_id)
         .where(*conds).order_by(MailMessage.received_at.desc(), MailMessage.id.desc())
         .offset((page - 1) * page_size).limit(page_size)
     )).all()
-    tags = await _statement_tags(db, [m.id for m, _ in rows])
-    statements = await db.scalar(select(func.count()).select_from(MailMessage).where(*scope, _has_statement())) or 0
-    return MessageListOut(items=[_list_item(m, box, tags.get(m.id)) for m, box in rows], total=total,
-                          unread=await _unread(db, current_user), statements=statements,
+    tags = await _statement_tags(db, [m.id for m, _, _ in rows])
+    # The tab counts, within the mailbox picked.
+    statements, pending, imported = (await db.execute(
+        select(func.count().filter(_has_statement()), func.count().filter(_pending()), func.count().filter(_imported()))
+        .select_from(MailMessage).where(*scope)
+    )).one()
+    return MessageListOut(items=[_list_item(m, box, tags.get(m.id), bool(done)) for m, box, done in rows],
+                          total=total, unread=await _unread(db, current_user), statements=statements or 0,
+                          pending=pending or 0, imported=imported or 0,
                           mailboxes=await _mailbox_counts(db, current_user))
 
 

@@ -259,6 +259,22 @@ def _same_vendor(a: Optional[str], b: Optional[str]) -> bool:
     return (a or "").strip().lower() == (b or "").strip().lower()
 
 
+def _is_b2b_upload(deal_type: Optional[str], business_type: Optional[str], direction: DealDirection) -> bool:
+    """Is an uploaded deal B2B-kind (vs Airline)?
+
+    The deal kind the user picked wins. Business Type is a separate axis — an airline
+    deal can be B2B / B2C / B2E / MICE and is still an airline deal — so it only decides
+    the kind when no kind was sent at all, which is how older clients signalled B2B.
+    Floated (outbound) deals are always B2B: you can't float a deal back to an airline.
+    """
+    if direction == DealDirection.OUTBOUND:
+        return True
+    kind = (deal_type or "").strip().lower()
+    if kind:
+        return kind == "b2b"
+    return bool(business_type)
+
+
 class UploadConfirmResult(BaseModel):
     created_count: int
     created_ids: list[int]
@@ -1339,13 +1355,8 @@ async def confirm_upload(
     if not rows:
         rows = [ExtractedRow()]
 
-    # Floated (outbound) deals are always B2B — you can't float a deal back to an airline.
     direction = DealDirection.OUTBOUND if (payload.direction or "").lower() == "outbound" else DealDirection.INBOUND
-    use_b2b = (
-        (payload.deal_type or "").strip().lower() == "b2b"
-        or bool(payload.business_type)
-        or direction == DealDirection.OUTBOUND
-    )
+    use_b2b = _is_b2b_upload(payload.deal_type, payload.business_type, direction)
     batch_id = str(uuid.uuid4())
 
     # WHO this deal is for. Outbound only; inbound is forced to ALL. The label it

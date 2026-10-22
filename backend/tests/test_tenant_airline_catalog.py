@@ -37,12 +37,13 @@ class FakeAirline:
 class FakeTenantAirline:
     """One id the tenant holds. `airline_name` is the snapshot taken at add time."""
 
-    def __init__(self, id, airline_id, ref_id, airline_name=None, is_active=True):
+    def __init__(self, id, airline_id, ref_id, airline_name=None, is_active=True, business_type=None):
         self.id = id
         self.airline_id = airline_id
         self.ref_id = ref_id
         self.airline_name = airline_name
         self.is_active = is_active
+        self.business_type = business_type
 
 
 INDIGO = FakeAirline(1, "INDIGO", "6E", iata_numeric_code="312")
@@ -141,6 +142,20 @@ class BuildCatalogTests(unittest.TestCase):
         self.assertTrue(entry["master_is_active"])
         [entry] = build_catalog([FakeAirline(9, "OLD AIR", "OA", is_active=False)], [])
         self.assertFalse(entry["master_is_active"])
+
+    def test_each_id_carries_its_own_business_type(self):
+        """One airline, one login per line of business — and an id saved before the
+        type was asked for comes back as None, not as a guess."""
+        rows = [
+            FakeTenantAirline(30, 1, "6E-B2B", business_type="B2B"),
+            FakeTenantAirline(31, 1, "6E-B2C", business_type="B2C"),
+            FakeTenantAirline(32, 1, "6E-OLD"),
+        ]
+        [entry] = build_catalog([INDIGO], rows)
+        self.assertEqual(
+            {i["ref_id"]: i["business_type"] for i in entry["ids"]},
+            {"6E-B2B": "B2B", "6E-B2C": "B2C", "6E-OLD": None},
+        )
 
 
 if __name__ == "__main__":

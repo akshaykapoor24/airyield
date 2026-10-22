@@ -213,6 +213,24 @@ class UploadedTicket(Base):
     corporate_id:       Mapped[int | None] = mapped_column(Integer, ForeignKey("corporates.id", ondelete="SET NULL"), nullable=True)
     customer_id:        Mapped[int | None] = mapped_column(Integer, ForeignKey("customers.id", ondelete="SET NULL"), nullable=True)
 
+    # ── WHO this ticket was bought from — Payable To ─────────────────────────
+    # The other side of Sold To: the airline (bought direct — any carrier in the platform's
+    # airline master) or the B2B consolidator (User master → Agency Master) this ticket is
+    # payable to. Set per ticket by Create Ticket; NULL on uploads and on tickets punched
+    # before it was asked. `payable_to` is the name as picked, kept so a list reads it
+    # without a join and still reads it after the master row is renamed or removed.
+    payable_type:       Mapped[str | None] = mapped_column(String(10), nullable=True)   # airline | b2b
+    payable_airline_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("airlines.id", ondelete="SET NULL"), nullable=True)
+    payable_agency_id:  Mapped[int | None] = mapped_column(Integer, ForeignKey("agencies.id", ondelete="SET NULL"), nullable=True)
+    payable_to:         Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+    # Which ticket this is — its Booked Date, Ticket No, Pax Name, Amount and Travel Date, as
+    # it was saved (services/ticket_duplicates.py). Internal Statement only: stamped at save
+    # so a later cell edit does not change it, and looked up (indexed) by every upload to
+    # leave out the tickets already loaded. NULL on Customer data's tickets, and on a line
+    # nothing names (no ticket number, no passenger).
+    dedup_key:          Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     # ── Billing status ────────────────────────────────────────────────────────
     # A ticket is billed to at most one customer billing. Locked once billed;
     # cleared when that billing is deleted.

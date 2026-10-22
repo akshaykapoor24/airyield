@@ -57,6 +57,15 @@ class StatementBatchControl(Base):
     expected_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     expected_amount: Mapped[float | None] = mapped_column(Numeric(20, 4), nullable=True)
 
+    # Entry lines of the file NOT saved because they were left out as duplicates of lines
+    # already saved for the same agency, or of the file's own (services/tp_gds_reupload.py),
+    # their net, and the earlier upload most of them were in. Part of the file's own arithmetic — opening + Σ net =
+    # closing counts them — so the checks add them back rather than reporting lines missing.
+    # 0 / NULL for other types.
+    duplicate_rows: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    duplicate_net: Mapped[float | None] = mapped_column(Numeric(20, 4), nullable=True)
+    duplicate_of: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

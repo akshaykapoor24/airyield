@@ -7,6 +7,10 @@ JSONB array (the folded ``Tax_TypeN`` / ``TaxN`` pairs, so any number of taxes i
 supported with no fixed Tax1..Tax20 columns). Slug → dedicated model via
 ``STATEMENT_MODELS`` (same pattern as ``ADJUSTMENT_MODELS`` for ADM/ACM/RA).
 
+THIRD PARTY GDS IS THE EXCEPTION: one typed column per field and no JSONB at all, with
+``data`` rebuilt over the columns so its readers are unchanged — see ``ThirdPartyGds`` and
+models/typed_statement.py.
+
 NOT EVERY TYPE HERE IS A VENDOR STATEMENT. ``mo-gds`` is the workspace's OWN mid-office
 record, uploaded under Vendors data → Payment Module to be checked against the vendor's
 bill. It shares this registry because it shares the router, the parser and the upload
@@ -14,17 +18,18 @@ wizard — not because it is something a vendor sent. Code that means "what a ve
 (the report download, the revenue board, commission) keeps its own explicit slug list
 rather than looping over this dict.
 """
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import String, DateTime, Integer, Boolean, ForeignKey, Numeric, SmallInteger, text
+from sqlalchemy import String, Date, DateTime, Integer, Boolean, CheckConstraint, ForeignKey, Index, Numeric, SmallInteger, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
+from app.models.typed_statement import TypedData
 
 
-class _StatementBase:
-    """Shared scaffolding for every spec-driven statement table."""
+class _Provenance:
+    """Who uploaded a line, and from which file — on every statement table."""
 
     id:            Mapped[int]        = mapped_column(primary_key=True)
     tenant_id:     Mapped[int]        = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -35,6 +40,10 @@ class _StatementBase:
     source_file:   Mapped[str | None] = mapped_column(String(255), nullable=True)
     file_url:      Mapped[str | None] = mapped_column(String(1000), nullable=True)   # GCS blob path of the uploaded XLS
     uploaded_at:   Mapped[datetime]   = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class _StatementBase(_Provenance):
+    """Shared scaffolding for every spec-driven statement table that keeps its fields in JSONB."""
 
     # Fixed columns (keyed by spec field name) + folded taxes (any count).
     data:          Mapped[dict | None] = mapped_column(JSONB, nullable=True)
@@ -186,19 +195,172 @@ class LccCtaBta(_NormalizedBase, Base):
     __tablename__ = "lcc_cta_bta"
 
 
-class ThirdPartyGds(_NormalizedBase, Base):
-    """Third Party GDS Statement — a consolidator's GDS statement to a sub-agency.
-    See services/flat_statement.py (tp-gds)."""
+class _ThirdPartyLine:
+    """A line of one `third_party_statements` upload (models/third_party_statement.py).
+
+    Redeclares `_StatementBase.batch_id` with the foreign key to its header. Listed FIRST
+    among the bases so this is the declaration the mapper takes. CASCADE: a statement's
+    lines are part of it, and deleting the statement is deleting them.
+    """
+
+    batch_id: Mapped[str] = mapped_column(
+        String(100), ForeignKey("third_party_statements.batch_id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+
+
+class ThirdPartyGds(TypedData, _ThirdPartyLine, _Provenance, Base):
+    """Third Party GDS Statement — a consolidator's GDS statement to a sub-agency, one row
+    per line. See services/flat_statement.py (tp-gds).
+
+    THE ONLY STATEMENT TABLE WITH A COLUMN PER FIELD. Every other one here keeps its fields
+    in a JSONB `data` blob; this one stores each in its own typed column — dates as DATE,
+    amounts as NUMERIC, the pax count as INTEGER — and keeps no JSON at all, not even the
+    vendor's row verbatim (`raw_data` is gone, so a GDS upload cannot be Reprocessed; the
+    file is re-uploaded instead). `data` is still there to READ and WRITE, built over these
+    columns by `TypedData` (models/typed_statement.py), because about fifteen readers and
+    Third Party LCC / MO GDS alongside it all speak `data["net_amount"]`.
+
+    Column names are the parser's field names, so each is its `data` key; the comment on
+    each is the header it is read from (the Third Party GDS template). Two differ:
+    `total_tax` holds key `taxes` (the name every other table uses for its folded tax
+    array) and `edited_fields` holds `__edited__`.
+    """
     __tablename__ = "third_party_gds"
+    __table_args__ = (
+        # A line's statement period, to read lines by period without the header.
+        Index("ix_third_party_gds_period", "tenant_id", "period_from", "period_to"),
+        # The lookups every upload makes: the agency's saved lines carrying one of the
+        # file's keys (services/tp_gds_reupload.py).
+        Index("ix_third_party_gds_dedup_key", "tenant_id", "created_by_id", "dedup_key"),
+        Index("ix_third_party_gds_match_key", "tenant_id", "created_by_id", "match_key"),
+        CheckConstraint("duplicate_kind IS NULL OR duplicate_kind IN ('exact', 'partial', 'in_file')",
+                        name="ck_third_party_gds_duplicate_kind"),
+    )
+
+    DATA_EXCLUDE = frozenset({"id", "tenant_id", "created_by_id", "batch_id", "source_file",
+                              "file_url", "uploaded_at", "source_format", "dedup_key",
+                              "period_from", "period_to", "match_key", "duplicate_kind",
+                              "duplicate_of_id", "duplicate_fields"})
+    DATA_KEYS = {"total_tax": "taxes", "edited_fields": "__edited__"}
+
+    source_format: Mapped[str | None] = mapped_column(String(40), nullable=True)      # Format
+
+    # Which line this is, exactly, and which entry (its ticket and event) — as the vendor
+    # sent it: fixed at upload, before any correction on the review step and untouched by a
+    # later cell edit, so a re-send is recognised (services/tp_gds_reupload.py). NULL on a
+    # balance line; `match_key` NULL too on a line with no ticket and no PNR.
+    dedup_key:   Mapped[str | None] = mapped_column(String(64), nullable=True)
+    match_key:   Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # A line saved although it repeats one: "exact" (already saved, saved again by choice),
+    # "partial" (the same entry with something changed) or "in_file" (an earlier line of its
+    # own file). `duplicate_of_id` is the saved line it repeats — NULL for "in_file", and
+    # once that line is deleted, when the flag goes with it — and `duplicate_fields` what
+    # differs, comma-separated (services/tp_gds_reupload.DIFF_FIELDS). NULL on every other line.
+    duplicate_kind:   Mapped[str | None] = mapped_column(String(20), nullable=True)
+    duplicate_of_id:  Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("third_party_gds.id", ondelete="SET NULL", name="fk_third_party_gds_duplicate_of"),
+        nullable=True, index=True)
+    duplicate_fields: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The statement period of the upload this line belongs to — a copy of its header's
+    # (models/third_party_statement.py), written with the line. NULL where the header has none.
+    period_from: Mapped[date | None] = mapped_column(Date, nullable=True)
+    period_to:   Mapped[date | None] = mapped_column(Date, nullable=True)
+
+    # ── Dates ────────────────────────────────────────────────────────────────
+    week:                Mapped[str | None]  = mapped_column(Text)                     # Week
+    booking_date:        Mapped[date | None] = mapped_column(Date)                     # Booked Date
+    transaction_date:    Mapped[date | None] = mapped_column(Date)                     # Transaction Date
+    issue_date:          Mapped[date | None] = mapped_column(Date)                     # Issue Date
+    travel_date:         Mapped[date | None] = mapped_column(Date)                     # Date of Travel
+
+    # ── Customer ─────────────────────────────────────────────────────────────
+    customer_name:       Mapped[str | None]  = mapped_column(Text)                     # Customer Name
+    customer_id:         Mapped[str | None]  = mapped_column(Text)                     # Customer ID
+
+    # ── Carrier ──────────────────────────────────────────────────────────────
+    airline_name:        Mapped[str | None]  = mapped_column(Text)                     # Airline Name
+    airline_code:        Mapped[str | None]  = mapped_column(Text)                     # Airline Code
+    ticket_prefix:       Mapped[str | None]  = mapped_column(Text)                     # Ticket Prefix
+    segment_type:        Mapped[str | None]  = mapped_column(Text)                     # Airline Category
+
+    # ── Document ─────────────────────────────────────────────────────────────
+    pnr:                 Mapped[str | None]  = mapped_column(Text)                     # S PNR
+    airline_pnr:         Mapped[str | None]  = mapped_column(Text)                     # Airline PNR
+    gds_pnr:             Mapped[str | None]  = mapped_column(Text)                     # CRS PNR
+    ticket_number:       Mapped[str | None]  = mapped_column(Text, index=True)         # Ticket No
+    ticket_status:       Mapped[str | None]  = mapped_column(Text)                     # Status
+    transaction_type:    Mapped[str | None]  = mapped_column(Text)                     # Type
+    booking_type:        Mapped[str | None]  = mapped_column(Text)                     # Booking Type
+    username:            Mapped[str | None]  = mapped_column(Text)                     # Username
+    issuing_office:      Mapped[str | None]  = mapped_column(Text)                     # Issuing Office
+
+    # ── Passenger ────────────────────────────────────────────────────────────
+    pax_type:            Mapped[str | None]  = mapped_column(Text)                     # Pax Type
+    first_name:          Mapped[str | None]  = mapped_column(Text)                     # First Name
+    last_name:           Mapped[str | None]  = mapped_column(Text)                     # Last Name
+    passenger_name:      Mapped[str | None]  = mapped_column(Text)                     # Passenger (First + Last when not printed)
+    passenger_count:     Mapped[int | None]  = mapped_column(Integer)                  # Pax
+
+    # ── Itinerary ────────────────────────────────────────────────────────────
+    sector:              Mapped[str | None]  = mapped_column(Text)                     # Sector
+    flight_number:       Mapped[str | None]  = mapped_column(Text)                     # Flight No
+    trip_type:           Mapped[str | None]  = mapped_column(Text)                     # Trip Type
+    travel_type:         Mapped[str | None]  = mapped_column(Text)                     # Travel Type
+    booking_class:       Mapped[str | None]  = mapped_column(Text)                     # Class
+    payment_method:      Mapped[str | None]  = mapped_column(Text)                     # Payment Mode
+
+    # ── Money ────────────────────────────────────────────────────────────────
+    # NUMERIC with no scale: it keeps the file's own precision (-28267.7162, 99090.00),
+    # which the opening + Σ net = closing identity is only exact at.
+    currency:            Mapped[str | None]  = mapped_column(Text)                     # Currency
+    base_fare:           Mapped[float | None] = mapped_column(Numeric)                 # Basic Fare
+    yq:                  Mapped[float | None] = mapped_column(Numeric)                 # YQ Fare
+    other_taxes:         Mapped[float | None] = mapped_column(Numeric)                 # Other Taxes
+    total_tax:           Mapped[float | None] = mapped_column(Numeric)                 # Total Tax
+    ssr_amount:          Mapped[float | None] = mapped_column(Numeric)                 # SSR Amount
+    reschedule_charges:  Mapped[float | None] = mapped_column(Numeric)                 # Reschedule Charges
+    total_fare:          Mapped[float | None] = mapped_column(Numeric)                 # Total Fare
+    commission_amount:   Mapped[float | None] = mapped_column(Numeric)                 # Agent Commission
+    commission_rate:     Mapped[float | None] = mapped_column(Numeric)                 # Comm %
+    incentive_amount:    Mapped[float | None] = mapped_column(Numeric)                 # Incentive
+    tds:                 Mapped[float | None] = mapped_column(Numeric)                 # TDS Amount
+    service_charge:      Mapped[float | None] = mapped_column(Numeric)                 # Service Charge
+    service_fee:         Mapped[float | None] = mapped_column(Numeric)                 # SF
+    gst_on_sf:           Mapped[float | None] = mapped_column(Numeric)                 # GST On SF
+    markup:              Mapped[float | None] = mapped_column(Numeric)                 # Markup
+    agent_penalty:       Mapped[float | None] = mapped_column(Numeric)                 # Agent Penalty
+    cancellation_markup: Mapped[float | None] = mapped_column(Numeric)                 # Cancellation Markup
+    net_amount:          Mapped[float | None] = mapped_column(Numeric)                 # Net Amount
+
+    # ── Other ────────────────────────────────────────────────────────────────
+    invoice_number:      Mapped[str | None]  = mapped_column(Text)                     # Invoice No
+    agency_code:         Mapped[str | None]  = mapped_column(Text)                     # Agency Code
+    consolidator_name:   Mapped[str | None]  = mapped_column(Text)                     # Consolidator
+    gds:                 Mapped[str | None]  = mapped_column(Text)                     # GDS
+    payment_status:      Mapped[str | None]  = mapped_column(Text)                     # Payment Status
+    remarks:             Mapped[str | None]  = mapped_column(Text)                     # Remarks
+
+    # ── Set at ingest, not read from the file ────────────────────────────────
+    issue_date_source:   Mapped[str | None]  = mapped_column(String(20))   # "booked_date": Issue Date was taken from Booked Date
+    total_fare_source:   Mapped[str | None]  = mapped_column(String(20))   # "derived": Basic + YQ + taxes + SSR
+    date_parse_failed:   Mapped[str | None]  = mapped_column(String(40))   # the first date field the parser could not read
+    row_kind:            Mapped[str | None]  = mapped_column(String(20))   # the statement's own OLD/BALANCE lines (services/statement_balance.py)
+    row_label:           Mapped[str | None]  = mapped_column(Text)         # …and the label printed on that line
+    airline_id:          Mapped[int | None]  = mapped_column(Integer)      # the Airline master row the carrier resolved to
+    airline_master_name: Mapped[str | None]  = mapped_column(Text)         # …and its name (services/tp_airline_resolution.py)
+    airline_conflict:    Mapped[str | None]  = mapped_column(Text)         # why the printed code and the prefix disagreed
+    edited_fields:       Mapped[str | None]  = mapped_column(Text)         # cells corrected by hand, comma-separated
+    unparsed_fields:     Mapped[str | None]  = mapped_column(Text)         # fields whose value did not fit the column's type
 
 
-class ThirdPartyLcc(_NormalizedBase, Base):
+class ThirdPartyLcc(_ThirdPartyLine, _NormalizedBase, Base):
     """Third Party LCC Statement — a consolidator's LCC statement to a sub-agency.
     See services/flat_statement.py (tp-lcc)."""
     __tablename__ = "third_party_lcc"
 
 
-class ThirdPartyApi(_BillingMixin, _NormalizedBase, Base):
+class ThirdPartyApi(_ThirdPartyLine, _BillingMixin, _NormalizedBase, Base):
     """Third Party API Statement — an aggregator's booking export (MakeMyTrip, TBO).
     See services/tp_api_spec.py (tp-api).
 

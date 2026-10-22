@@ -253,6 +253,11 @@ STATEMENT_SPECS: dict[str, dict] = {
     # statement_balance.py), stamped at ingest and kept out of entries and totals here.
     # `captures_controls` — each upload records its control figures (rows read, rows saved,
     # opening/closing balance, optional expected totals) for the Payment Module's checks.
+    # `captures_period` — each upload declares the statement period it covers: its tickets
+    # are checked against it, and a period already uploaded for the agency is asked about
+    # before the file is read (services/tp_gds_reupload.py).
+    # `date_formats` — the date columns whose written order (DD-MM / MM-DD / YYYY-MM) each
+    # upload declares; see `date_format_fields`.
     "tp-gds": {
         "label": "GDS",
         "parser": "tp-gds",
@@ -263,6 +268,8 @@ STATEMENT_SPECS: dict[str, dict] = {
         "supports_mapping": True,
         "balance_lines": True,
         "captures_controls": True,
+        "captures_period": True,
+        "date_formats": [("booking_date", "Booked Date"), ("travel_date", "Date of Travel")],
         "filters": _TP_GDS_FILTERS,
         "summary": _TP_SUMMARY,
     },
@@ -448,6 +455,31 @@ def captures_controls(slug: str) -> bool:
     """
     s = spec_for(slug)
     return bool(s and s.get("captures_controls"))
+
+
+def captures_period(slug: str) -> bool:
+    """Does each upload declare its statement period (third_party_statements.period_*)?
+
+    True for Third Party GDS only. Its tickets' Booked and Issue Dates are checked against
+    it, and the wizard asks before reading a file whose period is already uploaded for the
+    agency — services/tp_gds_reupload.py.
+    """
+    s = spec_for(slug)
+    return bool(s and s.get("captures_period"))
+
+
+def date_format_fields(slug: str) -> list[dict]:
+    """The date columns whose format each upload declares — [{field, header}], [] for a type
+    that declares none.
+
+    Third Party GDS only: a consolidator writes its sheet however it likes, so "05/08/2026"
+    is 5 Aug from one and 8 May from another, and the uploader is the only one who knows
+    which. The order declared is how those columns' text dates are read
+    (flat_statement.to_iso_date), and is kept on the upload (third_party_statements
+    .date_formats) to say so and to pre-fill the agency's next upload.
+    """
+    s = spec_for(slug)
+    return [{"field": f, "header": h} for f, h in (s or {}).get("date_formats", ())]
 
 
 def supports_mapping(slug: str) -> bool:

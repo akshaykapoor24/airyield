@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Plus, Upload, Search, RefreshCw, X, CheckCircle, XCircle, AlertCircle, MinusCircle, User, Save, Trash2, FileText, FileSpreadsheet, ChevronRight, Building2, Calendar, Hash, History, Pencil, Plane, List } from "lucide-react";
+import { Plus, Upload, Filter, RefreshCw, X, CheckCircle, XCircle, AlertCircle, MinusCircle, User, Save, Trash2, FileText, FileSpreadsheet, ChevronLeft, ChevronRight, Building2, Calendar, Hash, History, Pencil, List } from "lucide-react";
 import api from "@/lib/api";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import { IncentiveTabContent, InclExclTabContent, IEFieldValue, CONTINENTS, COUNTRY_GROUPS, IncentiveRulesModal } from "@/components/deals/IncentiveInclExclShared";
@@ -24,18 +24,6 @@ type DealBatch = {
   created_by_name:  string | null;
   created_at:       string;
 };
-
-// ── section tabs ───────────────────────────────────────────────────────────
-const SECTION_TABS = [
-  "Deal Repository",
-  "Deal Approver Details",
-  "B2E Details",
-  "B2B Details",
-  "B2C Details",
-  "LOB Approval Details",
-  "Final Approver Details",
-  "Audit Details",
-];
 
 // ── types ──────────────────────────────────────────────────────────────────
 type DealType = "upload" | "airline" | "b2b" | "unified";
@@ -153,6 +141,16 @@ const SCOPE_STYLE: Record<string, { label: string; cls: string }> = {
   all:       { label: "Common",    cls: "bg-emerald-50 text-emerald-700 border-emerald-200" },
 };
 
+/** The deal KIND — B2B vs Airline. For a unified deal it is encoded in the deal_no
+ *  prefix the backend builds from Deal.deal_type, the same signal the statement view
+ *  shows. Not business_type (B2B/B2C/B2E/MICE): that is optional on a B2B deal and
+ *  can be anything on an airline one. */
+function isB2bDeal(d: DealRepositoryItem) {
+  if (d.deal_type === "unified") return d.deal_no?.startsWith("B2B") ?? !!d.business_type;
+  if (d.deal_type === "upload") return !!d.business_type;
+  return d.deal_type === "b2b";
+}
+
 function getDealTypeBadge(d: DealRepositoryItem) {
   // Outgoing: show the scope. A Corporate deal is stored as deal_type='b2b'
   // (that column is the vendor-side airline-vs-b2b discriminator), so the old
@@ -160,17 +158,58 @@ function getDealTypeBadge(d: DealRepositoryItem) {
   if (d.direction === "outbound" && d.scope_type) {
     return SCOPE_STYLE[d.scope_type] ?? DEAL_TYPE_STYLE.b2b;
   }
-  if (d.deal_type === "unified") {
-    // The deal KIND (B2B vs Airline) is encoded in the deal_no prefix the backend
-    // builds from Deal.deal_type — the same signal the statement view shows. Don't
-    // use business_type (B2B/B2C/B2E/MICE), which is optional and may be empty on a
-    // B2B-kind deal, otherwise the badge disagrees with the statement.
-    const isB2b = d.deal_no?.startsWith("B2B") ?? !!d.business_type;
-    return isB2b ? DEAL_TYPE_STYLE.b2b : DEAL_TYPE_STYLE.airline;
-  }
-  if (d.deal_type !== "upload") return DEAL_TYPE_STYLE[d.deal_type];
-  if (d.business_type) return DEAL_TYPE_STYLE.b2b;
-  return DEAL_TYPE_STYLE.airline;
+  return isB2bDeal(d) ? DEAL_TYPE_STYLE.b2b : DEAL_TYPE_STYLE.airline;
+}
+
+/** Waiting on an approver — what the Pending Approval tile counts and filters. */
+function isPendingDeal(d: DealRepositoryItem) {
+  return d.status === "pending_approval" || d.status === "confirmed";
+}
+
+/** Who the deal comes from. A B2B deal names its supplier agency; an airline deal
+ *  stores none on the row because the airline itself is the supplier. On an outgoing
+ *  deal supplier_name holds the customer it is floated to instead. */
+function supplierOf(d: DealRepositoryItem) {
+  return d.supplier_name || (isB2bDeal(d) ? null : d.airline_name) || null;
+}
+
+/** Line of business. An incoming B2B deal is always B2B; an airline deal (and an
+ *  outgoing one) carries whatever was picked — B2B / B2C / B2E / MICE — if anything. */
+function businessTypeOf(d: DealRepositoryItem) {
+  if (d.direction !== "outbound" && isB2bDeal(d)) return "B2B";
+  return d.business_type || null;
+}
+
+/** Words that pad a supplier's name without identifying it — legal form and trade. */
+const NAME_FILLER = new Set([
+  "pvt", "private", "ltd", "pvtltd", "limited", "llp", "llc", "inc", "co", "company",
+  "corp", "corporation", "plc", "travel", "travels", "tours", "tour", "holidays",
+  "and", "&", "services", "solutions", "agency", "agencies",
+]);
+
+/** The identifying part of a supplier's name: everything before the first filler
+ *  word. "Lords Travel Pvt. Ltd." → "Lords", "Riya Travel & Tours" → "Riya",
+ *  "Aer Lingus Limited" → "Aer Lingus". A name that starts with filler keeps its
+ *  other words instead. */
+function shortNameOf(name: string) {
+  const words = name.replace(/\([^)]*\)/g, " ").replace(/\//g, " ").split(/\s+/).filter(Boolean);
+  const isFiller = (w: string) => NAME_FILLER.has(w.toLowerCase().replace(/[.,]/g, ""));
+  const cut = words.findIndex(isFiller);
+  const lead = cut === -1 ? words : words.slice(0, cut);
+  const kept = lead.length ? lead : words.filter(w => !isFiller(w));
+  return (kept.length ? kept : words).join(" ").replace(/[.,]+$/, "");
+}
+
+/** Display name / ID: Supplier/MM/WW/YYYY from the date the deal was loaded, so
+ *  "Riya/02/03/2026" is Riya's deal loaded in the 3rd week of Feb 2026. Weeks are
+ *  7-day blocks of the month (1–7, 8–14, 15–21) with the 4th running to month end. */
+function dealNameOf(d: DealRepositoryItem) {
+  const at = new Date(d.created_at);
+  if (isNaN(at.getTime())) return d.deal_no;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const week = Math.min(4, Math.ceil(at.getDate() / 7));
+  const supplier = supplierOf(d);
+  return [...(supplier ? [shortNameOf(supplier)] : []), pad(at.getMonth() + 1), pad(week), at.getFullYear()].join("/");
 }
 
 const STEP_STATUS_CONFIG: Record<string, { icon: React.ReactNode; color: string; label: string }> = {
@@ -185,6 +224,15 @@ const TRIGGER_TYPE_OPTIONS  = ["Flown", "Sales"];
 const PAYOUT_TYPE_OPTIONS   = ["Flown", "Sales"];
 const BUSINESS_TYPE_OPTIONS = ["B2B", "B2C", "B2E", "MICE"];
 const AIRLINE_TYPE_OPTIONS  = ["GDS", "LCC"];
+
+const PAGE_SIZE_OPTIONS = [25, 50, 100, 200];
+
+const FILTER_SELECT ="border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs text-gray-700 bg-white focus:outline-none focus:ring-1 focus:ring-blue-400";
+
+/** Distinct non-empty values, alphabetical — the options for a filter dropdown. */
+function uniqueSorted(values: (string | null | undefined)[]) {
+  return [...new Set(values.filter((v): v is string => !!v))].sort((a, b) => a.localeCompare(b));
+}
 
 function formatDate(d: string | null) {
   if (!d) return "—";
@@ -733,10 +781,14 @@ function DealEditPanel({ deal, onSave, onClose }: {
 }
 
 // ── DealFlatTable ──────────────────────────────────────────────────────────
-// Shared row rendering for the "All Deal" and "Airline Wise" repository views.
-function DealFlatTable({ deals, showAirlineCol = true, onOpenHistory, onEdit, onDelete, onOpenIncentiveRules }: {
+// Row rendering for the "All Deals" repository view.
+const TH = "px-2 py-2.5 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap";
+/** Actions stay on screen while the rest of the row scrolls; the shadow marks the seam. */
+const ACTIONS_STICKY = "sticky right-0 shadow-[-6px_0_8px_-6px_rgba(15,23,42,0.18)]";
+
+function DealFlatTable({ deals, outbound, onOpenHistory, onEdit, onDelete, onOpenIncentiveRules }: {
   deals: DealRepositoryItem[];
-  showAirlineCol?: boolean;
+  outbound: boolean;
   onOpenHistory: (d: DealRepositoryItem) => void;
   onEdit: (d: DealRepositoryItem) => void;
   onDelete: (d: DealRepositoryItem) => void;
@@ -750,63 +802,77 @@ function DealFlatTable({ deals, showAirlineCol = true, onOpenHistory, onEdit, on
       <table className="w-full">
         <thead>
           <tr style={{ background: "#1e3a5f" }}>
-            <th className="px-4 py-2.5 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Deal No</th>
-            <th className="px-3 py-2.5 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Deal Type</th>
-            {showAirlineCol && (
-              <th className="px-3 py-2.5 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Airline / Maker</th>
-            )}
-            <th className="px-3 py-2.5 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Contract Valid Period</th>
-            <th className="px-3 py-2.5 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Entity</th>
-            <th className="px-3 py-2.5 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Login IDs</th>
-            <th className="px-3 py-2.5 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Incentive &amp; Rules</th>
-            <th className="px-3 py-2.5 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Approval Status</th>
-            <th className="px-3 py-2.5 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Deal Status</th>
-            <th className="px-3 py-2.5 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Actions</th>
+            <th className={`${TH} pl-4`}>Deal Name / ID</th>
+            <th className={TH}>{outbound ? "Customer" : "Supplier Name"}</th>
+            <th className={TH}>Deal Type</th>
+            <th className={TH}>Business Type</th>
+            <th className={TH}>Airline / Maker</th>
+            <th className={TH}>Contract Valid Period</th>
+            <th className={TH}>Entity</th>
+            <th className={TH}>Login IDs</th>
+            <th className={TH}>Incentive &amp; Rules</th>
+            <th className={TH}>Approval Status</th>
+            <th className={TH}>Deal Status</th>
+            {/* Pinned to the right edge so the actions never scroll out of view. */}
+            <th className={`${TH} ${ACTIONS_STICKY} z-10 bg-[#1e3a5f]`}>Actions</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-100">
           {deals.map(d => {
             const dtStyle = getDealTypeBadge(d);
             const canEdit = d.status === "approved" || d.status === "rejected";
+            const dealName = dealNameOf(d);
+            const supplier = supplierOf(d);
+            const businessType = businessTypeOf(d);
             return (
-              <tr key={`${d.deal_type}-${d.id}`} className="hover:bg-blue-50/30 transition-colors">
-                <td className="px-4 py-2.5 text-xs font-semibold text-gray-800 whitespace-nowrap">{d.deal_no}</td>
-                <td className="px-3 py-2.5">
+              <tr key={`${d.deal_type}-${d.id}`} className="group hover:bg-blue-50/30 transition-colors">
+                <td className="pl-4 pr-2 py-2.5 text-xs font-semibold text-gray-800 whitespace-nowrap max-w-[180px]" title={dealName}>
+                  <span className="block truncate">{dealName}</span>
+                </td>
+                <td className="px-2 py-2.5 text-xs text-gray-700 max-w-[150px]" title={supplier ?? undefined}>
+                  <span className="block truncate">{supplier || "—"}</span>
+                </td>
+                <td className="px-2 py-2.5">
                   <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase border whitespace-nowrap ${dtStyle.cls}`}>
                     {dtStyle.label}
                   </span>
                 </td>
-                {showAirlineCol && (
-                  <td className="px-3 py-2.5 text-xs text-gray-700 max-w-[160px]" title={d.airline_name ?? d.deal_maker_name ?? undefined}>
-                    <span className="block truncate">{d.airline_name || d.deal_maker_name || d.supplier_name || "—"}</span>
-                    {/* Who it is floated to. The chip says which KIND of scope; this
-                        says which party, which is the part you actually search for. */}
-                    {d.direction === "outbound" && d.scope_party_name && (
-                      <span className="block truncate text-[10px] text-gray-400" title={d.scope_party_name}>
-                        → {d.scope_party_name}
-                      </span>
-                    )}
-                  </td>
-                )}
-                <td className="px-3 py-2.5 whitespace-nowrap">
+                <td className="px-2 py-2.5">
+                  {businessType ? (
+                    <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-gray-100 text-gray-600 border border-gray-200 whitespace-nowrap">{businessType}</span>
+                  ) : (
+                    <span className="text-xs text-gray-400">—</span>
+                  )}
+                </td>
+                <td className="px-2 py-2.5 text-xs text-gray-700 max-w-[140px]" title={d.airline_name ?? d.deal_maker_name ?? undefined}>
+                  <span className="block truncate">{d.airline_name || d.deal_maker_name || "—"}</span>
+                  {/* Who it is floated to. The chip says which KIND of scope; this
+                      says which party, which is the part you actually search for. */}
+                  {d.direction === "outbound" && d.scope_party_name && (
+                    <span className="block truncate text-[10px] text-gray-400" title={d.scope_party_name}>
+                      → {d.scope_party_name}
+                    </span>
+                  )}
+                </td>
+                <td className="px-2 py-2.5 whitespace-nowrap">
                   <span className="text-xs text-gray-700">{formatDate(d.valid_from)}</span>
                   <span className="text-gray-400 mx-1">→</span>
                   <span className="text-xs text-gray-700">{formatDate(d.valid_to)}</span>
                 </td>
-                <td className="px-3 py-2.5 text-xs text-gray-700 max-w-[140px] truncate" title={d.entity ?? d.entity_lcc ?? undefined}>
+                <td className="px-2 py-2.5 text-xs text-gray-700 max-w-[120px] truncate" title={d.entity ?? d.entity_lcc ?? undefined}>
                   {d.entity || d.entity_lcc || "—"}
                 </td>
-                <td className="px-3 py-2.5">
+                <td className="px-2 py-2.5">
                   {(d.login_ids ?? []).length > 0 ? (
-                    <div className="flex flex-wrap gap-0.5 max-w-[160px]">
+                    <div className="flex flex-wrap gap-0.5 max-w-[140px]">
                       {d.login_ids!.map(l => (
                         <span key={l} className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200 whitespace-nowrap">{l}</span>
                       ))}
                     </div>
                   ) : <span className="text-xs text-gray-400">—</span>}
                 </td>
-                <td className="px-3 py-2.5">
-                  <div className="flex flex-wrap gap-0.5 max-w-[220px]">
+                <td className="px-2 py-2.5">
+                  <div className="flex flex-wrap gap-0.5 max-w-[160px]">
                     {(d.incentive_types ?? []).length > 0
                       ? d.incentive_types!.map(t => (
                           <button key={t} onClick={() => onOpenIncentiveRules(d, t)} title="Edit incentive details & inclusion/exclusion rules"
@@ -817,19 +883,19 @@ function DealFlatTable({ deals, showAirlineCol = true, onOpenHistory, onEdit, on
                       : <span className="text-xs text-gray-400">—</span>}
                   </div>
                 </td>
-                <td className="px-3 py-2.5">
+                <td className="px-2 py-2.5">
                   <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border whitespace-nowrap ${STATUS_STYLE[d.status] ?? "bg-gray-50 text-gray-500 border-gray-200"}`}>
                     <span className={`w-1.5 h-1.5 rounded-full ${STATUS_DOT[d.status] ?? "bg-gray-400"}`} />
                     {STATUS_LABEL[d.status] ?? d.status}
                   </span>
                 </td>
-                <td className="px-3 py-2.5">
+                <td className="px-2 py-2.5">
                   <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border whitespace-nowrap ${LIFECYCLE_STYLE[d.deal_lifecycle_status ?? "draft"] ?? LIFECYCLE_STYLE.draft}`}>
                     <span className={`w-1.5 h-1.5 rounded-full ${LIFECYCLE_DOT[d.deal_lifecycle_status ?? "draft"] ?? LIFECYCLE_DOT.draft}`} />
                     {LIFECYCLE_LABEL[d.deal_lifecycle_status ?? "draft"] ?? "Draft"}
                   </span>
                 </td>
-                <td className="px-2 py-2.5 whitespace-nowrap">
+                <td className={`px-2 py-2.5 whitespace-nowrap ${ACTIONS_STICKY} z-[1] bg-white group-hover:bg-[#fafcff]`}>
                   <div className="flex items-center gap-1">
                     <button onClick={() => onOpenHistory(d)}
                       className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium border border-gray-200 text-gray-600 hover:bg-gray-50 hover:border-gray-300 transition-colors">
@@ -868,19 +934,25 @@ export default function DealsPage() {
   const searchParams = useSearchParams();
   // Incoming (received) vs Outgoing (floated to a sub-agency) repository view.
   const direction = searchParams.get("direction") === "outbound" ? "outbound" : "inbound";
-  const [sectionTab, setSectionTab] = useState("Deal Repository");
   const [deals,      setDeals]      = useState<DealRepositoryItem[]>([]);
   const [batches,    setBatches]    = useState<DealBatch[]>([]);
   const [loading,    setLoading]    = useState(true);
   const [apiError,   setApiError]   = useState("");
-  const [search,     setSearch]     = useState("");
+  // Set by the Active / Closed / Pending Approval stat tiles.
+  const [statusFilter,       setStatusFilter]       = useState<"" | "active" | "closed" | "pending">("");
+  const [supplierFilter,     setSupplierFilter]     = useState("");
+  const [businessTypeFilter, setBusinessTypeFilter] = useState("");
+  const [airlineFilter,      setAirlineFilter]      = useState("");
+  const [periodFrom,         setPeriodFrom]         = useState("");
+  const [periodTo,           setPeriodTo]           = useState("");
   // One control, two vocabularies: incoming filters by DealType (airline/b2b),
   // outgoing by scope (agency/corporate/common). "common" stands in for the stored
   // scope "all", which is already taken here by the no-filter option.
   type DealFilter = "all" | DealType | "agency" | "corporate" | "common";
   const [dealTypeFilter, setDealTypeFilter] = useState<DealFilter>("all");
   const [page,       setPage]       = useState(1);
-  const [repoView,   setRepoView]   = useState<"statement" | "airline" | "all">("all"); // default to first tab — All Deals
+  const [pageSize,   setPageSize]   = useState(50);
+  const [repoView,   setRepoView]   = useState<"statement" | "all">("all"); // default to first tab — All Deals
 
   // history panel
   const [historyDealId,   setHistoryDealId]   = useState<number | null>(null);
@@ -1025,8 +1097,9 @@ export default function DealsPage() {
   const countAirline   = batches.filter(b => b.deal_type === "airline").reduce((s, b) => s + b.deal_count, 0);
   const countB2B       = batches.filter(b => b.deal_type === "b2b").reduce((s, b) => s + b.deal_count, 0);
   const countScope     = (scope: string) => deals.filter(d => (d.scope_type ?? "all") === scope).length;
-  const countPending   = deals.filter(d => d.status === "pending_approval" || d.status === "confirmed").length;
+  const countPending   = deals.filter(isPendingDeal).length;
   const countActive    = deals.filter(d => d.deal_lifecycle_status === "active").length;
+  const countClosed    = deals.filter(d => d.deal_lifecycle_status === "closed").length;
 
   /** On outgoing the type filter selects a scope, not airline-vs-b2b. */
   const scopeOf = (d: DealRepositoryItem) => d.scope_type ?? "all";
@@ -1034,476 +1107,473 @@ export default function DealsPage() {
    *  because that string already means "no filter" in this same select. */
   const scopeFilterValue = dealTypeFilter === "common" ? "all" : dealTypeFilter;
 
-  // ── filtered batches ──────────────────────────────────────────────────
-  const filteredBatches = batches.filter(b => {
-    if (dealTypeFilter !== "all") {
-      if (outbound) {
-        if ((batchScope.get(b.batch_id) ?? "all") !== scopeFilterValue) return false;
-      } else if (b.deal_type !== dealTypeFilter) return false;
-    }
-    const q = search.toLowerCase();
-    return !q ||
-      (b.supplier_name ?? "").toLowerCase().includes(q) ||
-      (batchParty.get(b.batch_id) ?? "").toLowerCase().includes(q) ||
-      (b.file_name     ?? "").toLowerCase().includes(q) ||
-      (b.created_by_name ?? "").toLowerCase().includes(q);
-  });
+  // ── filter options, read off the loaded deals ─────────────────────────
+  const supplierOptions = useMemo(() => uniqueSorted(deals.map(supplierOf)), [deals]);
+  const airlineOptions  = useMemo(() => uniqueSorted(deals.map(d => d.airline_name)), [deals]);
 
-  // ── filtered deals (All Deal + Airline Wise views) ─────────────────────
+  const anyFilter = dealTypeFilter !== "all" || !!(statusFilter || supplierFilter || businessTypeFilter || airlineFilter || periodFrom || periodTo);
+  const clearFilters = () => {
+    setPage(1);
+    setStatusFilter("");
+    setDealTypeFilter("all");
+    setSupplierFilter("");
+    setBusinessTypeFilter("");
+    setAirlineFilter("");
+    setPeriodFrom("");
+    setPeriodTo("");
+  };
+
+  // ── stat-tile clicks ──────────────────────────────────────────────────
+  /** Totals: drop every filter and show that view. */
+  const showAll = (view: "all" | "statement") => { clearFilters(); setRepoView(view); };
+  /** Clicking the tile that is already on turns it off again. */
+  const toggleType = (v: DealFilter) => { setDealTypeFilter(dealTypeFilter === v ? "all" : v); setPage(1); };
+  const toggleStatus = (v: "active" | "closed" | "pending") => { setStatusFilter(statusFilter === v ? "" : v); setPage(1); };
+
+  // ── filtered deals (All Deals view) ───────────────────────────────────
   const filteredDeals = useMemo(() => deals.filter(d => {
     if (dealTypeFilter !== "all") {
       if (outbound) {
         if (scopeOf(d) !== scopeFilterValue) return false;
-      } else {
-        const dType = d.deal_type === "unified" ? (d.business_type ? "b2b" : "airline") : d.deal_type;
-        if (dType !== dealTypeFilter) return false;
-      }
+      } else if ((isB2bDeal(d) ? "b2b" : "airline") !== dealTypeFilter) return false;
     }
-    const q = search.toLowerCase();
-    return !q ||
-      (d.airline_name     ?? "").toLowerCase().includes(q) ||
-      (d.deal_maker_name   ?? "").toLowerCase().includes(q) ||
-      (d.supplier_name     ?? "").toLowerCase().includes(q) ||
-      (d.scope_party_name  ?? "").toLowerCase().includes(q) ||
-      d.deal_no.toLowerCase().includes(q);
-  }), [deals, dealTypeFilter, search, outbound]);
+    if (statusFilter === "pending") {
+      if (!isPendingDeal(d)) return false;
+    } else if (statusFilter && d.deal_lifecycle_status !== statusFilter) return false;
+    if (supplierFilter && supplierOf(d) !== supplierFilter) return false;
+    if (businessTypeFilter && (businessTypeOf(d) ?? "").toUpperCase() !== businessTypeFilter) return false;
+    if (airlineFilter && d.airline_name !== airlineFilter) return false;
+    // Period: keep deals whose contract valid period overlaps the picked range.
+    // ISO date strings compare correctly as strings; a missing end is open-ended.
+    if (periodFrom && d.valid_to && d.valid_to < periodFrom) return false;
+    if (periodTo && d.valid_from && d.valid_from > periodTo) return false;
+    return true;
+  }), [deals, dealTypeFilter, statusFilter, supplierFilter, businessTypeFilter, airlineFilter, periodFrom, periodTo, outbound]);
 
-  const dealsByAirline = useMemo(() => {
-    const map = new Map<string, DealRepositoryItem[]>();
-    for (const d of filteredDeals) {
-      const key = d.airline_name || "Unspecified Airline";
-      if (!map.has(key)) map.set(key, []);
-      map.get(key)!.push(d);
-    }
-    return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-  }, [filteredDeals]);
+  // ── filtered batches ──────────────────────────────────────────────────
+  // A statement shows when any of its deals passes the filters above.
+  const matchedBatchIds = useMemo(() => new Set(filteredDeals.map(d => d.batch_id)), [filteredDeals]);
+  const filteredBatches = anyFilter ? batches.filter(b => matchedBatchIds.has(b.batch_id)) : batches;
+
+  // ── pagination — one page/size pair for whichever view is showing ─────
+  const rowCount    = repoView === "statement" ? filteredBatches.length : filteredDeals.length;
+  const pageCount   = Math.max(1, Math.ceil(rowCount / pageSize));
+  // Clamped, so a delete or a narrower filter never leaves you on an empty page.
+  const currentPage = Math.min(page, pageCount);
+  const pageStart   = (currentPage - 1) * pageSize;
+  const pagedDeals   = filteredDeals.slice(pageStart, pageStart + pageSize);
+  const pagedBatches = filteredBatches.slice(pageStart, pageStart + pageSize);
 
   return (
     <div className="space-y-3">
 
-      {/* ── Section tab bar ─────────────────────────────────────────────── */}
-      <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
-        <div className="overflow-x-auto">
-          <div className="flex min-w-max">
-            {SECTION_TABS.map(tab => (
-              <button key={tab} onClick={() => setSectionTab(tab)}
-                className={`px-4 py-2.5 text-[11px] font-semibold whitespace-nowrap border-b-2 transition-colors ${
-                  sectionTab === tab
-                    ? "border-[#1e3a5f] text-[#1e3a5f] bg-blue-50/40"
-                    : "border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50"
-                }`}>
-                {tab}
-              </button>
-            ))}
-          </div>
+      {/* ── Header ──────────────────────────────────────────────────── */}
+      <div className="flex items-start justify-between">
+        <div>
+          <h1 className="text-xl font-bold text-gray-900 uppercase tracking-wide">{direction === "outbound" ? "Outgoing Deal Repository" : "Incoming Deal Repository"}</h1>
+          <p className="text-xs text-gray-500 mt-0.5">
+            {outbound
+              ? "Deals you float to customers — per agency, per corporate, or common to all"
+              : "All deals — uploads, airline contracts and B2B agreements"}
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <button onClick={fetchDeals} disabled={loading}
+            className="flex items-center gap-1.5 bg-white border border-gray-200 text-gray-600 px-3 py-1.5 rounded-lg text-xs font-medium hover:bg-gray-50 disabled:opacity-50">
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+          </button>
+          <Link href={`/deals/upload?direction=${direction}`}
+            className="flex items-center gap-1.5 bg-white border border-gray-200 text-gray-700 px-3 py-1.5 rounded-lg text-xs font-medium hover:bg-gray-50">
+            <Upload className="w-3.5 h-3.5" /> Upload
+          </Link>
+          <Link href={`/deals/new?direction=${direction}`}
+            className="flex items-center gap-1.5 bg-[#1e3a5f] text-white px-3 py-1.5 rounded-lg text-xs font-medium hover:bg-[#16304f]">
+            <Plus className="w-3.5 h-3.5" /> Create Deal
+          </Link>
         </div>
       </div>
 
-      {/* ── Placeholder for other tabs ──────────────────────────────────── */}
-      {sectionTab !== "Deal Repository" && (
-        <div className="bg-white rounded-xl border border-gray-200 flex items-center justify-center py-20">
-          <p className="text-sm text-gray-400 font-medium">{sectionTab} — Coming soon</p>
+      {/* ── Repository view switcher ──────────────────────────────────── */}
+      <div className="flex items-center gap-1 bg-white border border-gray-200 rounded-xl p-1 w-fit">
+        {([
+          { key: "all",       label: "All Deals",             icon: List },
+          { key: "statement", label: "Statement/Agency Wise", icon: Building2 },
+        ] as const).map(v => (
+          <button key={v.key} onClick={() => { setRepoView(v.key); setPage(1); }}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+              repoView === v.key ? "bg-[#1e3a5f] text-white" : "text-gray-500 hover:bg-gray-50"
+            }`}>
+            <v.icon className="w-3.5 h-3.5" /> {v.label}
+          </button>
+        ))}
+      </div>
+
+      {/* ── Stats bar ───────────────────────────────────────────────── */}
+      {/* Each tile is a filter: the two totals reset to their view, the rest toggle
+          a deal-type or status filter on and off. The active one is ringed. */}
+      <div className={`grid gap-2 ${outbound ? "grid-cols-8" : "grid-cols-7"}`}>
+        {[
+          { label: "Total Batches",    value: batches.length,                         color: "bg-blue-50 text-blue-700 border-blue-200",
+            active: repoView === "statement" && !anyFilter, onClick: () => showAll("statement") },
+          { label: "Total Deals",      value: totalDeals,                             color: "bg-indigo-50 text-indigo-700 border-indigo-200",
+            active: repoView === "all" && !anyFilter,       onClick: () => showAll("all") },
+          // "Airline Deals" is meaningless on the selling side — every outgoing
+          // deal is stored as b2b — so these two tiles count who the deals reach.
+          ...(outbound
+            ? [
+                { label: "B2B (Agency)", value: countScope("agency"),    color: "bg-sky-50 text-sky-700 border-sky-200",
+                  active: dealTypeFilter === "agency",    onClick: () => toggleType("agency") },
+                { label: "Corporate",    value: countScope("corporate"), color: "bg-violet-50 text-violet-700 border-violet-200",
+                  active: dealTypeFilter === "corporate", onClick: () => toggleType("corporate") },
+              ]
+            : [
+                { label: "Airline Deals", value: countAirline,           color: "bg-sky-50 text-sky-700 border-sky-200",
+                  active: dealTypeFilter === "airline",   onClick: () => toggleType("airline") },
+                { label: "B2B Deals",     value: countB2B,               color: "bg-violet-50 text-violet-700 border-violet-200",
+                  active: dealTypeFilter === "b2b",       onClick: () => toggleType("b2b") },
+              ]),
+          ...(outbound
+            ? [{ label: "Common", value: countScope("all"), color: "bg-teal-50 text-teal-700 border-teal-200",
+                 active: dealTypeFilter === "common", onClick: () => toggleType("common") }]
+            : []),
+          { label: "Active",           value: countActive,                            color: "bg-emerald-50 text-emerald-700 border-emerald-200",
+            active: statusFilter === "active",  onClick: () => toggleStatus("active") },
+          { label: "Closed",           value: countClosed,                            color: "bg-slate-50 text-slate-600 border-slate-200",
+            active: statusFilter === "closed",  onClick: () => toggleStatus("closed") },
+          { label: "Pending Approval", value: countPending,                           color: "bg-amber-50 text-amber-700 border-amber-200",
+            active: statusFilter === "pending", onClick: () => toggleStatus("pending") },
+        ].map(s => (
+          <button key={s.label} type="button" onClick={s.onClick} aria-pressed={s.active}
+            className={`text-left rounded-xl border px-3 py-2 min-w-0 transition-shadow hover:shadow-md ${s.color} ${
+              s.active ? "ring-2 ring-current ring-offset-1" : ""
+            }`}>
+            <p className="text-lg font-bold leading-tight">{s.value}</p>
+            <p className="text-[11px] font-medium truncate" title={s.label}>{s.label}</p>
+          </button>
+        ))}
+      </div>
+
+      {/* ── Filters ─────────────────────────────────────────────────── */}
+      {/* Filters wrap inside their own group, so pagination always stays on the first row. */}
+      <div className="flex items-start gap-3">
+        <div className="flex flex-1 min-w-0 flex-wrap items-center gap-2">
+          <Filter className="w-3.5 h-3.5 text-gray-400" />
+          <select value={supplierFilter} onChange={e => { setSupplierFilter(e.target.value); setPage(1); }}
+            className={`${FILTER_SELECT} w-44`}>
+            <option value="">{outbound ? "All Customers" : "All Suppliers"}</option>
+            {supplierOptions.map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
+          <select value={dealTypeFilter} onChange={e => { setDealTypeFilter(e.target.value as DealFilter); setPage(1); }}
+            className={FILTER_SELECT}>
+            <option value="all">All Deal Types</option>
+            {outbound ? (
+              <>
+                {/* The scope values, not airline-vs-b2b — every outgoing deal is b2b.
+                    "common" rather than the stored "all", which is already taken by
+                    the no-filter option above. scopeFilterValue maps it back. */}
+                <option value="agency">B2B</option>
+                <option value="corporate">Corporate</option>
+                <option value="common">Common</option>
+              </>
+            ) : (
+              <>
+                <option value="airline">Airline</option>
+                <option value="b2b">B2B</option>
+              </>
+            )}
+          </select>
+          <select value={businessTypeFilter} onChange={e => { setBusinessTypeFilter(e.target.value); setPage(1); }} className={FILTER_SELECT}>
+            <option value="">All Business Types</option>
+            {BUSINESS_TYPE_OPTIONS.map(t => <option key={t} value={t}>{t}</option>)}
+          </select>
+          <select value={airlineFilter} onChange={e => { setAirlineFilter(e.target.value); setPage(1); }}
+            className={`${FILTER_SELECT} w-36`}>
+            <option value="">All Airlines</option>
+            {airlineOptions.map(a => <option key={a} value={a}>{a}</option>)}
+          </select>
+          <div className="flex items-center gap-1.5">
+            <span className="text-[11px] font-medium text-gray-500">Period</span>
+            <input type="date" value={periodFrom} max={periodTo || undefined} onChange={e => { setPeriodFrom(e.target.value); setPage(1); }}
+              title="Contract valid from" className={`${FILTER_SELECT} w-[130px]`} />
+            <span className="text-gray-400 text-xs">→</span>
+            <input type="date" value={periodTo} min={periodFrom || undefined} onChange={e => { setPeriodTo(e.target.value); setPage(1); }}
+              title="Contract valid to" className={`${FILTER_SELECT} w-[130px]`} />
+          </div>
+          {anyFilter && (
+            <button onClick={clearFilters}
+              className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-medium text-gray-500 hover:text-gray-700 hover:bg-gray-100">
+              <X className="w-3 h-3" /> Clear
+            </button>
+          )}
         </div>
-      )}
 
-      {sectionTab === "Deal Repository" && (
-        <>
-          {/* ── Header ──────────────────────────────────────────────────── */}
-          <div className="flex items-start justify-between">
-            <div>
-              <h1 className="text-xl font-bold text-gray-900 uppercase tracking-wide">{direction === "outbound" ? "Outgoing Deal Repository" : "Incoming Deal Repository"}</h1>
-              <p className="text-xs text-gray-500 mt-0.5">
-                {outbound
-                  ? "Deals you float to customers — per agency, per corporate, or common to all"
-                  : "All deals — uploads, airline contracts and B2B agreements"}
-              </p>
-            </div>
-            <div className="flex gap-2">
-              <button onClick={fetchDeals} disabled={loading}
-                className="flex items-center gap-1.5 bg-white border border-gray-200 text-gray-600 px-3 py-1.5 rounded-lg text-xs font-medium hover:bg-gray-50 disabled:opacity-50">
-                <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
-              </button>
-              <Link href={`/deals/upload?direction=${direction}`}
-                className="flex items-center gap-1.5 bg-white border border-gray-200 text-gray-700 px-3 py-1.5 rounded-lg text-xs font-medium hover:bg-gray-50">
-                <Upload className="w-3.5 h-3.5" /> Upload
-              </Link>
-              <Link href={`/deals/new?direction=${direction}`}
-                className="flex items-center gap-1.5 bg-[#1e3a5f] text-white px-3 py-1.5 rounded-lg text-xs font-medium hover:bg-[#16304f]">
-                <Plus className="w-3.5 h-3.5" /> Create Deal
-              </Link>
-            </div>
-          </div>
+        {/* ── Pagination ── */}
+        <div className="shrink-0 flex items-center gap-1.5 text-[11px] text-gray-500 whitespace-nowrap">
+          <span title={`Showing ${rowCount === 0 ? 0 : pageStart + 1}–${Math.min(pageStart + pageSize, rowCount)} of ${rowCount}`}>
+            {rowCount === 0 ? "0" : `${pageStart + 1}–${Math.min(pageStart + pageSize, rowCount)}`} / {rowCount}
+          </span>
+          <select value={pageSize} onChange={e => { setPageSize(Number(e.target.value)); setPage(1); }}
+            title="Rows per page" className={FILTER_SELECT}>
+            {PAGE_SIZE_OPTIONS.map(n => <option key={n} value={n}>{n}</option>)}
+          </select>
+          <button onClick={() => setPage(currentPage - 1)} disabled={currentPage <= 1} aria-label="Previous page"
+            className="p-1.5 rounded-lg border border-gray-200 bg-white text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed">
+            <ChevronLeft className="w-3.5 h-3.5" />
+          </button>
+          <span title={`Page ${currentPage} of ${pageCount}`}>{currentPage} / {pageCount}</span>
+          <button onClick={() => setPage(currentPage + 1)} disabled={currentPage >= pageCount} aria-label="Next page"
+            className="p-1.5 rounded-lg border border-gray-200 bg-white text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed">
+            <ChevronRight className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      </div>
 
-          {/* ── Repository view switcher ──────────────────────────────────── */}
-          <div className="flex items-center gap-1 bg-white border border-gray-200 rounded-xl p-1 w-fit">
-            {([
-              { key: "all",       label: "All Deals",             icon: List },
-              { key: "statement", label: "Statement/Agency Wise", icon: Building2 },
-              { key: "airline",   label: "Airline Wise",          icon: Plane },
-            ] as const).map(v => (
-              <button key={v.key} onClick={() => setRepoView(v.key)}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
-                  repoView === v.key ? "bg-[#1e3a5f] text-white" : "text-gray-500 hover:bg-gray-50"
-                }`}>
-                <v.icon className="w-3.5 h-3.5" /> {v.label}
-              </button>
-            ))}
-          </div>
+      {/* ── Statement/Agency Wise: batch list table ────────────────────── */}
+      {repoView === "statement" && (
+      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden overflow-x-auto">
+        {/* summary bar */}
+        <div className="px-5 py-3 border-b border-gray-100 bg-gray-50/40 flex items-center justify-between">
+          <p className="text-xs font-semibold text-gray-600 uppercase tracking-wider">
+            {filteredBatches.length === batches.length
+              ? `${batches.length} Batch${batches.length !== 1 ? "es" : ""}`
+              : `${filteredBatches.length} of ${batches.length} Batches`}
+          </p>
+          <p className="text-xs text-gray-400">Click a row to view deals</p>
+        </div>
 
-          {/* ── Stats bar ───────────────────────────────────────────────── */}
-          <div className={`grid gap-2 ${outbound ? "grid-cols-7" : "grid-cols-6"}`}>
-            {[
-              { label: "Total Batches",    value: batches.length,                         color: "bg-blue-50 text-blue-700 border-blue-200"       },
-              { label: "Total Deals",      value: totalDeals,                             color: "bg-indigo-50 text-indigo-700 border-indigo-200"  },
-              // "Airline Deals" is meaningless on the selling side — every outgoing
-              // deal is stored as b2b — so these two tiles count who the deals reach.
-              ...(outbound
-                ? [
-                    { label: "B2B (Agency)", value: countScope("agency"),    color: "bg-sky-50 text-sky-700 border-sky-200"          },
-                    { label: "Corporate",    value: countScope("corporate"), color: "bg-violet-50 text-violet-700 border-violet-200" },
-                  ]
-                : [
-                    { label: "Airline Deals", value: countAirline,           color: "bg-sky-50 text-sky-700 border-sky-200"          },
-                    { label: "B2B Deals",     value: countB2B,               color: "bg-violet-50 text-violet-700 border-violet-200" },
-                  ]),
-              ...(outbound
-                ? [{ label: "Common", value: countScope("all"), color: "bg-teal-50 text-teal-700 border-teal-200" }]
-                : []),
-              { label: "Active",           value: countActive,                            color: "bg-emerald-50 text-emerald-700 border-emerald-200" },
-              { label: "Pending Approval", value: countPending,                           color: "bg-amber-50 text-amber-700 border-amber-200"     },
-            ].map(s => (
-              <div key={s.label} className={`rounded-xl border px-4 py-3 ${s.color}`}>
-                <p className="text-xl font-bold">{s.value}</p>
-                <p className="text-[11px] font-medium mt-0.5">{s.label}</p>
-              </div>
-            ))}
-          </div>
-
-          {/* ── Filters ─────────────────────────────────────────────────── */}
-          <div className="flex items-center gap-2">
-            <div className="relative flex-1">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
-              <input value={search} onChange={e => { setSearch(e.target.value); setPage(1); }}
-                placeholder={
-                  repoView === "statement"
-                    ? (outbound ? "Search by customer, file name, uploaded by..." : "Search by supplier, file name, uploaded by...")
-                    : (outbound ? "Search by deal no, airline, customer..." : "Search by deal no, airline, deal maker...")
-                }
-                className="w-full pl-8 pr-3 py-1.5 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-1 focus:ring-blue-400" />
-            </div>
-            <select value={dealTypeFilter} onChange={e => { setDealTypeFilter(e.target.value as DealFilter); setPage(1); }}
-              className="border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs text-gray-700 bg-white focus:outline-none focus:ring-1 focus:ring-blue-400">
-              <option value="all">All Deal Types</option>
-              {outbound ? (
-                <>
-                  {/* The scope values, not airline-vs-b2b — every outgoing deal is b2b.
-                      "common" rather than the stored "all", which is already taken by
-                      the no-filter option above. scopeFilterValue maps it back. */}
-                  <option value="agency">B2B</option>
-                  <option value="corporate">Corporate</option>
-                  <option value="common">Common</option>
-                </>
-              ) : (
-                <>
-                  <option value="airline">Airline</option>
-                  <option value="b2b">B2B</option>
-                </>
-              )}
-            </select>
-            <span className="text-[11px] text-gray-400 ml-auto whitespace-nowrap">
-              {repoView === "statement"
-                ? `${filteredBatches.length} batch${filteredBatches.length !== 1 ? "es" : ""}`
-                : `${filteredDeals.length} deal${filteredDeals.length !== 1 ? "s" : ""}`}
-            </span>
-          </div>
-
-          {/* ── Statement/Agency Wise: batch list table ────────────────────── */}
-          {repoView === "statement" && (
-          <div className="bg-white rounded-xl border border-gray-200 overflow-hidden overflow-x-auto">
-            {/* summary bar */}
-            <div className="px-5 py-3 border-b border-gray-100 bg-gray-50/40 flex items-center justify-between">
-              <p className="text-xs font-semibold text-gray-600 uppercase tracking-wider">
-                {filteredBatches.length === batches.length
-                  ? `${batches.length} Batch${batches.length !== 1 ? "es" : ""}`
-                  : `${filteredBatches.length} of ${batches.length} Batches`}
-              </p>
-              <p className="text-xs text-gray-400">Click a row to view deals</p>
-            </div>
-
-            <table className="w-full">
-              <thead>
-                <tr style={{ background: "#1e3a5f" }}>
-                  <th className="px-4 py-3 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">
-                    {outbound ? "Customer / Scope" : "Supplier / Source"}
-                  </th>
-                  <th className="px-3 py-3 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Deal Type</th>
-                  <th className="px-3 py-3 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Deal Tag</th>
-                  <th className="px-3 py-3 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">
-                    <span className="flex items-center gap-1"><Calendar className="w-3.5 h-3.5" /> Contract Valid Period</span>
-                  </th>
-                  <th className="px-3 py-3 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Incentive Types</th>
-                  <th className="px-3 py-3 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">File</th>
-                  <th className="px-3 py-3 text-center text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">
-                    <span className="flex items-center justify-center gap-1"><Hash className="w-3 h-3" /> Deals</span>
-                  </th>
-                  <th className="px-3 py-3 text-center text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Draft</th>
-                  <th className="px-3 py-3 text-center text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Active</th>
-                  <th className="px-3 py-3 text-center text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Closed</th>
-                  <th className="px-3 py-3 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">
-                    <span className="flex items-center gap-1"><User className="w-3.5 h-3.5" /> Uploaded By</span>
-                  </th>
-                  <th className="px-3 py-3 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Date</th>
-                  <th className="px-2 py-3" />
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {loading ? (
-                  <tr>
-                    <td colSpan={13} className="px-4 py-12 text-center text-xs text-gray-400">
-                      <RefreshCw className="w-4 h-4 animate-spin mx-auto mb-2 text-gray-300" />
-                      Loading batches...
-                    </td>
-                  </tr>
-                ) : apiError ? (
-                  <tr>
-                    <td colSpan={13} className="px-4 py-10 text-center text-xs text-red-400">{apiError}</td>
-                  </tr>
-                ) : filteredBatches.length === 0 ? (
-                  <tr>
-                    <td colSpan={13} className="px-4 py-12 text-center">
-                      <div className="flex flex-col items-center gap-3">
-                        <Upload className="w-8 h-8 text-gray-300" />
-                        <p className="text-xs text-gray-400 font-medium">
-                          {batches.length === 0 ? "No deal batches yet" : "No batches match the filters"}
+        <table className="w-full">
+          <thead>
+            <tr style={{ background: "#1e3a5f" }}>
+              <th className="px-4 py-3 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">
+                {outbound ? "Customer / Scope" : "Supplier / Source"}
+              </th>
+              <th className="px-3 py-3 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Deal Type</th>
+              <th className="px-3 py-3 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Deal Tag</th>
+              <th className="px-3 py-3 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">
+                <span className="flex items-center gap-1"><Calendar className="w-3.5 h-3.5" /> Contract Valid Period</span>
+              </th>
+              <th className="px-3 py-3 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Incentive Types</th>
+              <th className="px-3 py-3 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">File</th>
+              <th className="px-3 py-3 text-center text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">
+                <span className="flex items-center justify-center gap-1"><Hash className="w-3 h-3" /> Deals</span>
+              </th>
+              <th className="px-3 py-3 text-center text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Draft</th>
+              <th className="px-3 py-3 text-center text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Active</th>
+              <th className="px-3 py-3 text-center text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Closed</th>
+              <th className="px-3 py-3 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">
+                <span className="flex items-center gap-1"><User className="w-3.5 h-3.5" /> Uploaded By</span>
+              </th>
+              <th className="px-3 py-3 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap">Date</th>
+              <th className="px-2 py-3" />
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100">
+            {loading ? (
+              <tr>
+                <td colSpan={13} className="px-4 py-12 text-center text-xs text-gray-400">
+                  <RefreshCw className="w-4 h-4 animate-spin mx-auto mb-2 text-gray-300" />
+                  Loading batches...
+                </td>
+              </tr>
+            ) : apiError ? (
+              <tr>
+                <td colSpan={13} className="px-4 py-10 text-center text-xs text-red-400">{apiError}</td>
+              </tr>
+            ) : filteredBatches.length === 0 ? (
+              <tr>
+                <td colSpan={13} className="px-4 py-12 text-center">
+                  <div className="flex flex-col items-center gap-3">
+                    <Upload className="w-8 h-8 text-gray-300" />
+                    <p className="text-xs text-gray-400 font-medium">
+                      {batches.length === 0 ? "No deal batches yet" : "No batches match the filters"}
+                    </p>
+                    {batches.length === 0 && (
+                      <Link href={`/deals/upload?direction=${direction}`}
+                        className="flex items-center gap-1.5 bg-[#1e3a5f] text-white px-3 py-1.5 rounded-lg text-xs font-medium hover:bg-[#16304f]">
+                        <Upload className="w-3 h-3" /> Upload First Deal
+                      </Link>
+                    )}
+                  </div>
+                </td>
+              </tr>
+            ) : pagedBatches.map(b => {
+              // Outgoing: the batch's Deal Type chip is its SCOPE. Every outgoing
+              // batch is deal_type='b2b', so the old chip labelled a Corporate
+              // batch "B2B" and a Common one "B2B" too.
+              const bScope  = batchScope.get(b.batch_id);
+              const dtStyle = outbound && bScope
+                ? (SCOPE_STYLE[bScope] ?? DEAL_TYPE_STYLE.b2b)
+                : (DEAL_TYPE_STYLE[b.deal_type] ?? DEAL_TYPE_STYLE.airline);
+              const bParty  = batchParty.get(b.batch_id) ?? b.supplier_name;
+              const FileIcon = b.file_type === "pdf" ? FileText : FileSpreadsheet;
+              return (
+                <tr
+                  key={b.batch_id}
+                  onClick={() => router.push(`/deals/${b.batch_id}`)}
+                  className="hover:bg-blue-50/40 cursor-pointer transition-colors group"
+                >
+                  {/* Supplier */}
+                  <td className="px-4 py-3 max-w-[160px]">
+                    <div className="flex items-center gap-2">
+                      <div className="w-7 h-7 rounded-lg bg-blue-50 flex items-center justify-center shrink-0">
+                        <Building2 className="w-3.5 h-3.5 text-blue-500" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-xs font-semibold text-gray-800 group-hover:text-[#1e3a5f] leading-tight truncate" title={bParty ?? undefined}>
+                          {bParty || "—"}
                         </p>
-                        {batches.length === 0 && (
-                          <Link href={`/deals/upload?direction=${direction}`}
-                            className="flex items-center gap-1.5 bg-[#1e3a5f] text-white px-3 py-1.5 rounded-lg text-xs font-medium hover:bg-[#16304f]">
-                            <Upload className="w-3 h-3" /> Upload First Deal
-                          </Link>
+                        {/* Names the kind of counterparty, so "exl" reads as a
+                            corporate and "All Customers" as a common deal. */}
+                        {outbound && bScope && (
+                          <p className="text-[10px] text-gray-400 leading-tight truncate">
+                            {bScope === "agency" ? "Agency" : bScope === "corporate" ? "Corporate" : "All customers"}
+                          </p>
                         )}
                       </div>
-                    </td>
-                  </tr>
-                ) : filteredBatches.map(b => {
-                  // Outgoing: the batch's Deal Type chip is its SCOPE. Every outgoing
-                  // batch is deal_type='b2b', so the old chip labelled a Corporate
-                  // batch "B2B" and a Common one "B2B" too.
-                  const bScope  = batchScope.get(b.batch_id);
-                  const dtStyle = outbound && bScope
-                    ? (SCOPE_STYLE[bScope] ?? DEAL_TYPE_STYLE.b2b)
-                    : (DEAL_TYPE_STYLE[b.deal_type] ?? DEAL_TYPE_STYLE.airline);
-                  const bParty  = batchParty.get(b.batch_id) ?? b.supplier_name;
-                  const FileIcon = b.file_type === "pdf" ? FileText : FileSpreadsheet;
-                  return (
-                    <tr
-                      key={b.batch_id}
-                      onClick={() => router.push(`/deals/${b.batch_id}`)}
-                      className="hover:bg-blue-50/40 cursor-pointer transition-colors group"
-                    >
-                      {/* Supplier */}
-                      <td className="px-4 py-3 max-w-[160px]">
-                        <div className="flex items-center gap-2">
-                          <div className="w-7 h-7 rounded-lg bg-blue-50 flex items-center justify-center shrink-0">
-                            <Building2 className="w-3.5 h-3.5 text-blue-500" />
-                          </div>
-                          <div className="min-w-0">
-                            <p className="text-xs font-semibold text-gray-800 group-hover:text-[#1e3a5f] leading-tight truncate" title={bParty ?? undefined}>
-                              {bParty || "—"}
-                            </p>
-                            {/* Names the kind of counterparty, so "exl" reads as a
-                                corporate and "All Customers" as a common deal. */}
-                            {outbound && bScope && (
-                              <p className="text-[10px] text-gray-400 leading-tight truncate">
-                                {bScope === "agency" ? "Agency" : bScope === "corporate" ? "Corporate" : "All customers"}
-                              </p>
-                            )}
-                          </div>
-                        </div>
-                      </td>
+                    </div>
+                  </td>
 
-                      {/* Deal type */}
-                      <td className="px-3 py-3">
-                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase border whitespace-nowrap ${dtStyle.cls}`}>
-                          {dtStyle.label}
-                        </span>
-                      </td>
+                  {/* Deal type */}
+                  <td className="px-3 py-3">
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase border whitespace-nowrap ${dtStyle.cls}`}>
+                      {dtStyle.label}
+                    </span>
+                  </td>
 
-                      {/* Deal tag */}
-                      <td className="px-3 py-3">
-                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border whitespace-nowrap ${(b.deal_tag||"standard")==="adhoc"?"bg-amber-50 text-amber-700 border-amber-200":"bg-slate-50 text-slate-600 border-slate-200"}`}>
-                          {(b.deal_tag||"standard")==="adhoc"?"Adhoc":"Standard"}
-                        </span>
-                      </td>
+                  {/* Deal tag */}
+                  <td className="px-3 py-3">
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border whitespace-nowrap ${(b.deal_tag||"standard")==="adhoc"?"bg-amber-50 text-amber-700 border-amber-200":"bg-slate-50 text-slate-600 border-slate-200"}`}>
+                      {(b.deal_tag||"standard")==="adhoc"?"Adhoc":"Standard"}
+                    </span>
+                  </td>
 
-                      {/* Contract valid period */}
-                      <td className="px-3 py-3 whitespace-nowrap">
-                        <span className="text-xs font-medium text-gray-700">{formatDate(b.valid_from)}</span>
-                        <span className="text-gray-400 mx-1">→</span>
-                        <span className="text-xs font-medium text-gray-700">{formatDate(b.valid_to)}</span>
-                      </td>
+                  {/* Contract valid period */}
+                  <td className="px-3 py-3 whitespace-nowrap">
+                    <span className="text-xs font-medium text-gray-700">{formatDate(b.valid_from)}</span>
+                    <span className="text-gray-400 mx-1">→</span>
+                    <span className="text-xs font-medium text-gray-700">{formatDate(b.valid_to)}</span>
+                  </td>
 
-                      {/* Incentive types */}
-                      <td className="px-3 py-3">
-                        <div className="flex flex-wrap gap-0.5">
-                          {(b.incentive_types ?? []).length > 0
-                            ? b.incentive_types.map(t => (
-                                <span key={t} className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-blue-50 text-blue-700 border border-blue-200 whitespace-nowrap">{t}</span>
-                              ))
-                            : <span className="text-xs text-gray-400">—</span>
-                          }
-                        </div>
-                      </td>
+                  {/* Incentive types */}
+                  <td className="px-3 py-3">
+                    <div className="flex flex-wrap gap-0.5">
+                      {(b.incentive_types ?? []).length > 0
+                        ? b.incentive_types.map(t => (
+                            <span key={t} className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-blue-50 text-blue-700 border border-blue-200 whitespace-nowrap">{t}</span>
+                          ))
+                        : <span className="text-xs text-gray-400">—</span>
+                      }
+                    </div>
+                  </td>
 
-                      {/* File */}
-                      <td className="px-3 py-3">
-                        <div className="flex items-center gap-1.5">
-                          <FileIcon className="w-3.5 h-3.5 text-gray-400 shrink-0" />
-                          <span className="text-xs text-gray-500 truncate max-w-36 block" title={b.file_name ?? undefined}>
-                            {b.file_name || "—"}
-                          </span>
-                        </div>
-                      </td>
-
-                      {/* Total deal count */}
-                      <td className="px-3 py-3 text-center">
-                        <span className="inline-flex items-center justify-center w-9 h-7 rounded-full bg-[#1e3a5f]/10 text-[#1e3a5f] text-xs font-semibold">
-                          {b.deal_count}
-                        </span>
-                      </td>
-
-                      {/* Draft */}
-                      <td className="px-3 py-3 text-center text-xs font-semibold text-gray-400">
-                        {b.lifecycle_counts?.["draft"] ?? 0}
-                      </td>
-
-                      {/* Active */}
-                      <td className="px-3 py-3 text-center text-xs font-semibold text-emerald-600">
-                        {b.lifecycle_counts?.["active"] ?? 0}
-                      </td>
-
-                      {/* Closed */}
-                      <td className="px-3 py-3 text-center text-xs font-semibold text-slate-400">
-                        {b.lifecycle_counts?.["closed"] ?? 0}
-                      </td>
-
-                      {/* Uploaded by */}
-                      <td className="px-3 py-3 text-xs text-gray-600 font-medium max-w-[120px]">
-                        <span className="truncate block" title={b.created_by_name ?? undefined}>
-                          {b.created_by_name || "—"}
-                        </span>
-                      </td>
-
-                      {/* Date */}
-                      <td className="px-3 py-3 text-xs text-gray-500 whitespace-nowrap">
-                        {formatDate(b.created_at)}
-                      </td>
-
-                      {/* Delete + arrow. stopPropagation: the row itself opens the statement. */}
-                      <td className="px-2 py-3 text-right whitespace-nowrap">
-                        <button
-                          onClick={e => { e.stopPropagation(); setBatchToDelete(b); }}
-                          title="Delete this statement and all its deals"
-                          className="p-1.5 mr-1 rounded-lg text-red-400 hover:text-red-600 hover:bg-red-50 transition-colors">
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                        <ChevronRight className="w-4 h-4 text-gray-300 group-hover:text-[#1e3a5f] transition-colors inline" />
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-          )}
-
-          {batchToDelete && (
-            <ConfirmDialog
-              title="Delete statement"
-              confirmLabel={`Delete statement + ${batchToDelete.deal_count} deal${batchToDelete.deal_count === 1 ? "" : "s"}`}
-              onConfirm={async () => {
-                await api.delete(`/deals/batches/${encodeURIComponent(batchToDelete.batch_id)}`);
-                await fetchDeals();
-              }}
-              onClose={() => setBatchToDelete(null)}
-            >
-              <p>
-                Delete the statement from{" "}
-                <span className="font-semibold text-gray-900">{batchToDelete.supplier_name || "this source"}</span>
-                {batchToDelete.file_name && <span className="text-gray-400"> ({batchToDelete.file_name})</span>}?
-              </p>
-              <p>
-                All <span className="font-semibold text-gray-900">{batchToDelete.deal_count}</span> deal
-                {batchToDelete.deal_count === 1 ? "" : "s"} uploaded with it — including active ones — and
-                their approvals are deleted too, along with the uploaded file. This cannot be undone.
-              </p>
-              <p className="text-gray-400">
-                Commission already calculated against these deals keeps its amounts; it just stops pointing at a deal.
-              </p>
-            </ConfirmDialog>
-          )}
-
-          {/* ── All Deal: flat per-deal table ───────────────────────────────── */}
-          {repoView === "all" && (
-            <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-              <div className="px-5 py-3 border-b border-gray-100 bg-gray-50/40">
-                <p className="text-xs font-semibold text-gray-600 uppercase tracking-wider">
-                  {loading ? "Loading deals..." : `${filteredDeals.length} Deal${filteredDeals.length !== 1 ? "s" : ""}`}
-                </p>
-              </div>
-              {loading ? (
-                <div className="px-4 py-12 text-center text-xs text-gray-400">
-                  <RefreshCw className="w-4 h-4 animate-spin mx-auto mb-2 text-gray-300" /> Loading deals...
-                </div>
-              ) : apiError ? (
-                <p className="px-4 py-10 text-center text-xs text-red-400">{apiError}</p>
-              ) : (
-                <DealFlatTable
-                  deals={filteredDeals}
-                  onOpenHistory={openHistory}
-                  onEdit={(d) => router.push(`/deals/new?editId=${d.id}&direction=${direction}`)}
-                  onDelete={setDeleteTarget}
-                  onOpenIncentiveRules={openIncentiveRules}
-                />
-              )}
-            </div>
-          )}
-
-          {/* ── Airline Wise: deals grouped by airline ──────────────────────── */}
-          {repoView === "airline" && (
-            <div className="space-y-3">
-              {loading ? (
-                <div className="bg-white rounded-xl border border-gray-200 px-4 py-12 text-center text-xs text-gray-400">
-                  <RefreshCw className="w-4 h-4 animate-spin mx-auto mb-2 text-gray-300" /> Loading deals...
-                </div>
-              ) : apiError ? (
-                <div className="bg-white rounded-xl border border-gray-200 px-4 py-10 text-center text-xs text-red-400">{apiError}</div>
-              ) : dealsByAirline.length === 0 ? (
-                <div className="bg-white rounded-xl border border-gray-200 px-4 py-10 text-center text-xs text-gray-400">No deals match the filters.</div>
-              ) : (
-                dealsByAirline.map(([airline, airlineDeals]) => (
-                  <details key={airline} open className="bg-white rounded-xl border border-gray-200 overflow-hidden group">
-                    <summary className="px-5 py-3 border-b border-gray-100 bg-gray-50/40 flex items-center gap-2 cursor-pointer list-none">
-                      <Plane className="w-3.5 h-3.5 text-blue-500" />
-                      <p className="text-xs font-semibold text-gray-700">{airline}</p>
-                      <span className="ml-auto inline-flex items-center justify-center px-2 py-0.5 rounded-full bg-[#1e3a5f]/10 text-[#1e3a5f] text-[11px] font-semibold">
-                        {airlineDeals.length} deal{airlineDeals.length !== 1 ? "s" : ""}
+                  {/* File */}
+                  <td className="px-3 py-3">
+                    <div className="flex items-center gap-1.5">
+                      <FileIcon className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+                      <span className="text-xs text-gray-500 truncate max-w-36 block" title={b.file_name ?? undefined}>
+                        {b.file_name || "—"}
                       </span>
-                    </summary>
-                    <DealFlatTable
-                      deals={airlineDeals}
-                      showAirlineCol={false}
-                      onOpenHistory={openHistory}
-                      onEdit={(d) => router.push(`/deals/new?editId=${d.id}&direction=${direction}`)}
-                      onDelete={setDeleteTarget}
-                      onOpenIncentiveRules={openIncentiveRules}
-                    />
-                  </details>
-                ))
-              )}
+                    </div>
+                  </td>
+
+                  {/* Total deal count */}
+                  <td className="px-3 py-3 text-center">
+                    <span className="inline-flex items-center justify-center w-9 h-7 rounded-full bg-[#1e3a5f]/10 text-[#1e3a5f] text-xs font-semibold">
+                      {b.deal_count}
+                    </span>
+                  </td>
+
+                  {/* Draft */}
+                  <td className="px-3 py-3 text-center text-xs font-semibold text-gray-400">
+                    {b.lifecycle_counts?.["draft"] ?? 0}
+                  </td>
+
+                  {/* Active */}
+                  <td className="px-3 py-3 text-center text-xs font-semibold text-emerald-600">
+                    {b.lifecycle_counts?.["active"] ?? 0}
+                  </td>
+
+                  {/* Closed */}
+                  <td className="px-3 py-3 text-center text-xs font-semibold text-slate-400">
+                    {b.lifecycle_counts?.["closed"] ?? 0}
+                  </td>
+
+                  {/* Uploaded by */}
+                  <td className="px-3 py-3 text-xs text-gray-600 font-medium max-w-[120px]">
+                    <span className="truncate block" title={b.created_by_name ?? undefined}>
+                      {b.created_by_name || "—"}
+                    </span>
+                  </td>
+
+                  {/* Date */}
+                  <td className="px-3 py-3 text-xs text-gray-500 whitespace-nowrap">
+                    {formatDate(b.created_at)}
+                  </td>
+
+                  {/* Delete + arrow. stopPropagation: the row itself opens the statement. */}
+                  <td className="px-2 py-3 text-right whitespace-nowrap">
+                    <button
+                      onClick={e => { e.stopPropagation(); setBatchToDelete(b); }}
+                      title="Delete this statement and all its deals"
+                      className="p-1.5 mr-1 rounded-lg text-red-400 hover:text-red-600 hover:bg-red-50 transition-colors">
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                    <ChevronRight className="w-4 h-4 text-gray-300 group-hover:text-[#1e3a5f] transition-colors inline" />
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      )}
+
+      {batchToDelete && (
+        <ConfirmDialog
+          title="Delete statement"
+          confirmLabel={`Delete statement + ${batchToDelete.deal_count} deal${batchToDelete.deal_count === 1 ? "" : "s"}`}
+          onConfirm={async () => {
+            await api.delete(`/deals/batches/${encodeURIComponent(batchToDelete.batch_id)}`);
+            await fetchDeals();
+          }}
+          onClose={() => setBatchToDelete(null)}
+        >
+          <p>
+            Delete the statement from{" "}
+            <span className="font-semibold text-gray-900">{batchToDelete.supplier_name || "this source"}</span>
+            {batchToDelete.file_name && <span className="text-gray-400"> ({batchToDelete.file_name})</span>}?
+          </p>
+          <p>
+            All <span className="font-semibold text-gray-900">{batchToDelete.deal_count}</span> deal
+            {batchToDelete.deal_count === 1 ? "" : "s"} uploaded with it — including active ones — and
+            their approvals are deleted too, along with the uploaded file. This cannot be undone.
+          </p>
+          <p className="text-gray-400">
+            Commission already calculated against these deals keeps its amounts; it just stops pointing at a deal.
+          </p>
+        </ConfirmDialog>
+      )}
+
+      {/* ── All Deal: flat per-deal table ───────────────────────────────── */}
+      {repoView === "all" && (
+        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+          {loading ? (
+            <div className="px-4 py-12 text-center text-xs text-gray-400">
+              <RefreshCw className="w-4 h-4 animate-spin mx-auto mb-2 text-gray-300" /> Loading deals...
             </div>
+          ) : apiError ? (
+            <p className="px-4 py-10 text-center text-xs text-red-400">{apiError}</p>
+          ) : (
+            <DealFlatTable
+              deals={pagedDeals}
+              outbound={outbound}
+              onOpenHistory={openHistory}
+              onEdit={(d) => router.push(`/deals/new?editId=${d.id}&direction=${direction}`)}
+              onDelete={setDeleteTarget}
+              onOpenIncentiveRules={openIncentiveRules}
+            />
           )}
-        </>
+        </div>
       )}
 
       {/* ── Deal History Slide-over ──────────────────────────────────────── */}
@@ -1536,7 +1606,7 @@ export default function DealsPage() {
           initialIncType={incentiveRulesPopup.initialIncType}
           onSave={handleIncentiveRulesSave}
           onClose={() => setIncentiveRulesPopup(null)}
-          b2bStandard={(incentiveRulesPopup.deal.deal_no?.startsWith("B2B") ?? !!incentiveRulesPopup.deal.business_type) && (incentiveRulesPopup.deal.deal_tag ?? "standard") === "standard"}
+          b2bStandard={isB2bDeal(incentiveRulesPopup.deal) && (incentiveRulesPopup.deal.deal_tag ?? "standard") === "standard"}
           airlineName={incentiveRulesPopup.deal.airline_name ?? undefined}
         />
       )}

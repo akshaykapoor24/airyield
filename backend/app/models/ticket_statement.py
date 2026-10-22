@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from sqlalchemy import String, DateTime, Date, ForeignKey, Integer
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
 
@@ -45,3 +46,20 @@ class TicketStatement(Base):
     customer_agency_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("agencies.id", ondelete="SET NULL"), nullable=True)
     corporate_id:       Mapped[int | None] = mapped_column(Integer, ForeignKey("corporates.id", ondelete="SET NULL"), nullable=True)
     customer_id:        Mapped[int | None] = mapped_column(Integer, ForeignKey("customers.id", ondelete="SET NULL"), nullable=True)
+
+    # ── Duplicates left out (Internal Statement) ─────────────────────────────
+    # services/ticket_duplicates.py: an upload saves only the tickets not already loaded.
+    # `total_entries` — ticket lines in the file; `duplicate_entries` — of those, duplicates
+    # of a ticket already loaded, and so left out; `duplicate_of` —
+    # the statement most of them are already loaded in. NULL / 0 for statements made before,
+    # punched batches, and Customer data, which never checks.
+    total_entries:      Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duplicate_entries:  Mapped[int]        = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    duplicate_of:       Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    # ── The declared date format (Internal Statement) ────────────────────────
+    # The order the file's Ticket Date and Travel Date are written in, {field: "DMY" | "MDY"
+    # | "YMD"} (services/ticket_extraction.py DATE_FORMAT_FIELDS): how its dates were read,
+    # and what pre-fills the customer's next upload. NULL for Customer data, punched
+    # batches and statements made before it was asked for — read day-first.
+    date_formats:       Mapped[dict | None] = mapped_column(JSONB, nullable=True)

@@ -204,6 +204,8 @@ class MessageListItem(BaseModel):
     mailbox: str
     connection_id: int
     statements: list[DocTag] = []       # statement attachments, for the row badges
+    imported_items: int = 0             # items of this email imported so far (mail_messages.processed)
+    imported: bool = False              # everything recognised in it is imported — it sits under Imported
 
 
 class MailboxCount(BaseModel):
@@ -221,7 +223,10 @@ class MessageListOut(BaseModel):
     items: list[MessageListItem]
     total: int
     unread: int
-    statements: int                     # messages carrying at least one statement (current mailbox scope)
+    # Tab counts, within the current mailbox scope.
+    statements: int                     # messages carrying at least one statement
+    pending: int = 0                    # something in them is still to upload
+    imported: int = 0                   # fully imported — the Uploaded tab
     mailboxes: list[MailboxCount]
 
 

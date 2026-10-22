@@ -12,6 +12,7 @@ import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import { CUSTOMER_TYPE_BADGE, CUSTOMER_TYPE_LABEL } from "@/lib/customerType";
 import { MANUAL_ENTRY_FILE_NAME, type StatementType } from "@/lib/ticketFields";
 import { CUSTOMER_STATEMENT_BASE, STATEMENT_ENTRY_BASE } from "@/lib/statementSection";
+import { formatPeriod, formatUploadedAt, uploadedAtParts } from "@/lib/statementPeriod";
 
 export type TicketStatement = {
   batch_id:        string;
@@ -28,14 +29,16 @@ export type TicketStatement = {
   // tagging existed, and on any filed through Internal Statement, which asks
   // for a vendor rather than a customer.
   customer_type:   "agency" | "corporate" | "direct" | null;
+  customer_agency_id?: number | null;
+  corporate_id?:       number | null;
+  customer_id?:        number | null;
+  // Internal Statement's duplicate check: ticket lines in the file, the duplicates of tickets
+  // already loaded that were left out, and the statement most of them are in. Null / 0
+  // everywhere else — the list then shows the plain ticket count.
+  total_entries?:     number | null;
+  duplicate_entries?: number;
+  duplicate_of?:      string | null;
 };
-
-function formatDate(d: string) {
-  if (!d) return "—";
-  return new Date(d).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
-}
-
-const formatDateTime = formatDate;
 
 function TypeBadge({ type }: { type: StatementType }) {
   return type === "AIRLINE"
@@ -395,10 +398,8 @@ export default function StatementsView({
 
                   {/* Valid Period */}
                   <td className="px-4 py-2">
-                    <div className="text-xs text-gray-700">
-                      <span className="font-medium">{formatDate(stmt.valid_from)}</span>
-                      <span className="text-gray-400 mx-1.5">→</span>
-                      <span className="font-medium">{formatDate(stmt.valid_to)}</span>
+                    <div className="text-xs text-gray-700 font-medium whitespace-nowrap">
+                      {formatPeriod(stmt.valid_from, stmt.valid_to)}
                     </div>
                   </td>
 
@@ -420,6 +421,18 @@ export default function StatementsView({
                     <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-[#1e3a5f]/10 text-[#1e3a5f] text-xs font-semibold">
                       {stmt.ticket_count.toLocaleString()}
                     </span>
+                    {(stmt.duplicate_entries ?? 0) > 0 && (() => {
+                      const before = statements.find((o) => o.batch_id === stmt.duplicate_of);
+                      return (
+                        <span className="block mt-1 text-[10px] text-amber-700 whitespace-nowrap cursor-help"
+                          title={`${stmt.duplicate_entries} of the file's tickets were duplicates of tickets already loaded`
+                            + (before ? ` — most in ${before.statement_name || before.agency} (${before.file_name})` : "")
+                            + `, so only the ${stmt.ticket_count} new ones were saved here.`}>
+                          of {(stmt.total_entries ?? stmt.ticket_count).toLocaleString()} in file
+                          {" · "}{(stmt.duplicate_entries ?? 0).toLocaleString()} duplicate{stmt.duplicate_entries === 1 ? "" : "s"}
+                        </span>
+                      );
+                    })()}
                   </td>
 
                   {/* Uploaded By */}
@@ -428,8 +441,13 @@ export default function StatementsView({
                   </td>
 
                   {/* Created */}
-                  <td className="px-4 py-2 text-xs text-gray-500">
-                    {formatDateTime(stmt.created_at)}
+                  <td className="px-4 py-2 text-xs text-gray-500 whitespace-nowrap" title={formatUploadedAt(stmt.created_at)}>
+                    {(() => {
+                      const at = uploadedAtParts(stmt.created_at);
+                      return at
+                        ? <><span className="block">{at.date}</span><span className="block text-[10px] text-gray-400">{at.time}</span></>
+                        : "—";
+                    })()}
                   </td>
 
                   {/* Delete (where the caller allows it) + arrow */}
@@ -474,6 +492,19 @@ export default function StatementsView({
             <b>{deleteTarget.ticket_count}</b> ticket{deleteTarget.ticket_count !== 1 ? "s" : ""} loaded with it
             will be permanently deleted. This cannot be undone.
           </p>
+          {(() => {
+            // Uploads that left tickets out as duplicates of this one's: deleted, those are gone.
+            const later = statements.filter((o) => o.batch_id !== deleteTarget.batch_id
+              && (o.duplicate_entries ?? 0) > 0 && o.duplicate_of === deleteTarget.batch_id);
+            if (!later.length) return null;
+            return (
+              <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-amber-800">
+                {later.map((o) => `${o.statement_name || o.agency} (${o.file_name})`).join(", ")}{" "}
+                left out tickets already loaded in this statement as duplicates. After deleting it, upload{" "}
+                {later.length === 1 ? "that file" : "those files"} again to bring them back.
+              </p>
+            );
+          })()}
         </ConfirmDialog>
       )}
     </div>

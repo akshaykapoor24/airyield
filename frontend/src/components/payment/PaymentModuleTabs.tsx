@@ -30,6 +30,7 @@ function StatementTab({ type, checks }: { type: StatementType; checks: { api: st
       blurb={type.blurb ?? ""}
       requiresSupplier={type.requiresSupplier}
       supportsMapping={type.supportsMapping}
+      capturesPeriod={type.capturesPeriod}
       doneHint={type.doneHint}
       checks={checks}
       captureControls

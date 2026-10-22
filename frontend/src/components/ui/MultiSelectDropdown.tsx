@@ -5,7 +5,14 @@ import { createPortal } from "react-dom";
 import { ChevronDown, X } from "lucide-react";
 import { useAnchoredPanel } from "@/hooks/useAnchoredPanel";
 
-type Option<T extends string | number> = { value: T; label: string; sublabel?: string };
+type Option<T extends string | number> = {
+  value: T;
+  label: string;
+  sublabel?: string;
+  /** Short tag beside the label, in the list and on the selected chip — e.g. an
+   *  airline id's business type. Searchable like the label. */
+  badge?: string;
+};
 
 interface MultiSelectDropdownProps<T extends string | number> {
   options: Option<T>[];
@@ -56,7 +63,9 @@ export default function MultiSelectDropdown<T extends string | number>({
 
   const filtered = options.filter((o) => {
     const q = search.toLowerCase();
-    return o.label.toLowerCase().includes(q) || (o.sublabel ?? "").toLowerCase().includes(q);
+    return o.label.toLowerCase().includes(q)
+      || (o.sublabel ?? "").toLowerCase().includes(q)
+      || (o.badge ?? "").toLowerCase().includes(q);
   });
 
   // Ordered by selection, not by the option list, so the value round-trips in
@@ -86,6 +95,7 @@ export default function MultiSelectDropdown<T extends string | number>({
                 className="inline-flex items-center gap-1 bg-blue-50 text-blue-700 border border-blue-200 rounded px-1.5 py-0.5 text-xs font-medium"
               >
                 {o.label}
+                {o.badge && <span className="text-[10px] font-bold opacity-70">{o.badge}</span>}
                 <X
                   className="w-3 h-3 cursor-pointer hover:text-blue-900"
                   onClick={(e) => remove(o.value, e)}
@@ -134,7 +144,14 @@ export default function MultiSelectDropdown<T extends string | number>({
                       className="accent-blue-600 shrink-0"
                     />
                     <span className="flex flex-col min-w-0">
-                      <span className="font-medium text-gray-800 truncate">{o.label}</span>
+                      <span className="flex items-center gap-1.5 min-w-0">
+                        <span className="font-medium text-gray-800 truncate">{o.label}</span>
+                        {o.badge && (
+                          <span className="shrink-0 px-1 rounded border border-gray-200 bg-gray-100 text-[10px] font-bold text-gray-600">
+                            {o.badge}
+                          </span>
+                        )}
+                      </span>
                       {o.sublabel && <span className="text-xs text-gray-400 truncate">{o.sublabel}</span>}
                     </span>
                   </li>

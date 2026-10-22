@@ -17,6 +17,9 @@ export type TenantAirlineOpt = {
   id: number;
   airline_id: number;
   ref_id: string;
+  /** B2B / B2C / B2E / MICE, set in User Master → Airline Master. Null on ids
+   *  added before it was asked for. */
+  business_type: string | null;
   airline_name: string | null;
   airline_code: string | null;
 };
@@ -25,9 +28,15 @@ export type TenantAirlineOpt = {
 export const airlineLabel = (a: TenantAirlineOpt) =>
   `${a.airline_name ?? "Unknown airline"}${a.airline_code ? ` (${a.airline_code})` : ""}`;
 
-/** MultiSelectDropdown options: the id is what the user picks, the carrier is context. */
+/** MultiSelectDropdown options: the id is what the user picks, the carrier is context,
+ *  and the badge says which line of business the id is for. */
 export function toOptions(opts: TenantAirlineOpt[]) {
-  return opts.map(a => ({ value: a.id, label: a.ref_id, sublabel: airlineLabel(a) }));
+  return opts.map(a => ({
+    value: a.id,
+    label: a.ref_id,
+    sublabel: airlineLabel(a),
+    badge: a.business_type ?? "No type",
+  }));
 }
 
 /**

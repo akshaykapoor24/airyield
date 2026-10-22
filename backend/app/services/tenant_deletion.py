@@ -134,7 +134,8 @@ DELETION_GROUPS: tuple[DeletionGroup, ...] = (
         "TGQ HMPR, NDC, DI, Divided PNR, Flown Report, CTA/BTA, third-party GDS/LCC/API and Detailed.",
         GroupCategory.RECORDS,
         ("tgq_hmpr", "ndc", "lcc_di", "lcc_divided_pnr", "lcc_flown_report",
-         "lcc_cta_bta", "third_party_gds", "third_party_lcc", "third_party_api",
+         "lcc_cta_bta", "third_party_gds", "third_party_lcc",
+         "third_party_api", "third_party_statements",
          "lcc_detailed", "lcc_detailed_batch", "lcc_batch_airline_ids",
          "lcc_detailed_batch_file",
          "statement_batch_airline_ids", "statement_batch_suppliers",
@@ -142,10 +143,14 @@ DELETION_GROUPS: tuple[DeletionGroup, ...] = (
     ),
     DeletionGroup(
         "internal_statements", "Internal statements",
-        "The workspace's own ticket statements — Customer data's, and Internal Statement's own copy.",
+        "The workspace's own ticket statements — Customer data's, and Internal Statement's own "
+        "copy with the decisions taken reconciling it against a vendor's GDS statement.",
         # The internal_* pair (models/internal_ticket.py) has no FK between its two tables
-        # and nothing points into it, so it is safe beside its statement twin.
-        GroupCategory.RECORDS, ("ticket_statements", "internal_uploaded_tickets", "internal_ticket_statements"),
+        # and nothing points into it, so it is safe beside its statement twin. The
+        # resolutions are keyed by ticket text, not by row id, and say nothing once the
+        # internal statement they were about is gone.
+        GroupCategory.RECORDS, ("ticket_statements", "internal_uploaded_tickets", "internal_ticket_statements",
+                                "vendor_internal_resolutions"),
     ),
     DeletionGroup(
         "customer_statements", "Customer statements", "Statements issued to customers.",

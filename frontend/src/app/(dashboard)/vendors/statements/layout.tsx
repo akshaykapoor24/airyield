@@ -13,14 +13,11 @@ export default function StatementsLayout({ children }: { children: React.ReactNo
 
   return (
     <div className="w-full">
-      {/* Title */}
-      <div className="mb-4">
-        <h1 className="text-xl font-bold text-slate-900">Statements</h1>
-        <p className="text-xs text-slate-400 mt-0.5">Vendor statements — BSP, LCC and third-party sources.</p>
-      </div>
+      {/* Title — one short line, so the statement below starts high enough to fit the screen */}
+      <h1 className="mb-2 text-base font-semibold text-slate-900">Vendor statement</h1>
 
       {/* Category tabs */}
-      <div className="flex items-center gap-1 border-b border-slate-200 mb-3">
+      <div className="flex items-center gap-1 border-b border-slate-200 mb-2.5">
         {STATEMENT_NAV.map((cat) => {
           const active = cat.slug === activeCat;
           return (
@@ -28,7 +25,7 @@ export default function StatementsLayout({ children }: { children: React.ReactNo
               key={cat.slug}
               href={categoryFirstPath(cat.slug)}
               className={cn(
-                "px-4 py-2 text-sm font-semibold border-b-2 -mb-px transition-colors",
+                "px-4 py-1.5 text-sm font-semibold border-b-2 -mb-px transition-colors",
                 active
                   ? "border-blue-600 text-blue-700"
                   : "border-transparent text-slate-500 hover:text-slate-800"
@@ -41,7 +38,7 @@ export default function StatementsLayout({ children }: { children: React.ReactNo
       </div>
 
       {/* Type tabs (for the active category) */}
-      <div className="flex flex-wrap items-center gap-1.5 mb-5">
+      <div className="flex flex-wrap items-center gap-1.5 mb-3">
         {category.types.map((t) => {
           const active = t.slug === activeType;
           return (
@@ -49,7 +46,7 @@ export default function StatementsLayout({ children }: { children: React.ReactNo
               key={t.slug}
               href={`/vendors/statements/${category.slug}/${t.slug}`}
               className={cn(
-                "px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors",
+                "px-3 py-1 rounded-lg text-xs font-medium border transition-colors",
                 active
                   ? "bg-blue-600 border-blue-600 text-white"
                   : t.status === "coming-soon"

@@ -15,7 +15,7 @@ from unittest import mock
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.api.v1.mail_inbox import sniff  # noqa: E402
-from app.services.mail import cloud_readers, mime, registry, sync  # noqa: E402
+from app.services.mail import cloud_readers, mime, process, registry, sync  # noqa: E402
 from app.services.mail.sync import _match  # noqa: E402
 
 
@@ -303,6 +303,38 @@ class SniffTests(unittest.TestCase):
         self.assertEqual(sniff(b"\xff\xd8\xff\xe0..."), "image/jpeg")
         self.assertIsNone(sniff(b"<html><script>"))       # an "invoice.pdf" that is HTML stays a download
         self.assertIsNone(sniff(b"MZ\x90\x00"))           # an executable never previews
+
+
+class BodyScanTests(unittest.TestCase):
+    """The sync notes deals and statement tables in the body, so the inbox can list an email
+    under "Pending to upload" before anyone opens it."""
+
+    @staticmethod
+    def _msg(text: str, processed: dict | None = None):
+        return SimpleNamespace(body_text=text, body_html=None, subject="Deal update", provider_message_id="x",
+                               parties=[{"party_type": "agency"}], processed=processed)
+
+    def test_deal_written_in_the_body(self):
+        m = self._msg("Dear partner, our revised PLB deal is below.\n6E 3% on basic\nAI 5% on basic + YQ")
+        process.scan_body(m)
+        self.assertEqual(m.processed, {"body_items": 1})
+
+    def test_covering_note_holds_nothing(self):
+        m = self._msg("Dear Sir, kindly find attached the statement for last week.")
+        process.scan_body(m)
+        self.assertEqual(m.processed, {"body_items": 0})
+
+    def test_import_marks_are_kept(self):
+        marks = {"items": {"att:7": {"destination": "bsp", "ref": None, "at": "2026-10-08T10:00:00", "by": 1}}}
+        m = self._msg("PFA.", processed=marks)
+        process.scan_body(m)
+        self.assertEqual(m.processed["items"], marks["items"])
+
+    def test_a_failed_scan_never_fails_the_store(self):
+        m = self._msg("anything")
+        with mock.patch.object(process, "body_items", side_effect=ValueError("bad html")):
+            sync._scan_body(m)
+        self.assertEqual(m.processed, {"body_items": 0})
 
 
 if __name__ == "__main__":

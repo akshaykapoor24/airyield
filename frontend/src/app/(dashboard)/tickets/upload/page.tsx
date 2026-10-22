@@ -1,17 +1,34 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDropzone } from "react-dropzone";
 import {
   Upload, CheckCircle, AlertCircle, RefreshCw, ChevronLeft,
   FileSpreadsheet, X, Download, ArrowRight, ChevronDown, Trash2, Plus, Search,
-  FileText,
+  FileText, CopyX, CalendarDays,
 } from "lucide-react";
 import api from "@/lib/api";
 import { useStatementSectionBase } from "@/lib/statementSection";
 import StatementFormPanel, { isStatementComplete as statementComplete, type StatementType } from "@/components/tickets/StatementFormPanel";
-import CustomerPartyPanel from "@/components/statements/CustomerPartyPanel";
-import { EMPTY_TAG, buildTagPayload, isTagComplete, type CustomerTag } from "@/lib/customerType";
+import CustomerPartyPanel, { type FieldHint } from "@/components/statements/CustomerPartyPanel";
+import ConfirmDialog from "@/components/ui/ConfirmDialog";
+import {
+  CUSTOMER_TYPE_LABEL, EMPTY_TAG, buildTagPayload, isTagComplete, type CustomerTag, type CustomerType,
+} from "@/lib/customerType";
+import { formatDay, formatPeriod, formatUploadedAt } from "@/lib/statementPeriod";
+import {
+  type DateField, type DateFormats, type DateOrder, type DatesRead, type DetectedFormat,
+  DateFormatSection, DatesReadList, orderLabel, useDateFormats,
+} from "@/components/statements/dateFormat";
+
+/** Internal Statement's declared date columns — backend services/ticket_extraction.py
+ *  DATE_FORMAT_FIELDS. Doc Date follows the Ticket Date there. */
+const TICKET_DATE_FIELDS: DateField[] = [
+  { field: "ticket_date", header: "Ticket Date" },
+  { field: "departure_datetime", header: "Travel Date" },
+];
+const NO_DATE_FIELDS: DateField[] = [];
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}/;
 
 type AgencyOpt = { id: number; name: string; branch_name: string | null; branch_code: string; channels: string };
 
@@ -41,10 +58,186 @@ const TICKET_COL_GROUPS: TColGroup[] = reviewColGroups();
 
 const SKIP = "__skip__";
 
+// ── Internal Statement: what the attached file says about itself ─────────────────
+// Backend: api/v1/internal_tickets.py (/upload/guess) and services/statement_party.py.
+type GuessPeriod = { from: string; to: string; label: string; source: string };
+type PartyCandidate = { customer_type: CustomerType; id: number; name: string };
+type GuessResp = {
+  period: GuessPeriod | null;
+  /** The header line's period, only when it says something other than the file name. */
+  header_period: GuessPeriod | null;
+  party: {
+    status: "resolved" | "ambiguous" | "unresolved";
+    customer_type: CustomerType | null; id: number | null; name: string | null;
+    candidates: PartyCandidate[]; source: string | null;
+    narrowed_by: "previous upload" | "branch" | null; matched: string | null;
+  };
+};
+
+// ── Internal Statement: tickets already loaded ───────────────────────────────────
+// Backend: api/v1/internal_tickets.py (/upload/duplicates) and services/ticket_duplicates.py.
+// A row is a duplicate when its Booked Date, Ticket No, Pax Name, Amount and Travel Date match
+// a ticket already loaded — any uploaded statement or Create Ticket entry, of any period. Not
+// saved. The file is not checked against itself: a row it holds twice is saved twice.
+/** A statement some of the file's tickets are already loaded in. */
+type LoadedStatement = {
+  batch_id: string; statement_name: string | null; file_name: string | null;
+  period_label: string; uploaded_at: string | null;
+  /** This file's duplicates already loaded in it. */
+  matched: number;
+};
+type DuplicateLine = {
+  doc_no: string | null; ticket_number: string | null; pax_name: string | null;
+  booked_date: string | null; travel_date: string | null; total_amt: number | string | null;
+  index: number;
+  /** The statement it is already loaded in. */
+  batch_id: string;
+};
+type DuplicateReport = {
+  total: number; duplicates: number; duplicates_amount: string; new: number;
+  statements: LoadedStatement[];
+  lines: DuplicateLine[];                              // the first 200
+};
+type DuplicateCheck = DuplicateReport & {
+  rows: { index: number; batch_id: string }[];   // every one, for the grid
+  can_save: boolean;
+  reason: string | null;
+};
+
+function apiDetail(e: unknown): string | null {
+  const m = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+  return typeof m === "string" ? m : null;
+}
+
+const fmtMoney = (v: number | string | null | undefined) =>
+  v == null || v === "" ? "—" : Number(v).toLocaleString("en-IN", { maximumFractionDigits: 2 });
+
+/** Where a duplicate's ticket is already loaded. */
+function duplicateOf(d: { batch_id: string }, statements: LoadedStatement[]): string {
+  const s = statements.find(x => x.batch_id === d.batch_id);
+  if (!s) return "An earlier statement";
+  return `${s.statement_name ?? s.file_name ?? "A statement"} · ${s.period_label} · uploaded ${formatUploadedAt(s.uploaded_at)}`;
+}
+
+/** The duplicates of a file, and where each ticket already is. */
+function DuplicateTickets({ check }: { check: DuplicateCheck }) {
+  return (
+    <div className="mt-2 max-h-56 overflow-auto border border-gray-200 rounded-lg bg-white">
+      <table className="w-full text-[11px] text-left">
+        <thead className="bg-gray-50 text-gray-500 sticky top-0">
+          <tr>
+            <th className="px-2 py-1 font-medium">Row</th>
+            <th className="px-2 py-1 font-medium">Ticket No</th>
+            <th className="px-2 py-1 font-medium">Pax Name</th>
+            <th className="px-2 py-1 font-medium">Booked Date</th>
+            <th className="px-2 py-1 font-medium">Travel Date</th>
+            <th className="px-2 py-1 font-medium text-right">Amount</th>
+            <th className="px-2 py-1 font-medium">Already in</th>
+          </tr>
+        </thead>
+        <tbody>
+          {check.lines.map((d, i) => (
+            <tr key={i} className="border-t border-gray-100 text-gray-700">
+              <td className="px-2 py-1 text-gray-400 tabular-nums">{d.index + 1}</td>
+              <td className="px-2 py-1 font-mono">{d.ticket_number ?? "—"}</td>
+              <td className="px-2 py-1">{d.pax_name ?? "—"}</td>
+              <td className="px-2 py-1 whitespace-nowrap">{formatDay(d.booked_date)}</td>
+              <td className="px-2 py-1 whitespace-nowrap">{formatDay(d.travel_date)}</td>
+              <td className="px-2 py-1 text-right tabular-nums">{fmtMoney(d.total_amt)}</td>
+              <td className="px-2 py-1 text-gray-500">{duplicateOf(d, check.statements)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/** The preview's answer to "are any of these tickets already loaded?" — said here, before
+ *  Save, not as an error after it. Duplicates are left out; the rest are saved. */
+function DuplicateBox({ check, busy, error, onlyShown, onToggleOnly }: {
+  check: DuplicateCheck | null; busy: boolean; error: string | null;
+  onlyShown: boolean; onToggleOnly: () => void;
+}) {
+  const [show, setShow] = useState(false);
+  if (error) {
+    return (
+      <div className="flex items-start gap-2 px-4 py-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-800">
+        <AlertCircle className="w-4 h-4 shrink-0 mt-px" /><span>{error}</span>
+      </div>
+    );
+  }
+  if (!check) {
+    return busy ? (
+      <div className="flex items-center gap-2 px-4 py-3 bg-white border border-gray-200 rounded-xl text-xs text-gray-500">
+        <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Checking these tickets for duplicates…
+      </div>
+    ) : null;
+  }
+  if (check.duplicates === 0) {
+    return (
+      <div className="flex items-center gap-2 px-4 py-3 bg-green-50 border border-green-200 rounded-xl text-xs text-green-800">
+        <CheckCircle className="w-4 h-4 shrink-0 text-green-600" />
+        No duplicates — none of these {check.total.toLocaleString("en-IN")} tickets is loaded yet, so all of them
+        will be saved.
+        {busy && <RefreshCw className="w-3.5 h-3.5 animate-spin text-green-500" />}
+      </div>
+    );
+  }
+  const blocked = !check.can_save;
+  const n = check.duplicates;
+  return (
+    <div className={`px-4 py-3 border rounded-xl text-xs ${blocked ? "bg-red-50 border-red-200" : "bg-amber-50 border-amber-200"}`}>
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-gray-600">
+        <span className="flex items-center gap-1.5 font-semibold text-gray-800">
+          <CopyX className={`w-4 h-4 ${blocked ? "text-red-500" : "text-amber-600"}`} /> Duplicate tickets
+        </span>
+        <span>Tickets in this file <strong className="text-sm text-gray-800">{check.total.toLocaleString("en-IN")}</strong></span>
+        <span>Duplicates <strong className="text-sm text-amber-700">{n.toLocaleString("en-IN")}</strong></span>
+        <span>New <strong className={`text-sm ${check.new ? "text-green-700" : "text-red-700"}`}>{check.new.toLocaleString("en-IN")}</strong></span>
+        {busy && <RefreshCw className="w-3.5 h-3.5 animate-spin text-gray-400" />}
+      </div>
+      <p className={`mt-1.5 ${blocked ? "text-red-700" : "text-gray-700"}`}>
+        {blocked ? (
+          <><strong>This statement will not be saved.</strong> {check.reason}</>
+        ) : (
+          <>The {n.toLocaleString("en-IN")} duplicate{n === 1 ? " is" : "s are"} ignored (marked below) — the{" "}
+            {check.new.toLocaleString("en-IN")} new ticket{check.new === 1 ? "" : "s"} will be saved.</>
+        )}{" "}
+        A ticket is a duplicate when its Booked Date, Ticket No, Pax Name, Amount and Travel Date match a ticket
+        already loaded — from any statement you uploaded or any ticket you created.
+        <span className="block mt-1.5 space-x-3">
+          <button onClick={() => setShow(v => !v)} className="text-blue-600 hover:underline font-medium">
+            {show ? "Hide" : "Show"} the duplicates
+          </button>
+          <button onClick={onToggleOnly} className="text-blue-600 hover:underline font-medium">
+            {onlyShown ? "Show every row in the grid" : "Show only the duplicates in the grid"}
+          </button>
+        </span>
+      </p>
+      {check.statements.length > 0 && (
+        <ul className="mt-1.5 space-y-0.5 text-gray-500">
+          {check.statements.map(s => (
+            <li key={s.batch_id}>
+              <strong className="text-gray-700">{s.matched.toLocaleString("en-IN")}</strong> already loaded in{" "}
+              <strong className="text-gray-700">{s.statement_name ?? "a statement"}</strong> ({s.period_label}
+              {s.file_name ? ` · ${s.file_name}` : ""} · uploaded {formatUploadedAt(s.uploaded_at)})
+            </li>
+          ))}
+        </ul>
+      )}
+      {show && <DuplicateTickets check={check} />}
+      {show && check.lines.length < n && (
+        <p className="text-[11px] text-gray-500 mt-1">Showing the first {check.lines.length}.</p>
+      )}
+    </div>
+  );
+}
+
 // ── Editable review table ──────────────────────────────────────────────────
 function TicketReviewTable({
   rows, colGroups, onChange, onDelete, onAdd,
-  filterText, selectedRows, onToggleRow, onToggleAllFiltered,
+  filterText, selectedRows, onToggleRow, onToggleAllFiltered, duplicateIn, onlyRows,
 }:{
   rows: TicketRow[];
   colGroups: TColGroup[];
@@ -55,11 +248,16 @@ function TicketReviewTable({
   selectedRows: Set<number>;
   onToggleRow: (idx: number) => void;
   onToggleAllFiltered: (filteredIndices: number[], allSelected: boolean) => void;
+  /** Internal Statement: duplicate rows → where the ticket already is. Greyed, not saved. */
+  duplicateIn?: Map<number, string>;
+  /** Only these rows ("Show only the duplicates in the grid"); every row when null. */
+  onlyRows?: Set<number> | null;
 }) {
   const allCols = colGroups.flatMap(g => g.cols);
   const inp = "w-full bg-transparent text-[11px] text-gray-800 focus:outline-none focus:bg-blue-50 rounded px-1 py-0.5 min-w-[72px]";
 
   const filteredIndices: number[] = rows.reduce<number[]>((acc, row, i) => {
+    if (onlyRows && !onlyRows.has(i)) return acc;
     if (!filterText) { acc.push(i); return acc; }
     const haystack = Object.values(row).filter(v => v != null).join(" ").toLowerCase();
     if (haystack.includes(filterText.toLowerCase())) acc.push(i);
@@ -109,14 +307,18 @@ function TicketReviewTable({
           ):filteredIndices.map(idx=>{
             const row=rows[idx];
             const isSelected=selectedRows.has(idx);
+            const duplicate=duplicateIn?.get(idx);
             return(
-              <tr key={idx} className={`border-b border-gray-100 group ${isSelected?"bg-blue-50":"hover:bg-blue-50/20"}`}>
+              <tr key={idx} title={duplicate?`Duplicate — already in ${duplicate}. Not saved.`:undefined}
+                className={`border-b border-gray-100 group ${isSelected?"bg-blue-50":duplicate?"bg-gray-50 text-gray-400 opacity-60":"hover:bg-blue-50/20"}`}>
                 <td className={`px-2 py-1.5 sticky left-0 ${isSelected?"bg-blue-50":"bg-white group-hover:bg-blue-50/20"}`}>
                   <input type="checkbox" checked={isSelected} onChange={()=>onToggleRow(idx)} className="accent-blue-500 cursor-pointer"/>
                 </td>
                 <td className={`px-2 py-1.5 text-[10px] text-gray-400 sticky left-9 ${isSelected?"bg-blue-50":"bg-white group-hover:bg-blue-50/20"}`}>{idx+1}</td>
                 <td className="px-2 py-1.5 border-l border-gray-100 whitespace-nowrap">
-                  {row.split_type === "split"
+                  {duplicate ? (
+                    <span className="inline-flex px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100 text-amber-700 border border-amber-200">Duplicate</span>
+                  ) : row.split_type === "split"
                     ? <span className="inline-flex px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-50 text-amber-600 border border-amber-200">Split</span>
                     : <span className="inline-flex px-2 py-0.5 rounded-full text-[10px] font-semibold bg-gray-100 text-gray-500">Normal</span>}
                 </td>
@@ -167,12 +369,27 @@ function TicketReviewTable({
  * One flow rather than two copies, so the wizard, the column mapping and the
  * review grid can never drift apart between the two entry points.
  */
-export default function UploadTicketsPage({ mode = "internal", apiBase = "/tickets", listHref }: {
+export default function UploadTicketsPage({
+  mode = "internal", apiBase = "/tickets", listHref, duplicateCheck = false, fillFromFile = false,
+  askDateFormats = false,
+}: {
   mode?: "internal" | "customer";
   /** "/internal-tickets" on Internal Statement — its own tables. */
   apiBase?: string;
   /** Where "view statements" goes after a save; the section's list by default. */
   listHref?: string;
+  /** Internal Statement: the preview shows which rows are duplicates of a ticket already
+   *  loaded (any period, any time) or of a row above them — only the rest are saved
+   *  (`${apiBase}/upload/duplicates`; backend services/ticket_duplicates.py). */
+  duplicateCheck?: boolean;
+  /** Internal Statement: an attached file fills the statement details in — the customer, the
+   *  period and the name, from its name and header lines — and the upload step waits for
+   *  Next, so they are checked before the columns are mapped. */
+  fillFromFile?: boolean;
+  /** Internal Statement: ask how the sheet writes its Ticket Date and Travel Date — filled in
+   *  from the file, else the customer's last statement — and read every date that way
+   *  (components/statements/dateFormat.tsx; backend services/ticket_extraction.py). */
+  askDateFormats?: boolean;
 } = {}) {
   const isCustomer = mode === "customer";
   const sectionBase = useStatementSectionBase();
@@ -189,6 +406,8 @@ export default function UploadTicketsPage({ mode = "internal", apiBase = "/ticke
   const [error,          setError]          = useState<string | null>(null);
   const [batchId,        setBatchId]        = useState<string | null>(null);
   const [rows,           setRows]           = useState<TicketRow[]>([]);
+  // The grid was changed by hand since the file was last read — re-reading it would drop that.
+  const [rowsEdited,     setRowsEdited]     = useState(false);
   const downloadLinkRef  = useRef<HTMLAnchorElement>(null);
 
   // ── Statement form state ───────────────────────────────────────────────────
@@ -227,23 +446,81 @@ export default function UploadTicketsPage({ mode = "internal", apiBase = "/ticke
   const [validTo,     setValidTo]     = useState("");
   const [formTouched, setFormTouched] = useState(false);
 
+  // ── The declared date format (Internal Statement — `askDateFormats`) ──────
+  // What the user chose, else what the file shows (`/upload/detect-date-formats`), else this
+  // customer's last statement — `useDateFormats`. The rows are read in it at the extract that
+  // applies the mapping, so changing it on the preview reads the file again.
+  const dateFields = askDateFormats ? TICKET_DATE_FIELDS : NO_DATE_FIELDS;
+  const [detected, setDetected] = useState<{ file: File; byField: Record<string, DetectedFormat> } | null>(null);
+  const [detecting, setDetecting] = useState(false);
+  const detectSeq = useRef(0);
+  const partyKey = JSON.stringify(buildTagPayload(tag));
+  const [lastFormats, setLastFormats] = useState<{ key: string; formats: Partial<DateFormats> } | null>(null);
+  const dates = useDateFormats(
+    dateFields,
+    detected && detected.file === storedFile ? detected.byField : null,
+    lastFormats && lastFormats.key === partyKey ? lastFormats.formats : null,
+    detecting,
+    { lastUpload: "This customer's last statement", who: "this customer's system" },
+  );
+
   // Customer mode is gated on the customer tag; internal mode on the vendor agency.
-  const isStatementComplete = isCustomer
+  const isStatementComplete = (isCustomer
     ? (isTagComplete(tag) && validFrom !== "" && validTo !== "" && validTo >= validFrom)
-    : statementComplete(agency, validFrom, validTo);
+    : statementComplete(agency, validFrom, validTo)) && dates.complete;
+
+  // ── Internal Statement: duplicates (`duplicateCheck`) ──────────────────────
+  const [dupCheck,      setDupCheck]      = useState<DuplicateCheck | null>(null);
+  const [dupBusy,       setDupBusy]       = useState(false);
+  const [dupError,      setDupError]      = useState<string | null>(null);
+  const dupSeq = useRef(0);
+  const [savedReport,   setSavedReport]   = useState<{ created: number; duplicates: DuplicateReport | null } | null>(null);
+
+  // ── Internal Statement: details filled in from the file (`fillFromFile`) ────
+  // `…Guessed`: the value came from the file, so the next file's reading may replace it —
+  // what the user picked or typed is never replaced. `nameAuto`: the statement name
+  // follows the customer and the period until the user types one of their own.
+  const [tagGuessed,    setTagGuessed]    = useState(false);
+  const [periodGuessed, setPeriodGuessed] = useState(false);
+  const [nameAuto,      setNameAuto]      = useState(true);
+  const [partyHint,     setPartyHint]     = useState<FieldHint | null>(null);
+  const [periodHint,    setPeriodHint]    = useState<FieldHint | null>(null);
+
+  // The panel's own edits — the user's answer, so nothing read off a file replaces it.
+  const pickTag = (t: CustomerTag) => {
+    setTag(t);
+    setTagGuessed(false);
+    setPartyHint(h => (h?.candidates?.some(c => c.customer_type === t.customerType) ? h : null));
+  };
+  const typeFrom = (v: string) => { setValidFrom(v); setPeriodGuessed(false); setPeriodHint(null); };
+  const typeTo = (v: string) => { setValidTo(v); setPeriodGuessed(false); setPeriodHint(null); };
+  const typeName = (v: string) => { setStatementName(v); setNameAuto(v.trim() === ""); };
+
+  // "B2B - Globe Air Travels - 2026-08-01" — the name the server would give a blank one,
+  // shown filled in so the user sees it before saving.
+  useEffect(() => {
+    if (!fillFromFile || !nameAuto) return;
+    const t = tag.customerType;
+    setStatementName(t && tag.partyName && validFrom ? `${CUSTOMER_TYPE_LABEL[t]} - ${tag.partyName} - ${validFrom}` : "");
+  }, [fillFromFile, nameAuto, tag.customerType, tag.partyName, validFrom]);
 
   // ── Editable row handlers ─────────────────────────────────────────────────
   const handleTicketRowChange = useCallback((idx: number, key: string, val: string) => {
+    setRowsEdited(true);
     setRows(prev => prev.map((r, i) => {
       if (i !== idx) return r;
       const col = TICKET_COL_GROUPS.flatMap(g => g.cols).find(c => c.key === key);
       return { ...r, [key]: col?.type === "number" ? (val === "" ? null : parseFloat(val)) : (val || null) };
     }));
   }, []);
-  const handleDeleteTicketRow = useCallback((idx: number) =>
-    setRows(prev => prev.filter((_, i) => i !== idx)), []);
-  const handleAddTicketRow = () =>
+  const handleDeleteTicketRow = useCallback((idx: number) => {
+    setRowsEdited(true);
+    setRows(prev => prev.filter((_, i) => i !== idx));
+  }, []);
+  const handleAddTicketRow = () => {
+    setRowsEdited(true);
     setRows(prev => [...prev, { row_order: prev.length } as TicketRow]);
+  };
 
   // ── Filter + bulk edit state & handlers ───────────────────────────────────
   const [filterText,   setFilterText]   = useState("");
@@ -260,6 +537,7 @@ export default function UploadTicketsPage({ mode = "internal", apiBase = "/ticke
   const handleBulkApply = () => {
     if (!bulkColKey || bulkColValue === "") return;
     const col = TICKET_COL_GROUPS.flatMap(g => g.cols).find(c => c.key === bulkColKey);
+    setRowsEdited(true);
     setRows(prev => prev.map((r, i) => {
       if (!selectedRows.has(i)) return r;
       return { ...r, [bulkColKey]: col?.type === "number" ? (bulkColValue === "" ? null : parseFloat(bulkColValue)) : (bulkColValue || null) };
@@ -297,7 +575,12 @@ export default function UploadTicketsPage({ mode = "internal", apiBase = "/ticke
 
   const runExtract = useCallback(async (
     file: File,
-    opts: { mapping?: Record<string, string>; sheet?: string | null; headerRow?: number | null } = {},
+    opts: {
+      mapping?: Record<string, string>; sheet?: string | null; headerRow?: number | null;
+      // Internal Statement: how the dates are written, and the period that settles the
+      // Excel-stored ones — the read that makes the rows.
+      dateFormats?: DateFormats; period?: { from: string; to: string };
+    } = {},
   ) => {
     const form = new FormData();
     form.append("file", file);
@@ -307,11 +590,131 @@ export default function UploadTicketsPage({ mode = "internal", apiBase = "/ticke
     if (opts.headerRow !== null && opts.headerRow !== undefined) {
       form.append("header_row", String(opts.headerRow));
     }
+    if (opts.dateFormats) form.append("date_formats", JSON.stringify(opts.dateFormats));
+    if (opts.period) {
+      form.append("valid_from", opts.period.from);
+      form.append("valid_to", opts.period.to);
+    }
     const { data } = await api.post<ExtractionPreview>(`${apiBase}/upload/extract`, form);
     return data;
-  }, [statementType]);
+  }, [statementType, apiBase]);
 
-  const onDrop = useCallback(async (files: File[]) => {
+  // What the file shows about how it writes its dates — asked once it has been read, and again
+  // when the period changes: the period settles a date that reads both ways round.
+  const hasPreview = preview != null;
+  const detectPeriod = validFrom && validTo && validTo >= validFrom ? `${validFrom}|${validTo}` : "";
+  useEffect(() => {
+    if (!askDateFormats || !storedFile || !hasPreview) return;
+    const seq = ++detectSeq.current;
+    const timer = setTimeout(async () => {
+      setDetecting(true);
+      try {
+        const fd = new FormData();
+        fd.append("file", storedFile);
+        if (sheet) fd.append("sheet_name", sheet);
+        if (headerRow != null) fd.append("header_row", String(headerRow));
+        if (detectPeriod) {
+          const [from, to] = detectPeriod.split("|");
+          fd.append("valid_from", from);
+          fd.append("valid_to", to);
+        }
+        const { data } = await api.post<{ fields: DetectedFormat[] }>(`${apiBase}/upload/detect-date-formats`, fd);
+        if (seq !== detectSeq.current) return;
+        setDetected({ file: storedFile, byField: Object.fromEntries(data.fields.map(d => [d.field, d])) });
+      } catch {
+        if (seq === detectSeq.current) setDetected({ file: storedFile, byField: {} });   // the user chooses
+      } finally {
+        if (seq === detectSeq.current) setDetecting(false);
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [askDateFormats, storedFile, hasPreview, sheet, headerRow, detectPeriod, apiBase]);
+
+  // How this customer's last statement was read — a customer system writes dates the same way.
+  useEffect(() => {
+    if (!askDateFormats) return;
+    const params = Object.fromEntries(
+      Object.entries(JSON.parse(partyKey) as Record<string, unknown>).filter(([, v]) => v != null && v !== ""));
+    if (!params.customer_agency_id && !params.corporate_id && !params.customer_id) return;
+    let live = true;
+    api.get<{ date_formats: Partial<DateFormats> | null }>(`${apiBase}/upload/last-date-formats`, { params })
+      .then(({ data }) => { if (live) setLastFormats({ key: partyKey, formats: data.date_formats ?? {} }); })
+      .catch(() => { /* the file, or the user, decides */ });
+    return () => { live = false; };
+  }, [askDateFormats, partyKey, apiBase]);
+
+  /** Internal Statement: fill in what the file says about itself — the days it covers (its
+   *  name, else its header line) and who it is for (a name in it matched against the user's
+   *  agencies and corporates). Dates typed and a customer picked by the user are theirs. */
+  const applyGuess = async (fileName: string, data: ExtractionPreview) => {
+    let g: GuessResp | null = null;
+    try {
+      g = (await api.post<GuessResp>(`${apiBase}/upload/guess`, { file_name: fileName, preamble: data.preamble ?? [] })).data;
+    } catch { /* nothing filled in — the user enters the details */ }
+
+    const period = g?.period ?? null;
+    const typedDates = !periodGuessed && !!(validFrom || validTo);
+    if (!typedDates) {
+      setValidFrom(period?.from ?? "");
+      setValidTo(period?.to ?? "");
+      setPeriodGuessed(!!period);
+      setPeriodHint(period
+        ? { tone: "ok", text: `${period.label} — read from the ${period.source}. Check it.`
+            + (g?.header_period ? ` The statement header says ${g.header_period.label}.` : "") }
+        : { tone: "ask", text: "The file doesn't say which days it covers — enter the period." });
+    } else if (period && (period.from !== validFrom || period.to !== validTo)) {
+      setPeriodHint({ tone: "ask", text: `The ${period.source} says ${period.label}.` });
+    }
+
+    const p = g?.party;
+    const pickedByUser = !tagGuessed && (tag.agencyId != null || tag.corporateId != null || tag.customerId != null);
+    if (!p || pickedByUser) {
+      if (p?.status === "resolved" && p.name && p.id != null && p.customer_type
+          && !(p.customer_type === tag.customerType && (p.id === tag.agencyId || p.id === tag.corporateId))) {
+        setPartyHint({ tone: "ask", text: `The ${p.source} names ${p.name}.`,
+          candidates: [{ customer_type: p.customer_type, id: p.id, name: p.name }] });
+      }
+      return;
+    }
+    const typeChosen = !tagGuessed && tag.customerType != null;
+    const why = p.narrowed_by === "previous upload" ? " — the branch you filed it under last time"
+      : p.narrowed_by === "branch" ? " — the branch the file names" : "";
+    if (p.status === "resolved" && p.id != null && p.customer_type && (!typeChosen || tag.customerType === p.customer_type)) {
+      setTag({
+        customerType: p.customer_type,
+        agencyId: p.customer_type === "agency" ? p.id : null,
+        corporateId: p.customer_type === "corporate" ? p.id : null,
+        customerId: null,
+        partyName: p.name ?? "",
+      });
+      setTagGuessed(true);
+      setPartyHint({
+        tone: "ok",
+        text: `Identified from the ${p.source}${p.matched ? ` (“${p.matched}”)` : ""}${why}. Change it if it is wrong.`,
+        candidates: p.candidates.length > 1 ? p.candidates : undefined,
+      });
+    } else if (p.status !== "unresolved") {
+      if (p.customer_type && !typeChosen) {
+        setTag({ ...EMPTY_TAG, customerType: p.customer_type });
+        setTagGuessed(true);
+      }
+      const candidates = p.candidates.length ? p.candidates
+        : p.id != null && p.customer_type ? [{ customer_type: p.customer_type, id: p.id, name: p.name ?? "" }] : [];
+      setPartyHint({
+        tone: "ask",
+        text: p.status === "ambiguous"
+          ? `The ${p.source} could be ${candidates.length} of your customers${p.matched ? ` (“${p.matched}”)` : ""} — pick the right one:`
+          : `The ${p.source} names ${p.name}:`,
+        candidates,
+      });
+    } else {
+      if (tagGuessed) { setTag(EMPTY_TAG); setTagGuessed(false); }
+      setPartyHint(null);
+    }
+  };
+
+  // A plain function, not useCallback: it reads the details as they stand on each drop.
+  const onDrop = async (files: File[]) => {
     if (!files[0]) return;
     setError(null);
     setParsing(true);
@@ -322,12 +725,18 @@ export default function UploadTicketsPage({ mode = "internal", apiBase = "/ticke
       setMapping(data.suggested_mapping ?? {});
       setSheet(data.sheet_name ?? null);
       setHeaderRow(data.header_row ?? 0);
-      // The statement's own period line, e.g. "For The Period 8 August 2026 To
-      // 15 August 2026". Only ever fills a blank — a date the user already typed
-      // is their answer, not ours.
-      if (data.detected_from && !validFrom) setValidFrom(data.detected_from);
-      if (data.detected_to && !validTo) setValidTo(data.detected_to);
-      setStep("mapping");
+      if (fillFromFile) {
+        // Stay on this step: the details the file gave are filled in for the user to check,
+        // with the date format, and Next goes on to the mapping.
+        await applyGuess(files[0].name, data);
+      } else {
+        // The statement's own period line, e.g. "For The Period 8 August 2026 To
+        // 15 August 2026". Only ever fills a blank — a date the user already typed
+        // is their answer, not ours.
+        if (data.detected_from && !validFrom) setValidFrom(data.detected_from);
+        if (data.detected_to && !validTo) setValidTo(data.detected_to);
+        setStep("mapping");
+      }
     } catch (e: unknown) {
       const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
       setError(msg ?? "Failed to parse file. Please check the format.");
@@ -335,7 +744,23 @@ export default function UploadTicketsPage({ mode = "internal", apiBase = "/ticke
     } finally {
       setParsing(false);
     }
-  }, [runExtract, validFrom, validTo]);
+  };
+
+  /** Back to the drop zone with the details kept — what this file filled in may be
+   *  replaced by the next one; what the user entered stays. */
+  const changeFile = () => {
+    setPreview(null); setStoredFile(null); setMapping({}); setSheet(null); setHeaderRow(null);
+    setDupCheck(null); setRows([]);
+  };
+
+  /** "Next: map columns" (`fillFromFile`): once the details — the date format included — are
+   *  complete. The panel and the date format box say what is missing. */
+  const startNext = () => {
+    setFormTouched(true);
+    if (!isStatementComplete) return;
+    setError(null);
+    setStep("mapping");
+  };
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
@@ -364,15 +789,24 @@ export default function UploadTicketsPage({ mode = "internal", apiBase = "/ticke
   });
 
   // ── Step 2: apply user mapping → re-extract ──────────────────────────────
-  const applyMapping = async () => {
+  // `formats` — a date format just changed on the preview, before the state holding it has.
+  const applyMapping = async (formats?: DateFormats) => {
     if (!storedFile || !preview) return;
     setApplyingMap(true);
     setError(null);
     try {
-      const data = await runExtract(storedFile, { mapping, sheet, headerRow });
+      const data = await runExtract(storedFile, {
+        mapping, sheet, headerRow,
+        ...(askDateFormats ? {
+          dateFormats: formats ?? dates.formats,
+          period: validFrom && validTo ? { from: validFrom, to: validTo } : undefined,
+        } : {}),
+      });
       setPreview(data);
       setRows(data.rows);
+      setRowsEdited(false);
       resetFilter();
+      setOnlyDuplicates(false);
       setStep("preview");
     } catch (e: unknown) {
       const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
@@ -408,9 +842,94 @@ export default function UploadTicketsPage({ mode = "internal", apiBase = "/ticke
     }
   };
 
+  // Asked again after every edit, add and delete — a corrected ticket number, passenger, date
+  // or amount can turn a duplicate into a new ticket, and row positions move. Who the tickets
+  // were sold to and the period do not enter into it, so it is asked as soon as there are rows.
+  useEffect(() => {
+    if (!duplicateCheck || step !== "preview" || rows.length === 0) return;
+    const seq = ++dupSeq.current;
+    setDupBusy(true);
+    const timer = setTimeout(async () => {
+      try {
+        const { data } = await api.post<DuplicateCheck>(`${apiBase}/upload/duplicates`, {
+          // The source cells are not compared, so they are not sent (undefined drops out of JSON).
+          rows: rows.map(r => ({ ...r, raw_data: undefined })),
+        });
+        if (seq !== dupSeq.current) return;
+        setDupCheck(data);
+        setDupError(null);
+      } catch (e: unknown) {
+        if (seq !== dupSeq.current) return;
+        setDupCheck(null);
+        setDupError(apiDetail(e) ?? "Could not check these tickets for duplicates. Saving will still check them.");
+      } finally {
+        if (seq === dupSeq.current) setDupBusy(false);
+      }
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [duplicateCheck, step, rows, apiBase]);
+
+  // Duplicate rows → where the ticket already is, for the grid. `onlyDuplicates` narrows the
+  // grid to them, falling back to every row once none is left — so fixing the last one does
+  // not empty it.
+  const duplicateRows = useMemo(() => {
+    const out = new Map<number, string>();
+    for (const d of dupCheck?.rows ?? []) out.set(d.index, duplicateOf(d, dupCheck?.statements ?? []));
+    return out;
+  }, [dupCheck]);
+  const nothingNew = duplicateCheck && dupCheck != null && !dupCheck.can_save;
+  const [onlyDuplicates, setOnlyDuplicates] = useState(false);
+  const onlyRows = useMemo(
+    () => (onlyDuplicates && duplicateRows.size > 0 ? new Set(duplicateRows.keys()) : null),
+    [onlyDuplicates, duplicateRows]);
+
   const activeFields    = mappingFieldsFor(statementType);
   const requiredKeys    = activeFields.filter(f => f.mapRequired).map(f => f.key);
   const missingRequired = requiredKeys.filter(k => !mapping[k] || mapping[k] === SKIP);
+
+  // ── How the dates read (Internal Statement) ──────────────────────────────
+  // Counted off the rows as they stand — edits included — so a date set in the grid leaves
+  // the "not read" count at once. A loop, not forEach: the span is assigned as it goes.
+  const datesRead: DatesRead[] = useMemo(() => dateFields.map((f) => {
+    // A file with only a Doc Date (GLOBE's ticket statement) shows that under the Ticket
+    // Date's format, which it follows — rather than "no dates read" for a column it never had.
+    const value = (r: TicketRow, k: string) => (r as Record<string, unknown>)[k];
+    const viaDoc = f.field === "ticket_date" && !rows.some(r => value(r, "ticket_date")) && rows.some(r => value(r, "doc_date"));
+    const key = viaDoc ? "doc_date" : f.field;
+    let read = 0;
+    let first: string | null = null;
+    let last: string | null = null;
+    const cells: { index: number; value: string | null }[] = [];
+    for (let i = 0; i < rows.length; i++) {
+      const v = value(rows[i], key);
+      if (v == null || v === "") continue;
+      const s = String(v);
+      if (!ISO_DAY.test(s)) { cells.push({ index: i, value: s }); continue; }
+      const d = s.slice(0, 10);
+      read++;
+      if (first == null || d < first) first = d;
+      if (last == null || d > last) last = d;
+    }
+    const isMapped = (k: string) => !!mapping[k] && mapping[k] !== SKIP;
+    return { ...f, header: viaDoc ? "Doc Date" : f.header,
+      format: dates.formats[f.field] ?? null, read, first, last, unreadable: cells.length, cells,
+      // A file with only a Doc Date has it as its ticket date.
+      mapped: isMapped(f.field) || (f.field === "ticket_date" && isMapped("doc_date")) };
+  }), [dateFields, rows, mapping, dates.formats]);
+
+  // Changing a format on the preview reads the file again in it; hand edits are asked about first.
+  const [pendingFormat, setPendingFormat] = useState<{ field: string; order: DateOrder } | null>(null);
+  const rereadInFormat = (field: string, order: DateOrder) => {
+    dates.choose(field, order);
+    void applyMapping({ ...dates.formats, [field]: order });
+  };
+  const changeFormatOnPreview = (field: string, order: DateOrder) => {
+    if (dates.formats[field] === order) return;
+    if (rowsEdited) setPendingFormat({ field, order });
+    else rereadInFormat(field, order);
+  };
+  const datesText = askDateFormats && dates.complete
+    ? `Dates ${dateFields.map(f => orderLabel(dates.formats[f.field])).join(" / ")}` : "";
 
   // ── Step 3: confirm → save ────────────────────────────────────────────────
   const confirmUpload = async () => {
@@ -419,7 +938,7 @@ export default function UploadTicketsPage({ mode = "internal", apiBase = "/ticke
     setStep("saving");
     setError(null);
     try {
-      const { data } = await api.post<{ batch_id: string; created_count: number }>(
+      const { data } = await api.post<{ batch_id: string; created_count: number; duplicates?: DuplicateReport | null }>(
         `${apiBase}/upload/confirm`,
         {
           file_name:      preview.file_name,
@@ -436,9 +955,12 @@ export default function UploadTicketsPage({ mode = "internal", apiBase = "/ticke
           statement_name: statementName.trim() || null,
           valid_from:     validFrom,
           valid_to:       validTo,
+          // How the rows' dates were read — kept on the statement (Internal Statement).
+          ...(askDateFormats ? { date_formats: dates.formats } : {}),
         },
       );
       setBatchId(data.batch_id);
+      setSavedReport({ created: data.created_count, duplicates: data.duplicates ?? null });
       if (storedFile && data.batch_id) {
         console.log("[GCS] Uploading ticket file to bucket | batch_id=", data.batch_id, "| file=", storedFile.name, "| size=", storedFile.size);
         try {
@@ -467,7 +989,20 @@ export default function UploadTicketsPage({ mode = "internal", apiBase = "/ticke
     setMapping({}); setBatchId(null); setError(null); setRows([]); resetFilter();
     setStatementType("B2B"); setAgency(""); setStatementName("");
     setValidFrom(""); setValidTo(""); setFormTouched(false);
+    // The customer too — "Upload Another" is a new statement, and a kept customer would
+    // stop the next file's own customer being read off it.
+    setTag(EMPTY_TAG); setSheet(null); setHeaderRow(null);
+    setTagGuessed(false); setPeriodGuessed(false); setNameAuto(true);
+    setPartyHint(null); setPeriodHint(null);
+    setDupCheck(null); setDupError(null); setSavedReport(null); setOnlyDuplicates(false);
+    dates.reset(); setDetected(null); setRowsEdited(false);
   };
+
+  // What the summary bars and the done screen say the statement is: the CUSTOMER in
+  // customer mode (it used to read the vendor-mode `agency`, which this mode never sets).
+  const badgeText = isCustomer ? (tag.customerType ? CUSTOMER_TYPE_LABEL[tag.customerType] : "—") : statementType;
+  const partyText = isCustomer ? (tag.partyName || (tag.customerType === "direct" ? "Walk-in customer" : "")) : agency;
+  const periodText = validFrom && validTo ? (isCustomer ? formatPeriod(validFrom, validTo) : `${validFrom} – ${validTo}`) : "";
 
   const isDone = step === "done";
 
@@ -529,15 +1064,25 @@ export default function UploadTicketsPage({ mode = "internal", apiBase = "/ticke
           <div>
             <h2 className="text-lg font-bold text-gray-900">Statement Created</h2>
             <p className="text-sm font-medium text-gray-700 mt-1">
-              <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold mr-2 ${statementType === "AIRLINE" ? "bg-blue-100 text-blue-700" : "bg-purple-100 text-purple-700"}`}>{statementType}</span>
-              {agency}
+              <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold mr-2 ${statementType === "AIRLINE" ? "bg-blue-100 text-blue-700" : "bg-purple-100 text-purple-700"}`}>{badgeText}</span>
+              {partyText}
             </p>
             <p className="text-xs text-gray-500 mt-0.5">
-              {validFrom} – {validTo}
+              {periodText}
             </p>
             <p className="text-sm text-gray-500 mt-2">
-              {preview.total_rows} tickets saved from <span className="font-medium">{preview.file_name}</span>
+              {(savedReport?.created ?? rows.length).toLocaleString("en-IN")} tickets saved from <span className="font-medium">{preview.file_name}</span>
             </p>
+            {!!savedReport?.duplicates?.duplicates && (
+              <p className="text-xs text-amber-700 mt-1.5">
+                {savedReport.duplicates.duplicates.toLocaleString("en-IN")} of the file&apos;s{" "}
+                {savedReport.duplicates.total.toLocaleString("en-IN")} tickets were duplicates
+                {savedReport.duplicates.statements.length > 0 && (
+                  <> of tickets already loaded (in {savedReport.duplicates.statements
+                    .map(s => s.statement_name ?? s.file_name ?? "an earlier statement").join(", ")})</>
+                )} and were ignored.
+              </p>
+            )}
             <p className="text-xs text-gray-400 mt-0.5 font-mono">Batch: {batchId}</p>
           </div>
           <div className="flex items-center justify-center gap-3">
@@ -573,11 +1118,15 @@ export default function UploadTicketsPage({ mode = "internal", apiBase = "/ticke
           {/* LEFT: Statement form */}
           {isCustomer ? (
             <CustomerPartyPanel
-              tag={tag} setTag={setTag}
-              statementName={statementName} setStatementName={setStatementName}
-              validFrom={validFrom}         setValidFrom={setValidFrom}
-              validTo={validTo}             setValidTo={setValidTo}
+              tag={tag} setTag={fillFromFile ? pickTag : setTag}
+              statementName={statementName} setStatementName={fillFromFile ? typeName : setStatementName}
+              validFrom={validFrom}         setValidFrom={fillFromFile ? typeFrom : setValidFrom}
+              validTo={validTo}             setValidTo={fillFromFile ? typeTo : setValidTo}
               touched={formTouched}
+              partyHint={fillFromFile ? partyHint : null}
+              periodHint={fillFromFile ? periodHint : null}
+              nameHint={fillFromFile && nameAuto && statementName
+                ? "Filled in from the customer and the period — type your own to change it." : null}
             />
           ) : (
             <StatementFormPanel
@@ -615,6 +1164,45 @@ export default function UploadTicketsPage({ mode = "internal", apiBase = "/ticke
                 </button>
               </div>
 
+              {fillFromFile && preview && storedFile ? (
+                <div className="bg-white rounded-xl border border-gray-200 p-6 space-y-4">
+                  <div className="flex items-center gap-3 rounded-lg border border-green-200 bg-green-50/50 p-3">
+                    <FileSpreadsheet className="w-8 h-8 text-green-600 shrink-0" />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-semibold text-gray-800 truncate" title={preview.file_name}>{preview.file_name}</p>
+                      <p className="text-xs text-gray-500">
+                        {preview.total_rows.toLocaleString("en-IN")} rows read{preview.sheet_name ? ` · sheet ${preview.sheet_name}` : ""}
+                      </p>
+                    </div>
+                    <button onClick={changeFile} className="text-xs text-gray-500 underline hover:text-red-600 shrink-0">Change file</button>
+                  </div>
+                  {/* How this file writes its dates — read off it, beside it, where there is
+                      room for each column on one line. Needed before Next. */}
+                  {askDateFormats && (
+                    <div className={`rounded-lg border p-4 ${
+                      formTouched && !dates.complete ? "border-red-200 bg-red-50/30" : "border-gray-200"}`}>
+                      <DateFormatSection fields={dateFields} formats={dates.formats} onChoose={dates.choose}
+                        note={dates.note} detecting={detecting} />
+                      {formTouched && !dates.complete && (
+                        <p className="text-[11px] text-red-500 mt-2">
+                          Choose the date format of {dates.missing.map(f => f.header).join(" and ")}.
+                        </p>
+                      )}
+                    </div>
+                  )}
+                  <p className="text-xs text-gray-500">
+                    Check the statement details on the left — the customer, the period and the name are filled in
+                    from the file wherever it says them{askDateFormats ? ", and the date format from how its dates are written" : ""}.
+                    Change anything that is wrong, then press Next to map the columns.
+                  </p>
+                  <div className="flex justify-end">
+                    <button onClick={startNext}
+                      className="flex items-center gap-1.5 px-5 py-2 bg-[#1e3a5f] text-white rounded-lg text-sm font-semibold hover:bg-[#16304f] disabled:opacity-50">
+                      Next: map columns <ArrowRight className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              ) : (
               <div className="bg-white rounded-xl border border-gray-200 p-6">
                 <div
                   {...getRootProps()}
@@ -632,6 +1220,7 @@ export default function UploadTicketsPage({ mode = "internal", apiBase = "/ticke
                   {!parsing && <p className="text-xs text-gray-400 mt-1">or click to browse</p>}
                 </div>
               </div>
+              )}
             </div>
           </div>{/* /right panel */}
         </div>
@@ -643,10 +1232,11 @@ export default function UploadTicketsPage({ mode = "internal", apiBase = "/ticke
           {/* statement summary bar */}
           <div className="bg-[#1e3a5f]/5 border border-[#1e3a5f]/20 rounded-xl px-5 py-3 flex items-center gap-4 flex-wrap">
             <FileText className="w-4 h-4 text-[#1e3a5f] shrink-0" />
-            <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold tracking-wide ${statementType === "AIRLINE" ? "bg-blue-100 text-blue-700" : "bg-purple-100 text-purple-700"}`}>{statementType}</span>
-            <span className="text-xs font-semibold text-[#1e3a5f]">{agency || <span className="text-red-400 italic">Agency missing</span>}</span>
+            <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold tracking-wide ${statementType === "AIRLINE" ? "bg-blue-100 text-blue-700" : "bg-purple-100 text-purple-700"}`}>{badgeText}</span>
+            <span className="text-xs font-semibold text-[#1e3a5f]">{partyText || <span className="text-red-400 italic">{isCustomer ? "Customer missing" : "Agency missing"}</span>}</span>
             <span className="text-gray-300 text-xs">·</span>
-            <span className="text-xs text-gray-600">{validFrom && validTo ? `${validFrom} – ${validTo}` : <span className="text-red-400 italic">Dates missing</span>}</span>
+            <span className="text-xs text-gray-600">{periodText || <span className="text-red-400 italic">Dates missing</span>}</span>
+            {datesText && <><span className="text-gray-300 text-xs">·</span><span className="text-xs text-gray-600">{datesText}</span></>}
             {!isStatementComplete && (
               <button
                 onClick={() => setStep("drop")}
@@ -869,7 +1459,7 @@ export default function UploadTicketsPage({ mode = "internal", apiBase = "/ticke
                   the AUTO mapping produced — so every dropdown the user had just
                   corrected on a template-matched file was silently discarded. */}
               <button
-                onClick={applyMapping}
+                onClick={() => void applyMapping()}
                 disabled={applyingMap || missingRequired.length > 0}
                 className="flex items-center gap-1.5 px-5 py-2 bg-[#1e3a5f] text-white rounded-lg text-sm font-semibold hover:bg-[#16304f] disabled:opacity-50 disabled:cursor-not-allowed"
               >
@@ -888,10 +1478,11 @@ export default function UploadTicketsPage({ mode = "internal", apiBase = "/ticke
           {/* statement summary bar */}
           <div className="bg-[#1e3a5f]/5 border border-[#1e3a5f]/20 rounded-xl px-5 py-3 flex items-center gap-4 flex-wrap">
             <FileText className="w-4 h-4 text-[#1e3a5f] shrink-0" />
-            <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold tracking-wide ${statementType === "AIRLINE" ? "bg-blue-100 text-blue-700" : "bg-purple-100 text-purple-700"}`}>{statementType}</span>
-            <span className="text-xs font-semibold text-[#1e3a5f]">{agency || <span className="text-red-400 italic">Agency missing</span>}</span>
+            <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold tracking-wide ${statementType === "AIRLINE" ? "bg-blue-100 text-blue-700" : "bg-purple-100 text-purple-700"}`}>{badgeText}</span>
+            <span className="text-xs font-semibold text-[#1e3a5f]">{partyText || <span className="text-red-400 italic">{isCustomer ? "Customer missing" : "Agency missing"}</span>}</span>
             <span className="text-gray-300 text-xs">·</span>
-            <span className="text-xs text-gray-600">{validFrom && validTo ? `${validFrom} – ${validTo}` : <span className="text-red-400 italic">Dates missing</span>}</span>
+            <span className="text-xs text-gray-600">{periodText || <span className="text-red-400 italic">Dates missing</span>}</span>
+            {datesText && <><span className="text-gray-300 text-xs">·</span><span className="text-xs text-gray-600">{datesText}</span></>}
             {!isStatementComplete && (
               <button
                 onClick={() => setStep("drop")}
@@ -917,16 +1508,57 @@ export default function UploadTicketsPage({ mode = "internal", apiBase = "/ticke
               >
                 Back to Mapping
               </button>
+              {/* Held while the check runs, so the count on it is of the rows as they now
+                  stand, not as they were before the last edit. */}
               <button
                 onClick={confirmUpload}
-                disabled={!isStatementComplete}
-                title={!isStatementComplete ? "Complete statement details first" : undefined}
+                disabled={!isStatementComplete || nothingNew || (duplicateCheck && dupBusy)}
+                title={!isStatementComplete ? "Complete statement details first" : nothingNew ? dupCheck?.reason ?? undefined : undefined}
                 className="flex items-center gap-1.5 px-4 py-1.5 bg-[#1e3a5f] text-white rounded-lg text-xs font-semibold hover:bg-[#16304f] disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <CheckCircle className="w-3.5 h-3.5" /> Confirm & Save {rows.length} Rows
+                {duplicateCheck && dupBusy
+                  ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  : <CheckCircle className="w-3.5 h-3.5" />}
+                {duplicateCheck && dupBusy
+                  ? <>Checking…</>
+                  : duplicateCheck && dupCheck && dupCheck.duplicates > 0
+                  ? <>Confirm & Save {dupCheck.new} New Row{dupCheck.new === 1 ? "" : "s"}</>
+                  : <>Confirm & Save {rows.length} Rows</>}
               </button>
             </div>
           </div>
+
+          {duplicateCheck && (
+            <DuplicateBox check={dupCheck} busy={dupBusy} error={dupError} onlyShown={onlyRows != null}
+              onToggleOnly={() => setOnlyDuplicates(v => !v)} />
+          )}
+
+          {/* How the dates read in the declared format — change it here and the file is read
+              again in it. */}
+          {askDateFormats && datesRead.length > 0 && (
+            <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 space-y-2">
+              <p className="text-xs font-semibold text-gray-700 flex items-center gap-1.5">
+                <CalendarDays className="w-4 h-4 text-gray-400" /> How your dates read
+                {applyingMap && <RefreshCw className="w-3 h-3 animate-spin text-gray-400" />}
+              </p>
+              <DatesReadList dates={datesRead} formats={dates.formats} onChange={changeFormatOnPreview} />
+              {preview.date_fix && (
+                <p className="text-[11px] text-sky-700">
+                  {preview.date_fix.count.toLocaleString("en-IN")} Excel date{preview.date_fix.count === 1 ? "" : "s"} read
+                  as {orderLabel(dates.formats.ticket_date)} — Excel had stored {preview.date_fix.count === 1 ? "it" : "them"} with
+                  day and month swapped ({preview.date_fix.columns.map(c => `${c.column} ${c.cells}`).join(", ")}).
+                </p>
+              )}
+              {datesRead.filter(d => d.unreadable > 0).map(d => (
+                <p key={d.field} className="text-[11px] text-orange-700">
+                  {d.unreadable.toLocaleString("en-IN")} {d.header} value{d.unreadable === 1 ? "" : "s"} can&apos;t be read
+                  as {orderLabel(d.format)}: {d.cells.slice(0, 3).map(c => `"${c.value}" (row ${c.index + 1})`).join(", ")}
+                  {d.unreadable > 3 ? ", …" : ""}. If they are all like that, pick another format; otherwise set them
+                  in the grid — they save empty.
+                </p>
+              ))}
+            </div>
+          )}
 
           {preview.warnings.length > 0 && (
             <div className="bg-yellow-50 border border-yellow-200 rounded-xl px-4 py-3 text-xs text-yellow-800 space-y-1">
@@ -1014,6 +1646,14 @@ export default function UploadTicketsPage({ mode = "internal", apiBase = "/ticke
             <div className="px-4 py-2.5 border-b border-gray-100 flex items-center gap-2">
               <h2 className="text-xs font-semibold text-blue-600 uppercase tracking-wide">Review &amp; Edit</h2>
               <span className="ml-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-blue-50 text-blue-700 border border-blue-200">{rows.length} rows</span>
+              {onlyRows && (
+                <span className="inline-flex items-center gap-1 text-[11px] text-amber-700 font-semibold">
+                  <CopyX className="w-3 h-3" /> Showing only the {onlyRows.size} duplicate{onlyRows.size === 1 ? "" : "s"}
+                  <button onClick={() => setOnlyDuplicates(false)} className="ml-1 text-gray-400 hover:text-gray-700 font-medium">
+                    show all
+                  </button>
+                </span>
+              )}
               <span className="text-[10px] text-gray-400 ml-auto">Scroll horizontally · Click any cell to edit</span>
             </div>
             <TicketReviewTable
@@ -1026,9 +1666,26 @@ export default function UploadTicketsPage({ mode = "internal", apiBase = "/ticke
               selectedRows={selectedRows}
               onToggleRow={handleToggleRow}
               onToggleAllFiltered={handleToggleAllFiltered}
+              duplicateIn={duplicateCheck ? duplicateRows : undefined}
+              onlyRows={onlyRows}
             />
           </div>
         </div>
+      )}
+
+      {/* Changing a date format on the preview reads the file again — asked first when the
+          grid has hand edits, which the new read replaces. */}
+      {pendingFormat && (
+        <ConfirmDialog
+          title={`Read the file again with ${TICKET_DATE_FIELDS.find(f => f.field === pendingFormat.field)?.header ?? "the dates"} as ${orderLabel(pendingFormat.order)}?`}
+          confirmLabel="Read again"
+          danger={false}
+          onConfirm={async () => { const p = pendingFormat; setPendingFormat(null); rereadInFormat(p.field, p.order); }}
+          onClose={() => setPendingFormat(null)}
+        >
+          <p>The rows are read from the file again, every date in the new format. The changes you made in
+            the grid are lost.</p>
+        </ConfirmDialog>
       )}
     </div>
   );

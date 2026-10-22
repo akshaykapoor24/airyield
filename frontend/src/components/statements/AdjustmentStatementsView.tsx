@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useRouter } from "next/navigation";
 import {
   Upload, RefreshCw, Trash2, Download, Eye, X, AlertTriangle, ArrowLeft,
   FileSpreadsheet, CheckCircle2, Loader2, ChevronLeft, ChevronRight, FolderOpen, Search, Split,
@@ -18,12 +19,16 @@ import { type VendorAgency, loadVendorAgencies } from "@/lib/vendorAgency";
 import NdcBillingWorklist from "@/components/statements/ndc/NdcBillingWorklist";
 import TpApiBillingWorklist from "@/components/statements/tpapi/TpApiBillingWorklist";
 import { ChecksBadge, ChecksPanel, type CheckResult } from "@/components/statements/StatementChecks";
+import { formatPeriod, formatUploadedAt, uploadedAtParts } from "@/lib/statementPeriod";
 
 const PAGE = 50;
 // The API rejects anything below 3 recognised columns (_MIN_MATCHED_COLUMNS in
 // api/v1/statements.py). Between that floor and this number the import succeeds
 // but most fields land empty, which is worth saying out loud.
 const LOW_MATCH_WARNING = 6;
+// The uploads table's Actions column, pinned to the right edge while the rest scrolls.
+// Each cell sets its own opaque background so the columns scrolling under it stay hidden.
+const PINNED_RIGHT = "sticky right-0 z-10 shadow-[-8px_0_8px_-8px_rgba(15,23,42,0.18)]";
 const SELECT_CLS =
   "border border-slate-200 rounded-lg px-2 py-1.5 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-400";
 
@@ -51,7 +56,37 @@ type Batch = {
   // column absent rather than empty. ONE nested field rather than seven flat ones, so the
   // eight types sharing this component do not carry keys that mean nothing to them.
   billing?: BatchBilling | null;
+  agency_id?: number | null;
+  // Third-party types: the statement period the uploader declared, and the tally off the
+  // header — total = new + duplicate: `new` saved as its lines, `duplicate` left out as a
+  // duplicate of a line already saved for the same agency, or of the file's own (Third
+  // Party GDS only; 0 elsewhere). `duplicate_of_*`: the earlier upload most of those are in.
+  period_from?: string | null;
+  period_to?: string | null;
+  total_entries?: number;
+  duplicate_entries?: number;
+  new_entries?: number;
+  duplicate_of_file?: string | null;
+  duplicate_of_period?: string | null;
+  /** Third Party GDS: its saved lines flagged as duplicates, by kind (backend
+   *  services/tp_gds_reupload.py), and its tickets dated outside its period. */
+  flags?: BatchFlags | null;
 };
+type BatchFlags = { exact: number; partial: number; in_file: number; outside: number };
+
+/** A Third Party GDS line saved although it repeats one (`__dup__` on a served row). */
+type DupInfo = { kind: "exact" | "partial" | "in_file"; fields: string[]; of_file: string | null; of_period: string | null };
+
+const FLAG_CHIPS: { key: keyof BatchFlags; label: string; cls: string; title: string }[] = [
+  { key: "partial", label: "partial", cls: "bg-fuchsia-50 text-fuchsia-700 border-fuchsia-200",
+    title: "Saved although an earlier statement of this agency has the same ticket & status with something changed" },
+  { key: "in_file", label: "repeated", cls: "bg-indigo-50 text-indigo-700 border-indigo-200",
+    title: "The same ticket & status appears more than once in this statement — every copy was saved" },
+  { key: "exact", label: "saved again", cls: "bg-amber-50 text-amber-700 border-amber-200",
+    title: "Already in an earlier statement of this agency, saved again by choice" },
+  { key: "outside", label: "outside period", cls: "bg-rose-50 text-rose-700 border-rose-200",
+    title: "Tickets whose Booked Date or Issue Date falls outside the statement period" },
+];
 type BatchBilling = {
   resolution_status: "none" | "resolved" | "projected";
   billable_rows: number;
@@ -107,9 +142,7 @@ type RecordsResponse = {
   stale_rows?: number;
 };
 
-function fmtDate(s: string): string {
-  try { return new Date(s).toLocaleString(); } catch { return s; }
-}
+const fmtDate = formatUploadedAt;
 function errMsg(e: unknown, fallback: string): string {
   const m = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
   return typeof m === "string" ? m : fallback;
@@ -369,8 +402,8 @@ function SummarySlab({ summary }: { summary: Summary }) {
 }
 
 export default function AdjustmentStatementsView({
-  apiBase, slug, title, requiresAirlineId, requiresSupplier, supportsMapping,
-  supportsBilling, billingWorklist, exportsEntries, doneHint, checks, captureControls,
+  apiBase, slug, title, requiresAirlineId, requiresSupplier, supportsMapping, capturesPeriod,
+  supportsBilling, billingWorklist, exportsEntries, doneHint, checks, captureControls, uploadHref,
 }: {
   apiBase: string; slug: string; title: string; blurb?: string;
   /** LCC types only — see lib/statements.ts. Drives the mandatory Airline picker in
@@ -383,6 +416,9 @@ export default function AdjustmentStatementsView({
    *  modal. Mirrors `supports_mapping` in the backend spec, which is what actually decides
    *  whether /extract and /confirm answer for this type. */
   supportsMapping?: boolean;
+  /** Third Party GDS — see lib/statements.ts. PERIOD, and TOTAL / ALREADY UPLOADED / NEW in
+   *  place of ENTRIES, below. */
+  capturesPeriod?: boolean;
   /** NDC and Third Party API — see lib/statements.ts. Drives the BILLING column below and
    *  the worklist it opens. Every other type renders no column and makes no billing
    *  request. */
@@ -402,10 +438,15 @@ export default function AdjustmentStatementsView({
   /** Payment Module tabs only. The upload wizard asks for optional expected records and
    *  net amount, and compares them on its done screen. */
   captureControls?: boolean;
+  /** The upload's own page (lib/statements.ts `uploadPage`). Upload XLS goes there instead
+   *  of opening the wizard as a popup over this list. */
+  uploadHref?: string;
 }) {
+  const router = useRouter();
   const [batches, setBatches] = useState<Batch[]>([]);
   const [loading, setLoading] = useState(true);
   const [uploadOpen, setUploadOpen] = useState(false);
+  const startUpload = () => (uploadHref ? router.push(uploadHref) : setUploadOpen(true));
   const [deleteTarget, setDeleteTarget] = useState<Batch | null>(null);
   const [deleting, setDeleting] = useState(false);
   // batch_id of the entries export being built — a large upload takes a few seconds.
@@ -450,10 +491,11 @@ export default function AdjustmentStatementsView({
   // `row_count` is a live COUNT of stored entries (the server's list_batches), so the sum
   // is what the system holds — not a counter that could drift from it.
   const totalEntries = batches.reduce((s, b) => s + b.row_count, 0);
-  // File · [Airline] · [Agency] · Uploaded · Entries · [Checks] · [Billing] · Uploaded by · Actions.
+  // File · [Airline] · [Agency] · [Period] · Uploaded · Entries (or Total · Already uploaded ·
+  // New · Flags) · [Checks] · [Billing] · Uploaded by · Actions.
   // Computed rather than a literal, so adding a column can't leave the empty-state row short.
   const batchCols = 5 + (requiresAirlineId ? 1 : 0) + (requiresSupplier ? 1 : 0)
-                      + (checks ? 1 : 0) + (supportsBilling ? 1 : 0);
+                      + (capturesPeriod ? 4 : 0) + (checks ? 1 : 0) + (supportsBilling ? 1 : 0);
   const checksApi = checks?.api;
   const checksSlug = checks?.slug;
 
@@ -812,6 +854,38 @@ export default function AdjustmentStatementsView({
                       const text = v != null && v !== "" ? (money ? fmtMoney(v) : String(v)) : null;
                       const check = (r.__checks__ as unknown as Record<string, CellCheck> | undefined)?.[c.field];
                       const bad = check?.status === "mismatch";
+                      // Third Party GDS: a line saved although it repeats one, or dated outside
+                      // its statement period — tagged beside its ticket number.
+                      const dup = r.__dup__ as unknown as DupInfo | undefined;
+                      const outside = r.__outside__ as unknown as Record<string, string> | undefined;
+                      if (c.field === "ticket_number" && (dup || outside)) {
+                        const from = dup?.of_file ? ` in ${dup.of_file}${dup.of_period ? ` (${dup.of_period})` : ""}` : "";
+                        return <td key={c.field} className="px-3 py-1.5 text-xs whitespace-nowrap">
+                          <span className="inline-flex items-center gap-1">
+                            <span className="text-slate-700">{text ?? <span className="text-slate-300">—</span>}</span>
+                            {dup && (
+                              <span className={`px-1.5 py-0.5 rounded border text-[10px] font-semibold cursor-help ${
+                                dup.kind === "partial" ? "bg-fuchsia-50 text-fuchsia-700 border-fuchsia-200"
+                                  : dup.kind === "in_file" ? "bg-indigo-50 text-indigo-700 border-indigo-200"
+                                  : "bg-amber-50 text-amber-700 border-amber-200"}`}
+                                title={dup.kind === "partial"
+                                  ? `Partial duplicate — the same ticket & status is saved${from || " in an earlier statement"}; ${dup.fields.join(", ") || "something"} changed. Saved by choice at upload.`
+                                  : dup.kind === "in_file"
+                                  ? `Repeated in this statement — the same ticket & status appears on an earlier line${dup.fields.length ? `, with ${dup.fields.join(", ")} different` : ""}.`
+                                  : `Already saved${from || " in an earlier statement"} — saved again by choice at upload.`}>
+                                {dup.kind === "partial" ? "Partial dup." : dup.kind === "in_file" ? "Repeated" : "Saved again"}
+                              </span>
+                            )}
+                            {outside && (
+                              <span className="px-1.5 py-0.5 rounded border bg-rose-50 text-rose-700 border-rose-200 text-[10px] font-semibold cursor-help"
+                                title={Object.entries(outside).map(([f, s]) =>
+                                  `${f === "booking_date" ? "Booked Date" : "Issue Date"} ${s} the statement period`).join(" · ")}>
+                                Outside period
+                              </span>
+                            )}
+                          </span>
+                        </td>;
+                      }
                       if (c.field === "ticket_status" && r.__kind__ === "refund") {
                         return <td key={c.field} className="px-3 py-1.5 text-xs whitespace-nowrap" title="Cancelled — reverses the issued ticket as a refund">
                           <span className="inline-flex items-center gap-1">
@@ -873,36 +947,50 @@ export default function AdjustmentStatementsView({
         <div className="flex items-center gap-2">
           <button onClick={fetchBatches} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-500 border border-slate-200 rounded-lg hover:bg-slate-50"><RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} /> Refresh</button>
           <button onClick={downloadTemplate} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-500 border border-slate-200 rounded-lg hover:bg-slate-50"><Download className="w-3.5 h-3.5" /> Template</button>
-          <button onClick={() => setUploadOpen(true)} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700"><Upload className="w-3.5 h-3.5" /> Upload XLS</button>
+          <button onClick={startUpload} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700"><Upload className="w-3.5 h-3.5" /> Upload XLS</button>
         </div>
       </div>
 
+      {/* Scrolls sideways rather than clipping: with Period, the tally, Checks and Billing
+          the table can be wider than the page, and a clipped one lost its Actions column with
+          no way to reach it. Actions is pinned to the right edge so it is always in view. */}
       <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+        <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="bg-slate-50 border-b border-slate-200 text-[11px] uppercase tracking-wide text-slate-400">
               <th className="text-left px-3 py-2.5 font-semibold">File</th>
               {requiresAirlineId && <th className="text-left px-3 py-2.5 font-semibold">Airline</th>}
               {requiresSupplier && <th className="text-left px-3 py-2.5 font-semibold">Agency</th>}
+              {capturesPeriod && <th className="text-left px-3 py-2.5 font-semibold" title="The days the statement covers, as declared at upload">Period</th>}
               <th className="text-left px-3 py-2.5 font-semibold">Uploaded</th>
-              <th className="text-right px-3 py-2.5 font-semibold">Entries</th>
+              {capturesPeriod ? (
+                <>
+                  <th className="text-right px-3 py-2.5 font-semibold" title="Entries in the file — its OLD / BALANCE lines are not entries">Total</th>
+                  <th className="text-right px-3 py-2.5 font-semibold" title="Left out at upload as duplicates of lines already saved for this agency (or of the file's own) — not counted twice">Already uploaded</th>
+                  <th className="text-right px-3 py-2.5 font-semibold" title="Saved as this upload's own entries — duplicates saved by choice included, flagged">New</th>
+                  <th className="text-left px-3 py-2.5 font-semibold" title="Saved lines to look at: partial duplicates, repeats within the file, lines saved again, and tickets dated outside the period">Flags</th>
+                </>
+              ) : (
+                <th className="text-right px-3 py-2.5 font-semibold">Entries</th>
+              )}
               {checks && <th className="text-left px-3 py-2.5 font-semibold">Checks</th>}
               {supportsBilling && <th className="text-left px-3 py-2.5 font-semibold">Billing</th>}
               <th className="text-left px-3 py-2.5 font-semibold">Uploaded by</th>
-              <th className="text-right px-3 py-2.5 font-semibold">Actions</th>
+              <th className={`text-right px-3 py-2.5 font-semibold bg-slate-50 ${PINNED_RIGHT}`}>Actions</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
               <tr><td colSpan={batchCols} className="px-3 py-10 text-center text-slate-400">Loading…</td></tr>
             ) : batches.length === 0 ? (
-              <tr><td colSpan={batchCols} className="px-3 py-12 text-center text-slate-400">No {title} uploads yet. <button onClick={() => setUploadOpen(true)} className="text-blue-600 hover:underline">Upload an XLS</button>.</td></tr>
+              <tr><td colSpan={batchCols} className="px-3 py-12 text-center text-slate-400">No {title} uploads yet. <button onClick={startUpload} className="text-blue-600 hover:underline">Upload an XLS</button>.</td></tr>
             ) : batches.map((b) => (
-              <tr key={b.batch_id} className="border-b border-slate-100 hover:bg-slate-50/60">
+              <tr key={b.batch_id} className="group border-b border-slate-100 hover:bg-slate-50">
                 <td className="px-3 py-2">
                   <button onClick={() => openBatch(b)} className="flex items-center gap-2 text-slate-700 hover:text-blue-700">
-                    <FolderOpen className="w-4 h-4 text-slate-400" />
-                    <span className="font-medium truncate max-w-[280px]" title={b.source_file ?? undefined}>{b.source_file || "upload"}</span>
+                    <FolderOpen className="w-4 h-4 shrink-0 text-slate-400" />
+                    <span className="font-medium truncate max-w-[240px]" title={b.source_file ?? undefined}>{b.source_file || "upload"}</span>
                   </button>
                 </td>
                 {requiresAirlineId && (
@@ -932,13 +1020,14 @@ export default function AdjustmentStatementsView({
                 {requiresSupplier && (
                   <td className="px-3 py-2 whitespace-nowrap">
                     {b.supplier_name ? (
-                      <span className="text-xs text-slate-700">
+                      <span className="block text-xs leading-snug text-slate-700">
                         {b.supplier_name}
                         {/* Branch and code are what tell two rows of one vendor apart, so
-                            they are shown, not just stored. */}
+                            they are shown, not just stored — on a line of their own, which
+                            keeps the column narrow. */}
                         {(b.supplier_branch || b.supplier_code) && (
-                          <span className="text-slate-400">
-                            {" · "}{[b.supplier_branch, b.supplier_code].filter(Boolean).join(" · ")}
+                          <span className="block text-[11px] text-slate-400">
+                            {[b.supplier_branch, b.supplier_code].filter(Boolean).join(" · ")}
                           </span>
                         )}
                       </span>
@@ -949,8 +1038,53 @@ export default function AdjustmentStatementsView({
                     )}
                   </td>
                 )}
-                <td className="px-3 py-2 text-xs text-slate-500 whitespace-nowrap">{fmtDate(b.uploaded_at)}</td>
-                <td className="px-3 py-2 text-right tabular-nums text-slate-700">{b.row_count.toLocaleString()}</td>
+                {capturesPeriod && (
+                  <td className="px-3 py-2 text-xs whitespace-nowrap">
+                    {b.period_from && b.period_to ? (
+                      <span className="text-slate-700">{formatPeriod(b.period_from, b.period_to)}</span>
+                    ) : (
+                      // Uploaded before the period was asked for, and neither its file name
+                      // nor its Week column said one — never compared with a re-upload.
+                      <span className="text-slate-300" title="Uploaded before the statement period was captured">—</span>
+                    )}
+                  </td>
+                )}
+                <td className="px-3 py-2 text-xs text-slate-500 whitespace-nowrap" title={fmtDate(b.uploaded_at)}>
+                  {(() => {
+                    const at = uploadedAtParts(b.uploaded_at);
+                    return at
+                      ? <><span className="block">{at.date}</span><span className="block text-[11px] text-slate-400">{at.time}</span></>
+                      : fmtDate(b.uploaded_at);
+                  })()}
+                </td>
+                {capturesPeriod ? (
+                  <>
+                    <td className="px-3 py-2 text-right tabular-nums text-slate-700">{(b.total_entries ?? b.row_count).toLocaleString()}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">
+                      {b.duplicate_entries ? (
+                        <span className="font-medium text-amber-700 cursor-help"
+                          title={`Left out as duplicates${b.duplicate_of_file ? ` — mostly of lines in ${b.duplicate_of_file}` : ""}${b.duplicate_of_period ? ` (${b.duplicate_of_period})` : ""}; not counted twice`}>
+                          {b.duplicate_entries.toLocaleString()}
+                        </span>
+                      ) : <span className="text-slate-300">0</span>}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-slate-700">{(b.new_entries ?? b.row_count).toLocaleString()}</td>
+                    <td className="px-3 py-2">
+                      {b.flags && FLAG_CHIPS.some((f) => b.flags![f.key] > 0) ? (
+                        <span className="flex flex-wrap gap-1">
+                          {FLAG_CHIPS.filter((f) => b.flags![f.key] > 0).map((f) => (
+                            <span key={f.key} title={f.title}
+                              className={`whitespace-nowrap rounded border px-1.5 py-0.5 text-[10px] font-semibold cursor-help ${f.cls}`}>
+                              {b.flags![f.key].toLocaleString()} {f.label}
+                            </span>
+                          ))}
+                        </span>
+                      ) : <span className="text-xs text-slate-300">—</span>}
+                    </td>
+                  </>
+                ) : (
+                  <td className="px-3 py-2 text-right tabular-nums text-slate-700">{b.row_count.toLocaleString()}</td>
+                )}
                 {checks && (
                   <td className="px-3 py-2">
                     <ChecksBadge result={checkResults[b.batch_id]} onOpen={() => setChecksTarget(b.batch_id)} />
@@ -1002,7 +1136,7 @@ export default function AdjustmentStatementsView({
                   </td>
                 )}
                 <td className="px-3 py-2 text-xs text-slate-500">{b.created_by_name || "—"}</td>
-                <td className="px-3 py-2 text-right whitespace-nowrap">
+                <td className={`px-3 py-2 text-right whitespace-nowrap bg-white group-hover:bg-slate-50 ${PINNED_RIGHT}`}>
                   <button onClick={() => openBatch(b)} className="text-xs font-medium text-blue-600 hover:underline mr-3">Open</button>
                   {b.has_file && <button onClick={() => previewFile(b)} className="p-1 text-slate-400 hover:text-blue-600 mr-1" title="Preview file"><Eye className="w-3.5 h-3.5" /></button>}
                   {b.has_file && <button onClick={() => downloadFile(b)} className="p-1 text-slate-400 hover:text-slate-700 mr-1" title="Download the original file, as uploaded"><Download className="w-3.5 h-3.5" /></button>}
@@ -1019,6 +1153,7 @@ export default function AdjustmentStatementsView({
             ))}
           </tbody>
         </table>
+        </div>
       </div>
 
       {/* The types with no single fixed export get the map -> review -> confirm wizard: a
@@ -1045,6 +1180,22 @@ export default function AdjustmentStatementsView({
           <div className="bg-white rounded-xl shadow-xl w-full max-w-sm p-5">
             <div className="flex items-center gap-2.5 mb-2"><AlertTriangle className="w-5 h-5 text-red-500" /><h2 className="text-sm font-semibold text-slate-800">Delete this upload?</h2></div>
             <p className="text-xs text-slate-500 mb-4">This permanently removes all {deleteTarget.row_count} row{deleteTarget.row_count === 1 ? "" : "s"} from “{deleteTarget.source_file || "upload"}”. This cannot be undone.</p>
+            {/* Third Party GDS: a later upload of this agency that left out entries as already
+                saved — whatever its period — may hold only what was new to it, so deleting this
+                one can leave those entries saved nowhere until that statement is re-uploaded. */}
+            {capturesPeriod && (() => {
+              const others = batches.filter((o) => o.batch_id !== deleteTarget.batch_id
+                && o.agency_id != null && o.agency_id === deleteTarget.agency_id
+                && (o.duplicate_entries ?? 0) > 0 && o.uploaded_at > deleteTarget.uploaded_at);
+              if (!others.length) return null;
+              return (
+                <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  {others.map((o) => `${o.source_file || "Another upload"} (${formatPeriod(o.period_from, o.period_to)}, ${fmtDate(o.uploaded_at)})`).join(", ")}
+                  {" "}left out entries already saved for this agency — some may be in this one. After deleting it,
+                  upload {others.length === 1 ? "that statement" : "those statements"} again to bring them back.
+                </div>
+              );
+            })()}
             <div className="flex justify-end gap-2">
               <button onClick={() => setDeleteTarget(null)} className="px-3 py-1.5 text-xs font-medium text-slate-500 border border-slate-200 rounded-lg hover:bg-slate-50">Cancel</button>
               <button onClick={confirmDelete} disabled={deleting} className="px-4 py-1.5 text-xs font-semibold text-white bg-red-600 rounded-lg hover:bg-red-700 disabled:opacity-50">{deleting ? "Deleting…" : "Delete"}</button>

@@ -56,6 +56,7 @@ export const VENDOR_STATEMENT: StatementType = {
   apiBase: TP_GDS?.apiBase ?? "/statements/tp-gds",
   requiresSupplier: TP_GDS?.requiresSupplier ?? true,
   supportsMapping: TP_GDS?.supportsMapping ?? true,
+  capturesPeriod: TP_GDS?.capturesPeriod ?? true,
   blurb: TP_GDS?.blurb,
   doneHint: "Price it under Vendors data → Commission income → Third Party → GDS, then check it against your MO statement under Payment Module → Reconciliation.",
 };

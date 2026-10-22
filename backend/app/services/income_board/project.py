@@ -45,14 +45,18 @@ from app.services.income_board.dimensions import (
 # one product across two rows of the same card. One vocabulary, and it is the slug:
 # billing groups on it, and a label belongs to the screen rather than to the column.
 from app.services.markup_categories import CATEGORY_AIR
+from app.models.statement_row import ThirdPartyGds
+from app.models.typed_statement import sql_relation
 
 logger = logging.getLogger(__name__)
 
 
 # The statement table behind each commission source, joined only to recover a gross
-# that `commission_calculations` does not carry for any source.
+# that `commission_calculations` does not carry for any source. Third Party GDS keeps its
+# fields in typed columns, so it is read through `sql_relation`, which puts `data` back on
+# the rows for the `s.data->>'…'` this module is written in.
 _SOURCE_TABLES = {
-    SOURCE_TP_GDS: "third_party_gds",
+    SOURCE_TP_GDS: sql_relation(ThirdPartyGds),
     SOURCE_TP_LCC: "third_party_lcc",
     SOURCE_LCC_DETAILED: "lcc_detailed",
 }

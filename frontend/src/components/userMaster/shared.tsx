@@ -41,11 +41,19 @@ export type IataCommissionRow = {
   is_active: boolean;
 };
 
+/** Lines of business an airline id can be opened for — the deal form's Business
+ *  Type list, and what the backend accepts (schemas/tenant_airline.py). */
+export const BUSINESS_TYPES = ["B2B", "B2C", "B2E", "MICE"] as const;
+export type BusinessType = typeof BUSINESS_TYPES[number];
+
 /** One id the tenant holds for an airline. A tenant normally holds several per
  *  carrier, which is why the Airline Master groups these under the airline. */
 export type TenantAirlineIdRow = {
   id: number;
   ref_id: string;
+  /** The line of business the id is opened for. Null only on ids added before
+   *  it was asked for. */
+  business_type: BusinessType | null;
   is_active: boolean;
   /** LCC batches uploaded against this id — delete is refused above zero. */
   in_use_count: number;
