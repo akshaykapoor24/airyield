@@ -22,6 +22,7 @@ def _id_entry(row, master_name: str | None, usage_counts: Mapping[int, int]) -> 
     return {
         "id": row.id,
         "ref_id": row.ref_id,
+        "business_type": row.business_type,
         "is_active": bool(row.is_active),
         # How many LCC batches were uploaded against this id. DELETE refuses when
         # this is non-zero (api/v1/tenant_airlines.py), so the UI can say so up

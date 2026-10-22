@@ -11,25 +11,32 @@
 // New ids go through POST /tenant-airlines/bulk in one save, so a duplicate in the
 // third row does not throw away the other four the user typed — the failures come
 // back per id to be corrected in place.
+//
+// Every new id must say which line of business it is opened for (B2B / B2C / B2E /
+// MICE). There is no default on purpose: the same carrier commonly has one login per
+// line of business, so a pre-filled guess would be wrong as often as right.
 
 import { useState } from "react";
 import { Check, Plus, Trash2, X } from "lucide-react";
 import api from "@/lib/api";
 import {
-  type AirlineCatalogEntry, type TenantAirlineIdRow,
-  ActiveBadge, INPUT, LABEL, ModalShell, apiError,
+  type AirlineCatalogEntry, type BusinessType, type TenantAirlineIdRow,
+  ActiveBadge, BUSINESS_TYPES, INPUT, LABEL, ModalShell, apiError,
 } from "@/components/userMaster/shared";
 
 type BulkError = { ref_id: string; error: string };
 // `created` is TenantAirlineRead — the id row as stored. The two grid-only fields
 // (in_use_count, snapshot_name_drifted) are known for a row just created.
-type CreatedId = { id: number; ref_id: string; is_active: boolean };
+type CreatedId = { id: number; ref_id: string; business_type: BusinessType | null; is_active: boolean };
 type BulkResult = { created: CreatedId[]; errors: BulkError[] };
 
 /** A row being typed. `err` is the server's reason after a partial save. */
-type Draft = { ref_id: string; err?: string };
+type Draft = { ref_id: string; business_type: BusinessType | ""; err?: string };
 
-const emptyDraft = (): Draft => ({ ref_id: "" });
+const emptyDraft = (): Draft => ({ ref_id: "", business_type: "" });
+
+/** Same box as INPUT, sized for the four short business-type codes. */
+const TYPE_SELECT = "w-28 shrink-0 border border-gray-200 rounded-lg px-2 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-400 bg-gray-50";
 
 export default function AirlineIdsModal({
   entry, onClose, onChanged,
@@ -47,8 +54,8 @@ export default function AirlineIdsModal({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  const setDraft = (i: number, ref_id: string) =>
-    setDrafts(p => p.map((d, idx) => (idx === i ? { ref_id, err: undefined } : d)));
+  const setDraft = (i: number, patch: Partial<Omit<Draft, "err">>) =>
+    setDrafts(p => p.map((d, idx) => (idx === i ? { ...d, ...patch, err: undefined } : d)));
   const addDraft = () => setDrafts(p => [...p, emptyDraft()]);
   const removeDraft = (i: number) =>
     setDrafts(p => (p.length > 1 ? p.filter((_, idx) => idx !== i) : [emptyDraft()]));
@@ -65,6 +72,16 @@ export default function AirlineIdsModal({
       await api.patch(`/tenant-airlines/${row.id}`, { ref_id: next });
       setIds(p => p.map(r => (r.id === row.id ? { ...r, ref_id: next } : r)));
       setEdits(p => { const n = { ...p }; delete n[row.id]; return n; });
+      onChanged();
+    } catch (e) { setError(apiError(e)); }
+    finally { setBusy(false); }
+  };
+
+  const setBusinessType = async (row: TenantAirlineIdRow, business_type: BusinessType) => {
+    setBusy(true); setError("");
+    try {
+      await api.patch(`/tenant-airlines/${row.id}`, { business_type });
+      setIds(p => p.map(r => (r.id === row.id ? { ...r, business_type } : r)));
       onChanged();
     } catch (e) { setError(apiError(e)); }
     finally { setBusy(false); }
@@ -97,11 +114,18 @@ export default function AirlineIdsModal({
   const addAll = async () => {
     const wanted = drafts.filter(d => d.ref_id.trim());
     if (!wanted.length) { setError("Enter at least one id."); return; }
+    if (wanted.some(d => !d.business_type)) {
+      setDrafts(p => p.map(d => (d.ref_id.trim() && !d.business_type
+        ? { ...d, err: "Pick whether this id is B2B, B2C, B2E or MICE." }
+        : d)));
+      setError("Every new ID needs a business type.");
+      return;
+    }
     setBusy(true); setError("");
     try {
       const { data } = await api.post<BulkResult>("/tenant-airlines/bulk", {
         airline_id: entry.airline_id,
-        ids: wanted.map(d => ({ ref_id: d.ref_id.trim(), is_active: true })),
+        ids: wanted.map(d => ({ ref_id: d.ref_id.trim(), business_type: d.business_type, is_active: true })),
       });
       const created = data.created ?? [];
       const failed = data.errors ?? [];
@@ -116,7 +140,11 @@ export default function AirlineIdsModal({
       } else {
         // Keep only what failed, each carrying its reason, so the user fixes those
         // rows instead of retyping the ones that landed.
-        setDrafts(failed.map(f => ({ ref_id: f.ref_id, err: f.error })));
+        setDrafts(failed.map(f => ({
+          ref_id: f.ref_id,
+          business_type: wanted.find(w => w.ref_id.trim() === f.ref_id)?.business_type ?? "",
+          err: f.error,
+        })));
         setError(`${created.length} added, ${failed.length} not — fix the rows below.`);
       }
     } catch (e) { setError(apiError(e)); }
@@ -164,6 +192,17 @@ export default function AirlineIdsModal({
                   ) : (
                     <span className="w-7.5 shrink-0" />
                   )}
+                  {/* Saves on change. Blank only on ids added before the type was asked. */}
+                  <select
+                    value={row.business_type ?? ""}
+                    onChange={e => e.target.value && setBusinessType(row, e.target.value as BusinessType)}
+                    disabled={busy}
+                    title="Business type"
+                    className={`${TYPE_SELECT} ${row.business_type ? "" : "border-amber-300 bg-amber-50 text-amber-700"}`}
+                  >
+                    {!row.business_type && <option value="">Set type</option>}
+                    {BUSINESS_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                  </select>
                   <ActiveBadge active={row.is_active} onClick={() => toggle(row)} />
                   <button
                     onClick={() => remove(row)} disabled={busy}
@@ -177,6 +216,12 @@ export default function AirlineIdsModal({
                 </div>
               ))}
             </div>
+            {ids.some(r => !r.business_type) && (
+              <p className="text-[10px] text-amber-600 mt-1.5">
+                IDs marked &ldquo;Set type&rdquo; were added before the business type was asked —
+                pick B2B, B2C, B2E or MICE for each.
+              </p>
+            )}
             {ids.some(r => r.in_use_count > 0) && (
               <p className="text-[10px] text-gray-400 mt-1.5">
                 An id already used by an uploaded statement can&apos;t be removed — deactivate it
@@ -195,11 +240,22 @@ export default function AirlineIdsModal({
                 <div className="flex items-center gap-2">
                   <input
                     value={d.ref_id}
-                    onChange={e => setDraft(i, e.target.value)}
+                    onChange={e => setDraft(i, { ref_id: e.target.value })}
                     onKeyDown={e => { if (e.key === "Enter") addDraft(); }}
                     placeholder={`e.g. ${entry.iata_code}-DEL-88213`}
                     className={`${INPUT} flex-1 ${d.err ? "border-red-300 bg-red-50/40" : ""}`}
                   />
+                  <select
+                    value={d.business_type}
+                    onChange={e => setDraft(i, { business_type: e.target.value as BusinessType | "" })}
+                    title="Business type"
+                    className={`${TYPE_SELECT} ${d.business_type ? "" : "text-gray-400"} ${
+                      d.err && !d.business_type ? "border-red-300 bg-red-50/40" : ""
+                    }`}
+                  >
+                    <option value="" disabled>Type…</option>
+                    {BUSINESS_TYPES.map(t => <option key={t} value={t} className="text-gray-800">{t}</option>)}
+                  </select>
                   <button
                     onClick={() => removeDraft(i)}
                     className="p-1.5 hover:bg-gray-100 rounded-lg text-gray-400 hover:text-gray-600"
@@ -217,7 +273,8 @@ export default function AirlineIdsModal({
           </button>
           <p className="text-[10px] text-gray-400 mt-1.5">
             An ID must be unique across your whole account — it&apos;s what you pick when uploading
-            an LCC statement, and the file itself doesn&apos;t name the airline.
+            an LCC statement, and the file itself doesn&apos;t name the airline. Pick the business
+            type (B2B, B2C, B2E or MICE) the ID is used for.
           </p>
         </div>
 

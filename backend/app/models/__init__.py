@@ -33,11 +33,14 @@ from app.models.billing import Billing
 from app.models.uploaded_ticket import UploadedTicket
 from app.models.ticket_statement import TicketStatement
 from app.models.internal_ticket import InternalTicketStatement, InternalUploadedTicket
+# Vendors → Reconciliation → GDS ↔ Internal: what the user decided on a line that disagrees.
+from app.models.vendor_internal_recon import VendorInternalResolution
 from app.models.customer_statement import CustomerStatement, CustomerStatementTicket
 from app.models.income_summary import IncomeSummary
 from app.models.ticket_calculation import TicketCalculation
 from app.models.ticket_adjustment import TicketAdjustment
 from app.models.airline_adjustment import AirlineADM, AirlineACM, AirlineRA, ADJUSTMENT_MODELS
+from app.models.third_party_statement import ThirdPartyStatement
 from app.models.statement_row import (
     TgqHmpr, Ndc, LccDi, LccDividedPnr, LccFlownReport, LccCtaBta,
     ThirdPartyGds, ThirdPartyLcc, ThirdPartyApi, MidOfficeGds, STATEMENT_MODELS,
@@ -136,12 +139,14 @@ __all__ = [
     "Billing",
     "UploadedTicket",
     "TicketStatement",
+    "VendorInternalResolution",
     "CustomerStatement", "CustomerStatementTicket",
     "IncomeSummary",
     "TicketCalculation",
     "TicketAdjustment",
     "AirlineADM", "AirlineACM", "AirlineRA", "ADJUSTMENT_MODELS",
     "TgqHmpr", "Ndc", "LccDi", "LccDividedPnr", "LccFlownReport", "LccCtaBta",
+    "ThirdPartyStatement",
     "ThirdPartyGds", "ThirdPartyLcc", "ThirdPartyApi", "MidOfficeGds", "STATEMENT_MODELS",
     "LccDetailed", "LccDetailedBatch", "LccBatchAirlineId", "StatementBatchAirlineId",
     "StatementBatchSupplier", "StatementBatchBilling",

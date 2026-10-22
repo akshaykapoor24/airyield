@@ -44,6 +44,11 @@ class TenantAirline(Base):
     # The user's own id for this airline. Free text — it is a handle they recognise.
     ref_id:        Mapped[str]  = mapped_column(String(100), nullable=False, index=True)
 
+    # The line of business this id is opened for — B2B / B2C / B2E / MICE, the deal
+    # form's Business Type list (schemas/tenant_airline.py::BUSINESS_TYPES). Asked for
+    # every new id; NULL only on ids added before it was asked.
+    business_type: Mapped[str | None] = mapped_column(String(10), nullable=True)
+
     # Snapshots of the master at the moment the airline was registered. A statement
     # uploaded in August must keep saying what it said in August even if an admin later
     # renames the airline or corrects its numeric code. Same pattern as Deal.scope_party_name.

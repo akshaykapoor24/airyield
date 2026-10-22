@@ -72,6 +72,12 @@ export type TicketRow = {
   acc_code?:            string | null;
   sold_to?:             string | null;
   customer_name?:       string | null;
+  // Payable To — who the ticket was bought from (Create Ticket): "airline" or "b2b",
+  // the party's id, and its name as the master has it.
+  payable_type?:        "airline" | "b2b" | null;
+  payable_airline_id?:  number | null;
+  payable_agency_id?:   number | null;
+  payable_to?:          string | null;
   tour_code?:           string | null;
   split_type?:          string | null;
   adm_acm_ra?:          string | null;
@@ -189,6 +195,9 @@ export type TicketExtractionPreview = {
   unmapped_columns:  string[];
   /** Near matches, offered for one click and never applied on their own. */
   fuzzy_suggestions: Record<string, { column: string; score: number }[]>;
+  /** Internal Statement: Excel dates stored with day and month swapped and put back in the
+   *  declared date format (backend services/excel_dates.py). Null when none. */
+  date_fix?: { count: number; columns: { column: string; cells: number }[]; period_label: string } | null;
 };
 
 export type FieldGroupId =
@@ -534,8 +543,10 @@ const REVIEW_GROUP_KEYS: { label: string; color: string; keys: string[] }[] = [
     "adm", "incentive_sell", "dis_sell", "tds_sell", "total_amt",
     "paid_by_credit_card", "net_amt",
   ]},
+  // Doc Date beside Doc No: on a consolidator's statement it is the issue (or credit) date —
+  // and the Booked Date Internal Statement's duplicate check reads when there is no Ticket Date.
   { label: "Account", color: "#9333ea", keys: [
-    "cc", "acc_code", "doc_no", "sold_to", "customer_name",
+    "cc", "acc_code", "doc_no", "doc_date", "sold_to", "customer_name",
   ]},
 ];
 

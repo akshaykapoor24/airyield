@@ -7,12 +7,14 @@ request to the user and lets them pick which uploads go into it.
 
 Computed on request and never stored: both sides are small (a month is a few
 hundred lines), and a stored result would go stale the moment either statement is
-re-uploaded or a ticket is punched.
+re-uploaded or a ticket is punched. What IS stored is the user's decision on a line
+that disagrees (/resolutions) — see models/vendor_internal_recon.py.
 """
-from typing import Optional
+from typing import Literal, Optional
 
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy import and_, func, select
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
+from sqlalchemy import and_, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -21,9 +23,26 @@ from app.models.internal_ticket import InternalTicketStatement, InternalUploaded
 from app.models.statement_batch_supplier import StatementBatchSupplier
 from app.models.statement_row import ThirdPartyGds
 from app.models.user import User
-from app.services.vendor_internal_recon import reconcile
+from app.models.vendor_internal_recon import VendorInternalResolution
+from app.services.vendor_internal_recon import reconcile, resolve
 
 router = APIRouter()
+
+
+class _Selection(BaseModel):
+    # The uploads on screen, so the answer sent back is the one the user is looking at.
+    vendor_batch: Optional[list[str]] = None
+    internal_batch: Optional[list[str]] = None
+
+
+class ResolveBody(_Selection):
+    keys: list[str] = Field(..., min_length=1, max_length=5000)
+    decision: Literal["vendor_wrong", "internal_wrong", "accepted"]
+    note: Optional[str] = Field(None, max_length=2000)
+
+
+class ReopenBody(_Selection):
+    keys: list[str] = Field(..., min_length=1, max_length=5000)
 
 _TP_GDS_SLUG = "tp-gds"
 
@@ -86,4 +105,43 @@ async def run_reconciliation(
     return await reconcile(
         db, tenant_id=current_user.tenant_id, user_id=current_user.id,
         vendor_batches=vendor_batch or None, internal_batches=internal_batch or None,
+    )
+
+
+@router.post("/resolutions")
+async def resolve_lines(
+    body: ResolveBody,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Close lines that disagree with one decision — the GDS statement is wrong, the
+    internal statement is wrong, or the difference is accepted. Returns the
+    reconciliation as it now stands."""
+    try:
+        return await resolve(
+            db, tenant_id=current_user.tenant_id, user_id=current_user.id,
+            keys=body.keys, decision=body.decision, note=body.note,
+            vendor_batches=body.vendor_batch or None, internal_batches=body.internal_batch or None,
+        )
+    except LookupError:
+        raise HTTPException(409, "Some of these lines have changed since the screen was loaded — "
+                                 "reconcile again and retry.")
+
+
+@router.post("/resolutions/reopen")
+async def reopen_lines(
+    body: ReopenBody,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Withdraw the decision on these lines, putting them back with the open ones."""
+    await db.execute(delete(VendorInternalResolution).where(
+        VendorInternalResolution.tenant_id == current_user.tenant_id,
+        VendorInternalResolution.created_by_id == current_user.id,
+        VendorInternalResolution.item_key.in_(body.keys),
+    ))
+    await db.commit()
+    return await reconcile(
+        db, tenant_id=current_user.tenant_id, user_id=current_user.id,
+        vendor_batches=body.vendor_batch or None, internal_batches=body.internal_batch or None,
     )

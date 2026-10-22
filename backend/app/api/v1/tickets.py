@@ -56,11 +56,13 @@ from app.models.deal import DealDirection
 from app.api.v1.lcc_detailed import _resolve_bill_party
 from app.services import customer_resolver as cres
 from app.services import sector_split
+from app.services import ticket_duplicates
 from app.services.deal_matching import CustomerScope, DealMatchingService, SCOPE_SPECIFIC
 from app.services.exclusion_evaluator import evaluate_exclusion_for_payout, evaluate_inclusion_for_payout
+from app.services import flat_statement as _flat
 from app.services.ticket_extraction import (
     TicketExtractionService, TEMPLATE_HEADERS, AIRLINE_TEMPLATE_HEADERS,
-    derive_ticket_rows,
+    DATE_FORMAT_FIELDS, derive_ticket_rows,
 )
 
 router = APIRouter()
@@ -70,6 +72,19 @@ router = APIRouter()
 # Statement records sales instead and turns this off in its copy of this module
 # (api/v1/internal_tickets.py), so there a ticket stays one row, as on the statement.
 SPLIT_MULTI_SECTOR = True
+
+# An uploaded statement saves only the tickets not already loaded — a line whose Booked
+# Date, Ticket No, Pax Name, Amount and Travel Date match a saved ticket's is a duplicate
+# (services/ticket_duplicates.py) — and every ticket saved keeps its key for the next
+# upload. Off here — Customer data → Statement saves every row, as it always has — and on
+# in Internal Statement's copy (api/v1/internal_tickets.py).
+DUPLICATE_CHECK = False
+
+# An uploaded statement declares the order its Ticket Date and Travel Date are written in,
+# and its dates are read that way (services/ticket_extraction.py DATE_FORMAT_FIELDS) — no
+# day-first fallback. Off here — Customer data → Statement reads dates as it always has —
+# and on in Internal Statement's copy (api/v1/internal_tickets.py).
+DATE_FORMATS_REQUIRED = False
 
 # Mirrors MAX_SEND_ROWS / MAX_SELECTION in the LCC worklist, so the two bulk
 # controls in this product refuse at the same size.
@@ -165,6 +180,38 @@ async def list_tickets_legacy(
 
 # ── Upload flow: Step 1 — extract / preview ────────────────────────────────
 
+def _checked_date_formats(raw: dict | None, *, required: bool) -> dict[str, str] | None:
+    """The order the upload declared its Ticket Date and Travel Date are written in —
+    {field: "DMY" | "MDY" | "YMD"} (ticket_extraction.DATE_FORMAT_FIELDS), checked. None when
+    none was sent and none is required."""
+    if not raw:
+        if required:
+            raise HTTPException(
+                status_code=400,
+                detail="Choose the date format of Ticket Date and Travel Date — it decides how the file's dates are read.")
+        return None
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=400, detail="The date formats were not readable.")
+    out: dict[str, str] = {}
+    for f in DATE_FORMAT_FIELDS:
+        order = raw.get(f["field"])
+        if order not in _flat.DATE_ORDERS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Choose the date format of {f['header']} (DD-MM-YYYY, MM-DD-YYYY or YYYY-MM-DD).")
+        out[f["field"]] = order
+    return out
+
+
+def _period_or_none(valid_from: Optional[str], valid_to: Optional[str]) -> tuple[date, date] | None:
+    """The statement period as sent, or None when either end is missing, unreadable or backwards."""
+    try:
+        start, end = date.fromisoformat((valid_from or "")[:10]), date.fromisoformat((valid_to or "")[:10])
+    except ValueError:
+        return None
+    return (start, end) if start <= end else None
+
+
 @router.post("/upload/extract", response_model=TicketExtractionPreview)
 async def extract_ticket_file(
     file: UploadFile = File(...),
@@ -172,6 +219,12 @@ async def extract_ticket_file(
     statement_type: str = Form("B2B"),
     sheet_name: Optional[str] = Form(None),
     header_row: Optional[int] = Form(None),
+    # Internal Statement: JSON {field: "DMY" | "MDY" | "YMD"} — how the Ticket Date and Travel
+    # Date columns are written — and the statement period. Required with a mapping there
+    # (`DATE_FORMATS_REQUIRED`): that is the read that makes the rows.
+    date_formats: Optional[str] = Form(None),
+    valid_from: Optional[str] = Form(None),
+    valid_to: Optional[str] = Form(None),
     current_user: User = Depends(get_current_user),
 ):
     """Step 1 — Upload a spreadsheet, parse it and return a preview for user review.
@@ -199,6 +252,11 @@ async def extract_ticket_file(
             mapping_dict = json.loads(column_mapping)
         except (json.JSONDecodeError, TypeError):
             raise HTTPException(status_code=400, detail="column_mapping must be a valid JSON string.")
+    try:
+        formats_raw = json.loads(date_formats) if date_formats else None
+    except (json.JSONDecodeError, TypeError):
+        raise HTTPException(status_code=400, detail="date_formats must be a valid JSON string.")
+    formats = _checked_date_formats(formats_raw, required=DATE_FORMATS_REQUIRED and bool(mapping_dict))
 
     try:
         result = await TicketExtractionService.extract(
@@ -208,6 +266,8 @@ async def extract_ticket_file(
             sheet_name=sheet_name,
             header_row=header_row,
             split_legs=SPLIT_MULTI_SECTOR,
+            date_formats=formats,
+            valid_period=_period_or_none(valid_from, valid_to),
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
@@ -230,6 +290,7 @@ async def extract_ticket_file(
         sample_rows=result.get("sample_rows", {}),
         unmapped_columns=result.get("unmapped_columns", []),
         fuzzy_suggestions=result.get("fuzzy_suggestions", {}),
+        date_fix=result.get("date_fix"),
     )
 
 
@@ -374,6 +435,63 @@ async def _resolve_customer_party(
     return CustomerParty("direct", customer_id=row.id, name=name, label="Direct")
 
 
+# ── Payable To: who a ticket was bought from ────────────────────────────────
+_PAYABLE_TYPES = ("airline", "b2b")
+
+
+async def _resolve_payables(rows: list[TicketRow], db: AsyncSession, *, user_id: int) -> list[dict]:
+    """Authorise each row's Payable To and return what to store on it — `{}` for a row
+    that names none (every uploaded statement line, and a ticket punched without one).
+
+    The airline must be in the platform's airline master (platform admin → Airline Master,
+    the same list the ticket's own Airline is picked from) — any carrier can be bought from
+    direct, whether or not the user holds an id for it. The consolidator must be one of the
+    user's own Agency Master rows — user-scoped, as `_resolve_customer_party` scopes
+    agencies; checked here rather than left to the foreign key, because an FK only proves
+    the row exists, not that it is the caller's. The name stored is the master's, never the
+    payload's, so a ticket cannot name one party while pointing at another."""
+    def kind(r: TicketRow) -> str | None:
+        return (r.payable_type or "").strip().lower() or None
+
+    airline_ids = {r.payable_airline_id for r in rows if kind(r) == "airline" and r.payable_airline_id is not None}
+    agency_ids = {r.payable_agency_id for r in rows if kind(r) == "b2b" and r.payable_agency_id is not None}
+    airlines: dict[int, str] = {}
+    if airline_ids:
+        found = await db.execute(select(Airline.id, Airline.name).where(Airline.id.in_(airline_ids)))
+        airlines = {airline_id: (name or "").strip() for airline_id, name in found.all()}
+    agencies: dict[int, str] = {}
+    if agency_ids:
+        found = await db.execute(
+            select(Agency.id, Agency.name).where(Agency.id.in_(agency_ids), Agency.user_id == user_id)
+        )
+        agencies = {agency_id: name for agency_id, name in found.all()}
+
+    out: list[dict] = []
+    for r in rows:
+        t = kind(r)
+        if t is None:
+            out.append({})
+        elif t not in _PAYABLE_TYPES:
+            raise HTTPException(status_code=422, detail="Payable To must be Airline or B2B.")
+        elif t == "airline":
+            if r.payable_airline_id is None:
+                raise HTTPException(status_code=422, detail="Payable To is Airline — pick the airline.")
+            if r.payable_airline_id not in airlines:
+                raise HTTPException(status_code=400,
+                                    detail=f"Airline id {r.payable_airline_id} is not in the airline master.")
+            out.append(dict(payable_type="airline", payable_airline_id=r.payable_airline_id,
+                            payable_agency_id=None, payable_to=airlines[r.payable_airline_id] or None))
+        else:
+            if r.payable_agency_id is None:
+                raise HTTPException(status_code=422, detail="Payable To is B2B — pick the agency.")
+            if r.payable_agency_id not in agencies:
+                raise HTTPException(status_code=400,
+                                    detail=f"Agency id {r.payable_agency_id} not found in your agencies.")
+            out.append(dict(payable_type="b2b", payable_airline_id=None,
+                            payable_agency_id=r.payable_agency_id, payable_to=agencies[r.payable_agency_id]))
+    return out
+
+
 async def _build_uploaded_tickets(
     rows:           list[TicketRow],
     db:             AsyncSession,
@@ -398,9 +516,11 @@ async def _build_uploaded_tickets(
     vendor-statement tables keep, and what a later re-map would read.
     """
     code_to_airline, name_to_airline = await _resolve_airlines(rows, db)
+    # Who each ticket was bought from — authorised before anything is built.
+    payables = await _resolve_payables(rows, db, user_id=created_by_id)
     built: list[UploadedTicket] = []
 
-    for row in rows:
+    for row, payable in zip(rows, payables):
         # Try code lookup (numeric zero-padding + uppercase for alphabetic)
         raw_code = (row.airlines_code or "").strip()
         code_variants = [raw_code, raw_code.upper()]
@@ -510,6 +630,9 @@ async def _build_uploaded_tickets(
             customer_agency_id=(party.agency_id if party else None),
             corporate_id=(party.corporate_id if party else None),
             customer_id=(party.customer_id if party else None),
+            # Payable To — the ticket's own, never the statement's (one statement can
+            # hold tickets bought from different suppliers).
+            **payable,
             airline_name=resolved_airline_name,
             split_type=row.split_type,
             adm_acm_ra=adm_acm_ra,
@@ -575,9 +698,17 @@ async def confirm_ticket_upload(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Step 2 — User has reviewed the preview and confirms. Save rows to DB."""
+    """Step 2 — User has reviewed the preview and confirms. Save rows to DB.
+
+    Internal Statement (`DUPLICATE_CHECK`): an uploaded statement saves only the tickets not
+    already loaded — services/ticket_duplicates.py — and a file of nothing but duplicates is
+    refused (409) with nothing written.
+    """
     if not payload.rows:
         raise HTTPException(status_code=400, detail="No rows to save.")
+    # A punched batch has no sheet: its dates came from date pickers, already ISO.
+    uploaded = (payload.file_name or "") != MANUAL_ENTRY_FILE_NAME
+    formats = _checked_date_formats(payload.date_formats, required=DATE_FORMATS_REQUIRED and uploaded)
 
     now = datetime.utcnow()
     batch_id = str(uuid.uuid4())
@@ -589,6 +720,21 @@ async def confirm_ticket_upload(
         payload.customer_type, payload.customer_agency_id,
         payload.corporate_id, payload.customer_id,
     )
+
+    rows, dupes = list(payload.rows), None
+    # Create Ticket's hand-punched batches are not a statement: not checked, only keyed below.
+    if DUPLICATE_CHECK and (payload.file_name or "") != MANUAL_ENTRY_FILE_NAME:
+        # Two saves at the same moment would each find the other's tickets not yet there and
+        # both save them. One at a time per user, until commit.
+        await db.execute(select(func.pg_advisory_xact_lock(ticket_duplicates.lock_key(current_user))))
+        dupes = await ticket_duplicates.find(
+            db, current_user, [r.model_dump() for r in rows],
+            statements=TicketStatement, tickets=UploadedTicket,
+        )
+        reason = dupes.refusal()
+        if reason:
+            raise HTTPException(status_code=409, detail=f"{reason} Nothing was saved.")
+        rows = [payload.rows[i] for i in dupes.kept]
 
     db.add(TicketStatement(
         batch_id=batch_id,
@@ -612,10 +758,17 @@ async def confirm_ticket_upload(
         file_name=payload.file_name,
         created_by_id=current_user.id,
         created_at=now,
+        # How the file's dates were read (Internal Statement) — and what pre-fills this
+        # customer's next upload.
+        date_formats=formats,
+        # The file's tally when it was checked (Internal Statement): every ticket line in it,
+        # the duplicates left out, and the statement most of those are already loaded in.
+        **({"total_entries": dupes.entries, "duplicate_entries": dupes.count,
+            "duplicate_of": dupes.duplicate_of} if dupes is not None else {}),
     ))
 
-    for ticket in await _build_uploaded_tickets(
-        payload.rows, db,
+    built = await _build_uploaded_tickets(
+        rows, db,
         batch_id=batch_id,
         file_name=payload.file_name,
         statement_type=payload.statement_type,
@@ -623,14 +776,28 @@ async def confirm_ticket_upload(
         created_by_id=current_user.id,
         now=now,
         party=party,
-    ):
+    )
+    _stamp_keys(built, rows)
+    for ticket in built:
         db.add(ticket)
 
     await db.commit()
     await _rematch_series_contracts(
         db, tenant_id=current_user.tenant_id, created_by_id=current_user.id, batch_id=batch_id,
     )
-    return ConfirmTicketUploadResult(batch_id=batch_id, created_count=len(payload.rows))
+    return ConfirmTicketUploadResult(
+        batch_id=batch_id, created_count=len(rows),
+        duplicates=dupes.summary() if dupes is not None else None,
+    )
+
+
+def _stamp_keys(built: list[UploadedTicket], rows: list[TicketRow]) -> None:
+    """Internal Statement (`DUPLICATE_CHECK`): each ticket keeps the key of the line it was
+    saved from, so a later upload recognises it whatever is edited since — uploaded and
+    hand-punched alike. One row is one ticket here (Internal Statement does not split legs)."""
+    if DUPLICATE_CHECK and len(built) == len(rows):
+        for ticket, row in zip(built, rows):
+            ticket.dedup_key = ticket_duplicates.ticket_key(row.model_dump())
 
 
 async def _rematch_series_contracts(db: AsyncSession, *, tenant_id: int, created_by_id: int, batch_id: str) -> None:
@@ -693,7 +860,7 @@ async def append_tickets_to_statement(
     if not statement:
         raise HTTPException(status_code=404, detail="Statement not found.")
 
-    for ticket in await _build_uploaded_tickets(
+    built = await _build_uploaded_tickets(
         payload.rows, db,
         batch_id=batch_id,
         # Keep the statement's own file_name so provenance stays consistent; a
@@ -711,7 +878,9 @@ async def append_tickets_to_statement(
             corporate_id=statement.corporate_id,
             customer_id=statement.customer_id,
         ),
-    ):
+    )
+    _stamp_keys(built, payload.rows)
+    for ticket in built:
         db.add(ticket)
 
     await db.commit()
@@ -904,6 +1073,9 @@ async def list_ticket_statements(
             ticket_count=int(count),
             created_by_name=created_by_name,
             created_at=stmt.created_at,
+            total_entries=stmt.total_entries,
+            duplicate_entries=stmt.duplicate_entries or 0,
+            duplicate_of=stmt.duplicate_of,
         )
         for stmt, count, created_by_name in rows
     ]
@@ -1020,6 +1192,9 @@ async def get_ticket_statement(
         file_url=stmt.file_url,
         ticket_count=int(ticket_count),
         created_at=stmt.created_at,
+        total_entries=stmt.total_entries,
+        duplicate_entries=stmt.duplicate_entries or 0,
+        duplicate_of=stmt.duplicate_of,
     )
 
 

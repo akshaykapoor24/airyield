@@ -36,6 +36,7 @@ from app.services import notifications
 import httpx
 
 from app.services.mail import classify, cloud_readers, crypto, imap_client, mime, oauth, registry, storage
+from app.services.mail import process as mail_process
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +119,7 @@ async def _store_message(db: AsyncSession, conn: MailConnection, fetched: imap_c
         attachment_count=len(parsed.attachments),
         note="too_large" if fetched.too_large else None,
     )
+    _scan_body(msg)
     db.add(msg)
     await db.flush()
     for part in parsed.parts:
@@ -176,6 +178,31 @@ async def classify_pending(db: AsyncSession, *, tenant_id: int, connection_id: i
         done += 1
     await db.commit()
     return done
+
+
+def _scan_body(msg: MailMessage) -> None:
+    """Note the statement / deal tables and deal text in the body (services/mail/process.py).
+    Never fails the store: a body that cannot be read counts as holding nothing."""
+    try:
+        mail_process.scan_body(msg)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[mail.scan] message %s body scan failed: %s", msg.provider_message_id, exc)
+        msg.processed = {**(msg.processed or {}), mail_process.BODY_ITEMS_KEY: 0}
+
+
+async def scan_pending_bodies(db: AsyncSession, *, tenant_id: int, connection_id: int | None = None,
+                              limit: int = 200) -> int:
+    """Scan the bodies of mail stored before the scan existed. Called at the end of every check,
+    like classify_pending, so existing mail shows under "Pending to upload" without a manual step."""
+    q = select(MailMessage).where(MailMessage.tenant_id == tenant_id,
+                                  ~MailMessage.processed.has_key(mail_process.BODY_ITEMS_KEY))
+    if connection_id is not None:
+        q = q.where(MailMessage.connection_id == connection_id)
+    msgs = (await db.execute(q.limit(limit))).scalars().all()
+    for msg in msgs:
+        _scan_body(msg)
+    await db.commit()
+    return len(msgs)
 
 
 async def _notify_one(db: AsyncSession, msg: MailMessage) -> None:
@@ -404,6 +431,7 @@ async def _sync_locked(db: AsyncSession, conn: MailConnection) -> SyncResult:
                                       "ignored": ignored[-imap_client._IGNORED_KEEP:]}}
     try:
         await classify_pending(db, tenant_id=conn.tenant_id, connection_id=conn.id)
+        await scan_pending_bodies(db, tenant_id=conn.tenant_id, connection_id=conn.id)
     except Exception:  # noqa: BLE001 — classification catches up next time; the sync itself succeeded
         await db.rollback()
         await db.refresh(conn)

@@ -13,8 +13,9 @@
 //   bank       → the Bank statement import, directly
 //   other      → "Import as…" lets the user say what it is
 //
-// When an import is saved, the email remembers it ("Imported ✓"), so nothing is imported twice
-// by accident — "Import again" clears the mark when that is what the user wants.
+// When an import is saved, the email remembers it ("Uploaded ✓"), so nothing is imported twice
+// by accident — "Upload again" clears the mark when that is what the user wants. The inbox files
+// the email under "Pending to upload" or "Uploaded" from the same marks.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -112,9 +113,13 @@ type Open =
   | { kind: "mapping" | "oneshot"; item: PlanItem; docType: string; file: File; apiBase: string; title: string;
       requiresSupplier: boolean; requiresAirlineId: boolean; doneHint?: string }
   | { kind: "lcc"; item: PlanItem; docType: string; files: File[]; apiBase: string; title: string }
-  | { kind: "bsp"; item: PlanItem; docType: string; detail: File | null; summary: File | null };
+  | { kind: "bsp"; item: PlanItem; docType: string; detail: File | null; summary: File | null; pair: PlanItem | null };
 
-export default function ProcessPanel({ messageId }: { messageId: number }) {
+export default function ProcessPanel({ messageId, onChanged }: {
+  messageId: number;
+  /** An item was marked imported or cleared — the inbox re-files the email (Statements ↔ Imported). */
+  onChanged?: () => void;
+}) {
   const router = useRouter();
   const [plan, setPlan] = useState<Plan | null>(null);
   const [error, setError] = useState("");
@@ -127,15 +132,21 @@ export default function ProcessPanel({ messageId }: { messageId: number }) {
   }, [messageId]);
   useEffect(() => { void load(); }, [load]);
 
-  const markDone = async (item: PlanItem, destination: string, ref?: string | null) => {
-    try { await api.post(`/mail/messages/${messageId}/processed`, { key: item.key, destination, ref: ref ?? null }); }
-    catch { /* the import itself succeeded; the mark is a convenience */ }
+  // `items`: everything the module's screen imported — a BSP detail and its summary go in together.
+  // One after another: each mark rewrites the email's record, so two at once would lose one.
+  const markDone = async (items: PlanItem[], destination: string, ref?: string | null) => {
+    for (const item of items) {
+      try { await api.post(`/mail/messages/${messageId}/processed`, { key: item.key, destination, ref: ref ?? null }); }
+      catch { /* the import itself succeeded; the mark is a convenience */ }
+    }
     await load();
+    onChanged?.();
   };
 
   const unmark = async (item: PlanItem) => {
     await api.delete(`/mail/messages/${messageId}/processed/${encodeURIComponent(item.key)}`).catch(() => {});
     await load();
+    onChanged?.();
   };
 
   const dealLink = (item: PlanItem) => {
@@ -154,7 +165,7 @@ export default function ProcessPanel({ messageId }: { messageId: number }) {
         const fd = new FormData(); fd.append("file", file);
         const { data } = await api.post<{ statement: { id: number }; inserted: number }>("/bank-statements/upload", fd);
         toast.success(`Bank statement imported · ${data.inserted} line${data.inserted === 1 ? "" : "s"}`);
-        await markDone(item, "bank-statements", String(data.statement?.id ?? ""));
+        await markDone([item], "bank-statements", String(data.statement?.id ?? ""));
         return;
       }
       const target = STATEMENT_TARGET[docType];
@@ -165,7 +176,7 @@ export default function ProcessPanel({ messageId }: { messageId: number }) {
         const other = plan?.items.find(i => i.key !== item.key && i.source === "attachment" &&
           (docType === "bsp" ? i.doc_type === "bsp-summary" : i.doc_type === "bsp"));
         const otherFile = other ? await fetchFile(fileUrl(messageId, other), other.title).catch(() => null) : null;
-        setOpen({ kind: "bsp", item, docType,
+        setOpen({ kind: "bsp", item, docType, pair: otherFile ? other ?? null : null,
                   detail: docType === "bsp" ? file : otherFile, summary: docType === "bsp-summary" ? file : otherFile });
       } else if (cfg.kind === "lcc-detailed") {
         setOpen({ kind: "lcc", item, docType, files: [file], apiBase: cfg.apiBase ?? "/lcc-detailed", title: cfg.label });
@@ -205,7 +216,7 @@ export default function ProcessPanel({ messageId }: { messageId: number }) {
         <Wand2 className="w-4 h-4" style={{ color: BRAND }} />
         <h3 className="text-sm font-semibold text-gray-900">Process this email</h3>
         {plan.items.length > 0 && (
-          <span className="text-[11px] text-gray-500">{done} of {plan.items.length} imported</span>
+          <span className="text-[11px] text-gray-500">{done} of {plan.items.length} uploaded</span>
         )}
         {plan.sender.label && (
           <span className="ml-auto text-[11px] text-gray-500 truncate">From {plan.sender.label}</span>
@@ -239,24 +250,27 @@ export default function ProcessPanel({ messageId }: { messageId: number }) {
         <StatementUploadWizard apiBase={open.apiBase} title={open.title} requireSupplier={open.requiresSupplier}
           doneHint={open.doneHint}
           initialFile={open.file} initialAgencyId={plan.sender.agency_id}
+          initialPeriod={{ from: facts.period_from, to: facts.period_to }}
           onClose={() => setOpen(null)}
-          onDone={() => { const it = open.item; const dt = open.docType; setOpen(null); void markDone(it, `statements:${dt}`); }} />
+          onDone={() => { const it = open.item; const dt = open.docType; setOpen(null); void markDone([it], `statements:${dt}`); }} />
       )}
       {open?.kind === "oneshot" && (
         <UploadModal apiBase={open.apiBase} title={open.title} requiresSupplier={open.requiresSupplier}
           requiresAirlineId={open.requiresAirlineId} initialFile={open.file} initialAgencyId={plan.sender.agency_id}
           onClose={() => setOpen(null)}
-          onDone={() => { const it = open.item; const dt = open.docType; setOpen(null); void markDone(it, `statements:${dt}`); }} />
+          onDone={() => { const it = open.item; const dt = open.docType; setOpen(null); void markDone([it], `statements:${dt}`); }} />
       )}
       {open?.kind === "lcc" && (
         <LccUploadWizard apiBase={open.apiBase} title={open.title} initialFiles={open.files}
           onClose={() => setOpen(null)}
-          onDone={() => { const it = open.item; setOpen(null); void markDone(it, "lcc-detailed"); }} />
+          onDone={() => { const it = open.item; setOpen(null); void markDone([it], "lcc-detailed"); }} />
       )}
       {open?.kind === "bsp" && (
+        // The wizard always uploads the summary AND the detail, so the other file of the pair
+        // that came with this email is imported too.
         <BspUploadWizard initialDetailFile={open.detail} initialSummaryFile={open.summary}
           onClose={() => setOpen(null)}
-          onDone={() => { const it = open.item; setOpen(null); void markDone(it, "bsp"); }} />
+          onDone={() => { const its = open.pair ? [open.item, open.pair] : [open.item]; setOpen(null); void markDone(its, "bsp"); }} />
       )}
     </section>
   );
@@ -308,9 +322,9 @@ function ProcessRow({ item, busy, onImport, onDeal, onAgain }: {
         {item.imported ? (
           <div className="flex items-center gap-2 text-[11px]">
             <span className="inline-flex items-center gap-1 font-semibold text-emerald-700">
-              <CheckCircle2 className="w-4 h-4" /> Imported · {fmtWhen(item.imported.at)}
+              <CheckCircle2 className="w-4 h-4" /> Uploaded · {fmtWhen(item.imported.at)}
             </span>
-            <button onClick={onAgain} className="text-gray-500 underline underline-offset-2 hover:text-gray-800">Import again</button>
+            <button onClick={onAgain} className="text-gray-500 underline underline-offset-2 hover:text-gray-800">Upload again</button>
           </div>
         ) : item.kind === "deal" ? (
           <button onClick={onDeal} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-white" style={{ background: BRAND }}>

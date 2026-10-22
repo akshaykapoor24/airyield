@@ -52,6 +52,13 @@ class TicketRow(BaseModel):
     acc_code:            Optional[str]   = None
     sold_to:             Optional[str]   = None
     customer_name:       Optional[str]   = None
+    # Payable To — who the ticket was bought from: "airline" (payable_airline_id, an
+    # airline in the platform's airline master) or "b2b" (payable_agency_id, an Agency
+    # Master row). `payable_to` is the name; the server rewrites it from the master at save.
+    payable_type:        Optional[str]   = None
+    payable_airline_id:  Optional[int]   = None
+    payable_agency_id:   Optional[int]   = None
+    payable_to:          Optional[str]   = None
     tour_code:           Optional[str]   = None
     split_type:          Optional[str]   = None
     adm_acm_ra:          Optional[str]   = None
@@ -186,6 +193,9 @@ class TicketExtractionPreview(BaseModel):
     # and NEVER applied on their own. A 0.82 string match on a money column is a
     # good guess, not a fact.
     fuzzy_suggestions: dict[str, list[dict]] = {}
+    # Internal Statement: Excel dates stored with day and month swapped and put back in the
+    # declared format — {count, columns, period_label} (services/excel_dates.py). Null when none.
+    date_fix:          Optional[dict]  = None
 
 
 class ConfirmTicketUploadPayload(BaseModel):
@@ -213,6 +223,10 @@ class ConfirmTicketUploadPayload(BaseModel):
     corporate_id:       Optional[int] = None
     customer_id:        Optional[int] = None
 
+    # Internal Statement: the order the file's Ticket Date and Travel Date are written in,
+    # {field: "DMY" | "MDY" | "YMD"} — the rows were read that way at /upload/extract, and it
+    # is kept on the statement (ticket_statements.date_formats). Required there.
+    date_formats:       Optional[dict[str, str]] = None
 
 
 class AppendTicketsPayload(BaseModel):
@@ -252,6 +266,12 @@ class TicketStatementRead(BaseModel):
     ticket_count:     int
     created_by_name:  Optional[str] = None
     created_at:       datetime
+    # Internal Statement's duplicate check (services/ticket_duplicates.py): ticket lines in
+    # the file, the duplicates left out, and the statement most of them are already loaded
+    # in. None / 0 for Customer data, punched batches and statements made before.
+    total_entries:     Optional[int] = None
+    duplicate_entries: int = 0
+    duplicate_of:      Optional[str] = None
 
     model_config = {"from_attributes": True}
 
@@ -316,6 +336,9 @@ class UploadedTicketFacets(BaseModel):
 class ConfirmTicketUploadResult(BaseModel):
     batch_id:      str
     created_count: int
+    # Internal Statement: the duplicates left out and where their tickets are already loaded
+    # (services/ticket_duplicates.Duplicates.summary). None everywhere else.
+    duplicates:    Optional[Dict[str, Any]] = None
 
 
 class RunCalculationResult(BaseModel):

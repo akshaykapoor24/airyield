@@ -23,7 +23,7 @@ import VendorInternalRecon from "./VendorInternalRecon";
 const VENDOR_INTERNAL = "tp-gds-internal";
 type View = ReconSourceSlug | typeof VENDOR_INTERNAL;
 const VENDOR_INTERNAL_BLURB =
-  "Your consolidator's Third Party GDS statement against Internal Statement — sale with sale, refund with refund, with the difference and a hint on every line.";
+  "Your consolidator's Third Party GDS statement against Internal Statement — matched lines settle, differences are resolved, and lines on one side only carry forward to the next statement.";
 
 export default function ReconciliationTabs() {
   // Read once on mount. `?source=` makes a tab linkable — the natural thing to paste into a

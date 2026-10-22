@@ -36,9 +36,9 @@ from app.models.statement_batch_airline_id import StatementBatchAirlineId
 from app.models.tenant_airline import TenantAirline
 from app.models.user import User
 from app.schemas.tenant_airline import (
-    TenantAirlineBulkCreate, TenantAirlineBulkResult, TenantAirlineBulkUploadResult,
-    TenantAirlineCatalogPage, TenantAirlineCreate, TenantAirlineRead,
-    TenantAirlineUpdate,
+    BUSINESS_TYPES, TenantAirlineBulkCreate, TenantAirlineBulkResult,
+    TenantAirlineBulkUploadResult, TenantAirlineCatalogPage, TenantAirlineCreate,
+    TenantAirlineRead, TenantAirlineUpdate, normalize_business_type,
 )
 from app.services.tenant_airline_catalog import build_catalog
 from app.services import spreadsheet
@@ -290,6 +290,7 @@ async def create_tenant_airline_ids(
             tenant_id=current_user.tenant_id,
             created_by_id=current_user.id,
             ref_id=ref_id,
+            business_type=item.business_type,
             is_active=item.is_active if item.is_active is not None else True,
         )
         obj.apply_master(airline)
@@ -330,6 +331,7 @@ def _cell(v) -> str:
 # upload that sheet back.
 _ID_COLS = ("ID", "REF_ID", "AIRLINE_REF_ID", "LOGIN_ID")
 _CODE_COLS = ("AIRLINE_CODE", "CODE", "IATA_CODE")
+_BUSINESS_TYPE_COLS = ("BUSINESS_TYPE", "BUSINESS", "LOB")
 
 
 def _first(row, names: tuple[str, ...]) -> str:
@@ -346,11 +348,12 @@ async def bulk_upload_tenant_airline_ids(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Import ids from a spreadsheet — AIRLINE_CODE, ID, ACTIVE.
+    """Import ids from a spreadsheet — AIRLINE_CODE, ID, BUSINESS_TYPE, ACTIVE.
 
     Repeat the airline code to give one carrier several ids; that is the point of the
     file. Rows are reported individually rather than aborting the sheet, so a typo in
-    one row does not cost the user the other three hundred.
+    one row does not cost the user the other three hundred. BUSINESS_TYPE is required
+    per row, as it is on the form — a row without one is reported, not guessed.
     """
     content = await file.read()
     filename = (file.filename or "").lower()
@@ -387,7 +390,7 @@ async def bulk_upload_tenant_airline_ids(
                 detail=(
                     "Missing required columns: AIRLINE_CODE and ID. Your header may be on "
                     "a different row (a title row above it, say). "
-                    "Required: AIRLINE_CODE, ID  |  Optional: ACTIVE"
+                    "Required: AIRLINE_CODE, ID, BUSINESS_TYPE  |  Optional: ACTIVE"
                 ),
             )
     except Exception as e:
@@ -437,6 +440,16 @@ async def bulk_upload_tenant_airline_ids(
             errors.append(f"Row {row_num}: the id '{ref_id}' is already used by {taken[key]} — skipped.")
             continue
 
+        try:
+            business_type = normalize_business_type(_first(row, _BUSINESS_TYPE_COLS))
+        except ValueError:
+            business_type = None
+        if business_type is None:
+            errors.append(
+                f"Row {row_num}: BUSINESS_TYPE must be one of {', '.join(BUSINESS_TYPES)} — skipped."
+            )
+            continue
+
         active_raw = _cell(row.get("ACTIVE")).lower()
         is_active = active_raw not in ("0", "no", "false", "inactive", "n")
 
@@ -445,6 +458,7 @@ async def bulk_upload_tenant_airline_ids(
                 tenant_id=current_user.tenant_id,
                 created_by_id=current_user.id,
                 ref_id=ref_id,
+                business_type=business_type,
                 is_active=is_active,
             )
             obj.apply_master(airline)
@@ -469,13 +483,13 @@ async def download_tenant_airline_template():
     wb = Workbook()
     ws = wb.active
     ws.title = "Airline IDs"
-    ws.append(["AIRLINE_CODE", "ID", "ACTIVE"])
+    ws.append(["AIRLINE_CODE", "ID", "BUSINESS_TYPE", "ACTIVE"])
     # Indigo three times on purpose: the sample has to show that repeating the code
-    # is how you give one airline several ids.
-    ws.append(["6E", "6E-DEL-88213", "yes"])
-    ws.append(["6E", "6E-BOM-11902", "yes"])
-    ws.append(["6E", "6E-MAA-44510", "yes"])
-    ws.append(["AI", "KTDEL471", "yes"])
+    # is how you give one airline several ids, each for its own line of business.
+    ws.append(["6E", "6E-DEL-88213", "B2B", "yes"])
+    ws.append(["6E", "6E-BOM-11902", "B2C", "yes"])
+    ws.append(["6E", "6E-MAA-44510", "B2E", "yes"])
+    ws.append(["AI", "KTDEL471", "MICE", "yes"])
 
     bio = BytesIO()
     wb.save(bio)
@@ -503,6 +517,7 @@ async def create_tenant_airline(
         tenant_id=current_user.tenant_id,
         created_by_id=current_user.id,
         ref_id=ref_id,
+        business_type=payload.business_type,
         is_active=payload.is_active if payload.is_active is not None else True,
     )
     obj.apply_master(airline)
@@ -540,6 +555,9 @@ async def update_tenant_airline(
     if "airline_id" in data and data["airline_id"] is not None:
         # Re-point at a different master row: re-snapshot everything with it.
         obj.apply_master(await _airline_or_400(db, data["airline_id"]))
+
+    if "business_type" in data:
+        obj.business_type = data["business_type"]
 
     if "is_active" in data and data["is_active"] is not None:
         obj.is_active = data["is_active"]

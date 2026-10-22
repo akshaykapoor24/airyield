@@ -10,7 +10,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { AlertCircle, Calendar, ChevronLeft, FileSpreadsheet, Ticket, Trash2 } from "lucide-react";
+import { AlertCircle, Calendar, ChevronLeft, CopyX, FileSpreadsheet, Ticket, Trash2 } from "lucide-react";
 import api from "@/lib/api";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import InternalTicketsView from "@/components/tickets/InternalTicketsView";
@@ -25,6 +25,10 @@ type Statement = {
   ticket_count: number;
   created_by_name: string | null;
   created_at: string;
+  // The upload's duplicate check (backend services/ticket_duplicates.py): ticket lines in the
+  // file, and the duplicates of tickets already loaded that were left out. Null / 0 before it.
+  total_entries?: number | null;
+  duplicate_entries?: number;
 };
 
 const fmt = (d?: string | null) =>
@@ -89,6 +93,14 @@ export default function InternalStatementDetailPage() {
             <Ticket className="w-3.5 h-3.5" />
             <b className="text-gray-800">{statement.ticket_count}</b> tickets
           </span>
+          {(statement.duplicate_entries ?? 0) > 0 && (
+            <span className="flex items-center gap-1.5 text-amber-700"
+              title="Duplicates of tickets already loaded — the same Booked Date, Ticket No, Pax Name, Amount and Travel Date. Not saved.">
+              <CopyX className="w-3.5 h-3.5" />
+              <b>{statement.duplicate_entries}</b> duplicate{statement.duplicate_entries === 1 ? "" : "s"} ignored
+              {statement.total_entries != null && <> of {statement.total_entries} in file</>}
+            </span>
+          )}
           <span className="text-gray-400 ml-auto">
             Uploaded {fmt(statement.created_at)}{statement.created_by_name ? ` by ${statement.created_by_name}` : ""}
           </span>

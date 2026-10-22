@@ -14,7 +14,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Calendar, CheckCircle, FileText, Lock, Tag, Users } from "lucide-react";
+import { Calendar, CheckCircle, FileText, Lock, Sparkles, Tag, Users } from "lucide-react";
 import api from "@/lib/api";
 import { agencyLabel, type AgencyRow } from "@/lib/counterparty";
 import { corporateLabel, customerLabel, partyName, type Party } from "@/lib/party";
@@ -24,12 +24,21 @@ import {
   type CustomerTag, type CustomerType,
 } from "@/lib/customerType";
 
+/** A note under a field saying what the attached file said about it — Internal Statement
+ *  reads the customer and the period off the file (backend /internal-tickets/upload/guess).
+ *  `candidates`: the customers it could be, offered as one-click choices. */
+export type FieldHint = {
+  tone: "ok" | "ask";
+  text: string;
+  candidates?: { customer_type: CustomerType; id: number; name: string }[];
+};
+
 export default function CustomerPartyPanel({
   tag, setTag,
   statementName, setStatementName,
   validFrom, setValidFrom,
   validTo, setValidTo,
-  touched, lockedReason,
+  touched, lockedReason, partyHint, periodHint, nameHint,
 }: {
   tag: CustomerTag; setTag: (t: CustomerTag) => void;
   statementName: string; setStatementName: (v: string) => void;
@@ -37,6 +46,12 @@ export default function CustomerPartyPanel({
   validTo: string; setValidTo: (v: string) => void;
   touched: boolean;
   lockedReason?: string | null;
+  /** Who the attached file names, and how sure that is. */
+  partyHint?: FieldHint | null;
+  /** The days the attached file names. */
+  periodHint?: FieldHint | null;
+  /** Replaces the statement-name help line, e.g. "Filled in from the customer and period". */
+  nameHint?: string | null;
 }) {
   const [agencies,   setAgencies]   = useState<AgencyRow[]>([]);
   const [corporates, setCorporates] = useState<Party[]>([]);
@@ -90,6 +105,26 @@ export default function CustomerPartyPanel({
       setTag({ ...tag, customerId: c?.id ?? null, partyName: label });
     }
   };
+
+  const pickCandidate = (type: CustomerType, id: number) => {
+    if (type === "agency") {
+      const a = agencies.find(x => x.id === id);
+      if (a) setTag({ customerType: "agency", agencyId: a.id, corporateId: null, customerId: null, partyName: a.name });
+    } else if (type === "corporate") {
+      const c = corporates.find(x => x.id === id);
+      if (c) setTag({ customerType: "corporate", agencyId: null, corporateId: c.id, customerId: null, partyName: corpName(c) });
+    }
+  };
+  const candidateLabel = (type: CustomerType, id: number, name: string) => {
+    if (type === "agency") {
+      const a = agencies.find(x => x.id === id);
+      return a ? agencyLabel(a) : name;
+    }
+    const c = corporates.find(x => x.id === id);
+    return c ? corporateLabel(c) : name;
+  };
+  const isPicked = (type: CustomerType, id: number) =>
+    tag.customerType === type && (type === "agency" ? tag.agencyId === id : tag.corporateId === id);
 
   const currentLabel =
     tag.customerType === "agency"
@@ -179,6 +214,22 @@ export default function CustomerPartyPanel({
             />
           )
         )}
+        {partyHint && <HintNote hint={partyHint}>
+          {partyHint.candidates && partyHint.candidates.length > 0 && (
+            <div className="mt-1.5 flex flex-wrap gap-1.5">
+              {partyHint.candidates.map(c => (
+                <button key={`${c.customer_type}:${c.id}`} type="button" disabled={locked}
+                  onClick={() => pickCandidate(c.customer_type, c.id)}
+                  className={`px-2 py-1 rounded-md border text-[11px] font-medium transition-colors ${
+                    isPicked(c.customer_type, c.id)
+                      ? "border-[#1e3a5f] bg-[#1e3a5f] text-white"
+                      : "border-gray-200 bg-white text-gray-700 hover:border-[#1e3a5f]/40 hover:bg-[#1e3a5f]/5"}`}>
+                  {c.customer_type === "corporate" ? "B2E · " : ""}{candidateLabel(c.customer_type, c.id, c.name)}
+                </button>
+              ))}
+            </div>
+          )}
+        </HintNote>}
 
         {/* Statement Name */}
         <div>
@@ -192,34 +243,40 @@ export default function CustomerPartyPanel({
             className="w-full border border-gray-200 bg-white rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 disabled:opacity-60"
           />
           <p className="text-[11px] text-gray-400 mt-1">
-            {statementName.trim()
+            {nameHint ? nameHint
+              : statementName.trim()
               ? "Used as the statement's name in the repository."
               : derivedName ? `Leave blank to name it “${derivedName}”.`
               : "Leave blank to name it from the customer and start date."}
           </p>
         </div>
 
+        {/* The period on one row — From and To side by side, what is wrong with it below both. */}
         <div>
-          <label className="block text-xs font-semibold text-gray-600 mb-1.5 uppercase tracking-wide">
-            <Calendar className="w-3.5 h-3.5 inline mr-1" /> Statement Valid From <span className="text-red-500">*</span>
-          </label>
-          <input type="date" value={validFrom} disabled={locked}
-            onChange={e => setValidFrom(e.target.value)}
-            onClick={e => { try { (e.target as HTMLInputElement).showPicker(); } catch {} }}
-            className={`${fieldCls(validFrom)} disabled:opacity-60`} />
+          <div className="grid grid-cols-2 gap-3">
+            <div className="min-w-0">
+              <label className="block text-xs font-semibold text-gray-600 mb-1.5 uppercase tracking-wide">
+                <Calendar className="w-3.5 h-3.5 inline mr-1" /> Valid From <span className="text-red-500">*</span>
+              </label>
+              <input type="date" value={validFrom} disabled={locked}
+                onChange={e => setValidFrom(e.target.value)}
+                onClick={e => { try { (e.target as HTMLInputElement).showPicker(); } catch {} }}
+                className={`${fieldCls(validFrom)} disabled:opacity-60`} />
+            </div>
+            <div className="min-w-0">
+              <label className="block text-xs font-semibold text-gray-600 mb-1.5 uppercase tracking-wide">
+                <Calendar className="w-3.5 h-3.5 inline mr-1" /> Valid To <span className="text-red-500">*</span>
+              </label>
+              <input type="date" value={validTo} min={validFrom || undefined} disabled={locked}
+                onChange={e => setValidTo(e.target.value)}
+                onClick={e => { try { (e.target as HTMLInputElement).showPicker(); } catch {} }}
+                className={`${dateError ? "w-full border border-red-300 bg-red-50 rounded-lg px-3 py-2 text-sm" : fieldCls(validTo)} disabled:opacity-60`} />
+            </div>
+          </div>
           {touched && !validFrom && <p className="text-[11px] text-red-500 mt-1">Valid from date is required</p>}
-        </div>
-
-        <div>
-          <label className="block text-xs font-semibold text-gray-600 mb-1.5 uppercase tracking-wide">
-            <Calendar className="w-3.5 h-3.5 inline mr-1" /> Statement Valid To <span className="text-red-500">*</span>
-          </label>
-          <input type="date" value={validTo} min={validFrom || undefined} disabled={locked}
-            onChange={e => setValidTo(e.target.value)}
-            onClick={e => { try { (e.target as HTMLInputElement).showPicker(); } catch {} }}
-            className={`${dateError ? "w-full border border-red-300 bg-red-50 rounded-lg px-3 py-2 text-sm" : fieldCls(validTo)} disabled:opacity-60`} />
           {touched && !validTo && <p className="text-[11px] text-red-500 mt-1">Valid to date is required</p>}
           {dateError && <p className="text-[11px] text-red-500 mt-1">Valid to must be on or after valid from</p>}
+          {periodHint && <HintNote hint={periodHint} />}
         </div>
 
         <div className={`flex items-center gap-2 px-3 py-2.5 rounded-lg text-xs font-medium ${
@@ -229,6 +286,21 @@ export default function CustomerPartyPanel({
           {complete ? "Statement details complete" : "Complete all fields above"}
         </div>
       </div>
+    </div>
+  );
+}
+
+/** What the attached file said about a field: green when it was filled in from the file,
+ *  amber when the user should look (nothing found, or a choice to make). */
+function HintNote({ hint, children }: { hint: FieldHint; children?: React.ReactNode }) {
+  return (
+    <div className={`mt-1.5 px-2.5 py-2 rounded-lg border text-[11px] ${
+      hint.tone === "ok" ? "bg-emerald-50 border-emerald-200 text-emerald-800" : "bg-amber-50 border-amber-200 text-amber-800"}`}>
+      <span className="flex items-start gap-1.5">
+        <Sparkles className="w-3 h-3 shrink-0 mt-px" />
+        <span>{hint.text}</span>
+      </span>
+      {children}
     </div>
   );
 }

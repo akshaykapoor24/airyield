@@ -39,6 +39,12 @@ export type StatementType = {
    *  names. Mirrors `supports_mapping` in services/statement_spec.py, which is what
    *  actually decides whether /extract and /confirm answer for the type. */
   supportsMapping?: boolean;
+  /** Each upload declares the statement period it covers, and every entry is screened against
+   *  the agency's saved statements for duplicates (backend services/tp_gds_reupload.py) —
+   *  Third Party GDS only. The uploads list shows each statement's Period, and Total /
+   *  Already uploaded / New / Flags instead of one Entries count. The upload wizard asks for
+   *  the period on its own, from the API's `captures_period`; this flag is the list's. */
+  capturesPeriod?: boolean;
   /** This type has a Billing flow: its rows are resolved to a Customer/Corporate, rolled
    *  up per ticket, and projected into `uploaded_tickets` — the one table the billing
    *  screens read. Turns on the uploads list's **Billing** column and the worklist behind
@@ -67,6 +73,11 @@ export type StatementType = {
   exportsEntries?: boolean;
   /** One line on the wizard's success screen telling the user where the rows went. */
   doneHint?: string;
+  /** Upload XLS opens the upload wizard as a page of its own
+   *  (/vendors/statements/<category>/<type>/upload, under the same tabs) instead of a popup
+   *  over the uploads list — room for the mapping and review grids, and a URL. Only for
+   *  `supportsMapping` types; email intake and the Payment Module keep the popup. */
+  uploadPage?: boolean;
 };
 
 export type StatementCategory = {
@@ -128,7 +139,7 @@ export const STATEMENT_NAV: StatementCategory[] = [
     slug: "third-party",
     label: "Third Party",
     types: [
-      { slug: "gds", label: "GDS", kind: "spec-repo", status: "ready", apiBase: "/statements/tp-gds", requiresSupplier: true, supportsMapping: true, blurb: "Third-party GDS statement from your consolidator, normalized.", doneHint: "Price it under Vendors data → Commission income → Third Party." },
+      { slug: "gds", label: "GDS", kind: "spec-repo", status: "ready", apiBase: "/statements/tp-gds", requiresSupplier: true, supportsMapping: true, capturesPeriod: true, uploadPage: true, blurb: "Third-party GDS statement from your consolidator, normalized.", doneHint: "Price it under Vendors data → Commission income → Third Party." },
       { slug: "lcc", label: "LCC", kind: "spec-repo", status: "ready", apiBase: "/statements/tp-lcc", requiresSupplier: true, supportsMapping: true, blurb: "Third-party LCC statement from your consolidator, normalized.", doneHint: "Price it under Vendors data → Commission income → Third Party." },
       // The only multi-product type: one aggregator file carries hotel, flight, train, bus
       // and car bookings side by side, told apart by Category inside the upload. It feeds

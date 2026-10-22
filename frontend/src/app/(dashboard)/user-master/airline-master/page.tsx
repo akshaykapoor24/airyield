@@ -170,16 +170,21 @@ export default function AirlineMasterPage() {
                           <span
                             key={i.id}
                             title={[
+                              i.business_type ? null : "No business type yet — set it in Manage IDs",
                               i.is_active ? null : "Inactive — hidden from the LCC upload picker",
                               i.in_use_count ? `Used by ${i.in_use_count} uploaded statement(s)` : null,
                             ].filter(Boolean).join(" · ") || undefined}
-                            className={`px-1.5 py-0.5 rounded border text-[11px] font-semibold ${
+                            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[11px] font-semibold ${
                               i.is_active
                                 ? "bg-sky-50 text-sky-700 border-sky-200"
                                 : "bg-gray-50 text-gray-400 border-gray-200"
                             }`}
                           >
                             {i.ref_id}
+                            {/* The line of business it's opened for; amber when not yet set. */}
+                            <span className={`text-[9px] font-bold ${i.business_type ? "opacity-70" : "text-amber-500"}`}>
+                              {i.business_type ?? "?"}
+                            </span>
                           </span>
                         ))}
                         <button
@@ -281,12 +286,13 @@ export default function AirlineMasterPage() {
         <ModalShell title="Import Airline IDs" onClose={() => setImporting(false)}>
           <p className="text-[11px] text-gray-500 mb-3">
             Repeat an airline code to give one airline several IDs — that is what the file is for.
-            Unknown codes and IDs you already use are reported row by row, not silently skipped.
+            BUSINESS_TYPE is required on every row: B2B, B2C, B2E or MICE. Unknown codes, a missing
+            business type and IDs you already use are reported row by row, not silently skipped.
           </p>
           <UploadBox
             resource="tenant-airlines"
             templateName="airline_id_template.xlsx"
-            columns="AIRLINE_CODE, ID, ACTIVE"
+            columns="AIRLINE_CODE, ID, BUSINESS_TYPE, ACTIVE"
             onDone={refresh}
           />
         </ModalShell>

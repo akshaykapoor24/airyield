@@ -10,7 +10,9 @@
 // master), and the ticket is filed into that party's manual-entry statement for
 // the ticket's month — found if it exists, created if it does not. Arriving with
 // ?statement=<batch_id> (a statement's "Add ticket" button, e.g. an uploaded one)
-// files into that statement instead.
+// files into that statement instead. WHO it was bought from is Payable To → Airline
+// (the platform's airline master) or B2B (Agency Master) — optional, per ticket, and
+// checked against the user's masters by the server at save.
 //
 // The data path is the same as tickets/create/page.tsx — the debounced server
 // preview is the single source of truth, legs are folded in by composeLegs, and
@@ -87,6 +89,25 @@ const SOLD_TO: { value: string; label: string; type: CustomerType }[] = [
 ];
 const soldToFor = (t: CustomerType | null | undefined) =>
   SOLD_TO.find((s) => s.type === t)?.value ?? null;
+
+// ── Payable To ───────────────────────────────────────────────────────────────
+// The other side of Sold To: who the ticket was BOUGHT from. An Airline (bought direct —
+// any carrier in the platform's airline master, the list the ticket's Airline comes from)
+// or a B2B consolidator (User master → Agency Master). Stored per ticket as payable_type +
+// the party's id; the server checks the party and writes its name from the master.
+
+type PayableType = "airline" | "b2b";
+const PAYABLE_TO: { value: PayableType; label: string }[] = [
+  { value: "airline", label: "Airline" },
+  { value: "b2b",     label: "B2B" },
+];
+type Payable = { type: PayableType | null; airlineId: number | null; agencyId: number | null; name: string };
+const EMPTY_PAYABLE: Payable = { type: null, airlineId: null, agencyId: null, name: "" };
+const payableReady = (p: Payable) => p.type === "airline" ? p.airlineId != null : p.type === "b2b" ? p.agencyId != null : false;
+
+/** A carrier in the platform's airline master. */
+type PayableAirline = { airline_id: number; name: string; code: string | null };
+const payableAirlineLabel = (a: PayableAirline) => (a.code ? `${a.name} · ${a.code}` : a.name);
 
 // ── Layout ───────────────────────────────────────────────────────────────────
 // Which catalog fields sit on the main screen. Everything else the statement type
@@ -412,6 +433,8 @@ export default function CompactTicketForm({
   const [statements, setStatements] = useState<FilingStatement[]>([]);
   // Sold To — survives "Save & New", like the airline desk keeps the client.
   const [tag, setTag] = useState<CustomerTag>(EMPTY_TAG);
+  // Payable To — survives "Save & New" too: a run of tickets is usually bought from one supplier.
+  const [payable, setPayable] = useState<Payable>(EMPTY_PAYABLE);
   const masters = useMasters();
 
   // Ticket — cleared by "Save & New".
@@ -567,8 +590,17 @@ export default function CompactTicketForm({
       pax_name: p.name.trim() ? `${p.name.trim()} ${p.title}`.trim() : null,
       sold_to: soldTo,
       customer_name: clientName || null,
+      // Only a complete pick is sent; a half-made one (type, no party) saves none.
+      ...(payableReady(payable)
+        ? {
+            payable_type: payable.type,
+            payable_airline_id: payable.type === "airline" ? payable.airlineId : null,
+            payable_agency_id: payable.type === "b2b" ? payable.agencyId : null,
+            payable_to: payable.name || null,
+          }
+        : {}),
     })),
-    [composed, paxes, soldTo, clientName],
+    [composed, paxes, soldTo, clientName, payable],
   );
 
   const draftIsEmpty = useMemo(
@@ -654,6 +686,8 @@ export default function CompactTicketForm({
   const missingRequired = REQUIRED_KEYS.filter((k) =>
     k === "ticket_number" ? ticketMissing.some(Boolean) : isBlank(composed[k]));
   const soldToReady = !!preset || isTagComplete(tag);
+  // Payable To is optional — but a type picked with no airline / agency is a half answer.
+  const payableHalf = payable.type != null && !payableReady(payable);
   const ticketReady = missingRequired.length === 0 && !legMalformed && rows.length > 0;
 
   const legSet = new Set(legKeys);
@@ -737,7 +771,7 @@ export default function CompactTicketForm({
   // ── Save ──────────────────────────────────────────────────────────────────
   const save = async (andNew: boolean) => {
     setTouched(true);
-    if (!soldToReady || !ticketReady || saving) return;
+    if (!soldToReady || !ticketReady || payableHalf || saving) return;
     setSaving(true);
     try {
       // Re-derive immediately before saving, in case Save landed mid-debounce.
@@ -806,7 +840,11 @@ export default function CompactTicketForm({
     return () => window.removeEventListener("keydown", h);
   }, []);
 
-  useEffect(() => { focusFirst(); }, []);
+  // A fresh form starts at the top, Payable To; after Save & New both parties are kept,
+  // so `focusFirst` goes straight to the next ticket's Airline.
+  useEffect(() => {
+    requestAnimationFrame(() => document.getElementById("ct-payable_to")?.focus());
+  }, []);
 
   // ── Field rendering ───────────────────────────────────────────────────────
   // An input with no label of its own — for the Received / Paid grid, whose rows
@@ -929,6 +967,24 @@ export default function CompactTicketForm({
         <div className="space-y-3">
           <Panel title="Ticket" color="#1e3a5f">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2">
+              {/* Who it was bought from, who it was sold to, then the ticket itself — the
+                  two parties first, as the desk thinks of a sale. Both survive Save & New. */}
+              <PayableToRow
+                payable={payable}
+                setPayable={setPayable}
+                masters={masters}
+                ticketAirlineCode={String(draft.airlines_code ?? "")}
+                invalid={touched && payable.type != null && !payableReady(payable)}
+              />
+
+              <SoldToRow
+                tag={tag}
+                setTag={setTag}
+                locked={preset ? { soldTo: soldTo, name: preset.agency } : null}
+                invalid={touched && !soldToReady}
+                masters={masters}
+              />
+
               <div className="sm:col-span-2 flex items-start gap-2 min-w-0 relative z-20">
                 <label htmlFor="ct-airlines_code" className={SIDE_LABEL + " pt-1.5"}>
                   Airline<span className="text-red-500">*</span>
@@ -946,14 +1002,6 @@ export default function CompactTicketForm({
                   />
                 </div>
               </div>
-
-              <SoldToRow
-                tag={tag}
-                setTag={setTag}
-                locked={preset ? { soldTo: soldTo, name: preset.agency } : null}
-                invalid={touched && !soldToReady}
-                masters={masters}
-              />
 
               <div className="sm:col-span-2 flex items-center gap-2 min-w-0">
                 <label htmlFor="ct-pax_count" className={SIDE_LABEL}>Pax Count</label>
@@ -1242,6 +1290,11 @@ export default function CompactTicketForm({
         {touched && !soldToReady && (
           <span className="text-[11px] text-red-500">Pick who it was sold to</span>
         )}
+        {touched && payableHalf && (
+          <span className="text-[11px] text-red-500">
+            Pick the {payable.type === "airline" ? "airline" : "agency"} it is payable to
+          </span>
+        )}
         {touched && missingRequired.length > 0 && (
           <span className="text-[11px] text-red-500">
             Required: {missingRequired.map((k) => fieldByKey[k]?.label ?? k).join(", ")}
@@ -1290,31 +1343,148 @@ const SIDE_LABEL = "w-24 shrink-0 text-right text-[11px] font-semibold text-[#1e
  * Agency and Corporate must be a master record; a Customer may be left blank for
  * a walk-in. Locked to the statement's own party when filing into a preset one.
  */
-type Masters = { agencies: AgencyRow[]; corporates: Party[]; customers: Party[]; loaded: boolean };
+type Masters = {
+  agencies: AgencyRow[]; corporates: Party[]; customers: Party[];
+  /** Payable To → Airline: the platform's airline master (platform admin → Airline Master). */
+  airlines: PayableAirline[];
+  loaded: boolean;
+};
 
-/** The three User-master lists Sold To picks from, fetched once. */
+type PlatformAirlineRow = { id: number; name: string; iata_code: string | null; is_active: boolean };
+
+/** The User-master lists Sold To and Payable To pick from, fetched once. */
 function useMasters(): Masters {
-  const [m, setM] = useState<Masters>({ agencies: [], corporates: [], customers: [], loaded: false });
+  const [m, setM] = useState<Masters>({ agencies: [], corporates: [], customers: [], airlines: [], loaded: false });
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const [a, c, d] = await Promise.allSettled([
+      const [a, c, d, t] = await Promise.allSettled([
         api.get<AgencyRow[]>("/agencies/", { params: { limit: 1000 } }),
         api.get<Party[]>("/corporates/", { params: { limit: 1000 } }),
         api.get<Party[]>("/customers/", { params: { limit: 1000 } }),
+        // The platform's airline master — the list the ticket's own Airline is picked from
+        // (AirlinePicker). Any carrier can be bought from direct, so it is not narrowed to
+        // the ids the user holds in User master.
+        api.get<PlatformAirlineRow[]>("/airlines/", { params: { limit: 5000 } }),
       ]);
       if (cancelled) return;
+      const airlines: PayableAirline[] = t.status === "fulfilled"
+        ? t.value.data.filter((r) => r.is_active).map((r) => ({ airline_id: r.id, name: r.name, code: r.iata_code }))
+        : [];
       // None of these endpoints filters is_active by default.
       setM({
         agencies:   a.status === "fulfilled" ? a.value.data.filter((x) => x.is_active) : [],
         corporates: c.status === "fulfilled" ? c.value.data.filter((x) => x.is_active) : [],
         customers:  d.status === "fulfilled" ? d.value.data.filter((x) => x.is_active) : [],
+        airlines:   airlines.sort((x, y) => x.name.localeCompare(y.name)),
         loaded: true,
       });
     })();
     return () => { cancelled = true; };
   }, []);
   return m;
+}
+
+/**
+ * Payable To: Airline / B2B, then that party — the airline from the platform's
+ * airline master, the consolidator from User master → Agency Master. Optional; once
+ * a type is picked, its party is needed. An Airline pick left empty takes the
+ * ticket's own carrier — buying direct, that is nearly always the one. It sits above
+ * the ticket's Airline, so that usually happens as the carrier is entered, not when
+ * Airline is picked.
+ */
+function PayableToRow({ payable, setPayable, masters, ticketAirlineCode, invalid }: {
+  payable: Payable;
+  setPayable: (p: Payable) => void;
+  masters: Masters;
+  ticketAirlineCode: string;
+  invalid?: boolean;
+}) {
+  const { agencies, airlines, loaded } = masters;
+  const kind = payable.type;
+  const options: string[] =
+      kind === "airline" ? airlines.map(payableAirlineLabel)
+    : kind === "b2b"     ? agencies.map(agencyLabel)
+    : [];
+  const [text, setText] = useState("");
+
+  /** The ticket's own carrier, by its code in the airline master. */
+  const ownAirline = (code: string) => {
+    const c = code.trim().toUpperCase();
+    return c ? airlines.find((a) => (a.code ?? "").toUpperCase() === c) : undefined;
+  };
+
+  const pickType = (t: PayableType | null) => {
+    const own = t === "airline" ? ownAirline(ticketAirlineCode) : undefined;
+    setText(own ? payableAirlineLabel(own) : "");
+    setPayable(own ? { type: "airline", airlineId: own.airline_id, agencyId: null, name: own.name }
+      : t ? { ...EMPTY_PAYABLE, type: t } : EMPTY_PAYABLE);
+  };
+
+  // The ticket's Airline is entered AFTER this row. When it changes and the Airline pick
+  // here is still empty and untouched, take it. Only on a change of carrier — so clearing
+  // the box to search for another is never undone — and never over a pick already made.
+  const lastCode = useRef(ticketAirlineCode);
+  useEffect(() => {
+    if (lastCode.current === ticketAirlineCode) return;
+    lastCode.current = ticketAirlineCode;
+    if (kind !== "airline" || payable.airlineId != null || text) return;
+    const own = ownAirline(ticketAirlineCode);
+    if (!own) return;
+    setText(payableAirlineLabel(own));
+    setPayable({ type: "airline", airlineId: own.airline_id, agencyId: null, name: own.name });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ticketAirlineCode]);
+
+  const pickName = (v: string) => {
+    setText(v);
+    if (kind === "airline") {
+      const a = airlines.find((x) => payableAirlineLabel(x) === v);
+      setPayable({ type: kind, airlineId: a?.airline_id ?? null, agencyId: null, name: a?.name ?? "" });
+    } else if (kind === "b2b") {
+      const a = agencies.find((x) => agencyLabel(x) === v);
+      setPayable({ type: kind, airlineId: null, agencyId: a?.id ?? null, name: a?.name ?? "" });
+    }
+  };
+
+  return (
+    <div className="sm:col-span-2 flex items-center gap-2 min-w-0">
+      <label htmlFor="ct-payable_to" className={SIDE_LABEL}>Payable To</label>
+      <select
+        id="ct-payable_to"
+        value={kind ?? ""}
+        onChange={(e) => pickType((e.target.value || null) as PayableType | null)}
+        className={`w-28 shrink-0 ${inputCls()}`}
+      >
+        <option value="">— select —</option>
+        {PAYABLE_TO.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
+      </select>
+
+      {!kind ? (
+        <span className="flex-1 min-w-0 px-2 py-1 text-xs text-gray-400 italic">who you bought it from — Airline or B2B</span>
+      ) : loaded && options.length === 0 ? (
+        <span className="flex-1 min-w-0 px-2 py-1 rounded-md bg-amber-50 border border-amber-200 text-[11px] text-amber-800 truncate">
+          {kind === "airline" ? (
+            // The platform admin keeps this list; there is nothing here for the user to add.
+            <>No airlines could be loaded from the airline master.</>
+          ) : (
+            <>None yet — add in{" "}
+              <a href={CUSTOMER_TYPE_MASTER.agency.href} className="font-semibold underline">{CUSTOMER_TYPE_MASTER.agency.label}</a></>
+          )}
+        </span>
+      ) : (
+        <PartyCombo
+          key={kind}
+          inputId="ct-payable_to_name"
+          value={text}
+          options={options}
+          onChange={pickName}
+          invalid={invalid}
+          placeholder={!loaded ? "loading…" : kind === "airline" ? "Search airline…" : "Search agency…"}
+        />
+      )}
+    </div>
+  );
 }
 
 function SoldToRow({ tag, setTag, locked, invalid, masters }: {
@@ -1412,13 +1582,15 @@ function SoldToRow({ tag, setTag, locked, invalid, masters }: {
  * ↑/↓ to move, Enter to pick, Esc to close. Labels read "Name · CODE", so the
  * code is shown muted beside the name.
  */
-function PartyCombo({ value, options, onChange, placeholder, invalid, allowFree }: {
+function PartyCombo({ value, options, onChange, placeholder, invalid, allowFree, inputId = "ct-sold_to_name" }: {
   value: string;
   options: string[];
   onChange: (v: string) => void;
   placeholder: string;
   invalid?: boolean;
   allowFree?: boolean;
+  /** Two of these sit on the form (Sold To, Payable To) — each needs its own id. */
+  inputId?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
@@ -1460,7 +1632,7 @@ function PartyCombo({ value, options, onChange, placeholder, invalid, allowFree 
   return (
     <div ref={ref} className="relative flex-1 min-w-0">
       <input
-        id="ct-sold_to_name"
+        id={inputId}
         value={value}
         placeholder={placeholder}
         autoComplete="off"

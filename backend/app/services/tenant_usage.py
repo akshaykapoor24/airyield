@@ -161,7 +161,7 @@ EXCLUDED_TABLES: frozenset[str] = frozenset({
     "notifications", "notification_reads",
     # upload-session parents whose rows are counted instead
     "bsp_statements", "bsp_summary_statements", "deal_statements", "deal_batches",
-    "lcc_detailed_batch", "bank_statements",
+    "lcc_detailed_batch", "bank_statements", "third_party_statements",
     # which of the workspace's airline ids an LCC upload covers, which agency sent a
     # third-party upload, and where an NDC upload stands on its way into billing — state
     # about an already-classified upload, not records the workspace produced
@@ -183,6 +183,9 @@ EXCLUDED_TABLES: frozenset[str] = frozenset({
     # control figures are state about an upload already counted.
     "payment_reconciliations", "payment_reconciliation_runs",
     "payment_items", "mo_vendor_corrections", "vendor_accounts", "statement_batch_controls",
+    # …and for the GDS ↔ Internal decisions: state about a vendor upload and an internal
+    # statement that are both counted already
+    "vendor_internal_resolutions",
     # the income board is a projection of rows already counted above — one line per
     # priced settlement document, rebuilt by POST /dashboard/income/rebuild — so
     # counting it would count every statement a second time

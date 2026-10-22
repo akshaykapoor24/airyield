@@ -27,6 +27,9 @@ from app.models.mail import MailAttachment, MailMessage
 from app.services.mail import body, mime
 
 TEXT_DEALS_KEY = "text:deals"
+# mail_messages.processed["body_items"]: how many of body_items() the body holds, written when the
+# mail is stored — so the inbox can list it under "Pending to upload" before anyone opens it.
+BODY_ITEMS_KEY = "body_items"
 
 
 def _sender(msg: MailMessage) -> dict:
@@ -54,7 +57,6 @@ async def plan(db: AsyncSession, msg: MailMessage) -> dict:
         .order_by(MailAttachment.part_index)
     )).scalars().all()
     sender = _sender(msg)
-    context = msg.subject or ""
     items: list[dict] = []
 
     for a in atts:
@@ -69,10 +71,20 @@ async def plan(db: AsyncSession, msg: MailMessage) -> dict:
             "rows": meta.get("rows"), "imported": done.get(f"att:{a.id}"),
         })
 
-    tables = body.tables(msg.body_html)
+    items += body_items(msg, deal_attached=any(i["kind"] == "deal" for i in items))
+    facts = body.facts(msg.subject, body.new_content(body_text(msg)), *[a.filename for a in atts])
+    return {"message_id": msg.id, "subject": msg.subject, "sender": sender, "facts": facts, "items": items}
+
+
+def body_items(msg: MailMessage, *, deal_attached: bool = False) -> list[dict]:
+    """The plan items in the email's own body: tables that read as a statement or a deal, and a
+    deal written as text. No database — the sync calls this for every message it stores."""
+    done = (msg.processed or {}).get("items", {})
+    sender_hint = (msg.parties or [{}])[0].get("party_type")
+    items: list[dict] = []
     deal_table = False
-    for n, t in enumerate(tables):
-        c = body.classify_table(t, sender_hint=sender["party_type"], context=context)
+    for n, t in enumerate(body.tables(msg.body_html)):
+        c = body.classify_table(t, sender_hint=sender_hint, context=msg.subject or "")
         if c.kind not in ("statement", "deal"):
             continue
         deal_table |= c.kind == "deal"
@@ -84,11 +96,9 @@ async def plan(db: AsyncSession, msg: MailMessage) -> dict:
             "preview": t[:6], "imported": done.get(f"table:{n}"),
         })
 
-    text = body_text(msg)
     # With a deal sheet already attached, the body is usually its covering note — so the bar
     # for "the text is a deal of its own" is higher (two rate lines instead of one).
-    deal_attached = any(i["kind"] == "deal" for i in items)
-    deal_words = body.deal_text(text, min_lines=2 if deal_attached else 1)
+    deal_words = body.deal_text(body_text(msg), min_lines=2 if deal_attached else 1)
     if deal_words and not deal_table:
         items.append({
             "key": TEXT_DEALS_KEY, "source": "text", "title": "Deal written in the email",
@@ -96,9 +106,13 @@ async def plan(db: AsyncSession, msg: MailMessage) -> dict:
             "confidence": 0.6, "reason": "deal wording and percentages in the message",
             "preview_text": deal_words[:600], "imported": done.get(TEXT_DEALS_KEY),
         })
+    return items
 
-    facts = body.facts(msg.subject, body.new_content(text), *[a.filename for a in atts])
-    return {"message_id": msg.id, "subject": msg.subject, "sender": sender, "facts": facts, "items": items}
+
+def scan_body(msg: MailMessage) -> None:
+    """Record how many importable things the body holds (BODY_ITEMS_KEY). Attachments need no
+    such note: each is classified on its own row."""
+    msg.processed = {**(msg.processed or {}), BODY_ITEMS_KEY: len(body_items(msg))}
 
 
 def mark(msg: MailMessage, key: str, *, destination: str, ref: str | None, user_id: int) -> None:

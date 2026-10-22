@@ -199,13 +199,17 @@ export type MailListItem = {
   mailbox: string;
   connection_id: number;
   statements: DocTag[];
+  imported_items: number;   // items of this email uploaded so far
+  imported: boolean;        // every statement / deal in it is uploaded — it sits under Uploaded
 };
 
 export type MailList = {
   items: MailListItem[];
   total: number;
   unread: number;
-  statements: number;
+  statements: number;       // emails carrying a statement
+  pending: number;          // emails with something still to upload
+  imported: number;         // emails fully uploaded
   mailboxes: MailboxCount[];
 };
 

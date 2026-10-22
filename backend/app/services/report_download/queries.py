@@ -48,6 +48,7 @@ from app.models.statement_batch_airline_id import StatementBatchAirlineId
 from app.models.statement_batch_supplier import StatementBatchSupplier
 from app.models.statement_row import TgqHmpr
 from app.models.tenant_airline import TenantAirline
+from app.models.typed_statement import is_typed, sql_relation
 from app.services import bsp_tgq_enrichment
 from app.services.report_download import pii
 from app.services.report_download.linking import OwnerHit
@@ -136,10 +137,23 @@ def _is_timeout(exc: DBAPIError) -> bool:
 def _stream_columns(src: ReportSource, columns: Optional[Sequence[str]]) -> list:
     """Explicit column list: the model's columns minus ``file_url`` (never exported) and, for
     everything but BSP (whose mapper reads the settlement section from it), ``raw_data``."""
-    table = src.model.__table__
+    m = src.model
+    table = m.__table__
+    typed = is_typed(m)
+
+    def col(name: str):
+        # A typed table (Third Party GDS) has no `data` column; its rows are streamed with
+        # the same dict rebuilt from their columns, which is what every mapper reads.
+        return m.data.label("data") if typed and name == "data" else table.c[name]
+
     if columns is not None:
-        return [table.c[name] for name in columns]
+        return [col(name) for name in columns]
     skip = {"file_url"} if src.storage == "bsp" else {"file_url", "raw_data"}
+    if typed:
+        # The row shape a JSONB table streams — provenance plus `data` — not the sixty
+        # typed columns, which no mapper reads.
+        skip |= {f.attr for f in m.data_fields()}
+        return [c for c in table.columns if c.name not in skip] + [col("data")]
     return [c for c in table.columns if c.name not in skip]
 
 
@@ -994,7 +1008,8 @@ async def distinct_data_keys(conn: AsyncConnection, tenant_id: int, user_id: int
     src = get_source(source_key)
     if src.storage != "spec":
         return ()
-    keys = await _jsonb_keys(conn, src.model.__tablename__, "data", tenant_id, user_id, batch_ids)
+    # sql_relation, not the table name: Third Party GDS has no `data` column to read keys off.
+    keys = await _jsonb_keys(conn, sql_relation(src.model), "data", tenant_id, user_id, batch_ids)
     shown = {c["field"] for c in display_columns(source_key)}
     return _filter_keys(keys, include_pii, shown)
 

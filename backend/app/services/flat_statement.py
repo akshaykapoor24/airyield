@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import math
 import re
-from datetime import datetime
+from datetime import date, datetime
 from typing import Callable
 
 from app.services import statement_balance
@@ -75,12 +75,17 @@ _DT_FORMATS = (
 _ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
 
 
-def to_iso_date(value) -> str | None:
+def to_iso_date(value, order: str | None = None) -> str | None:
     """'08-08-2026' -> '2026-08-08'. Returns None when it is not a date at all.
 
     An unparseable cell yields None rather than a guess: the caller keeps the original in
     `raw_data`, and a wrong date silently shifts a ticket into another contract window.
+
+    `order` is the order the uploader declared the column is written in (DATE_ORDERS); the
+    cell is then read that way and no other — see `_in_order`. Without one, day-first.
     """
+    if order:
+        return _in_order(value, order)
     s = _clean(value)
     if not s:
         return None
@@ -96,6 +101,92 @@ def to_iso_date(value) -> str | None:
         return dateparser.parse(s, dayfirst=True).date().isoformat()
     except Exception:  # noqa: BLE001 — a free-form cell from someone else's spreadsheet
         return None
+
+
+# ── A declared date order ────────────────────────────────────────────────────
+# Vendors write the same day differently — 05/08/2026 is 5 Aug to one consolidator and
+# 8 May to the next — and nothing in a text cell says which. Where the uploader declares
+# the order a column is written in (statement_spec `date_formats`, asked on the upload
+# step), the cell is read in that order and in no other: one that does not fit it
+# ("13/08/2026" declared month-first) is left unread — `date_parse_failed`, shown on the
+# review step — rather than quietly read the other way round, which is the guess the
+# declaration exists to stop.
+#
+# A date Excel stored as a date reaches here as ISO ("2026-08-01 00:00:00") and is read as
+# it stands: it has no written order left in the cell. Where Excel stored one with day and
+# month swapped — typed in the declared order into an Excel set the other way round —
+# services/excel_dates.py has already put it back, row by row, before this reads it.
+DATE_ORDERS = ("DMY", "MDY", "YMD")
+
+_SEP = r"(?:\s*[-/.]\s*|\s+)"
+_NUMERIC_DATE = re.compile(
+    rf"^(\d{{1,4}}){_SEP}(\d{{1,2}}){_SEP}(\d{{1,4}})"
+    r"(?:[ T]+\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:\s*[AaPp][Mm])?)?$")
+_COMPACT_DATE = re.compile(r"^\d{8}$")
+
+
+def _ymd(y: str, m: str, d: str) -> str | None:
+    if len(y) not in (2, 4):
+        return None
+    try:
+        return date(2000 + int(y) if len(y) == 2 else int(y), int(m), int(d)).isoformat()
+    except ValueError:
+        return None
+
+
+def _in_order(value, order: str) -> str | None:
+    """`value` read as a date written in `order` — None when it is not one in that order."""
+    s = _clean(value)
+    if not s:
+        return None
+    if _ISO_RE.match(s):
+        return _ymd(s[:4], s[5:7], s[8:10])
+    m = _NUMERIC_DATE.match(s)
+    if m:
+        a, b, c = m.groups()
+        if len(a) == 4:             # a leading four-digit year can only be year-month-day
+            return _ymd(a, b, c)
+        if order == "DMY":
+            return _ymd(c, b, a)
+        if order == "MDY":
+            return _ymd(c, a, b)
+        return _ymd(a, b, c)
+    if _COMPACT_DATE.match(s):
+        if order == "DMY":
+            return _ymd(s[4:], s[2:4], s[:2])
+        if order == "MDY":
+            return _ymd(s[4:], s[:2], s[2:4])
+        return _ymd(s[:4], s[4:6], s[6:])
+    # A month by name ("05-Aug-2026", "Aug 5, 2026") says which part is the month; the
+    # order settles the rest. A digit is required: dateutil reads a bare "Aug" as today.
+    if re.search(r"[A-Za-z]", s) and re.search(r"\d", s):
+        try:
+            from dateutil import parser as dateparser
+            return dateparser.parse(s, dayfirst=order == "DMY", yearfirst=order == "YMD").date().isoformat()
+        except Exception:  # noqa: BLE001 — a free-form cell from someone else's spreadsheet
+            return None
+    return None
+
+
+# The date fields each declared column also decides. An Issue or Transaction Date comes from
+# the same system as the Booked Date beside it, so it is written the same way. Date of Travel
+# is declared on its own: the TRIUMPHH sheets show two date columns of one file entered
+# differently (one typed, one pasted), so they cannot be assumed to agree.
+_DATE_ORDER_FOLLOWS = {"booking_date": ("issue_date", "transaction_date")}
+
+
+def date_orders(date_formats: dict | None) -> dict[str, str]:
+    """{date field: declared order} for every field the declaration covers — each declared
+    field, and the fields that follow it (`_DATE_ORDER_FOLLOWS`) unless declared themselves."""
+    out: dict[str, str] = {}
+    for field, order in (date_formats or {}).items():
+        if order in DATE_ORDERS:
+            out[field] = order
+    for field, follows in _DATE_ORDER_FOLLOWS.items():
+        for f in follows:
+            if field in out:
+                out.setdefault(f, out[field])
+    return out
 
 
 _NUM_STRIP = re.compile(r"[,\s ₹$€£]")
@@ -139,7 +230,7 @@ class _FlatBuilder:
     """Bound builder — same interface as the per-type parser modules."""
 
     def __init__(self, display_columns: list[dict], aliases: dict[str, list[str]],
-                 source_format: str, derive: Callable[[dict], None] | None = None):
+                 source_format: str, derive: Callable[..., None] | None = None):
         self.display_columns = display_columns
         self._a2c = {v: k for k, vs in aliases.items() for v in vs}
         self._fmt = source_format
@@ -155,17 +246,20 @@ class _FlatBuilder:
                 seen.add(canon)
         return out
 
-    def build_row(self, row, columns: list[str]) -> dict:
+    def build_row(self, row, columns: list[str], date_formats: dict | None = None) -> dict:
+        """`date_formats` — {date field: DATE_ORDERS value} as the upload declared it; the
+        dates it covers are read in that order (`to_iso_date`). None reads them day-first."""
         vals = {c: _clean(row.get(c)) for c in columns}
         colmap = self.build_col_map(columns)
         data = {field: vals[col] for col, field in colmap.items() if vals.get(col) is not None}
         raw_data = {str(c): vals[c] for c in columns if vals.get(c) is not None}
         if self._derive is not None:
-            self._derive(data)
+            self._derive(data, date_formats)
         return {"source_format": self._fmt, "data": data, "taxes": [], "segments": [], "ssr": [], "raw_data": raw_data}
 
     def build_row_mapped(self, row, columns: list[str], column_map: dict[str, str],
-                         overrides: dict[str, str] | None = None) -> dict:
+                         overrides: dict[str, str] | None = None,
+                         date_formats: dict | None = None) -> dict:
         """Same row, but built from a mapping the USER chose rather than from the aliases.
 
         `column_map` is {canonical field: source column header} — the direction the mapping
@@ -180,6 +274,9 @@ class _FlatBuilder:
 
         `raw_data` stays the file's own columns verbatim, exactly as in `build_row`, so a
         later Reprocess re-reads the source rather than our interpretation of it.
+
+        `date_formats` as in `build_row`. A corrected date is read in the same declared
+        order as the column it sits in: the reviewer types it the way the sheet writes it.
         """
         vals = {c: _clean(row.get(c)) for c in columns}
         present = set(columns)
@@ -195,7 +292,7 @@ class _FlatBuilder:
                 data[field] = cleaned
         raw_data = {str(c): vals[c] for c in columns if vals.get(c) is not None}
         if self._derive is not None:
-            self._derive(data)
+            self._derive(data, date_formats)
         return {"source_format": self._fmt, "data": data, "taxes": [], "segments": [], "ssr": [], "raw_data": raw_data}
 
     def suggest_mapping(self, columns: list[str]) -> dict[str, str]:
@@ -328,7 +425,9 @@ def _assert_headers_round_trip(parser_name: str, builder: _FlatBuilder) -> None:
 
 
 def register(parser_name: str, columns: list[tuple[str, str]], aliases: dict[str, list[str]],
-             source_format: str, derive: Callable[[dict], None] | None = None) -> list[dict]:
+             source_format: str, derive: Callable[..., None] | None = None) -> list[dict]:
+    """`derive(data, date_formats)` — normalises one row in place; `date_formats` is the
+    upload's declared {date field: order}, or None."""
     _assert_unique_aliases(parser_name, aliases)
     b = _FlatBuilder(_cols(columns), aliases, source_format, derive)
     _assert_headers_round_trip(parser_name, b)
@@ -431,14 +530,16 @@ _MONEY_FIELDS = (
     "markup", "net_amount", "convenience_fee", "other_charges", "passenger_count",
 )
 
-_DATE_FIELDS = ("transaction_date", "booking_date", "issue_date", "travel_date")
+DATE_FIELDS = ("transaction_date", "booking_date", "issue_date", "travel_date")
 
 
-def _normalize_common(data: dict) -> None:
-    """Shared derivation: ISO dates, bare numbers, and a joined passenger name."""
-    for f in _DATE_FIELDS:
+def _normalize_common(data: dict, date_formats: dict | None = None) -> None:
+    """Shared derivation: ISO dates (each in its declared order, if any — `date_orders`),
+    bare numbers, and a joined passenger name."""
+    orders = date_orders(date_formats)
+    for f in DATE_FIELDS:
         if f in data:
-            iso = to_iso_date(data[f])
+            iso = to_iso_date(data[f], orders.get(f))
             if iso:
                 data[f] = iso
             else:
@@ -459,8 +560,8 @@ def _normalize_common(data: dict) -> None:
             data["passenger_name"] = " ".join(parts)
 
 
-def _derive_tp_gds(data: dict) -> None:
-    _normalize_common(data)
+def _derive_tp_gds(data: dict, date_formats: dict | None = None) -> None:
+    _normalize_common(data, date_formats)
 
     # ISSUE DATE. The real export has no ticketing-date column, and deal validity keys off
     # the issue date (deal_matching: contract_date = issue_date or travel_date). The booked
@@ -488,8 +589,8 @@ def _derive_tp_gds(data: dict) -> None:
     statement_balance.tag(data)
 
 
-def _derive_tp_lcc(data: dict) -> None:
-    _normalize_common(data)
+def _derive_tp_lcc(data: dict, date_formats: dict | None = None) -> None:
+    _normalize_common(data, date_formats)
     if not data.get("issue_date") and data.get("booking_date"):
         data["issue_date"] = data["booking_date"]
         data["issue_date_source"] = "booking_date"

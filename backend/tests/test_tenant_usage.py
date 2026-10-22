@@ -121,7 +121,8 @@ class TestRegistryShape(unittest.TestCase):
         """Counting a file AND its rows reports 1001 for a 1000-row upload."""
         by_table = {s.model.__tablename__ for s in USAGE_SOURCES}
         for parent in ("bsp_statements", "bsp_summary_statements",
-                       "deal_statements", "deal_batches", "lcc_detailed_batch"):
+                       "deal_statements", "deal_batches", "lcc_detailed_batch",
+                       "third_party_statements"):
             with self.subTest(parent=parent):
                 self.assertNotIn(parent, by_table)
 

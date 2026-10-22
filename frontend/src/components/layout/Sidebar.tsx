@@ -12,7 +12,7 @@ import {
   History, LayoutGrid, Contact, Layers,
   CreditCard, TrendingUp, Receipt, FileDown, PlaneTakeoff, ShieldAlert,
   Landmark, Wallet, Banknote, Ticket, Upload, FilePlus, Mail, Inbox,
-} from "lucide-react";
+} from "lucide-react";  
 import { USER_MASTER_NAV, userMasterHref } from "@/lib/userMasterNav";
 import { cn } from "@/lib/utils";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
@@ -332,10 +332,9 @@ export default function Sidebar() {
     <>
     <aside
       className={cn(
-        "flex flex-col shrink-0 h-screen sticky top-0 overflow-y-auto transition-all duration-300 bg-white border-r border-[#e6ebf2] text-slate-700",
+        "flex flex-col shrink-0 h-screen sticky top-0 overflow-hidden transition-all duration-300 bg-white border-r border-[#e6ebf2] text-slate-700",
         open ? "w-60" : "w-[58px]"
       )}
-      style={{ scrollbarWidth: "none" }}
     >
       {/* Logo. Open: the full logo, as wide as the bar allows — its tagline is part of the
           artwork, so width is the only thing keeping it readable — but capped in height so it
@@ -371,8 +370,9 @@ export default function Sidebar() {
         )}
       </div>
 
-      {/* Nav */}
-      <nav className="flex-1 py-4 px-2.5 space-y-0.5">
+      {/* Nav — the only part that scrolls, so the logo above and the account footer
+          below stay put however many sections are expanded. */}
+      <nav className="flex-1 min-h-0 overflow-y-auto py-4 px-2.5 space-y-0.5" style={{ scrollbarWidth: "none" }}>
         {navItems.filter((item) => {
           if (item.id === "system-master") return canSubmitMasterRequest(role);
           if (item.id === "admin") return canManageTenantUsers(role);
@@ -562,7 +562,7 @@ export default function Sidebar() {
       </div>
     </aside>
 
-    {/* Sibling of the <aside>, not a child: the aside is overflow-y-auto, and a
+    {/* Sibling of the <aside>, not a child: the aside clips its overflow, and a
         sibling is immune if it ever grows a transform (which would re-parent a
         fixed-position child). */}
     {showChangePw && <ChangePasswordModal onClose={() => setShowChangePw(false)} />}

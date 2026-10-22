@@ -251,6 +251,50 @@ class TestBalanceStamp(unittest.TestCase):
 
 
 @unittest.skipUnless(os.path.exists(REAL_STATEMENT), "real TRIUMPHH sample not on this machine")
+class TestAlreadyUploadedLines(unittest.TestCase):
+    """A period uploaded again saves only its new lines (services/tp_gds_reupload.py); the
+    lines it left out as already saved are still part of the file's arithmetic."""
+
+    def facts(self, **kw):
+        base = dict(slug="tp-gds", batch_id="new", source_file="WEEK 1 v2.xlsx", rows_now=6,
+                    ticket_rows=5, ticket_net=D("500"), opening=D("1000"),
+                    closing=D("3500"), file_rows=26, loaded_rows=6, duplicate_rows=20,
+                    duplicate_net=D("2000"), duplicate_of="old")
+        base.update(kw)
+        return BatchFacts(**base)
+
+    def test_rows_count_the_left_out_lines(self):
+        c = check_rows(self.facts())
+        self.assertEqual(c["status"], PASS)
+        self.assertIn("20 were already uploaded", c["detail"])
+
+    def test_amount_adds_the_left_out_lines_back(self):
+        c = check_amount(self.facts())
+        self.assertEqual(c["status"], PASS, c["detail"])
+        self.assertIn("already uploaded", c["detail"])
+
+    def test_declared_totals_are_the_whole_files(self):
+        c = check_controls(self.facts(expected_count=25, expected_amount=D("2500")))
+        self.assertEqual(c["status"], PASS, c["detail"])
+
+    def test_an_updated_copy_is_not_chained_as_a_new_statement(self):
+        f = self.facts()
+        self.assertTrue(f.is_update)
+        old = BatchFacts(slug="tp-gds", batch_id="old", source_file="WEEK 1.xlsx")
+        c = check_continuity(f, prev=old, updates=old)
+        self.assertEqual(c["status"], NA)
+        self.assertIn("updated copy of WEEK 1.xlsx", c["detail"])
+
+    def test_a_few_repeats_do_not_make_an_update(self):
+        self.assertFalse(self.facts(ticket_rows=30, duplicate_rows=2).is_update)
+
+    def test_no_left_out_lines_reads_as_before(self):
+        f = self.facts(duplicate_rows=0, duplicate_net=D("0"), duplicate_of=None,
+                       file_rows=6, closing=D("1500"))
+        self.assertIn("All 6 lines saved", check_rows(f)["detail"])
+        self.assertEqual(check_amount(f)["status"], PASS)
+
+
 class TestRealFileIngest(unittest.TestCase):
     """The upload path itself, on the real export: preamble OLD line and BALANCE stamp."""
 

@@ -23,10 +23,9 @@ from datetime import date
 from html.parser import HTMLParser
 
 from app.services.mail import classify
-
-_MONTHS = {m: i for i, m in enumerate(
-    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], start=1)}
-_MON = r"(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*"
+# The statement period is read by the same code the upload wizard reads a file name with, so a
+# period the wizard understands is one the inbox understands too.
+from app.services.statement_period import MON as _MON, MONTHS as _MONTHS, find_period
 
 # ── quoted history and signatures ───────────────────────────────────────────
 
@@ -186,12 +185,6 @@ def deal_text(text: str | None, *, min_lines: int = 1) -> str | None:
 
 # ── facts ───────────────────────────────────────────────────────────────────
 
-_RANGE_SAME_MONTH = re.compile(
-    rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s*(?:-|–|to|till|until|\s)\s*(\d{{1,2}})(?:st|nd|rd|th)?\s*{_MON}\W{{0,2}}\s*'?(\d{{2,4}})\b",
-    re.IGNORECASE)
-_RANGE_FULL = re.compile(
-    rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s*{_MON}\W{{0,2}}\s*'?(\d{{2,4}})?\s*(?:-|–|to|till|until)\s*"
-    rf"(\d{{1,2}})(?:st|nd|rd|th)?\s*{_MON}\W{{0,2}}\s*'?(\d{{2,4}})\b", re.IGNORECASE)
 _EFFECTIVE = re.compile(
     rf"\b(?:effective|w\.?\s?e\.?\s?f\.?|with effect from|valid from|from)\s*:?\s*"
     rf"(?:(\d{{1,2}})(?:st|nd|rd|th)?\s*{_MON}\W{{0,2}}\s*'?(\d{{2,4}})|(\d{{1,2}})[./-](\d{{1,2}})[./-](\d{{2,4}}))",
@@ -238,20 +231,9 @@ def facts(*texts: str | None, today: date | None = None) -> dict:
     blob = " \n ".join(t for t in texts if t)
     out: dict = {}
 
-    m = _RANGE_FULL.search(blob)
-    if m:
-        d1, mon1, y1, d2, mon2, y2 = m.groups()
-        end = _mk(d2, mon2, y2, today.year)
-        start = _mk(d1, mon1, y1 or y2, end.year if end else today.year)
-        if start and end and start <= end:
-            out["period_from"], out["period_to"] = start.isoformat(), end.isoformat()
-    if "period_from" not in out:
-        m = _RANGE_SAME_MONTH.search(blob)
-        if m:
-            d1, d2, mon, y = m.groups()
-            start, end = _mk(d1, mon, y, today.year), _mk(d2, mon, y, today.year)
-            if start and end and start <= end:
-                out["period_from"], out["period_to"] = start.isoformat(), end.isoformat()
+    period = find_period(blob, today)
+    if period:
+        out["period_from"], out["period_to"] = period[0].isoformat(), period[1].isoformat()
 
     m = _EFFECTIVE.search(blob)
     if m:

@@ -86,10 +86,12 @@ export default function StatementTypePage() {
       requiresAirlineId={type.requiresAirlineId}
       requiresSupplier={type.requiresSupplier}
       supportsMapping={type.supportsMapping}
+      capturesPeriod={type.capturesPeriod}
       supportsBilling={type.supportsBilling}
       billingWorklist={type.billingWorklist}
       exportsEntries={type.exportsEntries}
       doneHint={type.doneHint}
+      uploadHref={type.uploadPage ? `/vendors/statements/${categorySlug}/${typeSlug}/upload` : undefined}
     />
   );
 }

@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import date
 from difflib import SequenceMatcher
 from typing import Any
 
-from app.services import sector_split, spreadsheet
+from app.services import date_format_detect, excel_dates, sector_split, spreadsheet
+from app.services import flat_statement as _flat
 from app.services.statement_spec import norm as _norm
 
 logger = logging.getLogger(__name__)
@@ -341,7 +343,7 @@ def _leg_classes(raw: str | None, n: int) -> list[str]:
     return parts
 
 
-def _keep_multi_sector_whole(rows: list[dict]) -> list[dict]:
+def _keep_multi_sector_whole(rows: list[dict], travel_order: str | None = None) -> list[dict]:
     """The other answer to a multi-sector row: keep it as ONE row, legs inside it.
 
     For a section that records SALES rather than pricing deals (Internal Statement),
@@ -394,13 +396,13 @@ def _keep_multi_sector_whole(rows: list[dict]) -> list[dict]:
 
         first_date = segments[0].get("travel_date")
         if first_date and not row.get("departure_datetime"):
-            row["departure_datetime"] = _normalize_date(first_date)
+            row["departure_datetime"] = _normalize_date(first_date, travel_order)
         row["segments"] = segments
         out.append(row)
     return out
 
 
-def _split_multi_sector_rows(rows: list[dict]) -> list[dict]:
+def _split_multi_sector_rows(rows: list[dict], travel_order: str | None = None) -> list[dict]:
     """Expand a multi-sector row into one row per flown leg.
 
     Both sector grammars are understood, via `sector_split.leg_sectors`:
@@ -433,7 +435,7 @@ def _split_multi_sector_rows(rows: list[dict]) -> list[dict]:
             if segments:
                 seg = segments[0]
                 if seg.get("travel_date") and not row.get("departure_datetime"):
-                    row["departure_datetime"] = _normalize_date(seg["travel_date"])
+                    row["departure_datetime"] = _normalize_date(seg["travel_date"], travel_order)
                 if seg.get("segment_type"):
                     row["segment_type"] = seg["segment_type"]
                 row["segments"] = [{**seg, "segment_type": row.get("segment_type")}]
@@ -460,7 +462,7 @@ def _split_multi_sector_rows(rows: list[dict]) -> list[dict]:
             # This leg's own date, falling back to the whole-ticket one.
             departure = seg.get("travel_date") or (journeys[i] if i < len(journeys) else None)
             if departure:
-                r["departure_datetime"] = _normalize_date(departure)
+                r["departure_datetime"] = _normalize_date(departure, travel_order)
 
             # The leg's own airports are better evidence than a whole-ticket
             # value, so they outrank it — but only when the caller punched legs
@@ -527,7 +529,34 @@ def _to_str(val: Any) -> str | None:
     return s if s and s not in ("-", "--", "nan") else None
 
 
-def _normalize_date(val: Any) -> str | None:
+# ── The declared date format (Internal Statement) ────────────────────────────
+# A customer system writes its dates however it likes — "05/08/2026" is 5 Aug from one and
+# 8 May from the next — so Internal Statement asks the uploader how the sheet writes its
+# Ticket Date and its Travel Date (DD-MM-YYYY / MM-DD-YYYY / YYYY-MM-DD). Text dates are read
+# in that order and no other (flat_statement.to_iso_date); Excel-stored ones are put in it,
+# row by row, against the statement period (services/excel_dates.py, anchored on the Ticket
+# Date — the date that belongs in the period). Doc Date follows the Ticket Date: same
+# system, same kind of date. With no format declared — Customer data, manual entry — dates
+# are read as they always were, day-first.
+DATE_FORMAT_FIELDS: list[dict] = [
+    {"field": "ticket_date", "header": "Ticket Date"},
+    {"field": "departure_datetime", "header": "Travel Date"},
+]
+_DATE_FOLLOWS = {"ticket_date": ("doc_date",)}
+_DATE_ANCHORS = ("ticket_date", "doc_date")
+
+
+def date_orders(date_formats: dict | None) -> dict[str, str]:
+    """{ticket field: declared order} — each declared field, and the fields that follow it."""
+    out = {f: o for f, o in (date_formats or {}).items() if o in _flat.DATE_ORDERS}
+    for f, follows in _DATE_FOLLOWS.items():
+        for g in follows:
+            if f in out:
+                out.setdefault(g, out[f])
+    return out
+
+
+def _normalize_date(val: Any, order: str | None = None) -> str | None:
     """Normalize any common date string to YYYY-MM-DD for <input type='date'>.
 
     Delegates to flat_statement.to_iso_date, which tries explicit formats before
@@ -537,14 +566,16 @@ def _normalize_date(val: Any) -> str | None:
     11 August became 8 November, moving the ticket a quarter down the calendar and
     into a different contract window.
 
+    `order` — the order the upload declared the column is written in — reads it that way
+    and no other (see the block above).
+
     An unparseable value is returned unchanged rather than dropped, so the reviewer
     can see and correct it in the preview grid.
     """
     s = _to_str(val)
     if not s:
         return None
-    from app.services.flat_statement import to_iso_date
-    return to_iso_date(s) or s
+    return _flat.to_iso_date(s, order) or s
 
 
 # What makes a row a document. A ticket always has at least one of these; a
@@ -782,7 +813,8 @@ def _derive_from_transaction_type(
 # indistinguishable from an uploaded one, and a second copy of these rules would
 # drift silently — producing wrong money rather than an error.
 
-def derive_ticket_row(row: dict[str, Any], is_airline: bool) -> dict[str, Any]:
+def derive_ticket_row(row: dict[str, Any], is_airline: bool,
+                      date_formats: dict | None = None) -> dict[str, Any]:
     """Row-level derivations applied after canonical column mapping.
 
     `row` must already use canonical field names, with `tax_breakup`, `pax_name`
@@ -794,13 +826,17 @@ def derive_ticket_row(row: dict[str, Any], is_airline: bool) -> dict[str, Any]:
     key. Callers building rows from Pydantic models must use
     `model_dump(exclude_none=True)`.
 
+    `date_formats` — the order the upload declared its date columns are written in (see
+    DATE_FORMAT_FIELDS); None reads them day-first, as manual entry and Customer data do.
+
     Mutates and returns `row`.
     """
+    orders = date_orders(date_formats)
     # Normalize ticket_date to YYYY-MM-DD so <input type="date"> can display it
     if row.get("ticket_date"):
-        row["ticket_date"] = _normalize_date(row["ticket_date"])
+        row["ticket_date"] = _normalize_date(row["ticket_date"], orders.get("ticket_date"))
     if row.get("doc_date"):
-        row["doc_date"] = _normalize_date(row["doc_date"])
+        row["doc_date"] = _normalize_date(row["doc_date"], orders.get("doc_date"))
 
     # ── Ticket number: accounting code + document serial ──────────
     # A consolidator prints "607 5808583279" — the airline's 3-digit IATA accounting code,
@@ -922,7 +958,7 @@ def derive_ticket_row(row: dict[str, Any], is_airline: bool) -> dict[str, Any]:
 
     # Normalize departure_datetime to YYYY-MM-DD (drop time)
     if row.get("departure_datetime"):
-        row["departure_datetime"] = _normalize_date(row["departure_datetime"])
+        row["departure_datetime"] = _normalize_date(row["departure_datetime"], orders.get("departure_datetime"))
 
     return row
 
@@ -957,6 +993,8 @@ class TicketExtractionService:
         sheet_name: str | None = None,
         header_row: int | None = None,
         split_legs: bool = True,
+        date_formats: dict | None = None,
+        valid_period: tuple[date, date] | None = None,
     ) -> dict:
         """
         Parse spreadsheet bytes and return a preview dict.
@@ -968,6 +1006,10 @@ class TicketExtractionService:
         The caller must send back what the first call detected: a column map is a
         list of column NAMES, so re-detecting a header one row out on the second
         read would rename every column and drop the whole mapping on the floor.
+
+        `date_formats` and `valid_period` (Internal Statement): the order the Ticket Date and
+        Travel Date columns are written in, and the statement's period — every date in
+        those columns is read in that order (see DATE_FORMAT_FIELDS).
         """
         warnings: list[str] = []
         try:
@@ -1019,6 +1061,14 @@ class TicketExtractionService:
             }
         else:
             user_map = {canon: col for col, canon in _build_col_map(xls_columns).items()}
+
+        # The declared date format: Excel-stored dates put in it first, row by row against the
+        # period — the rows below then read the text dates in it (derive_ticket_row).
+        orders = date_orders(date_formats)
+        date_fix = None
+        if orders and valid_period and _is_excel(file_bytes, file_name):
+            date_fix = excel_dates.read_stored_dates(
+                df, valid_period, {f: user_map.get(f) for f in orders}, orders, anchor=_anchor(user_map))
 
         if not user_map:
             warnings.append(
@@ -1107,7 +1157,7 @@ class TicketExtractionService:
                     if v:
                         row["travel_dt"] = v
 
-            rows.append(derive_ticket_row(row, is_airline))
+            rows.append(derive_ticket_row(row, is_airline, date_formats))
 
         if skipped_totals:
             where = ", ".join(str(n) for n in skipped_totals[:5])
@@ -1120,7 +1170,9 @@ class TicketExtractionService:
         # Multi-sector splitting (B2B style — only when not airline BSP format), or
         # one row per ticket for a caller that records sales (see split_legs).
         if not is_airline:
-            rows = _split_multi_sector_rows(rows) if split_legs else _keep_multi_sector_whole(rows)
+            travel_order = orders.get("departure_datetime")
+            rows = (_split_multi_sector_rows(rows, travel_order) if split_legs
+                    else _keep_multi_sector_whole(rows, travel_order))
 
         return {
             **base,
@@ -1134,4 +1186,44 @@ class TicketExtractionService:
             "sample_rows":       sample_rows,
             "unmapped_columns":  unmapped_columns,
             "fuzzy_suggestions": fuzzy,
+            # Internal Statement: the Excel dates put back in the declared format, by column.
+            "date_fix":          date_fix.as_dict(rows_shown=0) if date_fix else None,
         }
+
+
+def _is_excel(file_bytes: bytes, file_name: str) -> bool:
+    """An Excel workbook — the only kind of file that stores dates rather than text."""
+    return spreadsheet.sniff(file_bytes, file_name) in (spreadsheet.XLS, spreadsheet.XLSX)
+
+
+def _anchor(columns: dict[str, str | None]) -> str:
+    """The mapped date that belongs in the statement period: the Ticket Date, else the Doc Date."""
+    return next((f for f in _DATE_ANCHORS if columns.get(f)), _DATE_ANCHORS[0])
+
+
+def detect_date_formats(file_bytes: bytes, file_name: str, sheet_name: str | None = None,
+                        header_row: int | None = None,
+                        valid_period: tuple[date, date] | None = None) -> list[dict]:
+    """The order the file's Ticket Date and Travel Date columns are written in, as far as the
+    file shows it (services/date_format_detect.py) — to fill in Internal Statement's Date
+    format before anyone is asked. Read through the columns the alias map maps them to,
+    under the sheet and header row the first read detected. Writes nothing."""
+    try:
+        read = spreadsheet.read_table(file_bytes, file_name, sheet=sheet_name,
+                                      header_row=header_row, recognise=recognised_count)
+    except spreadsheet.SpreadsheetError as exc:
+        raise ValueError(str(exc)) from exc
+    df = read.df
+    cols = {canon: col for col, canon in _build_col_map(list(read.columns)).items()}
+    fix = None
+    if valid_period and _is_excel(file_bytes, file_name):
+        # No format yet — it is what this finds out — so every date column may be put back.
+        fix = excel_dates.read_stored_dates(
+            df, valid_period, {f: cols.get(f) for f in ("ticket_date", "doc_date", "departure_datetime")},
+            None, anchor=_anchor(cols))
+    # A file with only a Doc Date has it as its ticket date (see _suggest_fallbacks).
+    fields = {"ticket_date": cols.get("ticket_date") or cols.get("doc_date"),
+              "departure_datetime": cols.get("departure_datetime")}
+    headers = {f["field"]: f["header"] for f in DATE_FORMAT_FIELDS}
+    return [{**d.as_dict(), "header": headers[d.field]}
+            for d in date_format_detect.detect(df, fields, valid_period, fix)]

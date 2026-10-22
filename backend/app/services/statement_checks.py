@@ -31,6 +31,8 @@ from app.models.payment_ledger import VendorAccount
 from app.models.statement_batch_control import StatementBatchControl
 from app.models.statement_batch_supplier import StatementBatchSupplier
 from app.models.statement_row import STATEMENT_MODELS
+from app.models.third_party_statement import THIRD_PARTY_SLUGS, ThirdPartyStatement
+from app.models.typed_statement import is_typed
 from app.services import statement_balance
 
 TOLERANCE = Decimal("1.00")
@@ -75,8 +77,30 @@ class BatchFacts:
     loaded_rows: int | None = None
     expected_count: int | None = None
     expected_amount: Decimal | None = None
+    # Entry lines of the file left out at upload as duplicates (services/tp_gds_reupload.py),
+    # their net, and the upload most of them were in. Still part of the file's arithmetic.
+    duplicate_rows: int = 0
+    duplicate_net: Decimal = Decimal("0")
+    duplicate_of: str | None = None
     # normalised Customer ID → (name, ticket rows carrying it)
     accounts: dict[str, tuple[str | None, int]] = field(default_factory=dict)
+    # The period is the one the uploader declared, not the span of the lines' issue dates.
+    period_declared: bool = False
+
+    @property
+    def file_tickets(self) -> int:
+        """Entries the FILE declares: the saved ones plus those already uploaded."""
+        return self.ticket_rows + self.duplicate_rows
+
+    @property
+    def file_net(self) -> Decimal:
+        return self.ticket_net + self.duplicate_net
+
+    @property
+    def is_update(self) -> bool:
+        """Mostly entries already uploaded in one earlier statement: an updated copy of it
+        (the same week re-sent with a few more lines), not the next statement in the chain."""
+        return self.duplicate_of is not None and self.duplicate_rows > self.ticket_rows
 
 
 def _check(key: str, label: str, status: str, detail: str, **extra) -> dict:
@@ -93,15 +117,21 @@ def check_rows(f: BatchFacts) -> dict:
         return _check("rows", "Records", FAIL,
                       f"{f.loaded_rows} rows were saved at upload but {present} are present now "
                       f"— rows were deleted or re-processed since.")
-    if f.file_rows is not None and f.file_rows != f.loaded_rows:
-        gap = f.file_rows - f.loaded_rows
+    dups = f.duplicate_rows
+    already = (f" {dups} {'was' if dups == 1 else 'were'} already uploaded and left out."
+               if dups else "")
+    if f.file_rows is not None and f.file_rows != f.loaded_rows + dups:
+        gap = f.file_rows - f.loaded_rows - dups
         return _check("rows", "Records", WARN,
-                      f"The file had {f.file_rows} lines; {f.loaded_rows} were saved. "
+                      f"The file had {f.file_rows} lines; {f.loaded_rows} were saved.{already} "
                       f"{gap} line{'s' if gap != 1 else ''} had no mapped values.")
     balance = f.rows_now - f.ticket_rows
     extra = ""
     if balance:
         extra = f" + {balance} balance line{'s' if balance != 1 else ''}"
+    if dups:
+        return _check("rows", "Records", PASS,
+                      f"{f.loaded_rows} new lines saved — {f.ticket_rows} tickets{extra}.{already}")
     return _check("rows", "Records", PASS,
                   f"All {f.loaded_rows} lines saved — {f.ticket_rows} tickets{extra}.")
 
@@ -118,9 +148,12 @@ def check_amount(f: BatchFacts) -> dict:
                       f"Closing balance {_money(f.closing)}, but {why} — enter the opening "
                       f"balance to verify the statement's arithmetic.", needs_opening=True)
     paid = f.payments or Decimal("0")
-    expected = f.opening + f.ticket_net - paid
+    # The file's arithmetic covers every entry it prints, including those left out at
+    # upload as already sent.
+    expected = f.opening + f.file_net - paid
     diff = f.closing - expected
     sum_text = (f"Opening {_money(f.opening)} + tickets {_money(f.ticket_net)}"
+                f"{f' + already uploaded {_money(f.duplicate_net)}' if f.duplicate_rows else ''}"
                 f"{f' − payments {_money(paid)}' if f.payments else ''}")
     if abs(diff) <= TOLERANCE:
         return _check("amount", "Amount", PASS, f"{sum_text} = closing {_money(f.closing)}.")
@@ -131,7 +164,16 @@ def check_amount(f: BatchFacts) -> dict:
 
 
 def check_continuity(f: BatchFacts, prev: BatchFacts | None,
-                     copy: BatchFacts | None = None) -> dict:
+                     copy: BatchFacts | None = None, updates: BatchFacts | None = None) -> dict:
+    if f.is_update:
+        # Its opening is the original's opening, so chaining it to the statement before
+        # would only repeat that check — and chaining it to the original would report a
+        # gap that is not there.
+        name = (updates.source_file if updates is not None else None) or "an earlier upload"
+        return _check("continuity", "Continuity", NA,
+                      f"An updated copy of {name}: {f.duplicate_rows} of its {f.file_tickets} "
+                      f"entries were already uploaded there and were left out; "
+                      f"{f.ticket_rows} new {'entry was' if f.ticket_rows == 1 else 'entries were'} saved.")
     if copy is not None:
         # Comparing a second copy's opening with the first copy's closing would report a
         # missing statement that is not missing — say what it actually is.
@@ -166,14 +208,18 @@ def check_controls(f: BatchFacts) -> dict:
     if f.expected_count is None and f.expected_amount is None:
         return _check("controls", "Control totals", NA,
                       "No expected record count or amount was entered for this upload.")
+    # The declared totals are the vendor's, for the whole file — entries left out at upload
+    # as already sent included.
     problems, fine = [], []
+    plus = f" (+{f.duplicate_rows} already uploaded)" if f.duplicate_rows else ""
     if f.expected_count is not None:
-        (fine if f.expected_count == f.ticket_rows else problems).append(
-            f"expected {f.expected_count} records, loaded {f.ticket_rows}")
+        (fine if f.expected_count == f.file_tickets else problems).append(
+            f"expected {f.expected_count} records, loaded {f.ticket_rows}{plus}")
     if f.expected_amount is not None:
-        diff = f.ticket_net - f.expected_amount
+        diff = f.file_net - f.expected_amount
         (fine if abs(diff) <= TOLERANCE else problems).append(
-            f"expected {_money(f.expected_amount)}, loaded {_money(f.ticket_net)}")
+            f"expected {_money(f.expected_amount)}, loaded {_money(f.ticket_net)}"
+            f"{f' (+{_money(f.duplicate_net)} already uploaded)' if f.duplicate_rows else ''}")
     if problems:
         return _check("controls", "Control totals", FAIL, "; ".join(problems).capitalize() + ".")
     return _check("controls", "Control totals", PASS, "; ".join(fine).capitalize() + ".")
@@ -232,8 +278,10 @@ def verdict(checks: list[dict]) -> str:
 
 
 def evaluate(f: BatchFacts, prev: BatchFacts | None, confirmed: dict[int, set[str]],
-             seen_elsewhere: dict[str, set[str]], copy: BatchFacts | None = None) -> dict:
-    checks = [check_rows(f), check_amount(f), check_continuity(f, prev, copy), check_controls(f)]
+             seen_elsewhere: dict[str, set[str]], copy: BatchFacts | None = None,
+             updates: BatchFacts | None = None) -> dict:
+    checks = [check_rows(f), check_amount(f), check_continuity(f, prev, copy, updates),
+              check_controls(f)]
     if f.slug == VENDOR_SLUG:
         checks.append(check_vendor(f, confirmed, seen_elsewhere))
     return {
@@ -250,6 +298,8 @@ def evaluate(f: BatchFacts, prev: BatchFacts | None, confirmed: dict[int, set[st
             "payments": str(f.payments) if f.payments is not None else None,
             "expected_count": f.expected_count,
             "expected_amount": str(f.expected_amount) if f.expected_amount is not None else None,
+            "duplicate_rows": f.duplicate_rows, "duplicate_net": str(f.duplicate_net),
+            "duplicate_of": f.duplicate_of,
             "period_from": f.period_from, "period_to": f.period_to,
             "accounts": [{"account": a, "name": n, "rows": c} for a, (n, c) in f.accounts.items()],
         },
@@ -350,6 +400,9 @@ async def load_facts(db: AsyncSession, slug: str, tenant_id: int, user_id: int,
         f.file_rows, f.loaded_rows = ctl.file_rows, ctl.loaded_rows
         f.expected_count = ctl.expected_count
         f.expected_amount = Decimal(ctl.expected_amount) if ctl.expected_amount is not None else None
+        f.duplicate_rows = ctl.duplicate_rows or 0
+        f.duplicate_net = Decimal(ctl.duplicate_net) if ctl.duplicate_net is not None else Decimal("0")
+        f.duplicate_of = ctl.duplicate_of
         if f.opening is None and ctl.opening_balance is not None:
             f.opening, f.opening_source = Decimal(ctl.opening_balance), ctl.opening_source
         if f.closing is None and ctl.closing_balance is not None:
@@ -363,9 +416,24 @@ async def load_facts(db: AsyncSession, slug: str, tenant_id: int, user_id: int,
         facts[link.batch_id].supplier_id = link.supplier_id
         facts[link.batch_id].supplier_name = link.supplier_name
 
+    # The period the uploader declared, where there is one (models/third_party_statement.py),
+    # over the issue dates' span: a refund keeps its sale's issue date, so the span of a
+    # week's lines can reach back weeks and order two statements wrongly.
+    if slug in THIRD_PARTY_SLUGS:
+        H = ThirdPartyStatement
+        for batch_id, start, end in (await db.execute(
+            select(H.batch_id, H.period_from, H.period_to).where(
+                H.slug == slug, H.batch_id.in_(ids), H.tenant_id == tenant_id,
+                H.period_from.isnot(None))
+        )).all():
+            facts[batch_id].period_from, facts[batch_id].period_to = start.isoformat(), end.isoformat()
+            facts[batch_id].period_declared = True
+
     # Inlined, not bound: a bound key renders as two different parameters in SELECT and
-    # GROUP BY, which Postgres then refuses to treat as the same expression.
-    acct_col = literal_column(f"{m.__tablename__}.data ->> 'customer_id'")
+    # GROUP BY, which Postgres then refuses to treat as the same expression. A typed table
+    # has the field as a column of its own, which needs neither.
+    acct_col = (m.customer_id if is_typed(m)
+                else literal_column(f"{m.__tablename__}.data ->> 'customer_id'"))
     for batch_id, acct, name, n in (await db.execute(
         select(m.batch_id, acct_col, func.max(m.data["customer_name"].astext), func.count())
         .where(*scope, m.batch_id.in_(ids), is_ticket)
@@ -383,6 +451,16 @@ async def check_uploads(db: AsyncSession, slug: str, tenant_id: int, user_id: in
     """The checks for the given uploads, keyed by batch id."""
     everything = await load_facts(db, slug, tenant_id, user_id, None)
     wanted = [b for b in (batch_ids or list(everything)) if b in everything]
+
+    # An updated copy covers the week of the upload it updates, whatever dates its few new
+    # lines carry — so the next statement chains to it, the latest copy with the latest
+    # closing, rather than to the original it superseded.
+    # A declared period already is the week's, so only an upload without one is widened.
+    for f in everything.values():
+        original = everything.get(f.duplicate_of) if f.is_update and not f.period_declared else None
+        if original is not None:
+            f.period_from = min(filter(None, (f.period_from, original.period_from)), default=None)
+            f.period_to = max(filter(None, (f.period_to, original.period_to)), default=None)
 
     confirmed: dict[int, set[str]] = {}
     for sid, acct in (await db.execute(
@@ -402,7 +480,8 @@ async def check_uploads(db: AsyncSession, slug: str, tenant_id: int, user_id: in
                 continue
             for a in o.accounts:
                 seen.setdefault(a, set()).add(o.supplier_name or f"vendor #{o.supplier_id}")
-        out[b] = evaluate(f, previous_of(f, others), confirmed, seen, copy=copy_of(f, others))
+        out[b] = evaluate(f, previous_of(f, others), confirmed, seen, copy=copy_of(f, others),
+                          updates=everything.get(f.duplicate_of))
         out[b]["supplier_id"] = f.supplier_id
         out[b]["supplier_name"] = f.supplier_name
         out[b]["source_file"] = f.source_file
