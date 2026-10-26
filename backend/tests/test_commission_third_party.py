@@ -106,6 +106,41 @@ class TestDeclaredSelfCheck(unittest.TestCase):
         self.assertIs(build_declared(dict(TURKISH, net_amount="89438")).net_ok, False)
 
 
+# Brightsun, 01-07 Oct 2026: commission printed NEGATIVE on a sale and positive on a credit
+# note, and added to the total either way — TRIUMPHH's arithmetic with the signs flipped.
+BS_SALE = {"ticket_number": "3987190646", "ticket_status": "Sales", "base_fare": "214580",
+           "other_taxes": "112309", "commission_amount": "-5001.06", "tds": "100.02",
+           "net_amount": "321987.96"}
+BS_REFUND = {"ticket_number": "5808961921", "ticket_status": "Credit Note", "base_fare": "-15140",
+             "other_taxes": "-17426", "cancellation_markup": "10815",
+             "commission_amount": "673.64", "tds": "-13.47", "net_amount": "-21090.83"}
+
+
+class TestCommissionSignFollowsTheLine(unittest.TestCase):
+    def test_a_sales_commission_is_earned_whatever_sign_it_is_printed_with(self):
+        for row in (BS_SALE, ETIHAD):
+            with self.subTest(ticket=row["ticket_number"]):
+                d = build_declared(row)
+                self.assertGreater(d.commission, 0)
+                self.assertIs(d.net_ok, True)
+        self.assertAlmostEqual(build_declared(BS_SALE).commission, 5001.06, places=2)
+
+    def test_a_refunds_commission_is_given_back(self):
+        d = build_declared(BS_REFUND)
+        self.assertAlmostEqual(d.commission, -673.64, places=2)
+        self.assertAlmostEqual(d.tds, -13.47, places=2)       # TDS stays as printed
+        # Not an unverified-sign "None": Cancellation Charges is on the line, but it closes.
+        self.assertAlmostEqual(net_from_components(BS_REFUND, refund=True), -21090.83, places=2)
+
+    def test_the_variance_compares_like_with_like(self):
+        """Read as printed, −5001.06 against a deal's 6437.40 was a gap of 11,438.46."""
+        d = build_declared(BS_SALE)
+        self.assertAlmostEqual(6437.40 - d.commission, 1436.34, places=2)
+
+    def test_a_debit_note_is_a_sale_side_line(self):
+        self.assertEqual(classify({"ticket_status": "Debit Note"}), (KIND_ISSUE, None))
+
+
 class TestStatusPolicy(unittest.TestCase):
     def test_confirmed_is_a_sale(self):
         self.assertEqual(classify({"ticket_status": "CONFIRMED"})[0], KIND_ISSUE)

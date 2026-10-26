@@ -156,6 +156,63 @@ class CommissionRowsPage(BaseModel):
     rows: list[CommissionRowRead] = []
 
 
+# ── A third-party statement line by line (services/commission/statement_lines.py) ──────
+
+class CommissionLineColumn(BaseModel):
+    field: str
+    header: str
+    kind: Optional[str] = None          # "money" → right-aligned
+
+
+class CommissionLine(BaseModel):
+    """One ticket line of the statement — calculated or not — and what it earned."""
+    line_id: int                        # the statement line; what a run's `row_ids` take
+    values: dict                        # {field: value} for the page's columns
+    kind: str                           # issue | refund | skip
+    # The vendor's Agent Commission + Incentive, signed by kind: + earned on a sale,
+    # − given back on a refund, whatever sign the file printed.
+    statement_commission: Optional[float] = None
+    # What the matched deal computes (incentive + IATA). None until a run reaches the line.
+    expected_commission: Optional[float] = None
+    # expected − statement. Positive: the vendor paid less than your deal says.
+    difference: Optional[float] = None
+    # Did the vendor's own figures add up to its own Net Amount? None = cannot judge.
+    net_ok: Optional[bool] = None
+    # The matched deal's IATA commission % as written on it ("3"), and what it came to on
+    # this line's basic fare — part of `expected_commission`. None: no deal, or it has none.
+    iata_pct: Optional[str] = None
+    iata_commission: Optional[float] = None
+    calc: Optional[CommissionRowRead] = None
+
+
+class CommissionLineTotals(BaseModel):
+    tickets: int = 0
+    matched: int = 0
+    unmatched: int = 0
+    other: int = 0                      # excluded by a deal rule, or not a sale
+    pending: int = 0                    # no run has reached them
+    statement_commission: float = 0.0   # over calculated lines, so the three add up
+    statement_pending: float = 0.0      # …and what the vendor printed on the rest
+    expected_commission: float = 0.0    # = incentive + iata_commission
+    incentive: float = 0.0
+    iata_commission: float = 0.0
+    with_iata: int = 0                  # lines that earned any IATA commission
+    difference: float = 0.0             # = expected − statement
+    differing: int = 0                  # lines whose gap is a rupee or more
+    unverified: int = 0                 # lines whose own figures do not add up
+
+
+class CommissionLinesPage(BaseModel):
+    columns: list[CommissionLineColumn] = []
+    rows: list[CommissionLine] = []
+    total: int = 0                      # lines matching the filters
+    offset: int = 0
+    limit: int = 50
+    totals: CommissionLineTotals        # the whole statement, never the filtered set
+    airlines: list[str] = []
+    invoice_types: list[str] = []
+
+
 class CommissionAirlineSummary(BaseModel):
     airline: str
     rows: int

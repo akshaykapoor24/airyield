@@ -240,6 +240,25 @@ class TestBalanceStamp(unittest.TestCase):
         statement_balance.tag(booking)
         self.assertNotIn("row_kind", booking)
 
+    def test_a_total_labelled_in_the_ticket_column_is_a_total_line(self):
+        """Brightsun's 01-07 Oct 2026 statement ends with `=SUM(…)` under every amount and
+        "Total" in TicketNumber. Read as a ticket, it was the one New line of the upload."""
+        total = {"ticket_number": "Total", "base_fare": "6717035", "uatp_amount": "-446390",
+                 "net_amount": "10570964.23"}
+        statement_balance.tag(total)
+        self.assertEqual((total["row_kind"], total["row_label"]), ("total", "TOTAL"))
+        for label in ("GRAND TOTAL", "Sub Total", "total"):
+            with self.subTest(label=label):
+                self.assertEqual(statement_balance.balance_kind({"pnr": label, "net_amount": "1"})[0],
+                                 "total")
+
+    def test_a_real_identity_beside_a_marker_is_still_a_booking(self):
+        for d in ({"ticket_number": "5808961921", "passenger_name": "TOTAL", "net_amount": "1"},
+                  {"ticket_number": "Total", "pnr": "HYK6XH", "net_amount": "1"},
+                  {"ticket_number": "5808961921", "remarks": "Total", "net_amount": "1"}):
+            with self.subTest(data=d):
+                self.assertIsNone(statement_balance.balance_kind(d))
+
     def test_restamping_is_idempotent_and_unstamps(self):
         d = {"cancellation_markup": "BALANCE", "net_amount": "5"}
         statement_balance.tag(d)

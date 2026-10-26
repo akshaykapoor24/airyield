@@ -20,6 +20,11 @@ Each entry of the file lands in one bucket:
     very file (identical or not). Saved by default, flagged; the user can leave it out.
   * NEW — none of these. Always saved.
 
+A line left out is not lost: it is kept, as the file had it, beside the statement it was on
+with the saved line it repeats (`left_out_rows`, models/statement_row.ThirdPartyGdsLeftOut),
+so the statement still holds every line its file had and the reconciliation can show where
+each was reconciled.
+
 Another agency's statements are never compared: each agency (each branch) is its own contract,
 and the same ticket on two of them is a question for the Payment Module's reconciliation, not
 something an upload may quietly drop.
@@ -58,7 +63,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.statement_batch_supplier import StatementBatchSupplier
-from app.models.statement_row import ThirdPartyGds
+from app.models.statement_row import ThirdPartyGds, ThirdPartyGdsLeftOut
 from app.models.third_party_statement import ThirdPartyStatement
 from app.services import statement_balance, statement_period
 
@@ -520,6 +525,45 @@ class Screen:
             "new": decision.kept_entries,
             "left_out_lines": [self._listed(e) for e in decision.left_out[:MAX_LISTED]],
         }
+
+
+def repeat_target(screen: Screen, entry: Entry) -> int | None:
+    """The saved line a left-out entry repeats: the earlier upload's line it was told apart
+    from, else — repeated in this file — its first copy here, or what that copy repeats when
+    it was left out too. Call once the kept lines are flushed, so a copy saved here has its
+    id; None when nothing saved is left to point at."""
+    by_pos = {e.pos: e for e in screen.entries}
+    e: Entry | None = entry
+    while e is not None:
+        if e.saved is not None:
+            return e.saved.id
+        if e.twin is None:
+            return None
+        twin_id = getattr(screen.lines[e.twin], "id", None)
+        if twin_id is not None:
+            return twin_id
+        e = by_pos.get(e.twin)
+    return None
+
+
+def left_out_rows(screen: Screen, decision: Decision, *, tenant_id: int, created_by_id: int,
+                  batch_id: str) -> list[ThirdPartyGdsLeftOut]:
+    """Each line the save left out, as its file had it, with what it repeats — written with
+    the statement, so the statement keeps every line its file held
+    (models/statement_row.ThirdPartyGdsLeftOut). After the kept lines are flushed."""
+    out = []
+    for e in decision.left_out:
+        line = screen.lines[e.pos]
+        row = ThirdPartyGdsLeftOut(
+            tenant_id=tenant_id, created_by_id=created_by_id, batch_id=batch_id,
+            file_row=e.index, kind=e.kind, repeat_of_id=repeat_target(screen, e),
+            differs=",".join(f["field"] for f in e.fields) or None,
+            dedup_key=line.dedup_key, match_key=line.match_key)
+        # Column for column: the same fields, already typed — and the same `unparsed_fields`.
+        for f in ThirdPartyGds.data_fields():
+            setattr(row, f.attr, getattr(line, f.attr))
+        out.append(row)
+    return out
 
 
 def normalize_choices(raw: dict | None) -> dict:

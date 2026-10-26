@@ -1014,7 +1014,9 @@ export default function UploadTicketsPage({
       {/* page header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <Link href="/customers/statements" className="p-1.5 rounded-lg border border-gray-200 hover:bg-gray-50 text-gray-500">
+          {/* Back to the section the upload belongs to — Internal Statement → Statements there. */}
+          <Link href={listHref ?? "/customers/statements"} aria-label="Back to statements"
+            className="p-1.5 rounded-lg border border-gray-200 hover:bg-gray-50 text-gray-500">
             <ChevronLeft className="w-4 h-4" />
           </Link>
           <div>

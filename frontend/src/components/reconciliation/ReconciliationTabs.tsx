@@ -1,64 +1,37 @@
 "use client";
 
-// The tab shell for Vendors → Reconciliation: BSP · LCC · Third Party, with inner switches
-// for BSP (BSP/NDC) and Third Party (GDS/LCC).
+// The tab shell for Reconciliation → Vendor Reconciliation: one tab per kind of vendor
+// statement — BSP · BSP-NDC · LCC · Third Party GDS · Third Party LCC.
 //
-// Two rows of tabs, mirroring the Statements and Commission income pages, because they are
-// the same two questions in the same order — which family, then which document. Kept as
-// in-page state plus a `?source=` param rather than nested routes, so this screen keeps the
-// one navigation model its neighbours use.
+// One row of tabs, not a family row and a document row: every tab asks the same question —
+// that vendor's statement against the tickets you sold — so the statement type is the only
+// choice. Kept as in-page state plus a `?source=` param rather than nested routes, so this
+// screen keeps the one navigation model its neighbours use. The tabs and what each shows are
+// lib/reconciliationSources.ts RECON_TABS.
 
 import { useCallback, useState } from "react";
 import { cn } from "@/lib/utils";
-import {
-  RECON_SOURCES, RECON_TABS, getReconSource, tabForReconSource,
-  type ReconSourceSlug,
-} from "@/lib/reconciliationSources";
+import { RECON_SOURCES, RECON_TABS, getReconTab, type ReconTabSlug } from "@/lib/reconciliationSources";
 import ReconciliationView from "./ReconciliationView";
 import VendorInternalRecon from "./VendorInternalRecon";
 
-// Third Party → GDS ↔ Internal: the consolidator's GDS statement against Internal
-// Statement. Not a ReconSource — it compares two statements, not a statement against
-// the commission run — so it rides alongside the registry as one extra sub-tab.
-const VENDOR_INTERNAL = "tp-gds-internal";
-type View = ReconSourceSlug | typeof VENDOR_INTERNAL;
-const VENDOR_INTERNAL_BLURB =
-  "Your consolidator's Third Party GDS statement against Internal Statement — matched lines settle, differences are resolved, and lines on one side only carry forward to the next statement.";
-
 export default function ReconciliationTabs() {
   // Read once on mount. `?source=` makes a tab linkable — the natural thing to paste into a
-  // message when asking a colleague to look at one consolidator's margins.
-  const [sourceSlug, setSourceSlug] = useState<View>(() => {
-    if (typeof window === "undefined") return "bsp";
-    const q = new URLSearchParams(window.location.search).get("source");
-    if (q === VENDOR_INTERNAL) return VENDOR_INTERNAL;
-    return (getReconSource(q)?.slug ?? "bsp") as ReconSourceSlug;
+  // message when asking a colleague to look at one consolidator's statement.
+  const [slug, setSlug] = useState<ReconTabSlug>(() => {
+    if (typeof window === "undefined") return RECON_TABS[0].slug;
+    return getReconTab(new URLSearchParams(window.location.search).get("source"))?.slug ?? RECON_TABS[0].slug;
   });
 
-  const select = useCallback((slug: View) => {
-    setSourceSlug(slug);
+  const select = useCallback((next: ReconTabSlug) => {
+    setSlug(next);
     const url = new URL(window.location.href);
-    url.searchParams.set("source", slug);
+    url.searchParams.set("source", next);
     window.history.replaceState({}, "", url);
   }, []);
 
-  const vendorInternal = sourceSlug === VENDOR_INTERNAL;
-  const source = vendorInternal ? undefined : RECON_SOURCES[sourceSlug as ReconSourceSlug];
-  const tab = vendorInternal
-    ? (RECON_TABS.find((t) => t.slug === "third-party") ?? RECON_TABS[0])
-    : tabForReconSource(sourceSlug);
-
-  // Opening a different tab should land on its first source, not on whatever was picked
-  // inside it last time.
-  const openTab = (slug: string) => {
-    const t = RECON_TABS.find((x) => x.slug === slug);
-    if (t) select(t.sources[0]);
-  };
-
-  // No effect resetting an unknown slug: the initializer already falls back to "bsp" via
-  // getReconSource, and `select` only ever takes a slug from the registry, so `sourceSlug`
-  // cannot become invalid. This guard is the belt to that pair of braces.
-  if (!source && !vendorInternal) return null;
+  const tab = getReconTab(slug) ?? RECON_TABS[0];
+  const source = tab.view.kind === "source" ? RECON_SOURCES[tab.view.source] : undefined;
 
   return (
     <div>
@@ -66,20 +39,19 @@ export default function ReconciliationTabs() {
         {/* Named for its side: the sidebar's Reconciliation group holds both this and
             Customer Reconciliation, and the heading should match the entry clicked. */}
         <h1 className="text-base font-bold text-slate-900">Vendor Reconciliation</h1>
-        <p className="text-xs text-slate-400 mt-0.5">{source ? source.blurb : VENDOR_INTERNAL_BLURB}</p>
+        <p className="text-xs text-slate-400 mt-0.5">{tab.blurb ?? source?.blurb}</p>
       </div>
 
-      {/* Family */}
-      <div className="flex items-center gap-1 border-b border-slate-200 mb-3">
+      <div className="flex items-center gap-1 border-b border-slate-200 mb-4 overflow-x-auto">
         {RECON_TABS.map((t) => {
           const active = t.slug === tab.slug;
           return (
             <button
               key={t.slug}
               type="button"
-              onClick={() => openTab(t.slug)}
+              onClick={() => select(t.slug)}
               className={cn(
-                "px-3.5 py-2 text-xs font-semibold border-b-2 -mb-px transition-colors",
+                "px-3.5 py-2 text-xs font-semibold border-b-2 -mb-px transition-colors whitespace-nowrap",
                 active
                   ? "border-blue-600 text-blue-700"
                   : "border-transparent text-slate-400 hover:text-slate-700",
@@ -91,53 +63,12 @@ export default function ReconciliationTabs() {
         })}
       </div>
 
-      {/* Document, when the family holds more than one. LCC has a single source, so it
-          shows no second row — a switch with one option is noise. */}
-      {(tab.sources.length > 1 || tab.slug === "third-party") && (
-        <div className="flex items-center gap-1.5 mb-4">
-          {tab.sources.map((slug) => {
-            const s = RECON_SOURCES[slug];
-            const active = slug === sourceSlug;
-            return (
-              <button
-                key={slug}
-                type="button"
-                onClick={() => select(slug)}
-                className={cn(
-                  "px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors",
-                  active
-                    ? "bg-blue-50 border-blue-300 text-blue-700"
-                    : "bg-white border-slate-200 text-slate-500 hover:bg-slate-50 hover:text-slate-800",
-                )}
-              >
-                {s.label}
-              </button>
-            );
-          })}
-          {tab.slug === "third-party" && (
-            <button
-              type="button"
-              onClick={() => select(VENDOR_INTERNAL)}
-              title="Third Party GDS statement against Internal Statement"
-              className={cn(
-                "px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors",
-                vendorInternal
-                  ? "bg-blue-50 border-blue-300 text-blue-700"
-                  : "bg-white border-slate-200 text-slate-500 hover:bg-slate-50 hover:text-slate-800",
-              )}
-            >
-              GDS ↔ Internal
-            </button>
-          )}
-        </div>
-      )}
-
-      {/* `key` forces a remount per source: the view holds rows, filters and an open
-          drilldown in state, and carrying any of them across a tab change would show one
-          source's numbers under another's heading. */}
-      {vendorInternal || !source
-        ? <VendorInternalRecon />
-        : <ReconciliationView key={sourceSlug} source={source} />}
+      {/* `key` forces a remount per tab: the view holds rows, filters and an open drilldown
+          in state, and carrying any of them across a tab change would show one statement's
+          numbers under another's heading. */}
+      {source
+        ? <ReconciliationView key={tab.slug} source={source} />
+        : <VendorInternalRecon key={tab.slug} />}
     </div>
   );
 }

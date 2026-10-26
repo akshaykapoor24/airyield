@@ -33,6 +33,15 @@ def display_columns(slug: str) -> list[dict]:
     # `data` — commission and payment reconciliation read the full name from it.
     if slug in ("tp-gds", "tp-lcc"):
         cols = [c for c in cols if c.get("field") != "passenger_name"]
+    # SSR Amount and GST On SF are not GDS columns to map — always their parts added up
+    # (flat_statement._TP_GDS_COLUMNS) — but the totals are still worth seeing, and a line
+    # saved before the parts existed has only the total. Shown after their last part,
+    # read-only: an edit goes to a part and the total follows.
+    if parser_name in ("tp-gds", "mo-gds"):
+        for after, total, header in (("meals", "ssr_amount", "SSR Amount"),
+                                     ("igst", "gst_on_sf", "GST On SF")):
+            i = next((k + 1 for k, c in enumerate(cols) if c["field"] == after), len(cols))
+            cols = cols[:i] + [{"header": header, "field": total, "readonly": True}] + cols[i:]
     if parser_name == "lcc":
         cols = cols + [
             {"header": "Taxes", "field": "__taxes__"},

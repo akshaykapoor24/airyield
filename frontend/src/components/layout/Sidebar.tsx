@@ -69,14 +69,10 @@ const TENANT_NAV: NavItem[] = [
     id: "vendors", label: "Vendors data", icon: FolderOpen,
     children: [
       { label: "Incoming deals", href: "/deals", icon: FolderOpen },
-      // TODO: wire badge to real count
       { label: "Statements", href: "/vendors/statements", icon: FileText },
+      { label: "Commission income", href: "/vendors/commission-income", icon: DollarSign },
       { label: "Series/SIT/MICE/Group", href: "/vendors/series-sit-mice", icon: Layers },
       { label: "Ticket Search", href: "/ticket-details", icon: Search },
-      // Reconciliation moved to its own group below.
-      { label: "Commission income", href: "/vendors/commission-income", icon: DollarSign },
-      // A vendor's bill checked against our mid-office (MO) record, with the commission
-      // above applied — the step before paying the consolidator.
       { label: "Payment Module", href: "/vendors/payment-module", icon: Wallet },
     ],
   },

@@ -4,7 +4,7 @@ import { useCallback, useState, useRef, useEffect, useMemo } from "react";
 import {
   Upload, FileText, FileSpreadsheet, File, Check,
   ChevronRight, AlertTriangle, X, RefreshCw, Save,
-  Plus, Trash2, ChevronDown, ArrowLeft, ArrowRight, Info, Settings2, Search,
+  Plus, Trash2, ChevronDown, ArrowLeft, ArrowRight, Info, Settings2,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import Link from "next/link";
@@ -14,6 +14,7 @@ import {
   IEFieldValue,
   CONTINENTS, COUNTRY_GROUPS,
   INCENTIVE_FIELDS, FIELD_OPTIONS, ANCILLARY_ITEMS,
+  DATE_WISE_INCENTIVES, FLIGHT_TYPE_OPTIONS, CLASS_OPTIONS, PAYOUT_CALC_OPTIONS,
   TabBar, IncentiveTabContent, InclExclTabContent,
 } from "@/components/deals/IncentiveInclExclShared";
 import OutgoingScopeFields, { type ScopeSelection } from "@/components/deals/OutgoingScopeFields";
@@ -161,8 +162,11 @@ const MT_CONTRACT_SHEET = "Airline Contract Details";
 
 // Files AI Extraction can read. PDFs (on by default — their tables are reconstructed
 // from the page) and spreadsheets (off by default, for sheets too free-form to map:
-// vendor comparisons, house formats). Word and images stay on column mapping.
+// vendor comparisons, house formats).
 const AI_READABLE_RE = /\.(pdf|xlsx|xlsm|xls|csv)$/i;
+// What a deal file may be: PDF or Excel only — Word and images are not accepted.
+const UPLOAD_FILE_RE = /\.(pdf|xlsx|xls)$/i;
+const UPLOAD_FILE_ERROR = "Only PDF and Excel (.xls / .xlsx) files can be uploaded.";
 
 // Header-sheet columns. Keys mirror the upload field keys (c__*) so the existing
 // review/confirm path consumes them unchanged. The full superset is used when
@@ -310,6 +314,26 @@ type AIDeal = {
   src_page?: number | null;
   src_text?: string | null;
   needs_manual?: boolean;
+  // Multi-supplier sheets: the row's Source cell as printed ("YATRA(TSI)"). On an
+  // All-suppliers extract also its line in supplier_summary, how it resolved, and the
+  // agency pre-selected for it (only when remembered / matched — never a guess).
+  supplier_cell?: string | null;
+  supplier_group?: string | null;
+  vendor_status?: string | null;
+  vendor_agency_id?: number | null;
+};
+
+// "All suppliers": one Source value of the sheet and the Agency Master row it resolved
+// to — see backend services/deal_vendor_resolver.py for what each status means.
+type SupplierSource = {
+  group: string;                 // joins rows to this line (extra.__src_group)
+  source: string;                // as printed; "" for rows with no Source
+  channel: string|null;          // GDS | LCC — agencies are onboarded per channel
+  rows: number; deals: number;
+  status: "remembered"|"matched"|"suggested"|"ambiguous"|"not_onboarded"|"blank";
+  agency_id: number|null;        // pre-selected: remembered / matched only
+  candidates: number[];          // offered: suggested / ambiguous
+  note?: string|null;
 };
 
 type AIExtractResponse = {
@@ -319,7 +343,11 @@ type AIExtractResponse = {
   warning?: string;
   // Counted over DISTINCT airlines, not rows — "12 will be added", not "36 rows".
   airline_summary?: Record<string,number>;
+  supplier_summary?: SupplierSource[];
 };
+
+// The Supplier Name option that loads a multi-supplier sheet in one go.
+const ALL_SUPPLIERS_LABEL = "All suppliers — multi-vendor sheet";
 
 function convertAIDealsToRows(deals: AIDeal[]): ReviewRow[] {
   return deals.map((deal, idx) => {
@@ -347,6 +375,14 @@ function convertAIDealsToRows(deals: AIDeal[]): ReviewRow[] {
       extra["__src"] = `p.${deal.src_page ?? "?"} r${deal.src_n ?? "?"} · ${deal.src_text ?? ""}`.trim();
     }
     if (deal.needs_manual) extra["__needs_manual"] = "1";
+    // All suppliers. The row's supplier is its own editable c__vendor_agency_id; the
+    // Source cell travels to the save too (it is remembered against the agency picked
+    // for it), so like c__airline_code it is a c__ key handleConfirm reads explicitly.
+    // Its group and status are advisory "__" keys, like __air_status.
+    if (deal.supplier_cell != null)     extra["c__supplier_cell"] = deal.supplier_cell;
+    if (deal.supplier_group)            extra["__src_group"] = deal.supplier_group;
+    if (deal.vendor_status)             extra["__vendor_status"] = deal.vendor_status;
+    if (deal.vendor_agency_id != null)  extra["c__vendor_agency_id"] = String(deal.vendor_agency_id);
     for (const [incType, incFields] of Object.entries(deal.incentive_data ?? {})) {
       if (!incFields) continue;
       for (const [field, value] of Object.entries(incFields)) {
@@ -393,6 +429,74 @@ const EMPTY_ROW = ():ReviewRow => ({
   peco_commission:"",bus_commission:"",valid_on:"",validity_raw:"",remarks:"",
   extra:{},
 });
+
+// The incentive fields the review table shows as columns of their own, in reading order —
+// what a reviewer checks on every row. Only the standard-shaped incentives have them
+// (DATE_WISE_INCENTIVES); the rest of each incentive, and its rules, stay in the popup.
+// A column's key is the row's own storage key, inc::{incentive}::{field}.
+const INLINE_INC_FIELDS:{field:string;label:string}[] = [
+  {field:"travelValidFrom", label:"Travel From"},
+  {field:"travelValidTo",   label:"Travel To"},
+  {field:"flightType",      label:"Flight Type"},
+  {field:"class",           label:"Class"},
+  {field:"payoutCalcCols",  label:"Calc On"},
+  {field:"incentiveAmtPct", label:"Rate"},
+];
+const inlineIncentives=(incentives:string[])=>incentives.filter(i=>DATE_WISE_INCENTIVES.has(i));
+const incCellField=(key:string)=>key.startsWith("inc::")?(key.split("::")[2]??""):"";
+const isSlabPayout=(extra:Record<string,string>,inc:string)=>extra[`inc::${inc}::amountBasedType`]==="Slab Based";
+
+// An edit to one of those columns, with what the popup would do alongside it. A rate typed
+// on a row with no payout mode yet (an unread row) makes it the Fixed percentage the
+// extractor gives a read row; a slab payout has no single rate, so it is left alone. Calc On
+// carries Target Calc Columns with it wherever the two still agreed. A new Flight Type
+// drops slabs laid out for the old one's columns.
+function withIncentiveCellChange(extra:Record<string,string>,key:string,val:string):Record<string,string>{
+  const [,inc,field]=key.split("::");
+  const k=(f:string)=>`inc::${inc}::${f}`;
+  if(field==="incentiveAmtPct"&&isSlabPayout(extra,inc))return extra;
+  const out={...extra,[key]:val};
+  if(field==="incentiveAmtPct"&&val!==""){
+    if(!out[k("targetBased")])     out[k("targetBased")]="Amount Based";
+    if(!out[k("amountBasedType")]) out[k("amountBasedType")]="Fixed";
+    if(!out[k("incentiveNumPct")]) out[k("incentiveNumPct")]="Percentage";
+  }else if(field==="payoutCalcCols"){
+    if(!out[k("targetCalcCols")]||out[k("targetCalcCols")]===(extra[key]??"")) out[k("targetCalcCols")]=val;
+  }else if(field==="flightType"&&val!==(extra[key]??"")){
+    for(const s of ["amountSlabs","segmentSlabs"]) if(out[k(s)]) out[k(s)]="[]";
+  }
+  return out;
+}
+
+// Rows the AI extractor could not read. They arrive holding only what the row's place in
+// the file gave away (airline, dates, Source) — see backend _manual_placeholder.
+const isUnreadRow=(r:ReviewRow)=>r.extra["__needs_manual"]==="1";
+
+// What an unread row still lacks, as column keys so the table can mark those cells; empty
+// once it is filled in, and always empty for a row that was read. A read row always has
+// these, so a hand-filled one is done when it has them too. Checked on the incentives the
+// row already carries (the extractor gives a placeholder PLB), else the first inline one.
+function unreadGaps(r:ReviewRow,inline:string[]):string[]{
+  if(!isUnreadRow(r))return [];
+  const gaps:string[]=[];
+  if(!(r.extra["c__airline_name"]||r.airline_name||"").trim()) gaps.push("c__airline_name");
+  const own=inline.filter(inc=>Object.keys(r.extra).some(k=>k.startsWith(`inc::${inc}::`)));
+  for(const inc of own.length?own:inline.slice(0,1)){
+    const blank=(f:string)=>!(r.extra[`inc::${inc}::${f}`]??"").trim();
+    for(const f of ["flightType","class","payoutCalcCols"]) if(blank(f)) gaps.push(`inc::${inc}::${f}`);
+    if(!isSlabPayout(r.extra,inc)&&blank("incentiveAmtPct")) gaps.push(`inc::${inc}::incentiveAmtPct`);
+  }
+  return gaps;
+}
+function gapLabels(gaps:string[]):string[]{
+  const incs=new Set(gaps.filter(g=>g.startsWith("inc::")).map(g=>g.split("::")[1]));
+  return gaps.map(g=>{
+    if(g==="c__airline_name")return "Airline Name";
+    const [,inc,f]=g.split("::");
+    const label=INLINE_INC_FIELDS.find(x=>x.field===f)?.label??f;
+    return incs.size>1?`${inc} ${label}`:label;
+  });
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // UI PRIMITIVES
@@ -690,6 +794,9 @@ function IncentiveDataRowModal({
                     name={incType}
                     data={getData(incType)}
                     onChange={(k,v)=>onFieldChange(incType,k,v)}
+                    // Travel Date Valid From/To, as on Create Deal — saved per incentive
+                    // (inc::{inc}::travelValidFrom / travelValidTo) like every other field.
+                    travelDates
                   />
 
                   {/* Inclusion / Exclusion rules for THIS incentive type */}
@@ -1058,12 +1165,36 @@ const CELL_PLACEHOLDER: Record<string, string> = {
 
 type ColGroup={label:string;color:string;cols:{key:string;label:string}[]};
 
+// Each editable cell's width, sized to what it holds. An input left to size itself is
+// ~150px wide, which made a two-letter airline code as wide as the airline's name.
+// Incentive columns are keyed by field (inc::{incentive}::{field} → field).
+const CELL_WIDTH:Record<string,string>={
+  c__airline_name:"w-40",     c__airline_code:"w-12",
+  c__airline_type:"w-16",     c__business_type:"w-16",
+  c__contract_year:"w-28",    c__trigger_type:"w-20",    c__payout_type:"w-20",
+  c__deal_tag:"w-20",         c__entity:"w-32",          c__login_id:"w-28",
+  c__iata_commission:"w-14",
+  c__valid_from:"w-[108px]",  c__valid_to:"w-[108px]",
+  travelValidFrom:"w-[108px]",travelValidTo:"w-[108px]",
+  flightType:"w-[100px]",     class:"w-[84px]",          payoutCalcCols:"w-[108px]",
+  remarks:"w-48",
+};
+const cellWidth=(key:string)=>CELL_WIDTH[incCellField(key)||key]??"w-28";
+
 // `entityOptions` are the step-1 entity choices — see the page's stepEntityOptions.
-function getColMeta(key:string,entityOptions:string[]):{type:"date"|"select"|"number"|"text";options?:string[]}{
+// `vendorLabels` are the Agency Master labels an All-suppliers row's supplier is picked from.
+function getColMeta(key:string,entityOptions:string[],vendorLabels:string[]=[]):{type:"date"|"select"|"number"|"text";options?:string[]}{
   if(key==="c__deal_tag")return{type:"select",options:DEAL_TAG_OPTIONS};
   if(key==="c__valid_from"||key==="c__valid_to")return{type:"date"};
   if(key==="c__entity")return{type:"select",options:entityOptions};
+  if(key==="c__vendor_agency_id")return{type:"select",options:vendorLabels};
   if(CONTRACT_COL_OPTIONS[key])return{type:"select",options:CONTRACT_COL_OPTIONS[key]};
+  const incField=incCellField(key);
+  if(incField==="travelValidFrom"||incField==="travelValidTo")return{type:"date"};
+  if(incField==="flightType")return{type:"select",options:FLIGHT_TYPE_OPTIONS};
+  if(incField==="class")return{type:"select",options:CLASS_OPTIONS};
+  if(incField==="payoutCalcCols")return{type:"select",options:PAYOUT_CALC_OPTIONS};
+  if(incField==="incentiveAmtPct")return{type:"number"};
   return{type:"text"};
 }
 
@@ -1071,26 +1202,68 @@ function getColMeta(key:string,entityOptions:string[]):{type:"date"|"select"|"nu
 // flat table columns — they're configured per row via the Incentive Data modal
 // (IncentiveDataRowModal), which reuses the same IncentiveTabContent the manual
 // create-deal form uses, so they get full slab/matrix/dependency support.
-function buildColGroups(dealType:string,aiMode=false):ColGroup[]{
-  const contractCols = getContractCols(dealType);
-  const groups:ColGroup[]=[
-    {label:"Airline Contract Details",color:"#1e3a5f",cols:[{key:"c__deal_tag",label:"Deal Tag"},...contractCols]},
-  ];
-  // How each row resolved against the airline master. The code is editable
-  // because it is the only way a reviewer can rescue a row the sheet left without
-  // one — without a code the airline cannot be added to the master at all.
-  if(aiMode) groups.push({label:"Airline Master",color:"#0f766e",cols:[
-    {key:"c__airline_code",label:"Code"},
-    {key:"__airline_master__",label:"Master"},
+// Left to right by what a reviewer reads first: whose deal (All suppliers), which
+// airline, its class / rate / rules, then the contract fields, and the read-only
+// notes last. `color` is the group's accent line in the table header.
+function buildColGroups(dealType:string,aiMode=false,multiVendor=false,incentives:string[]=[]):ColGroup[]{
+  const groups:ColGroup[]=[];
+  // All suppliers: whose deal each row is, first — on a vendor sheet that is the
+  // column a wrong value in costs the most. The sheet's own Source beside the pick.
+  if(multiVendor) groups.push({label:"Supplier",color:"#f97316",cols:[
+    {key:"__supplier_src__",label:"In Sheet"},
+    {key:"c__vendor_agency_id",label:"Agency Master"},
   ]});
-  // Where each AI-extracted row came from in the PDF. With 300+ rows, spot-checking
+  // The airline, and how it resolved against the airline master. The code is
+  // editable because it is the only way a reviewer can rescue a row the sheet left
+  // without one — without a code the airline cannot be added to the master at all.
+  groups.push({label:"Airline",color:"#14b8a6",cols:[
+    {key:"c__airline_name",label:"Airline Name"},
+    ...(aiMode?[{key:"c__airline_code",label:"Code"},{key:"__airline_master__",label:"Master"}]:[]),
+  ]});
+  // The incentive, column by column: travel window, flight type, class, what the rate is
+  // calculated on, and the rate — so an airline's ECO / PEY / BUS rows read side by side
+  // without opening anything. The last column opens every other field of the row's
+  // incentives and their inclusion / exclusion rules. Several incentives: a group each.
+  const inline=inlineIncentives(incentives);
+  const incCols=(inc:string)=>INLINE_INC_FIELDS.map(f=>({key:`inc::${inc}::${f.field}`,label:f.label}));
+  const rulesCol={key:"__incentive_data__",label:inline.length?"Rules & More":"Class · Rate · Rules"};
+  if(inline.length===1){
+    groups.push({label:"Incentive & Rules",color:"#818cf8",cols:[...incCols(inline[0]),rulesCol]});
+  }else{
+    inline.forEach(inc=>groups.push({label:inc,color:"#818cf8",cols:incCols(inc)}));
+    groups.push({label:inline.length?"Rules":"Incentive & Rules",color:"#818cf8",cols:[rulesCol]});
+  }
+  groups.push({label:"Contract Details",color:"#60a5fa",cols:[
+    {key:"c__deal_tag",label:"Deal Tag"},
+    ...getContractCols(dealType).filter(c=>c.key!=="c__airline_name"),
+  ]});
+  // Where each AI-extracted row came from in the file. With 300+ rows, spot-checking
   // against the printed contract is impractical without the page/row it came from.
-  if(aiMode) groups.push({label:"Source",color:"#7c3aed",cols:[{key:"__src__",label:"Source (PDF)"}]});
-  groups.push({label:"Remarks",color:"#64748b",cols:[{key:"remarks",label:"Remarks"}]});
-  // Single column for both the incentive payout fields AND their inclusion/exclusion
-  // rules — configured together per incentive type in one popup.
-  groups.push({label:"Incentive & Rules",color:"#4f46e5",cols:[{key:"__incentive_data__",label:"Incentive & Rules"}]});
+  groups.push({label:"Notes",color:"#94a3b8",cols:[
+    {key:"remarks",label:"Remarks"},
+    ...(aiMode?[{key:"__src__",label:"Source in File"}]:[]),
+  ]});
   return groups;
+}
+
+// Review columns the bulk bar's "Column to edit" never offers: read-only or edited in a popup.
+const BULK_SKIP_COLS=new Set(["__incl_excl__","__incentive_data__","__src__","__airline_master__","__supplier_src__"]);
+
+// What the Incentive & Rules button says about a row: the first incentive's class and
+// rate ("Economy · 2%"), "slabs" for a slab payout, and how many more incentives are set.
+function incentiveSummary(row:ReviewRow,incentives:string[]):{text:string;title:string}|null{
+  const parts=incentives.map(inc=>{
+    const g=(f:string)=>(row.extra[`inc::${inc}::${f}`]??"").trim();
+    const amt=g("incentiveAmtPct");
+    const rate=g("amountBasedType")==="Slab Based"?"slabs":amt?(g("incentiveNumPct")==="Number"?amt:`${amt}%`):"";
+    const text=[g("class"),rate].filter(Boolean).join(" · ");
+    return text?{inc,text}:null;
+  }).filter((p):p is {inc:string;text:string}=>!!p);
+  if(!parts.length)return null;
+  return{
+    text:parts[0].text+(parts.length>1?` +${parts.length-1}`:""),
+    title:parts.map(p=>`${p.inc}: ${p.text}`).join("\n"),
+  };
 }
 
 function ReviewTable({
@@ -1098,13 +1271,19 @@ function ReviewTable({
   rowInclExcl, inclExclPopup, setInclExclPopup, onToggleInclExclType,
   onOpenInclExclType, onRemoveInclExclType,
   selectedIncentives, onOpenIncentiveData,
-  filterText, airlineFilter, selectedRows, onToggleRow, onToggleAllFiltered,
-  entityOptions, lockedCols,
+  airlineFilter, selectedRows, onToggleRow, onToggleAllFiltered,
+  entityOptions, lockedCols, vendorChoices, entityOptionsFor, rowFilter,
 }:{
   rows:ReviewRow[];
   colGroups:ColGroup[];
   /** The step-1 entity choices — the Entity cell offers exactly these. */
   entityOptions:string[];
+  /** All suppliers: the agencies a row's supplier is picked from. */
+  vendorChoices?:{id:number;label:string}[];
+  /** All suppliers: the Entity cell offers the ROW's own agency's entities instead. */
+  entityOptionsFor?:(row:ReviewRow)=>string[];
+  /** The toolbar's other filters — one Source (All suppliers), Rows not read. */
+  rowFilter?:(row:ReviewRow)=>boolean;
   /** Columns fixed by step 1 that the save ignores per row — shown, not editable. */
   lockedCols:string[];
   onChange:(idx:number,key:string,val:string)=>void;
@@ -1118,7 +1297,6 @@ function ReviewTable({
   onToggleInclExclType:(rowIdx:number,type:string)=>void;
   onOpenInclExclType:(rowIdx:number,type:string)=>void;
   onRemoveInclExclType:(rowIdx:number,type:string)=>void;
-  filterText:string;
   /** The airline picked in the bulk bar — the table shows only that airline's rows. */
   airlineFilter?:string;
   selectedRows:Set<number>;
@@ -1126,7 +1304,11 @@ function ReviewTable({
   onToggleAllFiltered:(filteredIndices:number[],allSelected:boolean)=>void;
 }){
   const allCols=colGroups.flatMap(g=>g.cols);
-  const inp="w-full bg-transparent text-[11px] text-gray-800 focus:outline-none focus:bg-blue-50 rounded px-1 py-0.5 min-w-[80px]";
+  // Width comes from cellWidth, per column.
+  const inp="bg-transparent text-[11px] text-gray-800 focus:outline-none focus:bg-blue-50 rounded px-1 py-0.5";
+  // Incentives shown as columns of their own, and the rest (edited in the popup only).
+  const inline=inlineIncentives(selectedIncentives);
+  const popupOnly=selectedIncentives.filter(i=>!inline.includes(i));
 
   // Master airline names, for the Airline Name type-ahead. Fetched once when the
   // review table mounts — one shared <datalist> rather than a picker component
@@ -1147,19 +1329,23 @@ function ReviewTable({
     return (row as unknown as Record<string,string>)[key]??"";
   };
 
-  const renderCell=(row:ReviewRow,idx:number,colKey:string)=>{
+  // `gaps`: what this row still needs filling in by hand (unreadGaps) — those cells are marked.
+  const renderCell=(row:ReviewRow,idx:number,colKey:string,gaps:string[])=>{
     // Special: read-only provenance. Never edited, never saved — it exists so the
     // reviewer can find this row on the printed page.
     if(colKey==="__src__"){
       const src=row.extra["__src"]??"";
-      const manual=row.extra["__needs_manual"]==="1";
       return(
         <td key={colKey} className="px-2 py-1 border-l border-gray-100">
-          {manual&&(
-            <span className="mr-1.5 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-semibold bg-amber-100 text-amber-700 border border-amber-300">
+          {isUnreadRow(row)&&(gaps.length?(
+            <span className="mr-1.5 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-semibold bg-red-100 text-red-700 border border-red-300">
               <AlertTriangle className="w-2.5 h-2.5"/>fill in
             </span>
-          )}
+          ):(
+            <span className="mr-1.5 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-semibold bg-gray-50 text-gray-500 border border-gray-200">
+              <Check className="w-2.5 h-2.5"/>filled by hand
+            </span>
+          ))}
           <span className="text-[10px] text-gray-400 whitespace-nowrap" title={src}>
             {src.length>60?src.slice(0,60)+"…":src}
           </span>
@@ -1180,8 +1366,12 @@ function ReviewTable({
         </span>
       );
       let content:React.ReactNode=null;
+      // The master's name only when it differs from the row's — repeating the Airline
+      // Name cell next to it says nothing and doubles the column's width.
+      const rowName=(row.extra["c__airline_name"]||row.airline_name||"").trim().toLowerCase();
       if(status==="resolved"){
-        content=badge("bg-emerald-50 text-emerald-700 border-emerald-200","✓ "+(master||"matched"));
+        content=badge("bg-emerald-50 text-emerald-700 border-emerald-200",
+          "✓ "+(master&&master.trim().toLowerCase()!==rowName?master:"matched"));
       }else if(status==="new"){
         content=badge("bg-sky-50 text-sky-700 border-sky-200",`+ will be added${code?` (${code})`:""}`);
       }else if(status==="conflict"||status==="ambiguous"){
@@ -1194,6 +1384,33 @@ function ReviewTable({
       return(
         <td key={colKey} className="px-2 py-1 border-l border-gray-100 whitespace-nowrap" title={note||undefined}>
           {content}
+        </td>
+      );
+    }
+    // Special: the sheet's own Source cell (All suppliers). Read-only — what the row
+    // SAID; the Agency Master column beside it is what it will be saved as.
+    if(colKey==="__supplier_src__"){
+      const src=row.extra["c__supplier_cell"]??"";
+      const set=!!row.extra["c__vendor_agency_id"];
+      return(
+        <td key={colKey} className="px-2 py-1 border-l border-gray-100 whitespace-nowrap"
+          title={set?undefined:"No supplier picked for this row yet"}>
+          <span className={`inline-block w-1.5 h-1.5 rounded-full mr-1.5 align-middle ${set?"bg-emerald-500":"bg-red-500"}`}/>
+          <span className={`text-[11px] font-semibold ${src?"text-gray-700":"text-gray-400 italic"}`}>{src||"no Source"}</span>
+        </td>
+      );
+    }
+    // Special: the row's supplier (All suppliers) — an Agency Master row, by id.
+    if(colKey==="c__vendor_agency_id"){
+      const val=row.extra["c__vendor_agency_id"]??"";
+      return(
+        <td key={colKey} className={`px-1 py-1 border-l border-gray-100 ${val?"":"bg-red-50"}`}>
+          <select value={val} onChange={e=>onChange(idx,colKey,e.target.value)}
+            title={vendorChoices?.find(v=>String(v.id)===val)?.label}
+            className={`w-[190px] bg-transparent text-[11px] focus:outline-none focus:bg-blue-50 rounded px-1 py-0.5 border-0 truncate ${val?"text-gray-800":"text-red-600 font-semibold"}`}>
+            <option value="">— pick supplier —</option>
+            {(vendorChoices??[]).map(v=><option key={v.id} value={String(v.id)}>{v.label}</option>)}
+          </select>
         </td>
       );
     }
@@ -1225,26 +1442,99 @@ function ReviewTable({
       );
     }
 
-    // Special: Incentive Data column
+    // Special: Incentive Data column. Beside the inline incentive columns it is the way
+    // into everything else — it says how many rules the row has, and sums up any incentive
+    // that has no columns of its own. Without inline columns it keeps the class and rate.
+    if(colKey==="__incentive_data__"&&inline.length){
+      const rules=rowInclExcl[idx]?.types?.length??0;
+      const other=popupOnly.some(inc=>Object.entries(row.extra).some(([k,v])=>k.startsWith(`inc::${inc}::`)&&v))
+        ?(incentiveSummary(row,popupOnly)?.text??popupOnly.join(", ")):"";
+      const parts=[other,rules?`${rules} rule${rules!==1?"s":""}`:""].filter(Boolean);
+      return(
+        <td key={colKey} className="px-2 py-1 border-l border-gray-100 whitespace-nowrap">
+          <button
+            onClick={()=>onOpenIncentiveData(idx)}
+            title="Every field of this row's incentives, and their inclusion / exclusion rules"
+            className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border transition-colors ${parts.length?"bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-100":"bg-gray-100 text-gray-500 border-gray-200 hover:border-indigo-300 hover:text-indigo-700"}`}
+          >
+            {parts.length
+              ?<><Check className="w-2.5 h-2.5"/>{parts.join(" · ")}</>
+              :<><Settings2 className="w-2.5 h-2.5"/>Edit</>}
+          </button>
+        </td>
+      );
+    }
     if(colKey==="__incentive_data__"){
       const hasData=Object.entries(row.extra).some(([k,v])=>k.startsWith("inc::")&&v)
         || ((rowInclExcl[idx]?.types?.length??0)>0);
+      const summary=hasData?incentiveSummary(row,selectedIncentives):null;
       return(
-        <td key={colKey} className="px-1 py-1 border-l border-gray-100">
+        <td key={colKey} className="px-2 py-1 border-l border-gray-100 whitespace-nowrap">
           <button
             onClick={()=>onOpenIncentiveData(idx)}
             disabled={selectedIncentives.length===0}
-            className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${hasData?"bg-indigo-100 text-indigo-700 border-indigo-300":"bg-gray-100 text-gray-500 border-gray-200 hover:border-indigo-300 hover:text-indigo-700"}`}
+            title={summary?`${summary.title}\nClick to edit incentive fields and rules`:undefined}
+            className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${hasData?"bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-100":"bg-gray-100 text-gray-500 border-gray-200 hover:border-indigo-300 hover:text-indigo-700"}`}
           >
-            {hasData?<><Check className="w-2.5 h-2.5"/>Configured</>:<><Settings2 className="w-2.5 h-2.5"/>Configure ({selectedIncentives.length})</>}
+            {hasData
+              ?<><Check className="w-2.5 h-2.5"/>{summary?.text??"Configured"}</>
+              :<><Settings2 className="w-2.5 h-2.5"/>Configure ({selectedIncentives.length})</>}
           </button>
         </td>
       );
     }
 
-    const sel = "w-full bg-transparent text-[11px] text-gray-800 focus:outline-none focus:bg-blue-50 rounded px-1 py-0.5 min-w-[80px] border-0";
+    const w = cellWidth(colKey);
+    const sel = `${w} bg-transparent text-[11px] text-gray-800 focus:outline-none focus:bg-blue-50 rounded px-1 py-0.5 border-0`;
+    const txt = `${inp} ${w}`;
     const val = getCellValue(row,colKey);
     const change = (v:string)=>onChange(idx,colKey,v);
+    // A cell an unread row still needs — outlined red until it is filled in.
+    const td = `px-1 py-1 border-l border-gray-100${gaps.includes(colKey)?" bg-red-100/70 ring-1 ring-inset ring-red-300":""}`;
+
+    // The incentive's own columns (INLINE_INC_FIELDS) — the same values the popup edits.
+    const incField=incCellField(colKey);
+    if(incField){
+      if(incField==="travelValidFrom"||incField==="travelValidTo")return(
+        <td key={colKey} className={td}>
+          <input type="date" className={txt} value={val} onChange={e=>change(e.target.value)}/>
+        </td>
+      );
+      if(incField==="incentiveAmtPct"){
+        const inc=colKey.split("::")[1];
+        // A slab payout has no single rate — its slabs are edited in the popup.
+        if(isSlabPayout(row.extra,inc))return(
+          <td key={colKey} className={td}>
+            <button onClick={()=>onOpenIncentiveData(idx)} title="Paid by slabs — open to edit them"
+              className="px-2 py-0.5 rounded-full text-[10px] font-semibold border bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-100">
+              slabs
+            </button>
+          </td>
+        );
+        const pct=row.extra[`inc::${inc}::incentiveNumPct`]!=="Number";
+        return(
+          <td key={colKey} className={td}>
+            <div className="flex items-center">
+              <input type="number" step="any" min={0} value={val} onChange={e=>change(e.target.value)} placeholder="—"
+                title={pct?"Rate in percent":"Fixed amount"}
+                className="w-16 bg-transparent text-[11px] font-semibold text-gray-800 text-right tabular-nums focus:outline-none focus:bg-blue-50 rounded px-1 py-0.5"/>
+              {pct&&<span className="text-[11px] text-gray-500 pl-0.5">%</span>}
+            </div>
+          </td>
+        );
+      }
+      // Flight Type / Class / Calc On. A sheet value outside the list stays visible, to change.
+      const base=getColMeta(colKey,entityOptions).options??[];
+      const opts=val&&!base.includes(val)?[val,...base]:base;
+      return(
+        <td key={colKey} className={td}>
+          <select value={val} onChange={e=>change(e.target.value)} className={sel}>
+            <option value="">—</option>
+            {opts.map(o=><option key={o} value={o}>{o}</option>)}
+          </select>
+        </td>
+      );
+    }
 
     if(lockedCols.includes(colKey)){
       return(
@@ -1257,7 +1547,8 @@ function ReviewTable({
     // Entity dropdown — the same choices step 1 offered. A sheet value outside them
     // is still shown, so it is visibly there to change rather than silently saved.
     if(colKey==="c__entity"){
-      const opts=val&&!entityOptions.includes(val)?[val,...entityOptions]:entityOptions;
+      const base=entityOptionsFor?entityOptionsFor(row):entityOptions;
+      const opts=val&&!base.includes(val)?[val,...base]:base;
       return(
         <td key={colKey} className="px-1 py-1 border-l border-gray-100">
           <select value={val} onChange={e=>change(e.target.value)} className={sel}>
@@ -1284,16 +1575,16 @@ function ReviewTable({
     if(colKey==="c__valid_from"||colKey==="c__valid_to"){
       return(
         <td key={colKey} className="px-1 py-1 border-l border-gray-100">
-          <input type="date" className={inp} value={val} onChange={e=>change(e.target.value)}/>
+          <input type="date" className={txt} value={val} onChange={e=>change(e.target.value)}/>
         </td>
       );
     }
 
     // Default text input
     return(
-      <td key={colKey} className="px-1 py-1 border-l border-gray-100">
+      <td key={colKey} className={td}>
         <input
-          className={inp}
+          className={txt}
           list={colKey==="c__airline_name"?"airline-master-names":undefined}
           value={val}
           onChange={e=>change(e.target.value)}
@@ -1303,28 +1594,34 @@ function ReviewTable({
     );
   };
 
-  // Filter rows by search text
+  // Rows the toolbar's Airline / Supplier filters leave
   const filteredIndices:number[]=rows.reduce<number[]>((acc,row,i)=>{
     if(airlineFilter&&(row.extra["c__airline_name"]||row.airline_name||"").trim()!==airlineFilter)return acc;
-    if(!filterText){acc.push(i);return acc;}
-    const haystack=[row.airline_name,row.remarks,row.validity_raw,...Object.values(row.extra)].join(" ").toLowerCase();
-    if(haystack.includes(filterText.toLowerCase()))acc.push(i);
+    if(rowFilter&&!rowFilter(row))return acc;
+    acc.push(i);
     return acc;
   },[]);
   const allFilteredSelected=filteredIndices.length>0&&filteredIndices.every(i=>selectedRows.has(i));
   const someFilteredSelected=filteredIndices.some(i=>selectedRows.has(i));
 
+  // Header: one navy for every group, each group marked by its accent line underneath.
+  // Both header rows stick to the top of the scroll area (the second one 32px down,
+  // under the first's fixed h-8), and the checkbox / # cells also stick to the left.
+  const HEAD="#1e3a5f", SUBHEAD="#2d4f7c";
   return(
-    <div className="overflow-x-auto border border-gray-200 rounded-lg">
+    <div className="border-t border-gray-200">
       {/* One shared options list for every Airline Name cell. */}
       <datalist id="airline-master-names">
         {masterNames.map(n=><option key={n} value={n}/>)}
       </datalist>
+      {/* Its own scroll area, so the horizontal scrollbar stays in view instead of
+          sitting under the last of 300 rows. */}
+      <div className="overflow-auto max-h-[70vh]">
       <table className="w-full min-w-max border-collapse">
         <thead>
-          <tr>
+          <tr className="h-8">
             {/* Select-all checkbox */}
-            <th className="px-2 py-2 sticky left-0 z-10" style={{background:"#1e3a5f"}}>
+            <th className="w-9 min-w-9 px-2 sticky top-0 left-0 z-30" style={{background:HEAD}}>
               <input
                 type="checkbox"
                 checked={allFilteredSelected}
@@ -1334,21 +1631,23 @@ function ReviewTable({
                 title={allFilteredSelected?"Deselect all visible":"Select all visible"}
               />
             </th>
-            <th className="px-2 py-2 text-[10px] text-white font-semibold sticky left-9 z-10 whitespace-nowrap" style={{background:"#1e3a5f"}}>#</th>
+            <th className="px-2 text-[10px] text-white font-semibold sticky top-0 left-9 z-30 whitespace-nowrap" style={{background:HEAD}}>#</th>
             {colGroups.map(g=>(
-              <th key={g.label} colSpan={g.cols.length} className="px-2 py-2 text-[10px] text-white font-bold uppercase tracking-wider text-center border-l border-white/20 whitespace-nowrap" style={{background:g.color}}>
+              <th key={g.label} colSpan={g.cols.length}
+                className="px-2 text-[10px] text-white font-bold uppercase tracking-wider text-left border-l border-white/15 whitespace-nowrap sticky top-0 z-20"
+                style={{background:HEAD,boxShadow:`inset 0 -3px 0 ${g.color}`}}>
                 {g.label}
               </th>
             ))}
-            <th className="px-2 py-2" style={{background:"#1e3a5f"}}/>
+            <th className="px-2 sticky top-0 z-20" style={{background:HEAD}}/>
           </tr>
-          <tr style={{background:"#2d4f7c"}}>
-            <th className="px-2 py-1.5 sticky left-0 z-10" style={{background:"#2d4f7c"}}/>
-            <th className="px-2 py-1.5 sticky left-9 z-10" style={{background:"#2d4f7c"}}/>
+          <tr>
+            <th className="px-2 py-1.5 sticky top-8 left-0 z-30" style={{background:SUBHEAD}}/>
+            <th className="px-2 py-1.5 sticky top-8 left-9 z-30" style={{background:SUBHEAD}}/>
             {allCols.map(c=>(
-              <th key={c.key} className="px-2 py-1.5 text-left text-[10px] font-semibold text-white/80 whitespace-nowrap border-l border-white/10">{c.label}</th>
+              <th key={c.key} className="px-2 py-1.5 text-left text-[10px] font-semibold text-white/85 whitespace-nowrap border-l border-white/10 sticky top-8 z-20" style={{background:SUBHEAD}}>{c.label}</th>
             ))}
-            <th className="px-2 py-1.5"/>
+            <th className="px-2 py-1.5 sticky top-8 z-20" style={{background:SUBHEAD}}/>
           </tr>
         </thead>
         <tbody>
@@ -1359,13 +1658,34 @@ function ReviewTable({
           ):filteredIndices.map(idx=>{
             const row=rows[idx];
             const isSelected=selectedRows.has(idx);
+            // A row the file could not be read for is red until it is filled in; the #
+            // cell says what it still needs and what the file printed for it.
+            const unread=isUnreadRow(row);
+            const gaps=unreadGaps(row,inline);
+            const blank=gaps.length>0;
+            const stickyBg=blank?(isSelected?"bg-red-100":"bg-red-50 group-hover:bg-red-100")
+              :isSelected?"bg-blue-50":"bg-white group-hover:bg-blue-50";
+            const unreadTitle=unread?[
+              blank?`Could not be read from the file — fill in ${gapLabels(gaps).join(", ")}.`
+                :"Could not be read from the file — filled in by hand.",
+              row.extra["__src"]?`In the file: ${row.extra["__src"]}`:"",
+            ].filter(Boolean).join("\n"):undefined;
             return(
-              <tr key={idx} className={`border-b border-gray-100 group ${isSelected?"bg-blue-50":"hover:bg-blue-50/20"}`}>
-                <td className={`px-2 py-1.5 sticky left-0 ${isSelected?"bg-blue-50":"bg-white group-hover:bg-blue-50/20"}`}>
+              <tr key={idx} className={`border-b group ${blank
+                ?`border-red-200 ${isSelected?"bg-red-100":"bg-red-50 hover:bg-red-100/60"}`
+                :`border-gray-100 ${isSelected?"bg-blue-50":"hover:bg-blue-50/40"}`}`}>
+                <td className={`w-9 min-w-9 px-2 py-1.5 sticky left-0 z-10 ${stickyBg}`}
+                  style={blank?{boxShadow:"inset 3px 0 0 #ef4444"}:undefined}>
                   <input type="checkbox" checked={isSelected} onChange={()=>onToggleRow(idx)} className="accent-blue-500 cursor-pointer"/>
                 </td>
-                <td className={`px-2 py-1.5 text-[10px] text-gray-400 sticky left-9 ${isSelected?"bg-blue-50":"bg-white group-hover:bg-blue-50/20"}`}>{idx+1}</td>
-                {allCols.map(c=>renderCell(row,idx,c.key))}
+                <td className={`px-2 py-1.5 text-[10px] sticky left-9 z-10 whitespace-nowrap ${stickyBg}`} title={unreadTitle}>
+                  {unread
+                    ?<span className={`inline-flex items-center gap-0.5 font-semibold ${blank?"text-red-600":"text-emerald-600"}`}>
+                      {blank?<AlertTriangle className="w-3 h-3"/>:<Check className="w-3 h-3"/>}{idx+1}
+                    </span>
+                    :<span className="text-gray-400">{idx+1}</span>}
+                </td>
+                {allCols.map(c=>renderCell(row,idx,c.key,gaps))}
                 <td className="px-2 py-1.5">
                   <button onClick={()=>onDelete(idx)} className="opacity-0 group-hover:opacity-100 p-1 hover:bg-red-50 rounded text-red-400"><Trash2 className="w-3.5 h-3.5"/></button>
                 </td>
@@ -1374,6 +1694,7 @@ function ReviewTable({
           })}
         </tbody>
       </table>
+      </div>
       <div className="px-4 py-2.5 border-t border-gray-100">
         <button onClick={onAdd} className="flex items-center gap-1.5 text-xs text-[#1e3a5f] font-medium hover:underline">
           <Plus className="w-3.5 h-3.5"/> Add row manually
@@ -1547,6 +1868,166 @@ function parseMultiTabWorkbook(wb: XLSX.WorkBook, dealType:string): {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// ALL SUPPLIERS — one line per Source value of a multi-supplier sheet
+// ═══════════════════════════════════════════════════════════════════════════════
+// Map a Source once and every row of it follows; drop the rows of a supplier that is
+// not yours to load (an OTA's own "YATRA" lines on the sheet it compiles). Rows stay
+// editable one by one in the table — a line whose rows no longer agree says "mixed".
+const SOURCE_STATE: Record<string,{label:string;cls:string}> = {
+  remembered:    {label:"✓ saved mapping",    cls:"bg-emerald-50 text-emerald-700 border-emerald-200"},
+  matched:       {label:"✓ matched",          cls:"bg-emerald-50 text-emerald-700 border-emerald-200"},
+  suggested:     {label:"check suggestion",   cls:"bg-amber-50 text-amber-700 border-amber-300"},
+  ambiguous:     {label:"pick the branch",    cls:"bg-amber-50 text-amber-700 border-amber-300"},
+  not_onboarded: {label:"not onboarded",      cls:"bg-red-50 text-red-700 border-red-300"},
+  blank:         {label:"no Source in sheet", cls:"bg-gray-50 text-gray-500 border-gray-200"},
+  set:           {label:"set by you",         cls:"bg-blue-50 text-blue-700 border-blue-200"},
+  mixed:         {label:"mixed",              cls:"bg-blue-50 text-blue-700 border-blue-200"},
+};
+
+function SupplierSourcesPanel({
+  summary, rows, vendorChoices, filter, onFilter, onAssign, onRemove, onRefresh, refreshing,
+}:{
+  summary:SupplierSource[];
+  rows:ReviewRow[];
+  vendorChoices:{id:number;label:string}[];
+  filter:string;
+  onFilter:(group:string)=>void;
+  onAssign:(group:string,agencyId:string)=>void;
+  onRemove:(group:string)=>void;
+  onRefresh:()=>void;
+  refreshing:boolean;
+}){
+  const labelOf=new Map(vendorChoices.map(v=>[String(v.id),v.label]));
+  const lines=summary.map((s,order)=>{
+    const mine=rows.filter(r=>r.extra["__src_group"]===s.group);
+    const picks=new Set(mine.map(r=>r.extra["c__vendor_agency_id"]??""));
+    const current=picks.size===1?[...picks][0]:picks.size>1?"mixed":"";
+    const missing=mine.filter(r=>!r.extra["c__vendor_agency_id"]).length;
+    const state=current==="mixed"?"mixed":!current?s.status:current===String(s.agency_id??"")?s.status:"set";
+    return{s,order,count:mine.length,current,missing,state};
+  })
+    .filter(l=>l.count>0)
+    // What still needs a person first; sheet order otherwise.
+    .sort((a,b)=>(Number(b.missing>0)-Number(a.missing>0))||(a.order-b.order));
+  // Over EVERY row, not just the lines: a row added by hand belongs to no Source and
+  // still cannot be saved without a supplier.
+  const unassigned=rows.filter(r=>!r.extra["c__vendor_agency_id"]).length;
+  const total=rows.length;
+  // Folded to its header once every row has a supplier — the table is what is left to
+  // review then — and opened by itself whenever a row needs one.
+  // (Adjusted during render, not in an effect: reopen on the change to "needs work".)
+  const needsWork=unassigned>0;
+  const [open,setOpen]=useState(needsWork);
+  const [prevNeedsWork,setPrevNeedsWork]=useState(needsWork);
+  if(needsWork!==prevNeedsWork){ setPrevNeedsWork(needsWork); if(needsWork) setOpen(true); }
+
+  return(
+    <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+      <div className={`px-4 py-2.5 flex items-center gap-3 flex-wrap ${open?"border-b border-gray-100":""}`}>
+        <button type="button" onClick={()=>setOpen(o=>!o)} className="flex items-center gap-1.5 group"
+          title={open?"Hide the supplier mapping":"Show the supplier mapping"}>
+          <ChevronDown className={`w-3.5 h-3.5 text-[#9a3412] transition-transform ${open?"":"-rotate-90"}`}/>
+          <h2 className="text-xs font-semibold text-[#9a3412] uppercase tracking-wide group-hover:underline">Suppliers in this sheet</h2>
+        </button>
+        <span className="text-[11px] text-gray-400">{lines.length} source{lines.length!==1?"s":""} · {total} rows</span>
+        {unassigned>0
+          ?<span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-red-50 text-red-700 border border-red-300">
+              {unassigned} row{unassigned!==1?"s":""} still need{unassigned===1?"s":""} a supplier
+            </span>
+          :<span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+              ✓ every row has a supplier
+            </span>}
+        <div className="ml-auto flex items-center gap-3">
+          {/* A new tab: leaving this page would lose the whole review. */}
+          <Link href="/user-master/agency-master" target="_blank" className="text-[11px] font-semibold text-sky-600 hover:underline">
+            Onboard an agency ↗
+          </Link>
+          <button type="button" onClick={onRefresh} disabled={refreshing}
+            className="flex items-center gap-1 text-[11px] font-medium text-gray-600 hover:text-gray-900 disabled:opacity-50">
+            <RefreshCw className={`w-3 h-3 ${refreshing?"animate-spin":""}`}/>Refresh agency list
+          </button>
+          {!open&&(
+            <button type="button" onClick={()=>setOpen(true)} className="text-[11px] font-semibold text-blue-600 hover:underline">
+              Review mapping
+            </button>
+          )}
+        </div>
+      </div>
+      {open&&<table className="w-full">
+        <thead>
+          <tr className="bg-gray-50 text-[10px] uppercase tracking-wide text-gray-500">
+            <th className="px-4 py-1.5 text-left font-semibold">In sheet</th>
+            <th className="px-2 py-1.5 text-right font-semibold">Rows</th>
+            <th className="px-3 py-1.5 text-left font-semibold">Saved under (Agency Master)</th>
+            <th className="px-2 py-1.5 text-left font-semibold">Status</th>
+            <th className="px-4 py-1.5"/>
+          </tr>
+        </thead>
+        <tbody>
+          {lines.map(({s,count,current,missing,state})=>{
+            const badge=SOURCE_STATE[state]??SOURCE_STATE.not_onboarded;
+            const offered=s.candidates.map(String).filter(id=>labelOf.has(id));
+            const showing=filter===s.group;
+            return(
+              <tr key={s.group} className={`border-t border-gray-100 align-top ${missing?"bg-red-50/30":""}`}>
+                <td className="px-4 py-1.5 whitespace-nowrap">
+                  <span className="text-xs font-bold text-gray-800">
+                    {s.source||<span className="italic font-normal text-gray-400">no Source</span>}
+                  </span>
+                  {s.channel&&<span className="ml-1.5 px-1.5 py-0.5 rounded text-[9px] font-semibold bg-gray-100 text-gray-500">{s.channel}</span>}
+                </td>
+                <td className="px-2 py-1.5 text-right text-xs text-gray-600 tabular-nums">{count}</td>
+                <td className="px-3 py-1.5">
+                  <div className="flex items-center gap-2">
+                    <select value={current==="mixed"?"":current} onChange={e=>{if(e.target.value)onAssign(s.group,e.target.value);}}
+                      className={`w-full max-w-sm border rounded-md px-2 py-1 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 ${current?"border-gray-200 text-gray-800":"border-red-300 text-red-600"}`}>
+                      <option value="">{current==="mixed"?"— mixed: pick one for every row —":"— pick supplier —"}</option>
+                      {offered.length>0&&(
+                        <optgroup label={s.status==="suggested"?"Suggested":"Possible matches"}>
+                          {offered.map(id=><option key={`c${id}`} value={id}>{labelOf.get(id)}</option>)}
+                        </optgroup>
+                      )}
+                      <optgroup label="All agencies">
+                        {vendorChoices.map(v=><option key={v.id} value={String(v.id)}>{v.label}</option>)}
+                      </optgroup>
+                    </select>
+                    {!current&&offered.length===1&&(
+                      <button type="button" onClick={()=>onAssign(s.group,offered[0])}
+                        className="whitespace-nowrap text-[11px] font-semibold text-blue-700 hover:underline">
+                        Use suggestion
+                      </button>
+                    )}
+                  </div>
+                  {missing>0&&s.note&&<p className="text-[10px] text-gray-500 mt-0.5">{s.note}</p>}
+                </td>
+                <td className="px-2 py-1.5 whitespace-nowrap" title={s.note??undefined}>
+                  <span className={`inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold border ${badge.cls}`}>
+                    {badge.label}
+                  </span>
+                </td>
+                <td className="px-4 py-1.5 whitespace-nowrap text-right">
+                  {s.status==="not_onboarded"&&missing>0&&(
+                    <Link href="/user-master/agency-master" target="_blank" className="text-[11px] font-semibold text-sky-600 hover:underline mr-3">
+                      Onboard ↗
+                    </Link>
+                  )}
+                  <button type="button" onClick={()=>onFilter(showing?"":s.group)} className="text-[11px] font-medium text-blue-600 hover:underline mr-3">
+                    {showing?"Show all rows":"Show rows"}
+                  </button>
+                  <button type="button" onClick={()=>onRemove(s.group)} className="text-[11px] font-medium text-red-500 hover:underline">
+                    Remove rows
+                  </button>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // MAIN PAGE
 // ═══════════════════════════════════════════════════════════════════════════════
 export default function UploadDealPage(){
@@ -1565,6 +2046,14 @@ export default function UploadDealPage(){
   const [vendorAgencyId, setVendorAgencyId] = useState<number | null>(null);
   const vendorOptions = useMemo(() => vendorAgencyOptions(agencies), [agencies]);
   const vendorAgency = vendorAgencyId != null ? agencies.find(a => a.id === vendorAgencyId) ?? null : null;
+  // "All suppliers": a multi-vendor sheet — one row per airline per supplier, the supplier
+  // in a Source column — loaded in one go. No supplier is picked for the upload; each
+  // row's is read from its Source, matched to Agency Master and settled in review.
+  const [allSuppliers, setAllSuppliers] = useState(false);
+  // What a row's supplier is picked from: the same agencies, labels and order as above.
+  const vendorChoices = useMemo(
+    () => vendorOptions.labels.map(label => ({ id: vendorOptions.byLabel.get(label)!.id, label })),
+    [vendorOptions]);
   // Entity the deal is signed under — the user's own entities from My Profile, EXCEPT on an
   // incoming B2B deal, where it is one of the picked supplier's entities from Agency Master
   // (see `agencyParty` below).
@@ -1600,6 +2089,7 @@ export default function UploadDealPage(){
   });
   const [scopeTouched, setScopeTouched] = useState(false);
   const outbound  = direction==="outbound";
+  const multiVendor = !outbound && dealType==="b2b" && allSuppliers;
   const scopeType: DealScopeType = outbound ? toScopeType(scopeKind) : "all";
   /** Is the counterparty answered? A Common deal needs no party. */
   const scopeComplete = !outbound
@@ -1614,6 +2104,14 @@ export default function UploadDealPage(){
   // which rows the picked credentials land on.
   const agencyParty = !outbound && dealType==="b2b";
   const agencyEntityId = agencyParty ? (agencyEntities.find(e=>e.name===entity)?.id ?? null) : null;
+
+  // An incoming B2B upload starts with PLB picked and today as Valid From — both still
+  // editable. Functional updates, so a choice already made (or an email's valid_from) stays.
+  useEffect(()=>{
+    if(outbound||dealType!=="b2b") return;
+    setSelectedIncentives(p=>p.length?p:["PLB"]);
+    setValidFromDate(p=>p||new Date().toLocaleDateString("en-CA"));   // local YYYY-MM-DD
+  },[outbound,dealType]);
 
   // A different supplier (or leaving B2B Standard) means a different set of entities, so
   // the entity and credentials picked for the old one are dropped rather than carried
@@ -1807,6 +2305,34 @@ export default function UploadDealPage(){
   // "312 rows · 78% confidence" with nothing saying why.
   const [aiWarning,    setAiWarning]    = useState("");
   const [airlineSummary, setAirlineSummary] = useState<Record<string,number>>({});
+  // All suppliers: what each Source of the sheet resolved to, a filter showing one
+  // Source's rows, and every agency's entities — a row's Entity cell offers its OWN
+  // supplier's, since no step-1 entity exists to offer.
+  const [sourceSummary, setSourceSummary] = useState<SupplierSource[]>([]);
+  const [sourceFilter,  setSourceFilter]  = useState("");
+  // Review: show only the rows the file could not be read for (isUnreadRow).
+  const [unreadOnly,    setUnreadOnly]    = useState(false);
+  const reviewCardRef = useRef<HTMLDivElement>(null);
+  const [refreshingAgencies, setRefreshingAgencies] = useState(false);
+  const [entitiesByAgency, setEntitiesByAgency] = useState<Record<number,string[]>>({});
+  const loadAgencyEntities=useCallback(()=>
+    api.get<{agency_id:number;name:string;is_active:boolean}[]>("/agency-entities/",{params:{limit:1000}})
+      .then(r=>{
+        const m:Record<number,string[]>={};
+        for(const e of r.data){
+          if(e.is_active===false||!e.name) continue;
+          const list=m[e.agency_id]??(m[e.agency_id]=[]);
+          if(!list.includes(e.name)) list.push(e.name);
+        }
+        setEntitiesByAgency(m);
+      })
+      .catch(()=>setEntitiesByAgency({}))
+  ,[]);
+  useEffect(()=>{
+    if(!multiVendor){ setEntitiesByAgency({}); return; }
+    loadAgencyEntities();
+  },[multiVendor,loadAgencyEntities]);
+  const rowEntityOptions=useCallback((r:ReviewRow)=>entitiesByAgency[Number(r.extra["c__vendor_agency_id"])]??[],[entitiesByAgency]);
   // Reading a whole contract takes 30-60s. Without a ticker the button looks
   // hung, and people re-click or navigate away mid-extraction.
   const [uploadSecs,   setUploadSecs]   = useState(0);
@@ -1819,7 +2345,6 @@ export default function UploadDealPage(){
   const [incentiveDataModal, setIncentiveDataModal] = useState<number|null>(null);
   const [saving,        setSaving]        = useState(false);
   const [saveError,     setSaveError]     = useState("");
-  const [filterText,    setFilterText]    = useState("");
   const [selectedRows,  setSelectedRows]  = useState<Set<number>>(new Set());
   const [bulkColKey,    setBulkColKey]    = useState("");
   const [bulkColValue,  setBulkColValue]  = useState("");
@@ -1862,7 +2387,7 @@ export default function UploadDealPage(){
       .catch(()=>{});
   },[]);
 
-  const colGroups = buildColGroups(dealType,aiMode);
+  const colGroups = buildColGroups(dealType,aiMode,multiVendor,selectedIncentives);
 
   // ── Row incl/excl helpers ──────────────────────────────────────────────────
   const getOrInitRowInclExcl=(idx:number):RowInclExcl=>(
@@ -1979,18 +2504,84 @@ export default function UploadDealPage(){
   },[selectedRows]);
 
   // ── Table row helpers ──────────────────────────────────────────────────────
+  // All suppliers: a row moved to another supplier drops the entity and credentials it
+  // carried — they were the old supplier's, and would otherwise travel with its deal.
+  const withVendorChange=(extra:Record<string,string>,id:string):Record<string,string>=>{
+    if(id===(extra["c__vendor_agency_id"]??""))return extra;
+    const entity=extra["c__entity"]??"";
+    const keepEntity=!!entity&&(entitiesByAgency[Number(id)]??[]).includes(entity);
+    return{...extra,c__vendor_agency_id:id,c__entity:keepEntity?entity:"",c__login_id:""};
+  };
+  // The row's Contract Valid From / To are its incentives' too: an edit carries into every
+  // incentive the row has that still shows the old date (or none), and into Travel Date
+  // Valid From wherever that was opening with the contract. Only incentives already on the
+  // row — on a tabbed upload, writing a date into another would hand the row that incentive.
+  const withContractDateChange=(extra:Record<string,string>,key:string,next:string):Record<string,string>=>{
+    const prev=extra[key]??"";
+    const field=key==="c__valid_from"?"validFrom":"validTo";
+    const out={...extra,[key]:next};
+    const incs=new Set(Object.keys(extra).filter(k=>k.startsWith("inc::")).map(k=>k.split("::")[1]));
+    for(const inc of incs){
+      const k=`inc::${inc}::${field}`;
+      if(!out[k]||out[k]===prev) out[k]=next;
+      const t=`inc::${inc}::travelValidFrom`;
+      if(field==="validFrom"&&prev&&out[t]===prev) out[t]=next;
+    }
+    return out;
+  };
   const handleRowChange=(idx:number,key:string,val:string)=>{
     setRows(prev=>prev.map((r,i)=>{
       if(i!==idx)return r;
+      if(key==="c__valid_from"||key==="c__valid_to")return{...r,extra:withContractDateChange(r.extra,key,val)};
       if(key==="c__entity")return{...r,extra:withEntityChange(r.extra,val)};
-      if(key.startsWith("inc::")||key.startsWith("ie::")||key.startsWith("c__"))
+      if(key==="c__vendor_agency_id")return{...r,extra:withVendorChange(r.extra,val)};
+      if(key.startsWith("inc::"))return{...r,extra:withIncentiveCellChange(r.extra,key,val)};
+      if(key.startsWith("ie::")||key.startsWith("c__"))
         return{...r,extra:{...r.extra,[key]:val}};
       return{...r,[key]:val};
     }));
   };
-  const handleDeleteRow=useCallback((idx:number)=>setRows(prev=>prev.filter((_,i)=>i!==idx)),[]);
+  // Removes rows and keeps everything keyed by row POSITION lined up with them — the
+  // incl/excl rules and the selection. Filtering the rows alone handed every later row
+  // the rules of the row in front of it.
+  const removeRows=(drop:Set<number>)=>{
+    if(!drop.size)return;
+    const moved=new Map<number,number>();
+    rows.forEach((_,i)=>{ if(!drop.has(i)) moved.set(i,moved.size); });
+    setRows(prev=>prev.filter((_,i)=>!drop.has(i)).map((r,i)=>({...r,row_order:i})));
+    setRowInclExcl(prev=>{
+      const next:Record<number,RowInclExcl>={};
+      for(const [k,v] of Object.entries(prev)){ const to=moved.get(Number(k)); if(to!==undefined) next[to]=v; }
+      return next;
+    });
+    setSelectedRows(prev=>new Set([...prev].flatMap(i=>{ const to=moved.get(i); return to===undefined?[]:[to]; })));
+    setIncentiveDataModal(null);setInclExclModal(null);setInclExclPopup(null);
+  };
+  const handleDeleteRow=(idx:number)=>removeRows(new Set([idx]));
+
+  // All suppliers: every row of one Source at once.
+  const assignSource=(group:string,id:string)=>{
+    setRows(prev=>prev.map(r=>r.extra["__src_group"]===group?{...r,extra:withVendorChange(r.extra,id)}:r));
+  };
+  const removeSource=(group:string)=>{
+    const drop=new Set<number>();
+    rows.forEach((r,i)=>{ if(r.extra["__src_group"]===group) drop.add(i); });
+    const src=sourceSummary.find(s=>s.group===group)?.source||"rows with no Source";
+    if(!drop.size||!window.confirm(`Remove the ${drop.size} row${drop.size!==1?"s":""} from ${src}? They will not be saved — extract the file again to get them back.`))return;
+    removeRows(drop);
+    if(sourceFilter===group)setSourceFilter("");
+  };
+  // After onboarding an agency in another tab: offer it here without losing the review.
+  const refreshAgencies=()=>{
+    setRefreshingAgencies(true);
+    Promise.all([loadVendorAgencies().then(setAgencies),loadAgencyEntities()])
+      .catch(()=>{})
+      .finally(()=>setRefreshingAgencies(false));
+  };
   const handleAddRow=()=>{
     const newIdx=rows.length;
+    setSourceFilter("");   // a new row belongs to no Source, so a Source filter would hide it
+    setUnreadOnly(false);  // nor is it an unread row
     setRows(prev=>[...prev,{...EMPTY_ROW(),row_order:prev.length,extra:fillStepParty({c__deal_tag:dealTag==="adhoc"?"Adhoc":"Standard"})}]);
     if(selectedInclExcl.length>0){
       setRowInclExcl(prev=>({...prev,[newIdx]:{types:selectedInclExcl,data:{},viceVersa:{}}}));
@@ -2005,20 +2596,42 @@ export default function UploadDealPage(){
     setSelectedRows(prev=>{const next=new Set(prev);if(allSelected)filteredIndices.forEach(i=>next.delete(i));else filteredIndices.forEach(i=>next.add(i));return next;});
   },[]);
   const rowAirline=(r:ReviewRow)=>(r.extra["c__airline_name"]||r.airline_name||"").trim();
-  // The airlines among the selected rows, for the bulk bar's airline picker.
-  const selectedAirlines=useMemo(()=>{
-    const names=new Set<string>();
-    selectedRows.forEach(i=>{ const r=rows[i]; if(r){ const n=rowAirline(r); if(n) names.add(n); } });
-    return [...names].sort((a,b)=>a.localeCompare(b));
-  },[selectedRows,rows]);
-  // A picked airline that is no longer among the selected rows falls back to "all".
-  const activeBulkAirline=selectedAirlines.includes(bulkAirline)?bulkAirline:"";
-  // What a bulk edit touches: the selected rows, narrowed to one airline when picked.
-  const bulkTargets=useMemo(()=>{
-    const out=new Set<number>();
-    selectedRows.forEach(i=>{ const r=rows[i]; if(r&&(!activeBulkAirline||rowAirline(r)===activeBulkAirline)) out.add(i); });
-    return out;
-  },[selectedRows,rows,activeBulkAirline]);
+  // Rows the file could not be read for: how many, and how many are still blank. The
+  // filter only bites while there are any — deleting the last one must not leave an
+  // empty table behind a filter that is no longer offered.
+  const inlineIncs=inlineIncentives(selectedIncentives);
+  const unreadTotal=rows.filter(isUnreadRow).length;
+  const unreadBlank=rows.filter(r=>unreadGaps(r,inlineIncs).length>0).length;
+  const unreadActive=unreadOnly&&unreadTotal>0;
+  const showUnreadRows=()=>{
+    setUnreadOnly(true);setSourceFilter("");setBulkAirline("");
+    reviewCardRef.current?.scrollIntoView({behavior:"smooth",block:"start"});
+  };
+  // The toolbar filters narrow the table: Supplier (All suppliers — the sheet's Source,
+  // the same filter as "Show rows"), Rows not read, then Airline. The airline picker
+  // offers the airlines of the rows the other two leave, with their counts.
+  const rowPassesFilters=(r:ReviewRow)=>
+    (!sourceFilter||r.extra["__src_group"]===sourceFilter)&&(!unreadActive||isUnreadRow(r));
+  const filterAirlines=useMemo(()=>{
+    const counts=new Map<string,number>();
+    rows.forEach(r=>{
+      if(sourceFilter&&r.extra["__src_group"]!==sourceFilter) return;
+      if(unreadActive&&!isUnreadRow(r)) return;
+      const n=rowAirline(r); if(n) counts.set(n,(counts.get(n)??0)+1);
+    });
+    return [...counts.entries()].sort((a,b)=>a[0].localeCompare(b[0]));
+  },[rows,sourceFilter,unreadActive]);
+  // A picked airline the other filters no longer leave falls back to "all".
+  const activeBulkAirline=filterAirlines.some(([a])=>a===bulkAirline)?bulkAirline:"";
+  // Same test as ReviewTable's filteredIndices, so "visible" means the same thing here.
+  const rowVisible=(r:ReviewRow)=>
+    (!activeBulkAirline||rowAirline(r)===activeBulkAirline)&&rowPassesFilters(r);
+  const visibleCount=rows.filter(rowVisible).length;
+  // What a bulk edit touches: the ticked rows the filters still show — a ticked row
+  // hidden by a filter is left alone, so what you see ticked is what gets edited.
+  const bulkTargets=new Set<number>();
+  selectedRows.forEach(i=>{ const r=rows[i]; if(r&&rowVisible(r)) bulkTargets.add(i); });
+  const hiddenSelected=selectedRows.size-bulkTargets.size;
 
   const openBulkIncentive=()=>{
     setBulkIncDraft({});setBulkIeDraft({});setBulkVvDraft({});setBulkIncOpen(true);
@@ -2056,12 +2669,29 @@ export default function UploadDealPage(){
     }
   };
 
+  // The Entity a bulk edit may set. On All suppliers only a name EVERY target row's own
+  // supplier has — one vendor's entity is not another's.
+  const bulkEntityOptions=(()=>{
+    if(!multiVendor)return stepEntityOptions;
+    let common:string[]|null=null;
+    for(const i of bulkTargets){
+      const own=rows[i]?rowEntityOptions(rows[i]):[];
+      common=common===null?[...own]:common.filter(e=>own.includes(e));
+    }
+    return common??[];
+  })();
+
   const handleBulkApply=()=>{
     if(!bulkColKey||bulkColValue==="")return;
+    // The supplier is picked by its label and stored by its id.
+    const vendorId=bulkColKey==="c__vendor_agency_id"?String(vendorOptions.byLabel.get(bulkColValue)?.id??""):"";
     setRows(prev=>prev.map((r,i)=>{
       if(!bulkTargets.has(i))return r;
+      if(bulkColKey==="c__valid_from"||bulkColKey==="c__valid_to")return{...r,extra:withContractDateChange(r.extra,bulkColKey,bulkColValue)};
       if(bulkColKey==="c__entity")return{...r,extra:withEntityChange(r.extra,bulkColValue)};
-      if(bulkColKey.startsWith("inc::")||bulkColKey.startsWith("ie::")||bulkColKey.startsWith("c__"))
+      if(bulkColKey==="c__vendor_agency_id")return vendorId?{...r,extra:withVendorChange(r.extra,vendorId)}:r;
+      if(bulkColKey.startsWith("inc::"))return{...r,extra:withIncentiveCellChange(r.extra,bulkColKey,bulkColValue)};
+      if(bulkColKey.startsWith("ie::")||bulkColKey.startsWith("c__"))
         return{...r,extra:{...r.extra,[bulkColKey]:bulkColValue}};
       return{...r,[bulkColKey]:bulkColValue};
     }));
@@ -2070,9 +2700,19 @@ export default function UploadDealPage(){
 
   // A verdict is about ONE file against ONE supplier; changing either voids it.
   useEffect(()=>{ setSupplierCheck(null); setSupplierOverride(false); },
-    [file,vendorAgencyId,dealType,scopeKind,scopeSel.agencyId,scopeSel.corporateId]);
+    [file,vendorAgencyId,allSuppliers,dealType,scopeKind,scopeSel.agencyId,scopeSel.corporateId]);
   // An "Upload anyway" re-runs the extract once the override is in state.
   const [extractAgain, setExtractAgain] = useState(false);
+
+  // A PDF defaults to AI extraction and a spreadsheet to column mapping — except on All
+  // suppliers, which only the AI reader can split by Source.
+  const pickFile=(f:File)=>{
+    if(!UPLOAD_FILE_RE.test(f.name)){ setUploadError(UPLOAD_FILE_ERROR); return; }
+    setUploadError("");
+    setFile(f);
+    if(/\.pdf$/i.test(f.name)||multiVendor)setAiMode(true);
+    else if(/\.xlsx?$/i.test(f.name))setAiMode(false);
+  };
 
   // ── Step 1 → 2/3: Extract ───────────────────────────────────────────────────
   const handleExtract=async()=>{
@@ -2081,7 +2721,7 @@ export default function UploadDealPage(){
     const missing=missingFields([
       {label:"Contract File",value:file},
       {label:"Deal Type",value:dealType},
-      {label:"Supplier Name",value:supplierName,when:!outbound&&dealType==="b2b"},
+      {label:"Supplier Name",value:multiVendor?ALL_SUPPLIERS_LABEL:supplierName,when:!outbound&&dealType==="b2b"},
       // Outgoing names its counterparty through the scope. A Common deal has none,
       // which is why this checks scopeComplete rather than a party id.
       {label:scopeType==="corporate"?"Corporate":"Agency",value:scopeComplete?"set":"",when:outbound},
@@ -2093,8 +2733,17 @@ export default function UploadDealPage(){
       notifyRequired(msg);
       return;
     }
+    // A file loaded from an email skips pickFile, so the type is checked here too.
+    if(!UPLOAD_FILE_RE.test(file.name)){ setUploadError(UPLOAD_FILE_ERROR); return; }
     setUploading(true);setUploadError("");setIsMultiTab(false);setAiWarning("");setAirlineSummary({});
+    setSourceSummary([]);setSourceFilter("");setUnreadOnly(false);
     try{
+      // All suppliers splits a sheet by its Source column — which only the AI reader
+      // finds. Column mapping and the tabbed template cannot say whose each row is.
+      if(multiVendor&&!AI_READABLE_RE.test(file.name)){
+        setUploadError("All suppliers reads an Excel or PDF deal sheet with a Source / Supplier column. Pick one supplier to upload this file.");
+        return;
+      }
       // Incoming B2B: is this file really the picked supplier's? Before extraction, so a
       // wrong sheet costs a second, not a minute of AI reading and a review of 300 rows.
       if(!outbound&&dealType==="b2b"&&vendorAgencyId!=null&&!supplierOverride){
@@ -2122,10 +2771,13 @@ export default function UploadDealPage(){
         }catch{ setSupplierCheck(null); }
       }
       const form=new FormData();form.append("file",file);
-      if(aiMode&&AI_READABLE_RE.test(file.name)){
+      if((aiMode||multiVendor)&&AI_READABLE_RE.test(file.name)){
+        if(multiVendor) setAiMode(true);
         if(validFromDate) form.append("valid_from",validFromDate);
-        // The picked supplier: a multi-supplier spreadsheet keeps only its rows.
-        if(!outbound&&dealType==="b2b"&&vendorAgencyId!=null) form.append("agency_id",String(vendorAgencyId));
+        // All suppliers: every row is kept and says whose it is. Otherwise the picked
+        // supplier: a multi-supplier spreadsheet keeps only its rows.
+        if(multiVendor) form.append("all_suppliers","true");
+        else if(!outbound&&dealType==="b2b"&&vendorAgencyId!=null) form.append("agency_id",String(vendorAgencyId));
         // Per-call only — a global axios timeout would also apply to
         // /upload/confirm, which is slower still on a large sheet.
         const {data}=await api.post<AIExtractResponse>("/deals/upload/ai-extract",form,
@@ -2154,8 +2806,14 @@ export default function UploadDealPage(){
             });
           }
           if(!r.extra["c__valid_from"] && validFromDate) r.extra["c__valid_from"] = validFromDate;
+          // Each incentive's contract window is the row's own, and its travel window
+          // opens with the contract unless the sheet named a start ("01JAN'27 Onwards").
           selectedIncentives.forEach(incType=>{
-            if(!r.extra[`inc::${incType}::validFrom`] && validFromDate) r.extra[`inc::${incType}::validFrom`] = validFromDate;
+            const k=(f:string)=>`inc::${incType}::${f}`;
+            if(!r.extra[k("validFrom")] && r.extra["c__valid_from"]) r.extra[k("validFrom")] = r.extra["c__valid_from"];
+            if(!r.extra[k("validTo")] && r.extra["c__valid_to"]) r.extra[k("validTo")] = r.extra["c__valid_to"];
+            if(!r.extra[k("travelValidFrom")] && r.extra[k("travelValidTo")] && r.extra[k("validFrom")])
+              r.extra[k("travelValidFrom")] = r.extra[k("validFrom")];
           });
           if(!r.extra["c__business_type"] && dealType==="b2b") r.extra["c__business_type"] = "B2B";
           r.extra["c__deal_tag"] = dealTag==="adhoc"?"Adhoc":"Standard";
@@ -2171,7 +2829,8 @@ export default function UploadDealPage(){
         setAiConfidence(data.confidence);
         setAiWarning(data.warning??"");
         setAirlineSummary(data.airline_summary??{});
-        setFilterText("");setSelectedRows(new Set());setBulkColKey("");setBulkColValue("");
+        setSourceSummary(multiVendor?(data.supplier_summary??[]):[]);
+        setBulkAirline("");setSelectedRows(new Set());setBulkColKey("");setBulkColValue("");
         setStep(3);
       }else{
         // Multi-tab workbook? Parse all sheets in-browser (join by Deal No), then show
@@ -2208,7 +2867,7 @@ export default function UploadDealPage(){
             setSelectedIncentives(prev=>[...new Set([...prev, ...parsed.incentiveUnion])]);
             setSelectedInclExcl(prev=>[...new Set([...prev, ...parsed.inclExclUnion])]);
             initColumnMap(mtPreview);
-            setFilterText("");setSelectedRows(new Set());setBulkColKey("");setBulkColValue("");
+            setBulkAirline("");setSelectedRows(new Set());setBulkColKey("");setBulkColValue("");
             setStep(2);
             return;
           }
@@ -2244,7 +2903,7 @@ export default function UploadDealPage(){
       setRows(merged);
       setRowInclExcl(mtParsed.rowInclExcl);
       setMtParsed(null);
-      setFilterText("");setSelectedRows(new Set());setBulkColKey("");setBulkColValue("");
+      setBulkAirline("");setSelectedRows(new Set());setBulkColKey("");setBulkColValue("");
       setStep(3);
       return;
     }
@@ -2255,11 +2914,15 @@ export default function UploadDealPage(){
       // Like the AI and tabbed paths: a B2B sheet with no Business Type column is B2B.
       ...(dealType==="b2b" && !contract.c__business_type ? { c__business_type: "B2B" } : {}),
     };
+    // IATA Commission is per row: a row whose own cell is blank has none. Spread with the
+    // other sheet-wide values it handed the first row's % to every such row.
+    const sheetWide={...contract};
+    delete sheetWide.c__iata_commission;
     const rowsWithContract=mappedRows.map(r=>({
       ...r,
       extra:{
         ...fallbackContract,
-        ...contract,
+        ...sheetWide,
         ...r.extra,
         c__airline_name: r.extra.c__airline_name || contract.c__airline_name || r.airline_name || "",
         c__valid_from:   r.extra.c__valid_from   || contract.c__valid_from   || validFromDate || "",
@@ -2278,7 +2941,7 @@ export default function UploadDealPage(){
     }
     setRows(rowsWithContract.map(r=>({...r,extra:fillStepParty({...r.extra,c__deal_tag:dealTag==="adhoc"?"Adhoc":"Standard"})})));
     setRowInclExcl(finalRowInclExcl);
-    setFilterText("");setSelectedRows(new Set());setBulkColKey("");setBulkColValue("");
+    setBulkAirline("");setSelectedRows(new Set());setBulkColKey("");setBulkColValue("");
     setStep(3);
   };
 
@@ -2287,6 +2950,31 @@ export default function UploadDealPage(){
     if(rows.length===0){
       const msg="Add at least one commission row before saving.";
       setSaveError(msg);notifyRequired(msg);return;
+    }
+
+    // All suppliers: a B2B deal naming no supplier would match EVERY vendor's statements,
+    // so a row without one is not saved (the server refuses it too). Name the Sources
+    // still open — that is where they are fixed — not just a count.
+    if(multiVendor){
+      const open=rows.filter(r=>!r.extra["c__vendor_agency_id"]);
+      if(open.length){
+        const srcs=[...new Set(open.map(r=>r.extra["c__supplier_cell"]||"(no Source)"))];
+        const msg=`${open.length} row${open.length!==1?"s have":" has"} no supplier — ${srcs.slice(0,4).join(", ")}${srcs.length>4?` and ${srcs.length-4} more`:""}. `
+          +`Pick the agency for ${srcs.length>1?"each":"it"} under "Suppliers in this sheet", or remove those rows.`;
+        setSaveError(msg);notifyRequired(msg);setSourceFilter("");setBulkAirline("");setUnreadOnly(false);return;
+      }
+    }
+
+    // A row the file could not be read for has no rate until someone types it — saved as
+    // it stands it would be a deal paying nothing. Show just those rows, and say what the
+    // first one still needs.
+    const blankUnread=rows.map((r,i)=>({row:i+1,gaps:unreadGaps(r,inlineIncs)})).filter(b=>b.gaps.length);
+    if(blankUnread.length){
+      const msg=blankUnread.length===1
+        ? `Row ${blankUnread[0].row} could not be read from the file and still needs ${gapLabels(blankUnread[0].gaps).join(", ")} — fill it in, or delete the row.`
+        : `${blankUnread.length} rows could not be read from the file and are still blank (rows ${blankUnread.slice(0,6).map(b=>b.row).join(", ")}${blankUnread.length>6?", …":""}) — fill them in, or delete them.`;
+      setSaveError(msg);notifyRequired(msg);showUnreadRows();
+      return;
     }
 
     // Every review row becomes its own deal, so the header fields the deal API
@@ -2311,7 +2999,7 @@ export default function UploadDealPage(){
         ? `Row ${badRows[0].row}: ${missingMessage(badRows[0].missing)}`
         : `${badRows.length} rows are missing required fields (${cols.join(", ")}). First problem is row ${badRows[0].row}.`;
       setSaveError(msg);notifyRequired(msg);
-      setFilterText("");                      // clear any filter hiding the bad row
+      setSourceFilter("");setBulkAirline("");setUnreadOnly(false);   // clear any filter hiding the bad row
       return;
     }
 
@@ -2334,7 +3022,7 @@ export default function UploadDealPage(){
     // deal); this is only the fallback it starts from.
     const sourceAgent=outbound
       ?scopeLabel(scopeType)
-      :dealType==="b2b"?supplierName:(file?.name.replace(/\.[^/.]+$/,"")??"upload");
+      :dealType==="b2b"?(multiVendor?"Multiple suppliers":supplierName):(file?.name.replace(/\.[^/.]+$/,"")??"upload");
 
     const getContractVal=(key:string)=>{for(const r of rows){if(r.extra[key])return r.extra[key];}return "";};
 
@@ -2347,7 +3035,9 @@ export default function UploadDealPage(){
           // Incoming B2B only. The server resolves it (ownership-checked) and derives the
           // supplier name and supplier-master id from it; null everywhere else, where
           // ck_deals_vendor_agency would refuse it anyway.
-          vendor_agency_id: !outbound&&dealType==="b2b"?vendorAgencyId:null,
+          vendor_agency_id: !outbound&&dealType==="b2b"&&!multiVendor?vendorAgencyId:null,
+          // All suppliers: each row carries its own agency instead (rows[].vendor_agency_id).
+          multi_vendor:    multiVendor,
           deal_tag:        dealTag,
           direction:       direction,
           airline_type:    getContractVal("c__airline_type")||null,
@@ -2359,7 +3049,9 @@ export default function UploadDealPage(){
           payout_type:     dealType==="airline"?(getContractVal("c__payout_type")||null):null,
           // Outgoing takes the entity and credentials from the scoped AGENCY;
           // incoming keeps `entity` meaning your own filing entity from My Profile.
-          entity:          (outbound?scopeSel.entity:entity)||null,
+          // All suppliers has no upload-wide entity or credentials: they are per row,
+          // and a deal-level value would be some other row's — another vendor's.
+          entity:          multiVendor?null:((outbound?scopeSel.entity:entity)||null),
           // Retired, as on Create Deal — the Entity column is a per-row `entity` now.
           entity_lcc:      null,
           business_type:   (outbound?(getContractVal("c__business_type")||KIND_BUSINESS_TYPE[scopeKind]):(getContractVal("c__business_type")||(dealType==="b2b"?"B2B":"")))||null,
@@ -2367,13 +3059,17 @@ export default function UploadDealPage(){
           // Outgoing: the scoped agency's credentials. Incoming B2B: the picked
           // supplier's credentials from Agency Master — the server puts them only on rows
           // attributed to that supplier. Otherwise: the sheet's own Login ID, as before.
-          login_id:        (outbound?scopeSel.loginIds.join(", ")
+          login_id:        multiVendor?null
+                            :(outbound?scopeSel.loginIds.join(", ")
                             :agencyParty&&loginIds.length?loginIds.join(", ")
                             :getContractVal("c__login_id"))||null,
-          login_ids:       outbound&&scopeSel.loginIds.length?scopeSel.loginIds
+          login_ids:       multiVendor?null
+                            :outbound&&scopeSel.loginIds.length?scopeSel.loginIds
                             :agencyParty&&loginIds.length?loginIds
                             :null,
-          iata_commission: getContractVal("c__iata_commission")||null,
+          // Never upload-wide: each row sends its own (rows[].iata_commission). The first
+          // row's value sent here was saved on every row that had none.
+          iata_commission: null,
           // Mirrors the server's own re-derivation, so a stale id left by a scope
           // change can never travel attached to the wrong scope.
           ...(outbound?buildScopePayload(scopeType,scopeSel.agencyId,scopeSel.corporateId,scopeSel.agencyEntityId):{}),
@@ -2413,6 +3109,10 @@ export default function UploadDealPage(){
               iata_commission:r.extra["c__iata_commission"]||null,
               deal_maker_name:r.extra["c__deal_maker_name"]||null,
               supplier_name:  r.extra["c__supplier_name"]||null,
+              // All suppliers: this row's agency, and the Source it was read from —
+              // remembered against that agency for the next upload of the sheet.
+              vendor_agency_id: multiVendor?(Number(r.extra["c__vendor_agency_id"])||null):null,
+              supplier_cell:    multiVendor?(r.extra["c__supplier_cell"]??null):null,
               contract_year:  r.extra["c__contract_year"]||null,
               trigger_type:   r.extra["c__trigger_type"]||null,
               payout_type:    r.extra["c__payout_type"]||null,
@@ -2466,15 +3166,15 @@ export default function UploadDealPage(){
     }finally{setSaving(false);}
   };
 
-  const confColor=(c:number)=>c>=0.8?"bg-green-100 text-green-700 border-green-200":c>=0.5?"bg-yellow-100 text-yellow-700 border-yellow-200":"bg-red-100 text-red-600 border-red-200";
-
   // ── Step 4: Success ──────────────────────────────────────────────────────────
   if(step===4)return(
     <div className="max-w-lg mx-auto mt-16 text-center space-y-4">
       <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto"><Check className="w-8 h-8 text-green-500"/></div>
       <h2 className="text-xl font-bold text-gray-900">Deal Saved Successfully</h2>
       <p className="text-sm text-gray-500">
-        <span className="font-medium">{rows.length} row{rows.length!==1?"s":""}</span> saved and submitted for approval.
+        <span className="font-medium">{rows.length} row{rows.length!==1?"s":""}</span> saved
+        {multiVendor&&(()=>{const n=new Set(rows.map(r=>r.extra["c__vendor_agency_id"])).size;return <> across <span className="font-medium">{n} supplier{n!==1?"s":""}</span></>;})()}
+        {" "}and submitted for approval.
         {selectedIncentives.length>0&&<> Incentives: <span className="font-medium">{selectedIncentives.join(", ")}</span>.</>}
       </p>
       {fileStoreError&&(
@@ -2491,7 +3191,7 @@ export default function UploadDealPage(){
           <button onClick={()=>router.push(`/deals/${savedBatchId}`)} className="bg-[#1e3a5f] text-white px-5 py-2 rounded-lg text-sm font-medium hover:bg-[#16304f]">View Batch</button>
         )}
         <button onClick={()=>router.push(dealsHref(direction))} className="border border-[#1e3a5f] text-[#1e3a5f] px-5 py-2 rounded-lg text-sm font-medium hover:bg-blue-50">View All Deals</button>
-        <button onClick={()=>{setStep(1);setFile(null);setPreview(null);setRows([]);setDealType(outbound?"b2b":"");setSupplierName("");setVendorAgencyId(null);setEntity("");setLoginIds([]);setValidFromDate("");setColumnMap({});setSelectedIncentives([]);setSelectedInclExcl([]);setRowInclExcl({});setAiMode(false);setAiFileName("");setAiConfidence(0);setSavedBatchId(null);setFileStoreError("");setCopyPrevInclExcl(true);setIsMultiTab(false);
+        <button onClick={()=>{setStep(1);setFile(null);setPreview(null);setRows([]);setDealType(outbound?"b2b":"");setSupplierName("");setVendorAgencyId(null);setAllSuppliers(false);setSourceSummary([]);setSourceFilter("");setUnreadOnly(false);setEntity("");setLoginIds([]);setValidFromDate("");setColumnMap({});setSelectedIncentives([]);setSelectedInclExcl([]);setRowInclExcl({});setAiMode(false);setAiFileName("");setAiConfidence(0);setSavedBatchId(null);setFileStoreError("");setCopyPrevInclExcl(true);setIsMultiTab(false);
           // The scope is Step-1 state too — leaving it set would silently float the
           // next upload to the previous upload's agency. dealType stays "b2b" on an
           // outgoing upload, since the query param effect only runs on mount.
@@ -2560,7 +3260,6 @@ export default function UploadDealPage(){
               Deals · {outbound?"Outgoing":"Incoming"}
             </p>
             <h1 className="text-xl font-bold text-gray-900">Upload Deal File</h1>
-            <p className="text-xs text-gray-500 mt-0.5">Import deal sheets — automated extraction with manual review</p>
           </div>
         </div>
         <StepBar step={step}/>
@@ -2627,7 +3326,7 @@ export default function UploadDealPage(){
                       placeholder="Select deal type…"
                       options={["Airline","B2B"]}
                       value={dealType==="airline"?"Airline":dealType==="b2b"?"B2B":""}
-                      onChange={v=>{ setDealType(v==="Airline"?"airline":v==="B2B"?"b2b":""); setSupplierName(""); setVendorAgencyId(null); }}
+                      onChange={v=>{ setDealType(v==="Airline"?"airline":v==="B2B"?"b2b":""); setSupplierName(""); setVendorAgencyId(null); setAllSuppliers(false); }}
                     />
                     {dealType==="b2b"&&(
                       <div>
@@ -2635,17 +3334,32 @@ export default function UploadDealPage(){
                             — one vendor is onboarded once per each, and the pick has to say
                             which. Still MATCHED on the supplier-master row the agency was
                             copied from; see lib/vendorAgency.ts. */}
+                        {/* "All suppliers" heads the list: a vendor-comparison sheet carries
+                            every supplier's deals at once, each row naming its own. */}
                         <SearchSelectField
                           label="Supplier Name *"
                           placeholder={agencies.length?"Search agency…":"No agencies in your Agency Master yet"}
-                          options={vendorOptions.labels}
-                          value={vendorOptions.labelOf(vendorAgencyId)}
+                          options={vendorOptions.labels.length?[ALL_SUPPLIERS_LABEL,...vendorOptions.labels]:[]}
+                          value={allSuppliers?ALL_SUPPLIERS_LABEL:vendorOptions.labelOf(vendorAgencyId)}
                           onChange={v=>{
+                            if(v===ALL_SUPPLIERS_LABEL){
+                              setAllSuppliers(true);setVendorAgencyId(null);setSupplierName("");setAiMode(true);
+                              return;
+                            }
+                            setAllSuppliers(false);
                             const picked=vendorOptions.byLabel.get(v)??null;
                             setVendorAgencyId(picked?.id??null);
                             setSupplierName(picked?.name??"");
                           }}
                         />
+                        {allSuppliers&&(
+                          <p className="text-[10px] text-[#9a3412] bg-orange-50 border border-orange-200 rounded-md px-2 py-1.5 mt-1.5 leading-relaxed">
+                            Each row&apos;s supplier is read from the sheet&apos;s <span className="font-semibold">Source</span> column
+                            and matched to your Agency Master. Sources you haven&apos;t onboarded, or that fit more than one
+                            branch, are flagged in Review &amp; Edit — map each once for all its rows, or remove them.
+                            Entity and Login ID are set per row there.
+                          </p>
+                        )}
                         {agencies.length===0&&(
                           <p className="text-[10px] text-gray-400 mt-1">
                             Onboard the agencies you buy from in{" "}
@@ -2660,38 +3374,6 @@ export default function UploadDealPage(){
                           </p>
                         )}
                       </div>
-                    )}
-                    {/* The picked supplier's own Entity and Login ID / IATA Number, from
-                        User master → Agency Master — the same two fields, same source and
-                        same order as Create Deal for an incoming B2B Standard deal. Only
-                        what that agency actually has is offered; login IDs follow the
-                        entity, because a credential belongs to one. */}
-                    {agencyParty&&(
-                      <>
-                        <SearchSelectField
-                          label="Entity"
-                          placeholder={agencyEntityPlaceholder}
-                          options={agencyEntityNames}
-                          value={entity}
-                          onChange={setEntity}
-                        />
-                        <MultiSelectDropdown
-                          label="Login ID / IATA Number"
-                          options={agencyLoginIdOptions}
-                          selected={loginIds}
-                          onChange={setLoginIds}
-                        />
-                        {/* MultiSelectDropdown has no placeholder of its own, so the
-                            reason the list is empty is said underneath instead. */}
-                        {agencyLoginIdOptions.length===0&&(
-                          <p className="text-[10px] text-gray-400 -mt-2">{agencyLoginPlaceholder}</p>
-                        )}
-                        {loginIds.length>0&&(
-                          <p className="text-[10px] text-blue-600 -mt-2">
-                            Applied to every row of this supplier; a Login ID in the sheet still wins on its own row.
-                          </p>
-                        )}
-                      </>
                     )}
                   </>
                 )}
@@ -2717,12 +3399,41 @@ export default function UploadDealPage(){
                     {selectedInclExcl.join(", ")} — columns inside every incentive sheet, editable in Review.
                   </p>
                 )}
-                <SelectField
-                  label="Deal Tag"
-                  options={DEAL_TAG_OPTIONS}
-                  value={dealTag==="adhoc"?"Adhoc":"Standard"}
-                  onChange={v=>setDealTag(v.toLowerCase())}
-                />
+                {/* Incoming field order: Deal Type, Supplier, Incentive Types, Inclusions &
+                    Exclusions, Entity, Login ID, Deal Tag, Valid From. */}
+                {/* The picked supplier's own Entity and Login ID / IATA Number, from
+                    User master → Agency Master — the same two fields and source as
+                    Create Deal for an incoming B2B deal. Only what that agency actually
+                    has is offered; login IDs follow the entity, because a credential
+                    belongs to one. */}
+                {/* One supplier's entity and credentials — none to pick for all suppliers. */}
+                {agencyParty&&!multiVendor&&(
+                  <>
+                    <SearchSelectField
+                      label="Entity"
+                      placeholder={agencyEntityPlaceholder}
+                      options={agencyEntityNames}
+                      value={entity}
+                      onChange={setEntity}
+                    />
+                    <MultiSelectDropdown
+                      label="Login ID / IATA Number"
+                      options={agencyLoginIdOptions}
+                      selected={loginIds}
+                      onChange={setLoginIds}
+                    />
+                    {/* MultiSelectDropdown has no placeholder of its own, so the
+                        reason the list is empty is said underneath instead. */}
+                    {agencyLoginIdOptions.length===0&&(
+                      <p className="text-[10px] text-gray-400 -mt-2">{agencyLoginPlaceholder}</p>
+                    )}
+                    {loginIds.length>0&&(
+                      <p className="text-[10px] text-blue-600 -mt-2">
+                        Applied to every row of this supplier; a Login ID in the sheet still wins on its own row.
+                      </p>
+                    )}
+                  </>
+                )}
                 {/* Incoming deals only. On an outgoing deal OutgoingScopeFields
                     already asked for Agency Entity above, and that is what fills
                     Deal.entity (see the payload: outbound reads scopeSel.entity).
@@ -2730,7 +3441,7 @@ export default function UploadDealPage(){
                     that the save silently ignores. Mirrors /deals/new, which
                     hides it on `outboundScoped` for the same reason. */}
                 {/* Also hidden on an incoming B2B deal, whose Entity is the supplier
-                    agency's and is asked right under Supplier Name instead. */}
+                    agency's (the block above). */}
                 {!outbound&&!agencyParty&&(
                   <>
                     <SearchSelectField
@@ -2749,6 +3460,12 @@ export default function UploadDealPage(){
                     )}
                   </>
                 )}
+                <SelectField
+                  label="Deal Tag"
+                  options={DEAL_TAG_OPTIONS}
+                  value={dealTag==="adhoc"?"Adhoc":"Standard"}
+                  onChange={v=>setDealTag(v.toLowerCase())}
+                />
                 <div>
                   <label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">Valid From Date</label>
                   <input
@@ -2770,8 +3487,10 @@ export default function UploadDealPage(){
               <div className="flex items-center justify-between">
                 <h2 className="text-xs font-semibold text-blue-600 uppercase tracking-wide">Deal File</h2>
                 <div className="flex items-center gap-3">
-                  <span className="text-[11px] text-gray-400">PDF · Excel · Word · Image</span>
-                  <button
+                  <span className="text-[11px] text-gray-400">{multiVendor?"Excel · PDF — with a Source column":"PDF · Excel"}</span>
+                  {/* The tabbed template is one supplier's (its code is pre-filled), and
+                      All suppliers reads only sheets the AI can split by Source. */}
+                  {!multiVendor&&<button
                     type="button"
                     onClick={async()=>{
                       // The filled sheet says whose it is: the supplier's code on an incoming B2B
@@ -2797,18 +3516,18 @@ export default function UploadDealPage(){
                     className="flex items-center gap-1 text-[11px] text-blue-600 hover:text-blue-800 hover:underline font-medium"
                   >
                     <FileSpreadsheet className="w-3 h-3"/>Download Tabbed Template
-                  </button>
+                  </button>}
                 </div>
               </div>
               <div
                 onDragOver={e=>{e.preventDefault();setDragging(true);}}
                 onDragLeave={()=>setDragging(false)}
-                onDrop={e=>{e.preventDefault();setDragging(false);const f=e.dataTransfer.files[0];if(f){setFile(f);if(/\.pdf$/i.test(f.name))setAiMode(true);else if(/\.xlsx?$/i.test(f.name))setAiMode(false);}}}
+                onDrop={e=>{e.preventDefault();setDragging(false);const f=e.dataTransfer.files[0];if(f)pickFile(f);}}
                 onClick={()=>fileRef.current?.click()}
                 className={`border-2 border-dashed rounded-xl flex flex-col items-center justify-center py-16 gap-3 cursor-pointer transition-all ${dragging?"border-[#1e3a5f] bg-blue-50/40":file?"border-green-400 bg-green-50/30":"border-gray-200 hover:border-blue-300 hover:bg-blue-50/20"}`}
               >
-                <input ref={fileRef} type="file" accept=".pdf,.xls,.xlsx,.doc,.docx,.png,.jpg,.jpeg" className="hidden"
-                  onChange={e=>{const f=e.target.files?.[0];if(f){setFile(f);if(/\.pdf$/i.test(f.name))setAiMode(true);else if(/\.xlsx?$/i.test(f.name))setAiMode(false);}}}/>
+                <input ref={fileRef} type="file" accept=".pdf,.xls,.xlsx" className="hidden"
+                  onChange={e=>{const f=e.target.files?.[0];if(f)pickFile(f);}}/>
                 {file?(
                   <div className="flex items-center gap-3 bg-white rounded-xl px-4 py-3 border border-gray-200 shadow-sm">
                     <FileIcon name={file.name}/>
@@ -2820,7 +3539,7 @@ export default function UploadDealPage(){
                     <div className="w-14 h-14 bg-gray-100 rounded-2xl flex items-center justify-center"><Upload className="w-7 h-7 text-gray-400"/></div>
                     <div className="text-center"><p className="text-sm font-semibold text-gray-700">Drop your deal file here</p><p className="text-xs text-gray-400 mt-1">or click to browse</p></div>
                     <div className="flex gap-2">
-                      {[["PDF","text-red-500 bg-red-50"],["Excel","text-green-600 bg-green-50"],["Word","text-blue-500 bg-blue-50"]].map(([l,c])=>(
+                      {[["PDF","text-red-500 bg-red-50"],["Excel","text-green-600 bg-green-50"]].map(([l,c])=>(
                         <span key={l} className={`px-2.5 py-1 rounded-full text-[11px] font-semibold ${c}`}>{l}</span>
                       ))}
                     </div>
@@ -2884,12 +3603,13 @@ export default function UploadDealPage(){
                 </div>);
               })()}
 
-              {/* AI Mode toggle — PDF only. The extractor reads the PDF's table
-                  structure, so it has nothing to work with for any other format. */}
+              {/* AI Mode toggle — turned on by itself for a PDF (pickFile), optional for
+                  Excel, where leaving it off goes to column mapping. A PDF can still be
+                  switched off: column mapping is the fallback when its table can't be read. */}
               {(()=>{const aiBlocked=!AI_READABLE_RE.test(file?.name??"");const isSheet=/\.(xlsx|xlsm|xls|csv)$/i.test(file?.name??"");return(
-              <label className={`flex items-center gap-2.5 select-none py-1 ${aiBlocked?"opacity-40 cursor-not-allowed":"cursor-pointer"}`}>
+              <label className={`flex items-center gap-2.5 select-none py-1 ${aiBlocked?"opacity-40 cursor-not-allowed":multiVendor?"cursor-default":"cursor-pointer"}`}>
                 <div
-                  onClick={()=>{if(!aiBlocked)setAiMode(m=>!m);}}
+                  onClick={()=>{if(!aiBlocked&&!multiVendor)setAiMode(m=>!m);}}
                   className={`relative w-10 h-5 rounded-full transition-colors duration-200 flex-shrink-0 ${aiMode&&!aiBlocked?"bg-[#1e3a5f]":"bg-gray-200"}`}
                 >
                   <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform duration-200 ${aiMode&&!aiBlocked?"translate-x-5":"translate-x-0"}`}/>
@@ -2897,8 +3617,10 @@ export default function UploadDealPage(){
                 <span className="text-xs font-medium text-gray-700">
                   Use AI Extraction
                   <span className="ml-1.5 text-[11px] text-gray-400 font-normal">
-                    {aiBlocked
-                      ?"Available for PDF and Excel files — use column mapping"
+                    {multiVendor
+                      ?(aiBlocked?"All suppliers reads a PDF or Excel deal sheet":"Always on for All suppliers — it reads each row's Source")
+                      :aiBlocked
+                      ?"On automatically for a PDF · optional for Excel"
                       :aiMode
                         ?(isSheet?"Reads the sheet as a table — no column mapping":"Reads the PDF's table — no column mapping")
                         :(isSheet?"Off — column mapping. Turn on for sheets too free-form to map":"Standard extraction with column mapping")}
@@ -2923,7 +3645,7 @@ export default function UploadDealPage(){
                 </span>
               </label>
 
-              <button onClick={handleExtract} disabled={!file||!dealType||(outbound?!scopeComplete:(dealType==="b2b"&&!supplierName))||uploading}
+              <button onClick={handleExtract} disabled={!file||!dealType||(outbound?!scopeComplete:(dealType==="b2b"&&!supplierName&&!multiVendor))||uploading}
                 className="w-full bg-[#1e3a5f] text-white rounded-xl py-3 text-sm font-semibold hover:bg-[#16304f] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2">
                 {uploading
                   ?<><RefreshCw className="w-4 h-4 animate-spin"/>{aiMode
@@ -2939,6 +3661,8 @@ export default function UploadDealPage(){
                 {aiMode
                   ?(uploading&&uploadSecs>=20
                     ?"Reading the whole sheet — a 4-page contract takes about a minute and produces 300+ rows. Please keep this tab open."
+                    :multiVendor
+                      ?"AI will read every supplier's rows — each airline split into Economy / Premium / Business — and match each row's Source to your Agency Master. You review the suppliers before anything is saved."
                     :/\.(xlsx|xlsm|xls|csv)$/i.test(file?.name??"")
                       ?"AI will read the sheet as a table — every row, split into Economy / Premium / Business — and skip column mapping. A sheet listing several suppliers keeps only the selected supplier's rows."
                       :"AI will read every row of the PDF, split each airline's deal into Economy / Premium / Business rows, and skip column mapping.")
@@ -2970,108 +3694,180 @@ export default function UploadDealPage(){
       {/* ══ STEP 3 ══ */}
       {step===3&&(preview||aiMode||isMultiTab)&&(
         <div className="space-y-3">
-          {/* File summary bar */}
-          <div className="bg-white rounded-xl border border-gray-200 px-4 py-2.5 flex items-center gap-4 flex-wrap">
-            <div className="flex items-center gap-2.5">
-              <FileIcon name={aiMode?(aiFileName||file?.name||""):(preview?.file_name??file?.name??"")}/>
-              <div>
-                <p className="text-sm font-semibold text-gray-800">{aiMode?(aiFileName||file?.name):(preview?.file_name??file?.name)}</p>
-                <p className="text-xs text-gray-400">{aiMode?"AI-extracted · PLB per class":isMultiTab?"Tabbed template · joined by Deal No":(dealType==="b2b"?supplierName:"Airline upload")}</p>
-              </div>
-            </div>
-            {!isMultiTab&&(
-              <span className={`px-2.5 py-1 rounded-full text-[11px] font-semibold border ${confColor(aiMode?aiConfidence:(preview?.confidence??0))}`}>
-                {Math.round((aiMode?aiConfidence:(preview?.confidence??0))*100)}% confidence
-              </span>
-            )}
-            <span className="px-2.5 py-1 rounded-full text-[11px] font-semibold border bg-blue-50 text-blue-700 border-blue-200">{rows.length} rows</span>
-            {aiMode
-              ?<span className="px-2.5 py-1 rounded-full text-[11px] font-semibold border bg-purple-50 text-purple-700 border-purple-200">AI Extraction</span>
-              :<span className={`px-2.5 py-1 rounded-full text-[11px] font-semibold border ${dealType==="b2b"?"bg-violet-50 text-violet-700 border-violet-200":"bg-sky-50 text-sky-700 border-sky-200"}`}>{dealType==="b2b"?"B2B":"Airline"}</span>
-            }
-            <span className={`px-2.5 py-1 rounded-full text-[11px] font-semibold border ${dealTag==="adhoc"?"bg-amber-50 text-amber-700 border-amber-200":"bg-slate-50 text-slate-700 border-slate-200"}`}>
-              {dealTag==="adhoc"?"Adhoc":"Standard"}
-            </span>
-            {selectedIncentives.map(t=><span key={t} className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-purple-50 text-purple-700 border border-purple-200">{t}</span>)}
-            {(aiMode?aiWarning:preview?.warning)&&<span className="flex items-center gap-1 text-[11px] text-amber-600"><AlertTriangle className="w-3.5 h-3.5"/>{aiMode?aiWarning:preview?.warning}</span>}
-          </div>
-
-          {/* Airline-master summary. Counts DISTINCT airlines, not rows, because
-              one airline routinely occupies 3 rows (Economy / Premium / Business). */}
-          {aiMode&&Object.keys(airlineSummary).length>0&&(()=>{
+          {/* Summary — what was read (file, how, for whom), the key numbers, and one
+              list of everything that still needs a look before saving. */}
+          {(()=>{
+            const fileName=aiMode?(aiFileName||file?.name||""):(preview?.file_name??file?.name??"");
+            const conf=aiMode?aiConfidence:(preview?.confidence??0);
+            const party=outbound?"Outgoing"
+              :dealType==="b2b"?(multiVendor?"All suppliers":(supplierName||"B2B"))
+              :"Airline deal";
+            const meta=[aiMode?"AI extraction":isMultiTab?"Tabbed template":"Column mapping",party,
+              dealTag==="adhoc"?"Adhoc":"Standard",selectedIncentives.join(", ")].filter(Boolean);
+            // Airline-master counts are DISTINCT airlines, not rows — one airline
+            // routinely occupies 3 rows (Economy / Premium / Business).
             const n=(k:string)=>airlineSummary[k]??0;
-            const attention=n("conflict")+n("ambiguous")+n("multi_carrier");
+            const airlinesTotal=Object.values(airlineSummary).reduce((a,b)=>a+b,0);
+            const needLook=n("conflict")+n("ambiguous")+n("multi_carrier");
+            const unassigned=multiVendor?rows.filter(r=>!r.extra["c__vendor_agency_id"]).length:0;
+            const warning=aiMode?aiWarning:preview?.warning;
+            const pl=(c:number,one:string,many:string)=>`${c} ${c===1?one:many}`;
+            // Rows the file could not be read for are not listed here — the toolbar's
+            // "Rows not read" filter and the red rows say it where they are fixed.
+            const notes:{tone:"red"|"amber"|"sky";text:string}[]=[];
+            if(unassigned) notes.push({tone:"red",text:`${pl(unassigned,"row still needs","rows still need")} a supplier — pick it under Suppliers in this sheet.`});
+            if(needLook)   notes.push({tone:"red",text:`${pl(needLook,"airline needs","airlines need")} a look — check the Master column.`});
+            if(warning)    notes.push({tone:"amber",text:warning});
+            if(n("unresolved")) notes.push({tone:"amber",text:n("unresolved")===1
+              ?"1 airline is not in the airline master and has no code — fill in its Code to add it."
+              :`${n("unresolved")} airlines are not in the airline master and have no code — fill in their Code to add them.`});
+            if(n("new"))   notes.push({tone:"sky",text:`${pl(n("new"),"airline","airlines")} will be added to the airline master when you save.`});
+            const TONE={red:"text-red-700",amber:"text-amber-700",sky:"text-sky-700"};
+            const stat=(label:string,value:React.ReactNode,cls="text-gray-800")=>(
+              <div key={label} className="px-4 text-right">
+                <p className="text-[10px] uppercase tracking-wide text-gray-400">{label}</p>
+                <p className={`text-sm font-semibold tabular-nums ${cls}`}>{value}</p>
+              </div>
+            );
             return(
-              <div className="flex items-center gap-2 flex-wrap text-[11px]">
-                {n("resolved")>0&&<span className="px-2 py-0.5 rounded-full font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">{n("resolved")} matched to the airline master</span>}
-                {n("new")>0&&<span className="px-2 py-0.5 rounded-full font-semibold bg-sky-50 text-sky-700 border border-sky-200">{n("new")} will be added to the master when you save</span>}
-                {attention>0&&<span className="px-2 py-0.5 rounded-full font-semibold bg-red-50 text-red-700 border border-red-300">{attention} need a look — check the Master column</span>}
-                {n("unresolved")>0&&<span className="px-2 py-0.5 rounded-full font-semibold bg-gray-50 text-gray-500 border border-gray-200">{n("unresolved")} not in the master (no code)</span>}
+              <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                <div className="px-4 py-3 flex items-center gap-3 flex-wrap">
+                  <FileIcon name={fileName}/>
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-gray-800 truncate">{fileName}</p>
+                    <p className="text-[11px] text-gray-500">{meta.join(" · ")}</p>
+                  </div>
+                  <div className="ml-auto flex items-center divide-x divide-gray-100">
+                    {stat("Rows",rows.length)}
+                    {!isMultiTab&&stat("Confidence",`${Math.round(conf*100)}%`,
+                      conf>=0.8?"text-emerald-600":conf>=0.5?"text-amber-600":"text-red-600")}
+                    {aiMode&&airlinesTotal>0&&stat("Airlines matched",`${n("resolved")} / ${airlinesTotal}`)}
+                    {multiVendor&&stat("Suppliers",sourceSummary.length)}
+                  </div>
+                </div>
+                {notes.length>0&&(
+                  <ul className="border-t border-gray-100 bg-gray-50/60 px-4 py-2 space-y-1">
+                    {notes.map(nt=>(
+                      <li key={nt.text} className={`flex items-start gap-1.5 text-[11px] ${TONE[nt.tone]}`}>
+                        {nt.tone==="sky"
+                          ?<Info className="w-3.5 h-3.5 mt-px flex-shrink-0"/>
+                          :<AlertTriangle className="w-3.5 h-3.5 mt-px flex-shrink-0"/>}
+                        {nt.text}
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
             );
           })()}
 
-          {/* Filter + Bulk Edit Toolbar */}
-          <div className="bg-white rounded-xl border border-gray-200 px-4 py-2.5 space-y-2">
-            {/* Row 1: Filter */}
-            <div className="flex items-center gap-2">
-              <div className="relative flex-1">
-                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none"/>
-                <input
-                  type="text"
-                  placeholder="Filter by airline, class, or any value…"
-                  value={filterText}
-                  onChange={e=>setFilterText(e.target.value)}
-                  className="w-full pl-8 pr-3 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400"
-                />
-              </div>
-              {filterText&&(
-                <>
-                  <span className="text-[11px] text-gray-400 whitespace-nowrap">
-                    {rows.filter(row=>{const h=[row.airline_name,row.remarks,row.validity_raw,...Object.values(row.extra)].join(" ").toLowerCase();return h.includes(filterText.toLowerCase());}).length} of {rows.length} rows
-                  </span>
-                  <button onClick={()=>setFilterText("")} title="Clear filter" className="p-1 hover:bg-gray-100 rounded-lg">
-                    <X className="w-3.5 h-3.5 text-gray-500"/>
+          {/* All suppliers: whose deal every row is — settled here before anything saves. */}
+          {multiVendor&&sourceSummary.length>0&&(
+            <SupplierSourcesPanel
+              summary={sourceSummary}
+              rows={rows}
+              vendorChoices={vendorChoices}
+              filter={sourceFilter}
+              onFilter={setSourceFilter}
+              onAssign={assignSource}
+              onRemove={removeSource}
+              onRefresh={refreshAgencies}
+              refreshing={refreshingAgencies}
+            />
+          )}
+
+          {/* Review & Edit — one card: the filter + bulk-edit line, then the table. */}
+          <div ref={reviewCardRef} className="bg-white rounded-xl border border-gray-200 overflow-hidden scroll-mt-4">
+            {/* Filter + Bulk Edit Toolbar — always shown, on ONE line (the user's ask): pick
+                Supplier / Airline, tick rows in the table, then edit them here. Labels are kept
+                short so it fits; a narrow window scrolls it sideways rather than wrapping. */}
+            <div className="px-4 py-2">
+              <div className="flex items-center gap-1.5 flex-nowrap overflow-x-auto py-0.5 *:shrink-0">
+                {/* All suppliers: one Source's rows — the same filter as the panel's "Show rows". */}
+                {multiVendor&&sourceSummary.length>0&&(
+                  <select
+                    value={sourceFilter}
+                    onChange={e=>setSourceFilter(e.target.value)}
+                    title="Show one supplier's rows"
+                    className={`border rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400 max-w-40 ${
+                      sourceFilter?"border-orange-300 bg-orange-50 text-[#9a3412] font-semibold":"border-gray-200 text-gray-700"}`}
+                  >
+                    <option value="">All suppliers ({rows.length})</option>
+                    {sourceSummary.map(s=>{
+                      const n=rows.filter(r=>r.extra["__src_group"]===s.group).length;
+                      if(!n)return null;
+                      return <option key={s.group} value={s.group}>{s.source||"No Source"}{s.channel?` · ${s.channel}`:""} ({n})</option>;
+                    })}
+                  </select>
+                )}
+                {/* Only the rows the file could not be read for — red while any is still blank. */}
+                {unreadTotal>0&&(
+                  <button
+                    type="button"
+                    onClick={()=>setUnreadOnly(v=>!v)}
+                    aria-pressed={unreadActive}
+                    title={unreadActive?"Show every row again"
+                      :"Show only the rows the file could not be read for — they need filling in by hand"}
+                    className={`inline-flex items-center gap-1.5 border rounded-lg px-2 py-1.5 text-xs font-semibold whitespace-nowrap transition-colors ${
+                      unreadBlank
+                        ?(unreadActive?"bg-red-600 border-red-600 text-white hover:bg-red-700":"border-red-300 bg-red-50 text-red-700 hover:bg-red-100")
+                        :(unreadActive?"bg-emerald-600 border-emerald-600 text-white hover:bg-emerald-700":"border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100")}`}
+                  >
+                    {unreadBlank?<AlertTriangle className="w-3.5 h-3.5"/>:<Check className="w-3.5 h-3.5"/>}
+                    Rows not read ({unreadTotal})
+                    {unreadBlank>0&&unreadBlank<unreadTotal&&<span className="font-normal">· {unreadBlank} left</span>}
                   </button>
-                </>
-              )}
-            </div>
-            {/* Row 2: Bulk Edit (only when rows are selected) */}
-            {selectedRows.size>0&&(
-              <div className="flex items-center gap-2 flex-wrap border-t border-gray-100 pt-2">
-                <span className="inline-flex items-center gap-1 bg-blue-100 text-blue-700 text-[11px] font-semibold px-2.5 py-1 rounded-full whitespace-nowrap">
-                  ● {selectedRows.size} row{selectedRows.size!==1?"s":""} selected
-                </span>
-                {/* Narrow the edit to one airline among the selected rows. */}
+                )}
                 <select
                   value={activeBulkAirline}
                   onChange={e=>setBulkAirline(e.target.value)}
-                  title="Apply the edit to every selected row, or only to one airline's rows"
-                  className={`border rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400 max-w-56 ${
+                  title="Show one airline's rows"
+                  className={`border rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400 max-w-40 ${
                     activeBulkAirline?"border-blue-300 bg-blue-50 text-blue-800 font-semibold":"border-gray-200 text-gray-700"}`}
                 >
-                  <option value="">All selected airlines ({selectedAirlines.length})</option>
-                  {selectedAirlines.map(a=>{
-                    const n=[...selectedRows].filter(i=>rows[i]&&rowAirline(rows[i])===a).length;
-                    return <option key={a} value={a}>{a} ({n})</option>;
-                  })}
+                  <option value="">All airlines ({filterAirlines.length})</option>
+                  {filterAirlines.map(([a,n])=><option key={a} value={a}>{a} ({n})</option>)}
                 </select>
+                {(activeBulkAirline||sourceFilter||unreadActive)&&(
+                  <button onClick={()=>{setBulkAirline("");setSourceFilter("");setUnreadOnly(false);}} title="Clear filters"
+                    className="inline-flex items-center gap-1 text-[11px] text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg px-1.5 py-1 whitespace-nowrap">
+                    {visibleCount} of {rows.length} <X className="w-3.5 h-3.5"/>
+                  </button>
+                )}
+                <span className="w-px h-5 bg-gray-200 mx-0.5" aria-hidden/>
+                {/* Bulk edit — on the ticked rows the filters show */}
+                {bulkTargets.size>0?(
+                  <span className="inline-flex items-center gap-1 bg-blue-100 text-blue-700 text-[11px] font-semibold px-2 py-1 rounded-full whitespace-nowrap">
+                    ● {bulkTargets.size} selected
+                  </span>
+                ):(
+                  <span className="text-[11px] text-gray-400 whitespace-nowrap">No rows ticked</span>
+                )}
+                {hiddenSelected>0&&(
+                  <span className="text-[10px] text-gray-400 whitespace-nowrap"
+                    title={`${hiddenSelected} more ticked row${hiddenSelected!==1?"s are":" is"} hidden by the filters — not edited`}>
+                    +{hiddenSelected} hidden
+                  </span>
+                )}
                 <select
                   value={bulkColKey}
                   onChange={e=>{setBulkColKey(e.target.value);setBulkColValue("");}}
-                  className="border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400 text-gray-700"
+                  className="border border-gray-200 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400 text-gray-700 max-w-36"
                 >
                   <option value="">Column to edit…</option>
-                  {colGroups.filter(g=>g.label!=="Incl / Excl"&&g.label!=="Incentive Data"&&g.label!=="Source").map(g=>(
-                    <optgroup key={g.label} label={g.label}>
-                      {g.cols.filter(c=>c.key!=="__incl_excl__"&&c.key!=="__incentive_data__"&&c.key!=="__src__"&&c.key!=="__airline_master__"&&!lockedPartyCols.includes(c.key)).map(c=>(
-                        <option key={c.key} value={c.key}>{c.label}</option>
-                      ))}
-                    </optgroup>
-                  ))}
+                  {/* Editable columns only — read-only and popup columns are left out, and
+                      so is any group left with nothing (Incentive & Rules has its own button). */}
+                  {colGroups
+                    .map(g=>({label:g.label,cols:g.cols.filter(c=>!BULK_SKIP_COLS.has(c.key)&&!lockedPartyCols.includes(c.key))}))
+                    .filter(g=>g.cols.length>0)
+                    .map(g=>(
+                      <optgroup key={g.label} label={g.label}>
+                        {g.cols.map(c=><option key={c.key} value={c.key}>{c.label}</option>)}
+                      </optgroup>
+                    ))}
                 </select>
                 {bulkColKey&&(()=>{
-                  const meta=getColMeta(bulkColKey,stepEntityOptions);
+                  const meta=getColMeta(bulkColKey,bulkEntityOptions,vendorOptions.labels);
                   if(meta.type==="date")return(
                     <input type="date" value={bulkColValue} onChange={e=>setBulkColValue(e.target.value)}
                       className="border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400"/>
@@ -3096,42 +3892,29 @@ export default function UploadDealPage(){
                 })()}
                 <button
                   onClick={handleBulkApply}
-                  disabled={!bulkColKey||bulkColValue===""}
+                  disabled={bulkTargets.size===0||!bulkColKey||bulkColValue===""}
+                  title={`Apply to the ${bulkTargets.size} ticked row${bulkTargets.size!==1?"s":""}`}
                   className="px-3 py-1.5 bg-blue-600 text-white text-xs font-semibold rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
                 >
-                  Apply to {bulkTargets.size} row{bulkTargets.size!==1?"s":""}
+                  Apply
                 </button>
                 <button
                   onClick={openBulkIncentive}
                   disabled={bulkTargets.size===0||selectedIncentives.length===0}
-                  title={selectedIncentives.length===0?"Pick an incentive type in step 1 first":"Edit incentive fields and rules on these rows"}
-                  className="px-3 py-1.5 border border-blue-200 text-blue-700 bg-white text-xs font-semibold rounded-lg hover:bg-blue-50 disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+                  title={selectedIncentives.length===0?"Pick an incentive type in step 1 first":"Edit incentive fields and rules on the ticked rows"}
+                  className="px-2.5 py-1.5 border border-blue-200 text-blue-700 bg-white text-xs font-semibold rounded-lg hover:bg-blue-50 disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
                 >
-                  Incentive &amp; Rules ({bulkTargets.size})
+                  Incentive &amp; Rules
                 </button>
+                {/* Clears the ticks only — the Supplier / Airline filters stay as picked. */}
                 <button
-                  onClick={()=>{setSelectedRows(new Set());setBulkAirline("");}}
-                  className="px-3 py-1.5 border border-gray-200 text-gray-600 text-xs font-medium rounded-lg hover:bg-gray-50 whitespace-nowrap"
+                  onClick={()=>setSelectedRows(new Set())}
+                  disabled={selectedRows.size===0}
+                  className="px-2.5 py-1.5 border border-gray-200 text-gray-600 text-xs font-medium rounded-lg hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
                 >
                   Deselect All
                 </button>
               </div>
-            )}
-          </div>
-
-          <div className="bg-white rounded-lg border border-gray-200">
-            <div className="px-4 py-2.5 border-b border-gray-100 flex items-center gap-2">
-              <h2 className="text-xs font-semibold text-blue-600 uppercase tracking-wide">
-                Review &amp; Edit — {activeBulkAirline||"All Data"}
-              </h2>
-              {/* Picking an airline in the bulk bar narrows the table to it; this undoes that. */}
-              {activeBulkAirline&&(
-                <button onClick={()=>setBulkAirline("")}
-                  className="inline-flex items-center gap-1 text-[10px] font-semibold text-blue-700 bg-blue-50 border border-blue-200 rounded-full px-2 py-0.5 hover:bg-blue-100">
-                  Showing {rows.filter(r=>rowAirline(r)===activeBulkAirline).length} of {rows.length} rows <X className="w-3 h-3"/>
-                </button>
-              )}
-              <span className="text-[10px] text-gray-400 ml-auto">Scroll horizontally · Click any cell to edit · Use Incl/Excl column to add per-row rules</span>
             </div>
             <ReviewTable
               rows={rows}
@@ -3147,13 +3930,15 @@ export default function UploadDealPage(){
               onRemoveInclExclType={handleRemoveInclExclType}
               selectedIncentives={selectedIncentives}
               onOpenIncentiveData={setIncentiveDataModal}
-              filterText={filterText}
               airlineFilter={activeBulkAirline}
               selectedRows={selectedRows}
               onToggleRow={handleToggleRow}
               onToggleAllFiltered={handleToggleAllFiltered}
               entityOptions={stepEntityOptions}
               lockedCols={lockedPartyCols}
+              vendorChoices={multiVendor?vendorChoices:undefined}
+              entityOptionsFor={multiVendor?rowEntityOptions:undefined}
+              rowFilter={sourceFilter||unreadActive?rowPassesFilters:undefined}
             />
           </div>
 

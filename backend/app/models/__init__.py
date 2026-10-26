@@ -33,7 +33,7 @@ from app.models.billing import Billing
 from app.models.uploaded_ticket import UploadedTicket
 from app.models.ticket_statement import TicketStatement
 from app.models.internal_ticket import InternalTicketStatement, InternalUploadedTicket
-# Vendors → Reconciliation → GDS ↔ Internal: what the user decided on a line that disagrees.
+# Vendor Reconciliation → Third Party GDS: what the user decided on a line that disagrees.
 from app.models.vendor_internal_recon import VendorInternalResolution
 from app.models.customer_statement import CustomerStatement, CustomerStatementTicket
 from app.models.income_summary import IncomeSummary
@@ -43,7 +43,7 @@ from app.models.airline_adjustment import AirlineADM, AirlineACM, AirlineRA, ADJ
 from app.models.third_party_statement import ThirdPartyStatement
 from app.models.statement_row import (
     TgqHmpr, Ndc, LccDi, LccDividedPnr, LccFlownReport, LccCtaBta,
-    ThirdPartyGds, ThirdPartyLcc, ThirdPartyApi, MidOfficeGds, STATEMENT_MODELS,
+    ThirdPartyGds, ThirdPartyGdsLeftOut, ThirdPartyLcc, ThirdPartyApi, MidOfficeGds, STATEMENT_MODELS,
 )
 from app.models.lcc_detailed import LccDetailed, LccDetailedBatch
 from app.models.lcc_detailed_batch_file import LccDetailedBatchFile
@@ -52,6 +52,7 @@ from app.models.commission_calculation import CommissionCalculation
 from app.models.commission_run import CommissionRun
 from app.models.income_board import IncomeBoardRow
 from app.models.statement_batch_supplier import StatementBatchSupplier
+from app.models.statement_column_mapping import StatementColumnMapping
 from app.models.statement_batch_billing import StatementBatchBilling
 from app.models.statement_batch_airline_id import StatementBatchAirlineId
 from app.models.bsp_statement import BspStatement, BspStatementRow, BspTaxBreakup, BspParseError
@@ -147,9 +148,9 @@ __all__ = [
     "AirlineADM", "AirlineACM", "AirlineRA", "ADJUSTMENT_MODELS",
     "TgqHmpr", "Ndc", "LccDi", "LccDividedPnr", "LccFlownReport", "LccCtaBta",
     "ThirdPartyStatement",
-    "ThirdPartyGds", "ThirdPartyLcc", "ThirdPartyApi", "MidOfficeGds", "STATEMENT_MODELS",
+    "ThirdPartyGds", "ThirdPartyGdsLeftOut", "ThirdPartyLcc", "ThirdPartyApi", "MidOfficeGds", "STATEMENT_MODELS",
     "LccDetailed", "LccDetailedBatch", "LccBatchAirlineId", "StatementBatchAirlineId",
-    "StatementBatchSupplier", "StatementBatchBilling",
+    "StatementBatchSupplier", "StatementBatchBilling", "StatementColumnMapping",
     "CommissionRun", "CommissionCalculation",
     "IncomeBoardRow",
     "BspStatement", "BspStatementRow", "BspTaxBreakup", "BspParseError",

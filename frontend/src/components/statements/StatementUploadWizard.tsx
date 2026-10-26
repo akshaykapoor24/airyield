@@ -59,7 +59,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   X, Upload, FileSpreadsheet, CheckCircle2, Loader2, Search, AlertTriangle,
   ArrowLeft, ArrowRight, Wand2, Eraser, PartyPopper, Pencil, RotateCcw, Filter,
-  Sparkles, CalendarRange, CalendarCheck, ClipboardCheck,
+  Sparkles, CalendarRange, CalendarCheck, ClipboardCheck, History,
 } from "lucide-react";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
@@ -67,7 +67,7 @@ import { notifyRequired } from "@/lib/requiredFields";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import StatementAgencyField, { agencyBlockReason, channelForApiBase } from "@/components/statements/StatementAgencyField";
 import { type VendorAgency, loadVendorAgencies } from "@/lib/vendorAgency";
-import { formatDay, formatPeriod, formatUploadedAt } from "@/lib/statementPeriod";
+import { formatDay, formatPeriod, formatUploadedAt, uploadedAtParts } from "@/lib/statementPeriod";
 import {
   type DateField, type DateFormats, type DateOrder, type DatesRead, type DetectedFormat,
   DateFormatSection, DatesReadList, orderLabel, useDateFormats,
@@ -75,7 +75,10 @@ import {
 
 type Step = "upload" | "mapping" | "review" | "done";
 
-type StdCol = { header: string; field: string; group: string };
+/** `fills` — what fills the field when the file does not have it, once one of `from` is
+ *  mapped (Third Party GDS: the Airline Master, or a calculated total). Shown in place of
+ *  "not in file" so nobody hunts for a column whose value is coming anyway. */
+type StdCol = { header: string; field: string; group: string; fills?: { label: string; from: string[] } };
 type StdGroup = { group: string; columns: StdCol[] };
 type FieldGroup = { label: string; fields: string[]; headers: string; consequence?: string };
 /** Rows this type discards on content rather than importing — NDC's unpaid holds and free
@@ -128,6 +131,24 @@ type ExtractResp = {
   /** Third Party GDS: Excel dates stored with day and month swapped ("01-08-2026" typed
    *  day-first, kept as 8 Jan), put back in the declared format. Null when none. */
   date_fix?: DateFixInfo | null;
+  /** The mapping a statement was last SAVED with, when `suggested_mapping` is it — whose,
+   *  from which file (services/saved_mapping.py). Null when the mapping is by name. */
+  remembered_mapping?: RememberedMapping | null;
+  /** The alias map's own answer — "Map by column names instead". */
+  name_mapping?: Record<string, string>;
+};
+
+/** vendor: this vendor, same columns · vendor_changed: this vendor, columns since changed —
+ *  kept where they still are · layout: another vendor's (or the last) file with these exact
+ *  columns. */
+type RememberedMapping = {
+  match: "vendor" | "vendor_changed" | "layout";
+  vendor_name: string | null;
+  source_file: string | null;
+  saved_at: string | null;
+  fields: number;
+  new_columns: string[];
+  gone_columns: string[];
 };
 
 type DateFixInfo = {
@@ -529,18 +550,62 @@ function DateFixNote({ fix, format }: { fix: DateFixInfo; format: string }) {
   );
 }
 
+/** Said on the mapping step in place of the name-match note when the mapping opened with is
+ *  one a statement was saved with (services/saved_mapping.py) — whose, from which file, and
+ *  what changed since. `onByName` drops it for the alias map's answer. */
+function RememberedNote({ info, unused, onByName }: {
+  info: RememberedMapping; unused: string[]; onByName: () => void;
+}) {
+  const from = [info.source_file, uploadedAtParts(info.saved_at)?.date].filter(Boolean).join(", ");
+  const whose = info.vendor_name ?? "your last upload";
+  const changed = info.match === "vendor_changed";
+  return (
+    <div className={`flex items-start gap-2 px-3 py-2 mb-3 rounded-xl border text-xs ${
+      changed || info.match === "layout"
+        ? "border-sky-200 bg-sky-50 text-sky-800"
+        : "border-emerald-200 bg-emerald-50 text-emerald-800"}`}>
+      <History className="w-4 h-4 shrink-0 mt-px" />
+      <span className="flex-1">
+        {info.match === "vendor" && (
+          <><strong>Mapping remembered from {whose}&apos;s last statement</strong>{from && <> ({from})</>} —{" "}
+            {info.fields} field{info.fields === 1 ? "" : "s"} mapped exactly as you saved it. Check it, then continue.</>
+        )}
+        {changed && (
+          <><strong>{whose}&apos;s columns have changed since {from || "the last statement"}.</strong>{" "}
+            The remembered mapping is kept for the columns still in the file
+            {info.new_columns.length > 0 && <>; new in this file: {info.new_columns.join(", ")}</>}
+            {info.gone_columns.length > 0 && <>; no longer in it: {info.gone_columns.join(", ")}</>}. Check those.</>
+        )}
+        {info.match === "layout" && (
+          <><strong>Same columns as {info.vendor_name ? `${info.vendor_name}'s statement` : "an earlier statement"}</strong>
+            {from && <> ({from})</>} — its mapping is applied. Check it, then continue.</>
+        )}
+        {unused.length > 0 && <> Not imported: {unused.join(", ")}.</>}
+      </span>
+      <button type="button" onClick={onByName}
+        className="shrink-0 underline underline-offset-2 hover:no-underline">
+        Map by column names instead
+      </button>
+    </div>
+  );
+}
+
 /** What the review grid can be narrowed to — one per count on the Statement check. */
-type GridFilter = "all" | DupKind | "new" | "before" | "after" | "unparsed" | "edited";
+type GridFilter = "all" | DupKind | "new" | "before" | "after" | "unparsed" | "multi" | "edited";
+/** What a row can be flagged for — each a tile of the Statement check. */
+type Flag = DupKind | "before" | "after" | "unparsed";
 
 const FILTER_LABEL: Record<GridFilter, string> = {
   all: "All entries", exact: "Already uploaded", partial: "Partial dup.", in_file: "Repeated in file",
-  new: "New", before: "Before period", after: "After period", unparsed: "Not read", edited: "Edited",
+  new: "New", before: "Before period", after: "After period", unparsed: "Not read",
+  multi: "Multiple flags", edited: "Edited",
 };
 
 const TILE_TONE = {
   slate:   { text: "text-slate-800",   on: "border-slate-400 bg-slate-50 ring-1 ring-slate-300" },
   emerald: { text: "text-emerald-700", on: "border-emerald-300 bg-emerald-50 ring-1 ring-emerald-300" },
   rose:    { text: "text-rose-700",    on: "border-rose-300 bg-rose-50 ring-1 ring-rose-300" },
+  red:     { text: "text-red-700",     on: "border-red-300 bg-red-50 ring-1 ring-red-300" },
   orange:  { text: "text-orange-700",  on: "border-orange-300 bg-orange-50 ring-1 ring-orange-300" },
   amber:   { text: "text-amber-700",   on: "border-amber-300 bg-amber-50 ring-1 ring-amber-300" },
   fuchsia: { text: "text-fuchsia-700", on: "border-fuchsia-300 bg-fuchsia-50 ring-1 ring-fuchsia-300" },
@@ -560,9 +625,11 @@ const DIFF_COLUMNS: Record<string, string[]> = {
 };
 
 /** One count on the Statement check, and the filter it puts on the grid below. */
-function Tile({ label, hint, value, tone, active, onClick, title }: {
+function Tile({ label, hint, value, tone, active, onClick, title, moved }: {
   label: string; hint: string; value: number | null; tone: keyof typeof TILE_TONE;
   active: boolean; onClick: () => void; title: string;
+  /** Rows of this bucket counted under another tile ("+1 in multiple"). */
+  moved?: string;
 }) {
   const none = value === 0;
   return (
@@ -572,9 +639,10 @@ function Tile({ label, hint, value, tone, active, onClick, title }: {
           : none ? "border-slate-200 bg-white cursor-default"
           : "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50"}`}>
       <span className="block text-[10px] font-semibold uppercase tracking-wide text-slate-500 truncate">{label}</span>
-      <span className={`block text-lg font-bold leading-tight tabular-nums ${
+      <span className={`flex items-baseline gap-1.5 text-lg font-bold leading-tight tabular-nums ${
         none || value == null ? "text-slate-300" : TILE_TONE[tone].text}`}>
         {value == null ? "—" : value.toLocaleString("en-IN")}
+        {moved && <span className="text-[10px] font-medium text-slate-400 truncate">{moved}</span>}
       </span>
       <span className="block text-[10px] text-slate-400 truncate">{hint}</span>
     </button>
@@ -595,9 +663,12 @@ const NOTE_STYLE: Record<CheckNote["tone"], { cls: string; Icon: typeof CheckCir
  *  do with it — each count a filter on the grid below — what to do with each bucket of
  *  duplicates (`children`), how its dates read, in which format (changeable here; the check
  *  runs again), and the few things that need a look. */
-function ReviewSummary({ counts, hints, balanceLines, filter, onFilter, periodLabel, busy, dates, formats,
+function ReviewSummary({ counts, moved, hints, balanceLines, filter, onFilter, periodLabel, busy, dates, formats,
   onFormat, notes, children }: {
+  /** One tile per entry: the tiles but Edited add up to All entries. */
   counts: Record<GridFilter, number | null>;
+  /** A bucket's rows counted under another tile, said on its tile. */
+  moved: Partial<Record<GridFilter, string>>;
   /** What Save does with each bucket of duplicates, as chosen — the tile's second line. */
   hints: Record<DupKind, string>;
   balanceLines: number;
@@ -611,24 +682,28 @@ function ReviewSummary({ counts, hints, balanceLines, filter, onFilter, periodLa
   notes: CheckNote[];
   children?: ReactNode;
 }) {
+  // Each entry is counted once: a ticket with a second flag is under Multiple flags only.
+  const once = " A ticket with another flag as well is counted under Multiple flags instead.";
   const tiles: { key: GridFilter; hint: string; tone: keyof typeof TILE_TONE; title: string }[] = [
     { key: "all", tone: "slate",
       hint: balanceLines ? `+ ${balanceLines} balance line${balanceLines === 1 ? "" : "s"}` : "in this statement",
-      title: "Every ticket line in the file. The statement's own OLD / BALANCE lines are not entries." },
+      title: "Every ticket line in the file — the counts beside it (Edited apart) add up to it, each ticket counted once. The statement's own OLD / BALANCE lines are not entries." },
     { key: "exact", tone: DUP_TONE.exact.tile, hint: hints.exact,
-      title: "Exactly the same as a line already saved for this agency, in any earlier statement — same ticket, status, passenger, booked date, issue date, basic fare and net amount. Not saved again unless you choose to." },
+      title: "Exactly the same as a line already saved for this agency, in any earlier statement — same ticket, status, passenger, booked date, issue date, basic fare and net amount. Not saved again unless you choose to." + once },
     { key: "partial", tone: DUP_TONE.partial.tile, hint: hints.partial,
-      title: "The same ticket and status as a line already saved for this agency, but the passenger, a date or an amount changed. Saved and flagged unless you leave it out; the changed cells are outlined." },
+      title: "The same ticket and status as a line already saved for this agency, but the passenger, a date or an amount changed. Saved and flagged unless you leave it out; the changed cells are outlined." + once },
     { key: "in_file", tone: DUP_TONE.in_file.tile, hint: hints.in_file,
-      title: "The same ticket and status as an earlier row of this very file. Saved and flagged unless you leave it out." },
+      title: "The same ticket and status as an earlier row of this very file. Saved and flagged unless you leave it out." + once },
     { key: "new", tone: "emerald", hint: "will be saved",
-      title: "Lines no statement of this agency holds yet." },
+      title: "Lines no statement of this agency holds yet, with nothing else to check. A new line dated outside the period, or with a value not read, is counted under that flag." },
     { key: "before", tone: "rose", hint: "Booked / Issue Date",
-      title: `Tickets whose Booked Date or Issue Date is before ${periodLabel} — often a refund or reissue of an older ticket. Saved with this statement; check them.` },
+      title: `Tickets whose Booked Date or Issue Date is before ${periodLabel} — often a refund or reissue of an older ticket. Saved with this statement; check them.` + once },
     { key: "after", tone: "rose", hint: "Booked / Issue Date",
-      title: `Tickets whose Booked Date or Issue Date is after ${periodLabel} — often a late posting, or the wrong period. Saved with this statement; check them.` },
+      title: `Tickets whose Booked Date or Issue Date is after ${periodLabel} — often a late posting, or the wrong period. Saved with this statement; check them.` + once },
     { key: "unparsed", tone: "orange", hint: "a value didn't fit its field",
-      title: "Rows with a date that doesn't fit its column's format, or text where an amount belongs. That value is saved empty unless you correct it." },
+      title: "Rows with a date that doesn't fit its column's format, or text where an amount belongs. That value is saved empty unless you correct it." + once },
+    { key: "multi", tone: "red", hint: "2+ flags on one ticket",
+      title: "Tickets under two or more flags — Already uploaded, Partial dup., Repeated in file, Before period, After period, Not read — for example a partial duplicate also dated after the period. Counted here only, not under each flag, so the counts add up to All entries. Check these first." },
     { key: "edited", tone: "slate", hint: "rows you corrected",
       title: "Rows you changed on this step." },
   ];
@@ -648,10 +723,10 @@ function ReviewSummary({ counts, hints, balanceLines, filter, onFilter, periodLa
         )}
       </div>
       <div className="p-3 space-y-3">
-        <div className="grid gap-2 grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 2xl:grid-cols-9">
+        <div className="grid gap-2 grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 2xl:grid-cols-10">
           {tiles.map((t) => (
             <Tile key={t.key} label={FILTER_LABEL[t.key]} hint={t.hint} tone={t.tone} title={t.title}
-              value={counts[t.key]} active={filter === t.key}
+              value={counts[t.key]} moved={moved[t.key]} active={filter === t.key}
               onClick={() => onFilter(filter === t.key ? "all" : t.key)} />
           ))}
         </div>
@@ -1032,6 +1107,10 @@ export default function StatementUploadWizard({
           fd.append("period_from", from);
           fd.append("period_to", to);
         }
+        // The vendor's remembered mapping names the date columns of a layout the column
+        // names alone do not (TripJack's "Posting Date").
+        if (supplierId != null) fd.append("supplier_id", String(supplierId));
+        if (agencyKey != null) fd.append("agency_id", String(agencyKey));
         const { data } = await api.post<{ fields: DetectedFormat[] }>(`${apiBase}/detect-date-formats`, fd);
         if (seq !== detectSeq.current) return;
         setDetected({ file, byField: Object.fromEntries(data.fields.map((d) => [d.field, d])) });
@@ -1042,7 +1121,7 @@ export default function StatementUploadWizard({
       }
     }, 300);
     return () => clearTimeout(timer);
-  }, [apiBase, dateFields, file, detectPeriod]);
+  }, [apiBase, dateFields, file, detectPeriod, supplierId, agencyKey]);
 
   const fileDetection = detected && detected.file === file ? detected.byField : null;
   const lastFormats = lastUpload && lastUpload.agencyKey === agencyKey ? lastUpload.formats : null;
@@ -1182,6 +1261,14 @@ export default function StatementUploadWizard({
     return Object.entries(seen).filter(([, fs]) => fs.length > 1);
   }, [columnMap]);
 
+  /** The file's columns some field is mapped to. A dropdown offers only the columns NOT in
+   *  here (plus its own), so what is still listed is exactly what is left to map. */
+  const usedColumns = useMemo(() => new Set(Object.values(columnMap).filter(Boolean)), [columnMap]);
+  /** The file's columns no field is mapped to — what Save will not import. */
+  const unusedColumns = useMemo(
+    () => (extracted?.columns ?? []).filter((c) => !usedColumns.has(c)),
+    [extracted, usedColumns]);
+
   // ── Review ────────────────────────────────────────────────────────────────
   // The fields worth showing: those a column was mapped onto, plus those the AI filled from
   // the narration. The second half is not cosmetic — an AI-filled field like `train_name`
@@ -1289,15 +1376,29 @@ export default function StatementUploadWizard({
   // a date corrected into the period drops out of "After period" at the next check — and an
   // emptied filter says so rather than falling back to every row.
   const sides = (i: number): OutsideSide[] => (willSave(i) ? Object.values(outsideRows.get(i) ?? {}) : []);
+  /** The flags a row carries: its duplicate kind, and — only on a row Save writes, since a row
+   *  left out needs no look — Before / After period and Not read. Never Edited, which is the
+   *  user's own correction. */
+  const rowFlags = (i: number): Flag[] => {
+    const kind = dupRows.get(i)?.kind;
+    const side = sides(i);
+    return [
+      ...(kind ? [kind] : []),
+      ...(["before", "after"] as const).filter((s) => side.includes(s)),
+      ...(willSave(i) && unparsedRows.has(i) ? ["unparsed" as const] : []),
+    ];
+  };
+  /** The one tile a row is counted under, so the tiles add up to All entries: New with no
+   *  flag, its flag's tile with one, Multiple flags with two or more. */
+  const rowTile = (i: number): Flag | "new" | "multi" => {
+    const f = rowFlags(i);
+    return f.length === 0 ? "new" : f.length === 1 ? f[0] : "multi";
+  };
   const inFilter = (i: number): boolean => {
     switch (gridFilter) {
-      case "exact": case "partial": case "in_file": return dupRows.get(i)?.kind === gridFilter;
-      case "new": return !dupRows.has(i) && !balanceRows.has(i);
-      case "before": return sides(i).includes("before");
-      case "after": return sides(i).includes("after");
-      case "unparsed": return unparsedRows.has(i);
+      case "all": return true;
       case "edited": return !!edits[i];
-      default: return true;
+      default: return !balanceRows.has(i) && rowTile(i) === gridFilter;
     }
   };
   // A row ticked out of the save leaves Before / After at once, like a date corrected into
@@ -1307,19 +1408,42 @@ export default function StatementUploadWizard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [rows, gridFilter, dupRows, balanceRows, outsideRows, unparsedRows, edits, dupChoices, rowChoices]);
   const pickFilter = (f: GridFilter) => { setGridFilter(f); setPage(0); };
-  const sideCount = (side: OutsideSide) =>
-    outsideSaved.filter((r) => Object.values(r.outside).includes(side)).length;
+  // Each entry under exactly one tile — over the whole file, off the preview's marks (the grid
+  // holds only the file's first rows). A row with no mark has no flag: it is New.
+  const tiles = (() => {
+    const n: Record<Flag | "multi", number> = { exact: 0, partial: 0, in_file: 0, before: 0, after: 0, unparsed: 0, multi: 0 };
+    let flagged = 0;
+    for (const i of new Set([...dupRows.keys(), ...outsideRows.keys(), ...unparsedRows.keys()])) {
+      const t = rowTile(i);
+      if (t === "new") continue;
+      flagged++;
+      n[t]++;
+    }
+    return { ...n, new: savePreview ? savePreview.total - flagged : 0 };
+  })();
   const checkCounts: Record<GridFilter, number | null> = {
     all: savePreview ? savePreview.total : null,
-    exact: savePreview ? savePreview.counts.exact : null,
-    partial: savePreview ? savePreview.counts.partial : null,
-    in_file: savePreview ? savePreview.counts.in_file : null,
-    new: savePreview ? savePreview.counts.new : null,
-    before: outsidePeriod ? sideCount("before") : null,
-    after: outsidePeriod ? sideCount("after") : null,
-    unparsed: savePreview ? savePreview.unparsed_rows?.length ?? 0 : null,
+    exact: savePreview ? tiles.exact : null,
+    partial: savePreview ? tiles.partial : null,
+    in_file: savePreview ? tiles.in_file : null,
+    new: savePreview ? tiles.new : null,
+    before: savePreview ? tiles.before : null,
+    after: savePreview ? tiles.after : null,
+    unparsed: savePreview ? tiles.unparsed : null,
+    multi: savePreview ? tiles.multi : null,
     edited: editedRowCount,
   };
+  // A bucket's rows counted under another tile — a duplicate with a second flag is under
+  // Multiple flags; a new line with a flag, under that flag. Said on the bucket's tile.
+  const movedOut: Partial<Record<GridFilter, string>> = {};
+  if (savePreview) {
+    for (const k of DUP_KINDS) {
+      const m = savePreview.counts[k] - tiles[k];
+      if (m > 0) movedOut[k] = `+${m} in multiple`;
+    }
+    const m = savePreview.counts.new - tiles.new;
+    if (m > 0) movedOut.new = `+${m} flagged`;
+  }
   /** A duplicate tile's second line: what Save does with the bucket as chosen. */
   const dupHint = (k: DupKind): string => {
     const n = savePreview?.counts[k] ?? 0;
@@ -1684,6 +1808,10 @@ export default function StatementUploadWizard({
                 </div>
               )}
               {dateFix && <DateFixNote fix={dateFix} format={orderLabel(dateFormats.booking_date)} />}
+              {extracted.remembered_mapping ? (
+                <RememberedNote info={extracted.remembered_mapping} unused={unusedColumns}
+                  onByName={() => setColumnMap(extracted.name_mapping || {})} />
+              ) : (
               <div className={`flex items-start gap-2 px-3 py-2 mb-3 rounded-xl border text-xs ${
                 extracted.is_template_match || extracted.matched_columns >= extracted.columns.length
                   ? "border-emerald-200 bg-emerald-50 text-emerald-800"
@@ -1703,11 +1831,17 @@ export default function StatementUploadWizard({
                       in this export.</>
                   ) : (
                     <><strong>{extracted.matched_columns} of {extracted.columns.length} columns
-                      were recognised by name.</strong> Map the rest below — anything left as
-                      <em> not in file</em> isn&apos;t imported.</>
+                      were recognised by name.</strong>{" "}
+                      {unusedColumns.length > 0 ? (
+                        <>Not a standard field, so not imported: {unusedColumns.join(", ")}. Map any
+                          of them below if it belongs to one.</>
+                      ) : (
+                        <>Map the rest below — anything left as <em>not in file</em> isn&apos;t imported.</>
+                      )}</>
                   )}
                 </span>
               </div>
+              )}
 
               {missingRequired.length > 0 && (
                 <div className="flex items-start gap-2 px-3 py-2.5 mb-3 rounded-xl border border-red-200 bg-red-50 text-xs text-red-700">
@@ -1757,8 +1891,17 @@ export default function StatementUploadWizard({
                 </button>
                 <span className="ml-auto text-[11px] text-slate-400">
                   {mappedCount} of {std?.total ?? 0} fields mapped
+                  {" · "}{unusedColumns.length
+                    ? `${unusedColumns.length} of ${extracted.columns.length} file columns left`
+                    : "every file column used"}
                 </span>
               </div>
+              <p className="flex items-center gap-1.5 -mt-1 mb-3 text-[11px] text-slate-400">
+                <History className="w-3 h-3 shrink-0" />
+                This mapping is remembered when you save —{" "}
+                {extracted.supplier_name ? `${extracted.supplier_name}'s next file` : "the next file with these columns"}{" "}
+                opens already mapped.
+              </p>
 
               <div className="space-y-4">
                 {filteredGroups.map((g) => (
@@ -1767,6 +1910,7 @@ export default function StatementUploadWizard({
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                       {g.columns.map((c) => {
                         const required = (std?.required ?? []).some((r) => r.fields.includes(c.field));
+                        const filled = !columnMap[c.field] && c.fills?.from.some((f) => columnMap[f]);
                         return (
                           <div key={c.field} className="flex items-center gap-2">
                             <label className="text-xs text-slate-600 w-40 shrink-0 truncate" title={c.field}>
@@ -1777,12 +1921,15 @@ export default function StatementUploadWizard({
                               value={columnMap[c.field] ?? SKIP}
                               onChange={(e) => setMap(c.field, e.target.value)}
                               className={`flex-1 min-w-0 border rounded-lg px-2 py-1.5 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 ${
-                                columnMap[c.field] ? "border-slate-200 text-slate-700" : "border-slate-200 text-slate-400"}`}
+                                columnMap[c.field] ? "border-slate-200 text-slate-700"
+                                  : filled ? "border-emerald-200 text-emerald-700" : "border-slate-200 text-slate-400"}`}
                             >
-                              <option value={SKIP}>— not in file —</option>
-                              {extracted.columns.map((col) => (
-                                <option key={col} value={col}>{col}</option>
-                              ))}
+                              <option value={SKIP}>{filled ? `— ${c.fills!.label} —` : "— not in file —"}</option>
+                              {extracted.columns
+                                .filter((col) => col === columnMap[c.field] || !usedColumns.has(col))
+                                .map((col) => (
+                                  <option key={col} value={col}>{col}</option>
+                                ))}
                             </select>
                           </div>
                         );
@@ -1800,7 +1947,7 @@ export default function StatementUploadWizard({
               {/* Third Party GDS: one box — the counts, each a filter on the grid below; how
                   the dates read, in which format; and the few things that need a look. */}
               {capturesPeriod && (
-                <ReviewSummary counts={checkCounts} balanceLines={savePreview?.balance_lines ?? 0}
+                <ReviewSummary counts={checkCounts} moved={movedOut} balanceLines={savePreview?.balance_lines ?? 0}
                   hints={{ exact: dupHint("exact"), partial: dupHint("partial"), in_file: dupHint("in_file") }}
                   filter={gridFilter} onFilter={pickFilter} periodLabel={periodText}
                   busy={previewBusy} dates={savePreview?.dates ?? []} formats={dateFormats}
@@ -1991,9 +2138,8 @@ export default function StatementUploadWizard({
                                   skipped || leftOut ? "bg-slate-50/80 opacity-60"
                                     : outside ? "bg-rose-50/40 hover:bg-rose-50/70" : "hover:bg-slate-50/60"}`}
                                 title={skipped ? "Not imported — see the note above."
-                                  : dupNote ? dupNote
-                                  : outside ? `Dated outside the statement period (${outsidePeriod?.period_label}) — check it before saving.`
-                                  : undefined}>
+                                  : [dupNote, outside ? `Dated outside the statement period (${outsidePeriod?.period_label}) — check it before saving.` : null]
+                                    .filter(Boolean).join(" ") || undefined}>
                               <td className="px-2 py-1 text-slate-400 tabular-nums whitespace-nowrap">
                                 <span className="inline-flex items-center gap-1">
                                   {dup && (

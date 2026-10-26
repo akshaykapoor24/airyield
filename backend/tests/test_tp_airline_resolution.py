@@ -23,6 +23,7 @@ from app.services.tp_airline_resolution import (  # noqa: E402
     BY_PREFIX,
     TpAirlineIndex,
     normalize_prefix,
+    numeric_code,
     resolve_tp_airline,
     stamp,
 )
@@ -33,7 +34,7 @@ def make_index(rows, ambiguous_names=()):
     """rows: [(id, numeric, iata, name)] — a stand-in for the airline master."""
     by_numeric, by_code, by_name_key = {}, {}, {}
     for pk, numeric, iata, name in rows:
-        value = (pk, iata, name)
+        value = (pk, iata, name, numeric)
         by_numeric[numeric] = value
         by_code[iata] = value
         by_name_key[airline_match_key(name)] = value
@@ -48,6 +49,9 @@ MASTER = make_index([
     (3, "157", "QR", "Qatar Airways"),
     (4, "607", "EY", "Etihad Airways"),
     (5, "098", "AI", "Air India"),
+    (6, "465", "KC", "Air Astana"),
+    (7, "006", "DL", "Delta Air Lines"),
+    (8, "312", "6E", "IndiGo"),
 ])
 
 
@@ -171,6 +175,61 @@ class TestStamp(unittest.TestCase):
         data = {"airline_name": "MYSTERY AIR"}
         self.assertFalse(stamp(data, resolve_tp_airline(None, None, "MYSTERY AIR", MASTER)))
         self.assertEqual(data, {"airline_name": "MYSTERY AIR"})
+
+
+
+class TestNumericAirlineCode(unittest.TestCase):
+    """TripJack prints the 3-digit accounting code in the column mapped to Airline Code."""
+
+    def test_a_numeric_code_resolves_like_a_prefix(self):
+        m = resolve_tp_airline(None, "465", None, MASTER)
+        self.assertEqual((m.name, m.iata_code, m.source), ("Air Astana", "KC", BY_CODE))
+
+    def test_only_a_cell_of_digits_is_numeric(self):
+        self.assertEqual(numeric_code(" 98 "), "098")
+        self.assertIsNone(numeric_code("6E"))           # IndiGo, not 006 Delta
+        self.assertIsNone(numeric_code("5809142100"))   # a ticket number
+        self.assertEqual(resolve_tp_airline(None, "6E", None, MASTER).name, "IndiGo")
+
+    def test_the_name_is_filled_and_the_code_becomes_the_designator(self):
+        data = {"airline_code": "465"}
+        stamp(data, resolve_tp_airline(None, data["airline_code"], None, MASTER))
+        self.assertEqual(data["airline_name"], "Air Astana")
+        self.assertEqual(data["airline_code"], "KC")
+        self.assertEqual(data["ticket_prefix"], "465")     # kept, where it belongs
+
+    def test_a_printed_ticket_prefix_is_not_overwritten(self):
+        data = {"airline_code": "465", "ticket_prefix": "0465"}
+        stamp(data, resolve_tp_airline(data["ticket_prefix"], data["airline_code"], None, MASTER))
+        self.assertEqual((data["ticket_prefix"], data["airline_code"]), ("0465", "KC"))
+
+    def test_an_unknown_number_is_left_as_printed(self):
+        data = {"airline_code": "239"}
+        self.assertFalse(stamp(data, resolve_tp_airline(None, "239", None, MASTER)))
+        self.assertEqual(data, {"airline_code": "239"})
+
+
+
+class TestAnyOneFillsTheOtherTwo(unittest.TestCase):
+    """Airline Name, Airline Code and Ticket Prefix: map one, the master fills the rest."""
+
+    def fill(self, **data):
+        stamp(data, resolve_tp_airline(data.get("ticket_prefix"), data.get("airline_code"),
+                                       data.get("airline_name"), MASTER))
+        return data["airline_name"], data["airline_code"], data["ticket_prefix"]
+
+    def test_from_the_name(self):
+        self.assertEqual(self.fill(airline_name="AIR INDIA"), ("AIR INDIA", "AI", "098"))
+
+    def test_from_the_code(self):
+        self.assertEqual(self.fill(airline_code="AI"), ("Air India", "AI", "098"))
+
+    def test_from_the_prefix(self):
+        self.assertEqual(self.fill(ticket_prefix="98"), ("Air India", "AI", "98"))
+
+    def test_what_the_file_prints_is_kept(self):
+        self.assertEqual(self.fill(airline_name="AIR INDIA LTD", airline_code="AI", ticket_prefix="098"),
+                         ("AIR INDIA LTD", "AI", "098"))
 
 
 if __name__ == "__main__":

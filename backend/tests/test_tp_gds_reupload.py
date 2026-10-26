@@ -28,7 +28,7 @@ from fastapi import HTTPException  # noqa: E402
 from sqlalchemy.dialects import postgresql  # noqa: E402
 
 from app.api.v1 import statements as router  # noqa: E402
-from app.models.statement_row import ThirdPartyGds  # noqa: E402
+from app.models.statement_row import ThirdPartyGds, ThirdPartyGdsLeftOut  # noqa: E402
 from app.models.third_party_statement import ThirdPartyStatement  # noqa: E402
 from app.services import tp_gds_reupload as ru  # noqa: E402
 
@@ -36,6 +36,10 @@ VERSIONS = Path(__file__).resolve().parents[1] / "alembic" / "versions"
 DEDUP_MIGRATION = VERSIONS / "tp_gds_dedup_01_line_keys.py"
 PERIOD_MIGRATION = VERSIONS / "tp_gds_period_01_statement_period.py"
 DUPES_MIGRATION = VERSIONS / "tp_gds_dupes_02_partial_and_in_file.py"
+LEFT_OUT_MIGRATION = VERSIONS / "tp_gds_left_out_01_left_out_lines.py"
+STD_MIGRATION = VERSIONS / "tp_gds_std_01_tax_parts.py"
+STD_02_MIGRATION = VERSIONS / "tp_gds_std_02_ssr_gst_parts.py"
+STD_03_MIGRATION = VERSIONS / "tp_gds_std_03_refund.py"
 
 USER = SimpleNamespace(id=7, tenant_id=3, full_name="Test User")
 AGENCY = SimpleNamespace(id=751, agency_id=28)          # Globe Air Travels, SUPP-0751
@@ -633,6 +637,72 @@ class WriteTests(unittest.TestCase):
         obj.data = {**ISSUE, "net_amount": "1"}           # a cell edit rewrites every field…
         self.assertEqual(obj.duplicate_kind, "partial")   # …and leaves the flag
 
+    def test_the_left_out_lines_are_kept_after_the_saved_ones_are_flushed(self):
+        s = screen([ISSUE, ticket(1), BALANCE], saved_from([ISSUE]))
+        d = s.decide()
+        db = FakeDB()
+        asyncio.run(router._write_lines(
+            db, "tp-gds", USER, d.kept, batch_id="b-2", source_file="WEEK 1 v2.xlsx",
+            file_url=None, uploaded_at=datetime(2026, 8, 15, 11, 0), period=WEEK1, decision=d, screen=s))
+        self.assertEqual([k for k, _ in db.log], ["add", "flush", "add_all", "flush", "add_all"])
+        kept = db.log[4][1]
+        self.assertEqual([type(r) for r in kept], [ThirdPartyGdsLeftOut])
+        self.assertEqual((kept[0].batch_id, kept[0].tenant_id, kept[0].created_by_id, kept[0].kind),
+                         ("b-2", 3, 7, "exact"))
+
+    def test_nothing_left_out_writes_nothing_more(self):
+        s = screen([ticket(1)])
+        d = s.decide()
+        db = FakeDB()
+        asyncio.run(router._write_lines(
+            db, "tp-gds", USER, d.kept, batch_id="b-1", source_file="f.xlsx", file_url=None,
+            uploaded_at=datetime(2026, 8, 7), period=WEEK1, decision=d, screen=s))
+        self.assertEqual([k for k, _ in db.log], ["add", "flush", "add_all"])
+
+
+class LeftOutTests(unittest.TestCase):
+    """Each line an upload leaves out is kept, as its file had it, with the saved line it repeats."""
+
+    def _flushed(self, d: ru.Decision, first_id: int = 500) -> None:
+        for n, obj in enumerate(d.kept):
+            obj.id = first_id + n
+
+    def test_each_left_out_line_points_at_the_saved_line_it_repeats(self):
+        saved = saved_from([ISSUE])
+        # ISSUE: already uploaded · ticket 1: new · ticket 1 again: repeats row 1, saved here ·
+        # ISSUE again: repeats row 0, which is itself left out — so the earlier upload's line.
+        s = screen([ISSUE, ticket(1), ticket(1), ISSUE], saved)
+        self.assertEqual(kinds(s), ["exact", "new", "in_file", "in_file"])
+        d = s.decide({"in_file": "skip"})
+        self._flushed(d)
+        rows = ru.left_out_rows(s, d, tenant_id=3, created_by_id=7, batch_id="b-2")
+        self.assertEqual([(r.file_row, r.kind, r.repeat_of_id) for r in rows],
+                         [(0, "exact", saved[0].id), (2, "in_file", 500), (3, "in_file", saved[0].id)])
+
+    def test_the_line_is_kept_exactly_as_the_file_had_it(self):
+        s = screen([{**ISSUE, "week": "08-15TH AUG 26", "airline_code": "TK"}], saved_from([ISSUE]))
+        d = s.decide()
+        [row] = ru.left_out_rows(s, d, tenant_id=3, created_by_id=7, batch_id="b-2")
+        self.assertEqual(row.data, s.lines[0].data)
+        self.assertEqual(row.data["week"], "08-15TH AUG 26")
+        self.assertEqual((row.dedup_key, row.match_key), (s.lines[0].dedup_key, s.lines[0].match_key))
+
+    def test_a_partial_left_out_says_what_changed(self):
+        saved = saved_from([ticket(1)])
+        s = screen([ticket(1, net_amount="999"), ticket(2)], saved)
+        d = s.decide({"partial": "skip"})
+        [row] = ru.left_out_rows(s, d, tenant_id=3, created_by_id=7, batch_id="b-2")
+        self.assertEqual((row.kind, row.differs, row.repeat_of_id), ("partial", "net_amount", saved[0].id))
+
+    def test_lines_saved_by_choice_are_not_kept_twice(self):
+        s = screen([ISSUE, ticket(1)], saved_from([ISSUE]))
+        d = s.decide({"exact": "save"})
+        self.assertEqual(ru.left_out_rows(s, d, tenant_id=3, created_by_id=7, batch_id="b-2"), [])
+
+    def test_the_kept_line_has_every_field_of_a_saved_one(self):
+        self.assertEqual({(f.key, f.kind) for f in ThirdPartyGdsLeftOut.data_fields()},
+                         {(f.key, f.kind) for f in ThirdPartyGds.data_fields()})
+
 
 class MigrationTests(unittest.TestCase):
     src = DUPES_MIGRATION.read_text(encoding="utf-8")
@@ -672,6 +742,35 @@ class MigrationTests(unittest.TestCase):
                       period)
         self.assertIn("op.create_index('ix_third_party_gds_dedup_key', _T, ['tenant_id', 'created_by_id', 'dedup_key'])",
                       self.src)
+
+
+class LeftOutMigrationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.src = LEFT_OUT_MIGRATION.read_text(encoding="utf-8")
+        cls.mig = _load(LEFT_OUT_MIGRATION, "tp_gds_left_out_01")
+
+    def test_chains_onto_the_previous_head_without_forking(self):
+        self.assertIn("down_revision: Union[str, None] = 'internal_dupes_01'", self.src)
+        siblings = [f.name for f in VERSIONS.glob("*.py") if f != LEFT_OUT_MIGRATION
+                    and "down_revision: Union[str, None] = 'internal_dupes_01'" in f.read_text(encoding="utf-8")]
+        self.assertEqual(siblings, [], "another migration also revises internal_dupes_01")
+
+    def test_creates_every_model_column(self):
+        frozen = {name for name, _key, _type in self.mig._COLUMNS}
+        # Added to both line tables later: YR, K3 and a derived Total Tax; then the SSR and GST
+        # parts, ADM, Discount, UATP Amount and Card Type; then Refund.
+        added = {name for name, _key, _type in _load(STD_MIGRATION, "tp_gds_std_01")._COLUMNS}
+        added |= {name for name, _key, _type in _load(STD_02_MIGRATION, "tp_gds_std_02")._COLUMNS}
+        added |= {name for name, _key, _type in _load(STD_03_MIGRATION, "tp_gds_std_03")._COLUMNS}
+        self.assertEqual(frozen | added, {f.attr for f in ThirdPartyGdsLeftOut.data_fields()})
+        own = set(ThirdPartyGdsLeftOut.__table__.c.keys()) - frozen - added
+        for col in own:
+            with self.subTest(column=col):
+                self.assertIn(f"sa.Column('{col}'", self.src)
+        self.assertIn("ck_third_party_gds_left_out_kind", self.src)
+        for col in ("tenant_id", "created_by_id", "batch_id", "repeat_of_id"):
+            self.assertIn(f"ix_third_party_gds_left_out_{col}", {ix.name for ix in ThirdPartyGdsLeftOut.__table__.indexes})
 
 
 if __name__ == "__main__":

@@ -333,7 +333,7 @@ export default function CustomerStatementUpload() {
       // is their answer, not ours.
       if (data.detected_from && !validFrom) setValidFrom(data.detected_from);
       if (data.detected_to && !validTo) setValidTo(data.detected_to);
-      setStep("mapping");
+      // Stay on this step: the user checks the statement details and presses Next.
     } catch (e: unknown) {
       const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
       setError(msg ?? "Failed to parse file. Please check the format.");
@@ -342,6 +342,19 @@ export default function CustomerStatementUpload() {
       setParsing(false);
     }
   }, [runExtract, validFrom, validTo]);
+
+  /** Back to the drop zone with the details kept. */
+  const changeFile = () => {
+    setPreview(null); setStoredFile(null); setMapping({}); setSheet(null); setHeaderRow(null);
+  };
+
+  /** "Next: map columns" — once the statement details are complete; the panel says what is missing. */
+  const startNext = () => {
+    setFormTouched(true);
+    if (!isStatementComplete) return;
+    setError(null);
+    setStep("mapping");
+  };
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
@@ -621,6 +634,30 @@ export default function CustomerStatementUpload() {
                 </button>
               </div>
 
+              {preview && storedFile ? (
+                <div className="bg-white rounded-xl border border-gray-200 p-6 space-y-4">
+                  <div className="flex items-center gap-3 rounded-lg border border-green-200 bg-green-50/50 p-3">
+                    <FileSpreadsheet className="w-8 h-8 text-green-600 shrink-0" />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-semibold text-gray-800 truncate" title={preview.file_name}>{preview.file_name}</p>
+                      <p className="text-xs text-gray-500">
+                        {preview.total_rows.toLocaleString("en-IN")} rows read{preview.sheet_name ? ` · sheet ${preview.sheet_name}` : ""}
+                      </p>
+                    </div>
+                    <button onClick={changeFile} className="text-xs text-gray-500 underline hover:text-red-600 shrink-0">Change file</button>
+                  </div>
+                  <p className="text-xs text-gray-500">
+                    Fill in the statement details on the left — who the tickets were sold to and the period
+                    {preview.detected_from ? " (filled in from the file where it says it)" : ""} — then press Next to map the columns.
+                  </p>
+                  <div className="flex justify-end">
+                    <button onClick={startNext}
+                      className="flex items-center gap-1.5 px-5 py-2 bg-[#1e3a5f] text-white rounded-lg text-sm font-semibold hover:bg-[#16304f] disabled:opacity-50">
+                      Next: map columns <ArrowRight className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              ) : (
               <div className="bg-white rounded-xl border border-gray-200 p-6">
                 <div
                   {...getRootProps()}
@@ -638,6 +675,7 @@ export default function CustomerStatementUpload() {
                   {!parsing && <p className="text-xs text-gray-400 mt-1">or click to browse</p>}
                 </div>
               </div>
+              )}
             </div>
           </div>{/* /right panel */}
         </div>

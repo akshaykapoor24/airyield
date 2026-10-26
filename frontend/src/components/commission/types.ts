@@ -181,6 +181,60 @@ export type CommissionRowsPage = {
   rows: CommissionRow[];
 };
 
+// ── A third-party statement, line by line (GET …/statements/{batch}/lines) ──────────────
+// Every ticket line of the consolidator's statement — calculated or not — with its own
+// columns, and what it earned. Mirrors schemas/commission.py CommissionLinesPage.
+
+/** What a card filters the table to. */
+export type LineBucket =
+  | "all" | "matched" | "unmatched" | "other" | "pending" | "statement" | "iata" | "expected"
+  | "difference";
+
+export type CommissionLineColumn = { field: string; header: string; kind?: string | null };
+
+export type CommissionLine = {
+  line_id: number;                       // the statement line — what a run's row_ids take
+  values: Record<string, string | number | null>;
+  kind: string;                          // issue | refund | skip
+  // The vendor's commission + incentive, + on a sale and − on a refund whatever sign it printed.
+  statement_commission: number | null;
+  expected_commission: number | null;    // null until a run reaches the line
+  difference: number | null;             // expected − statement; + means they owe you
+  net_ok: boolean | null;                // did the vendor's own figures add up
+  // The matched deal's IATA % as written ("3"), and what it came to on the basic fare.
+  iata_pct: string | null;
+  iata_commission: number | null;
+  calc: CommissionRow | null;
+};
+
+export type CommissionLineTotals = {
+  tickets: number;
+  matched: number;
+  unmatched: number;
+  other: number;
+  pending: number;
+  statement_commission: number;          // over calculated lines, so the three add up
+  statement_pending: number;
+  expected_commission: number;           // = incentive + iata_commission
+  incentive: number;
+  iata_commission: number;
+  with_iata: number;                     // lines that earned any IATA commission
+  difference: number;
+  differing: number;
+  unverified: number;
+};
+
+export type CommissionLinesPage = {
+  columns: CommissionLineColumn[];
+  rows: CommissionLine[];
+  total: number;
+  offset: number;
+  limit: number;
+  totals: CommissionLineTotals;
+  airlines: string[];
+  invoice_types: string[];
+};
+
 export type CommissionSummary = {
   airlines: {
     airline: string;

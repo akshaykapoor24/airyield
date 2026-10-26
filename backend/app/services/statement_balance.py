@@ -39,9 +39,11 @@ IDENTITY_KEYS = ("ticket_number", "pnr", "airline_pnr", "gds_pnr",
                  "passenger_name", "first_name", "last_name")
 
 MONEY_KEYS = (
-    "base_fare", "yq", "other_taxes", "taxes", "ssr_amount", "reschedule_charges",
+    "base_fare", "yq", "yr", "k3", "other_taxes", "taxes", "ssr_amount", "reschedule_charges",
+    "seat_selection", "excess_baggage", "meals",
     "total_fare", "commission_amount", "incentive_amount", "tds", "service_charge",
-    "service_fee", "gst_on_sf", "agent_penalty", "cancellation_markup", "net_amount",
+    "service_fee", "gst_on_sf", "cgst", "sgst", "igst", "agent_penalty", "cancellation_markup",
+    "refund_amount", "adm", "discount", "uatp_amount", "net_amount",
 )
 
 
@@ -62,24 +64,41 @@ def _text(v) -> str | None:
     return s or None
 
 
+_MARKERS = (("opening", OPENING_MARKERS), ("closing", CLOSING_MARKERS),
+            ("payment", PAYMENT_MARKERS), ("total", TOTAL_MARKERS))
+
+
+def _marker(v) -> tuple[str, str] | None:
+    """(kind, label) when a cell is one of the markers, exactly or as its leading word."""
+    if not isinstance(v, str):
+        return None
+    t = " ".join(v.upper().split())
+    for kind, markers in _MARKERS:
+        if any(t == m or t.startswith(m + " ") for m in markers):
+            return kind, t
+    return None
+
+
 def balance_kind(data: dict | None) -> tuple[str, str] | None:
     """('opening' | 'closing' | 'payment' | 'total', label) for a statement's own lines.
 
     None for anything that could be a booking. A row with no identity AND no label but a
     lone Net Amount is a footer nobody labelled (the real export's subtotal, opening + Σ
     net) — kept out as a 'total', never used as a balance.
+
+    An identity cell that holds only a marker is not an identity: Brightsun's statement ends
+    with a `=SUM(…)` row whose "Total" label sits in the TicketNumber column. No ticket
+    number, PNR or passenger is "Total" — and a row with any real one is still a booking.
     """
     data = data or {}
-    if any(_text(data.get(k)) for k in IDENTITY_KEYS):
+    if any(_text(data.get(k)) and not _marker(data.get(k)) for k in IDENTITY_KEYS):
         return None
     for k, v in data.items():
-        if k == ROW_KIND_KEY or not isinstance(v, str):
+        if k == ROW_KIND_KEY:
             continue
-        t = " ".join(v.upper().split())
-        for kind, markers in (("opening", OPENING_MARKERS), ("closing", CLOSING_MARKERS),
-                              ("payment", PAYMENT_MARKERS), ("total", TOTAL_MARKERS)):
-            if any(t == m or t.startswith(m + " ") for m in markers):
-                return kind, t
+        found = _marker(v)
+        if found:
+            return found
     money = [k for k in MONEY_KEYS if to_decimal(data.get(k)) is not None]
     if money == ["net_amount"]:
         return "total", "UNLABELLED TOTAL"

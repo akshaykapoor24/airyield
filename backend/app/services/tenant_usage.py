@@ -167,9 +167,15 @@ EXCLUDED_TABLES: frozenset[str] = frozenset({
     # about an already-classified upload, not records the workspace produced
     "lcc_batch_airline_ids", "statement_batch_airline_ids", "statement_batch_suppliers",
     "statement_batch_billing",
+    # the column mapping a vendor's statements were saved with, remembered for its next file —
+    # a convenience for the uploader, not a record the workspace produced
+    "statement_column_mappings",
     # the source files behind an LCC upload — one or two spreadsheets per already-counted
     # batch, and the rows they produce are what `lcc_detailed` counts
     "lcc_detailed_batch_file",
+    # the lines a Third Party GDS upload left out as repeats of lines already saved — each a
+    # copy of a third_party_gds line counted already, so counting it would count it twice
+    "third_party_gds_left_out",
     # derived caches, not user data — a commission figure is recomputed from a statement
     # row and a deal, so counting it would count the same work twice
     "ticket_calculations", "ticket_reconciliation",
@@ -183,7 +189,7 @@ EXCLUDED_TABLES: frozenset[str] = frozenset({
     # control figures are state about an upload already counted.
     "payment_reconciliations", "payment_reconciliation_runs",
     "payment_items", "mo_vendor_corrections", "vendor_accounts", "statement_batch_controls",
-    # …and for the GDS ↔ Internal decisions: state about a vendor upload and an internal
+    # …and for Vendor Reconciliation's decisions: state about a vendor upload and an internal
     # statement that are both counted already
     "vendor_internal_resolutions",
     # the income board is a projection of rows already counted above — one line per

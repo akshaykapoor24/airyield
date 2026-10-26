@@ -1,10 +1,11 @@
-// Central registry for Vendors → Reconciliation.
+// Central registry for Reconciliation → Vendor Reconciliation: its tabs (RECON_TABS, at the
+// end) and the grid sources some of them show.
 //
 // Shaped like lib/commissionSources.ts on purpose: plain data, icon-free, one entry per
 // thing the screen can reconcile. Adding a source = add an entry here and register its
 // backend adapter; no component changes.
 //
-// TWO DIFFERENT QUESTIONS SHARE THIS SCREEN, and that is what `comparison` records.
+// TWO DIFFERENT QUESTIONS SHARE THE GRID, and that is what `comparison` records.
 // BSP asks "did the airline settle what we expected", comparing one internal ticket
 // against one settlement row. Every other source asks "what did this ticket cost and what
 // did it sell for" — the vendor's statement is the BUY side, our own tickets the SELL
@@ -17,7 +18,9 @@
 // code being right. The coupling is that their response shapes agree, which the backend
 // guarantees by making schemas/sell_reconciliation.py a superset of the shared keys.
 
-export type ReconSourceSlug = "bsp" | "ndc" | "lcc-detailed" | "tp-gds" | "tp-lcc";
+// No "tp-gds": the Third Party GDS tab reconciles against Internal Statement instead (see the
+// tabs below). Its buy-vs-sell adapter stays on the backend, at /reconciliation/vendor/tp-gds.
+export type ReconSourceSlug = "bsp" | "ndc" | "lcc-detailed" | "tp-lcc";
 
 export type ReconSource = {
   slug: ReconSourceSlug;
@@ -93,21 +96,6 @@ export const RECON_SOURCES: Record<ReconSourceSlug, ReconSource> = {
     // An LCC Detailed export is keyed on PNRs, not ticket numbers.
     joinsByTicket: false,
   },
-  "tp-gds": {
-    slug: "tp-gds",
-    label: "GDS",
-    apiBase: "/reconciliation/vendor/tp-gds",
-    comparison: "buy-vs-sell",
-    buyLabel: "Bought at",
-    sellLabel: "Sold at",
-    diffLabel: "Margin",
-    statementNoun: "third-party GDS statement",
-    uploadHref: "/vendors/statements/third-party/gds",
-    uploadLabel: "Vendors data → Statements → Third Party → GDS",
-    blurb: "For every ticket on your consolidator's GDS statement, what you bought it at and what you sold it at.",
-    showsBatchFilter: true,
-    joinsByTicket: true,
-  },
   "tp-lcc": {
     slug: "tp-lcc",
     label: "LCC",
@@ -125,25 +113,44 @@ export const RECON_SOURCES: Record<ReconSourceSlug, ReconSource> = {
   },
 };
 
+// ── The tabs ──────────────────────────────────────────────────────────────────
+// One tab per kind of vendor statement, in one row: Vendor Reconciliation matches a vendor's
+// statement against the tickets you sold, so the statement type IS the choice — there is no
+// family-then-document second row. A tab shows either a registry source's grid above, or the
+// vendor ↔ Internal Statement reconciliation (components/reconciliation/VendorInternalRecon.tsx:
+// sale with sale and refund with refund, against what Internal Statement → Upload Statement and
+// Create Ticket hold). Third Party GDS is the first on Internal Statement; the rest still show
+// their own grid until they move over.
+
+export type ReconTabSlug = "bsp" | "ndc" | "lcc-detailed" | "tp-gds" | "tp-lcc";
+
 export type ReconTab = {
-  slug: string;
+  /** Also the `?source=` value that opens it. */
+  slug: ReconTabSlug;
   label: string;
-  sources: ReconSourceSlug[];
+  view: { kind: "source"; source: ReconSourceSlug } | { kind: "vendor-internal" };
+  /** One line under the page title; a source tab uses its source's. */
+  blurb?: string;
 };
 
-/** The three top-level tabs. A tab with one source renders no sub-tab row — the sub-tabs
- *  are a switch between documents of the same kind, and a switch with one option is noise. */
 export const RECON_TABS: ReconTab[] = [
-  { slug: "bsp", label: "BSP", sources: ["bsp", "ndc"] },
-  { slug: "lcc", label: "LCC", sources: ["lcc-detailed"] },
-  { slug: "third-party", label: "Third Party", sources: ["tp-gds", "tp-lcc"] },
+  { slug: "bsp", label: "BSP", view: { kind: "source", source: "bsp" } },
+  { slug: "ndc", label: "BSP-NDC", view: { kind: "source", source: "ndc" } },
+  { slug: "lcc-detailed", label: "LCC", view: { kind: "source", source: "lcc-detailed" } },
+  {
+    slug: "tp-gds",
+    label: "Third Party GDS",
+    view: { kind: "vendor-internal" },
+    blurb: "Each vendor's Third Party GDS statements against your Internal Statement — the balance payable as per the vendor and as per your books, and every difference between them, ticket by ticket.",
+  },
+  { slug: "tp-lcc", label: "Third Party LCC", view: { kind: "source", source: "tp-lcc" } },
 ];
 
-export function getReconSource(slug: string | null | undefined): ReconSource | undefined {
-  return RECON_SOURCES[(slug ?? "") as ReconSourceSlug];
-}
+// `?source=` values from before the tabs were flattened: Third Party → GDS ↔ Internal is now
+// the Third Party GDS tab itself.
+const LEGACY_TAB: Record<string, ReconTabSlug> = { "tp-gds-internal": "tp-gds" };
 
-export function tabForReconSource(slug: string): ReconTab {
-  return RECON_TABS.find((t) => t.sources.includes(slug as ReconSourceSlug))
-    ?? RECON_TABS[0];
+export function getReconTab(slug: string | null | undefined): ReconTab | undefined {
+  const s = LEGACY_TAB[slug ?? ""] ?? slug;
+  return RECON_TABS.find((t) => t.slug === s);
 }

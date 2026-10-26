@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from datetime import date
 
 from fastapi import UploadFile
 
@@ -293,6 +294,78 @@ def parse_validity_iso(text: str | None) -> str | None:
     return f"{y:04d}-{m:02d}-{d:02d}"
 
 
+# "01JAN'27 Onwards" OPENS a deal and names no end. Read as an end date — the only
+# kind parse_validity_iso knows — it runs the deal backwards: from the upload date
+# UNTIL 1 Jan 2027, exactly the window it is not valid in.
+_ONWARDS_RE = re.compile(r"\bonwards?\b", re.I)
+
+
+def parse_validity_window(text: str | None) -> tuple[str | None, str | None]:
+    """(starts, ends) from a validity cell.
+
+    Only an "… onwards" cell has a start: the date before the word opens the deal and
+    a date after it ("01JAN'27 onwards till 31MAR'27") closes it. Every other cell is
+    an end date only, read exactly as parse_validity_iso always has."""
+    if not text:
+        return None, None
+    m = _ONWARDS_RE.search(text)
+    if m is None:
+        return None, parse_validity_iso(text)
+    return parse_validity_iso(text[:m.start()]), parse_validity_iso(text[m.end():])
+
+
+# A row's CONTRACT period on the weekly vendor sheet ("Week"): "01-07OCT", "23-30SEP26",
+# "28SEP-04OCT", "01OCT-07OCT'26", "01 Oct 2026 - 07 Oct 2026". The first day may leave
+# its month to the second ("01-07OCT"), and the year is usually not printed at all.
+_MON = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?"
+_PERIOD_RE = re.compile(
+    rf"(?P<d1>\d{{1,2}})\s*(?:(?P<m1>{_MON})\s*'?\s*(?P<y1>\d{{2,4}})?)?"
+    rf"\s*(?:-|–|—|\bto\b|\btill\b|\buntil\b)\s*"
+    rf"(?P<d2>\d{{1,2}})\s*(?P<m2>{_MON})(?:\s*'?\s*(?P<y2>\d{{2,4}}))?",
+    re.I,
+)
+
+
+def parse_period_window(text: str | None, today: date | None = None) -> tuple[str | None, str | None]:
+    """(starts, ends) of a contract-period cell, or (None, None) when it is not one.
+
+    A missing year is the one that puts the period's start nearest `today` (a weekly
+    sheet is loaded the week it is for, so "29DEC-04JAN" read on 2 Jan is last year's
+    December); a period running past December ends the following year."""
+    if not text:
+        return None, None
+    m = _PERIOD_RE.search(text)
+    if m is None:
+        nums = _NUMERIC_DATE_RE.findall(text)       # "01/10/2026 - 07/10/2026"
+        if len(nums) != 2:
+            return None, None
+        try:
+            (a1, b1, c1), (a2, b2, c2) = nums
+            start = date(_norm_year(c1), int(b1), int(a1))
+            end = date(_norm_year(c2), int(b2), int(a2))
+        except ValueError:
+            return None, None
+        return (start.isoformat(), end.isoformat()) if start <= end else (None, None)
+
+    d1, d2 = int(m["d1"]), int(m["d2"])
+    m2 = _MONTHS[m["m2"][:3].lower()]
+    m1 = _MONTHS[m["m1"][:3].lower()] if m["m1"] else m2
+    y1 = _norm_year(m["y1"]) if m["y1"] else None
+    y2 = _norm_year(m["y2"]) if m["y2"] else None
+    wraps = (m1, d1) > (m2, d2)
+    if y1 is None and y2 is None:
+        today = today or date.today()
+        y1 = min((today.year - 1, today.year, today.year + 1),
+                 key=lambda y: abs((date(y, m1, _clamp_day(d1, m1, y)) - today).days))
+    if y1 is None:
+        y1 = y2 - 1 if wraps else y2
+    if y2 is None:
+        y2 = y1 + 1 if wraps else y1
+    start = date(y1, m1, _clamp_day(d1, m1, y1))
+    end = date(y2, m2, _clamp_day(d2, m2, y2))
+    return (start.isoformat(), end.isoformat()) if start <= end else (None, None)
+
+
 _DOM_RE = re.compile(r"\bdomestic\b", re.I)
 _INTL_RE = re.compile(r"\b(international|intl)\b", re.I)
 
@@ -387,6 +460,17 @@ def _row_code(row: DocRow, cm) -> str | None:
     if cm is None or cm.code is None or cm.code >= len(row.cells):
         return None
     return clean_airline_code(row.cells[cm.code])[0]
+
+
+def _supplier_cell(row: DocRow, cm) -> str | None:
+    """The row's Source / Supplier cell on a multi-supplier sheet ("AKBAR"), "" when the
+    sheet has that column but this row leaves it blank, None when there is no such column.
+
+    Transport only, like the airline code: the API layer resolves it to an Agency Master
+    row when the upload is for all suppliers."""
+    if cm is None or cm.supplier is None or cm.supplier >= len(row.cells):
+        return None
+    return re.sub(r"\s+", " ", row.cells[cm.supplier] or "").strip()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -519,6 +603,28 @@ def _has_validity_cell(row: DocRow, cm) -> bool:
     return bool((row.cells[cm.validity] or "").strip())
 
 
+def _period_cell(row: DocRow, cm) -> str | None:
+    """The row's contract-period cell ("Week"), None when the sheet has no such column."""
+    if cm is None or cm.period is None or cm.period >= len(row.cells):
+        return None
+    return row.cells[cm.period] or None
+
+
+def _windows(row: DocRow, cm, valid_from: str | None, valid_to: str | None) -> tuple[str | None, ...]:
+    """(contract from, contract to, travel from, travel to) for a row whose validity cell
+    read as (valid_from, valid_to).
+
+    The validity cell is the TRAVEL window: "Till 31DEC'26" ends it, "01JAN'27 Onwards"
+    opens it. The CONTRACT window is the row's own period when the sheet prints one
+    ("Week" = "01-07OCT"), and travel then opens with the contract unless the cell names
+    its own start. A sheet without a period column keeps reading the validity cell as
+    the contract window as well, exactly as it always has."""
+    period_from, period_to = parse_period_window(_period_cell(row, cm))
+    if period_from:
+        return period_from, period_to, valid_from or period_from, valid_to
+    return valid_from, valid_to, valid_from, valid_to
+
+
 def expand_row(compact: dict, row: DocRow, stats: Stats, cm=None) -> list[dict]:
     """Turn one compact model row into the nested deal objects the UI expects.
 
@@ -549,19 +655,23 @@ def expand_row(compact: dict, row: DocRow, stats: Stats, cm=None) -> list[dict]:
                        or FT.get(compact.get("ft") or "")
                        or "Both")
 
-    py_iso = parse_validity_iso(compact.get("vt"))
+    valid_from, py_iso = parse_validity_window(compact.get("vt"))
     model_iso = compact.get("vt_iso") or None
     if model_iso and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(model_iso)):
         model_iso = None
     if py_iso and model_iso and py_iso != model_iso:
         stats.date_disputes += 1
-    valid_to = py_iso or model_iso
+    # An "onwards" cell ends only where the text after the word says; the model, told
+    # to read the LATER date, would hand back its start as the end.
+    valid_to = py_iso if valid_from else (py_iso or model_iso)
     # Last resort, and only when the sheet has no validity column at all (or left
     # it blank): those sheets state validity mid-remark instead. Scoped tightly
     # on purpose — a row whose Travel Validity says "Open" means open, and must
     # not pick up an unrelated "booking till 31st March" from its remark.
-    if valid_to is None and not _has_validity_cell(row, cm):
+    if valid_to is None and valid_from is None and not _has_validity_cell(row, cm):
         valid_to = parse_validity_iso(remark_cell)
+
+    contract_from, contract_to, travel_from, travel_to = _windows(row, cm, valid_from, valid_to)
 
     airline_type = "LCC" if _canon_airline(name) in LCC_NAMES else "GDS"
 
@@ -578,6 +688,7 @@ def expand_row(compact: dict, row: DocRow, stats: Stats, cm=None) -> list[dict]:
     iata = canon_pct(compact.get("iata"))
     if iata is not None and not 0 < iata <= 100:
         iata = None
+    supplier_cell = _supplier_cell(row, cm)
 
     out: list[dict] = []
     for slot in ("ECO", "PEY", "BUS"):
@@ -599,12 +710,14 @@ def expand_row(compact: dict, row: DocRow, stats: Stats, cm=None) -> list[dict]:
             "airline_name": name,          # still the RAW cell — the API layer renames
             "airline_code": airline_code,  # transport only, never persisted on the deal
             "iata_commission": iata,
-            "contract_valid_from": None,
-            "contract_valid_to": valid_to,
+            "contract_valid_from": contract_from,
+            "contract_valid_to": contract_to,
             "incentive_types": ["PLB"],
             "incentive_data": {"PLB": {
-                "validFrom": None,
-                "validTo": valid_to,
+                "validFrom": contract_from,
+                "validTo": contract_to,
+                "travelValidFrom": travel_from,
+                "travelValidTo": travel_to,
                 "frequency": "Yearly",
                 "flightType": flight_type,
                 "class": SLOT_CLASS[slot],
@@ -624,6 +737,7 @@ def expand_row(compact: dict, row: DocRow, stats: Stats, cm=None) -> list[dict]:
             "src_page": row.page + 1,
             "src_text": row.raw[:120],
             "needs_manual": False,
+            "supplier_cell": supplier_cell,
         })
     return out
 
@@ -638,20 +752,27 @@ def _manual_placeholder(row: DocRow, cm) -> dict:
         # Cells keep their internal newlines; a name going straight to the UI
         # must not.
         name = re.sub(r"\s+", " ", row.cells[cm_airline] or "").strip()
+    # The row's contract period and travel validity still hold when its rates could not
+    # be read — only the rates are left to fill in. Travel follows _windows' rule.
+    validity = (row.cells[cm.validity] or None
+                if cm is not None and cm.validity is not None and cm.validity < len(row.cells) else None)
+    period_from, period_to = parse_period_window(_period_cell(row, cm))
+    travel_from, travel_to = parse_validity_window(validity)
     return {
         "airline_type": "GDS",
         "airline_name": name,
         "airline_code": _row_code(row, cm),
         "iata_commission": None,
-        "contract_valid_from": None,
-        "contract_valid_to": None,
+        "contract_valid_from": period_from,
+        "contract_valid_to": period_to,
         "incentive_types": ["PLB"],
-        "incentive_data": {"PLB": {}},
+        "incentive_data": {"PLB": {"travelValidFrom": travel_from or period_from, "travelValidTo": travel_to}},
         "remark": None,
         "src_n": row.n,
         "src_page": row.page + 1,
         "src_text": row.raw[:120],
         "needs_manual": True,
+        "supplier_cell": _supplier_cell(row, cm),
     }
 
 
@@ -860,10 +981,9 @@ def _build_warning(layout: DocLayout, stats: Stats, capped_from: int | None,
         )
     if stats.failed_chunks:
         parts.append(f"{stats.failed_chunks} section(s) could not be read.")
-    unread = stats.needs_manual + stats.unresolved
-    if unread:
-        parts.append(f"{unread} row(s) could not be read and need filling in by hand — "
-                     "look for the blank rows in the table.")
+    # Rows that could not be read are not counted here: each comes back as its own deal
+    # flagged needs_manual, and the review table counts, marks and filters those rows
+    # itself — a count fixed at extraction would go stale as they are filled in.
     if stats.date_disputes:
         parts.append(f"{stats.date_disputes} validity date(s) were ambiguous — check Contract Valid To.")
     return " ".join(parts) or None
@@ -888,9 +1008,14 @@ def _confidence(stats: Stats, deal_count: int) -> float:
 
 class AIDealExtractionService:
     @staticmethod
-    async def extract(file: UploadFile, supplier_name: str | None = None) -> dict:
+    async def extract(file: UploadFile, supplier_name: str | None = None,
+                      all_suppliers: bool = False) -> dict:
         """`supplier_name`: the supplier this upload is for. A spreadsheet with a
-        Source / Supplier column keeps only that supplier's rows."""
+        Source / Supplier column keeps only that supplier's rows.
+
+        `all_suppliers`: keep every supplier's rows instead, each deal carrying its own
+        Source cell (`supplier_cell`) for the API layer to attribute. The file must have
+        such a column — a sheet that does not say whose each row is cannot be split."""
         content = await file.read()
         await file.seek(0)
         filename = file.filename or ""
@@ -898,10 +1023,21 @@ class AIDealExtractionService:
         is_sheet = filename.lower().endswith((".xlsx", ".xlsm", ".xls", ".csv"))
         if is_sheet:
             from app.services.deal_supplier_check import supplier_cell_matches
-            keep = (lambda cell: supplier_cell_matches(cell, supplier_name)) if supplier_name else None
+            keep = None
+            if supplier_name and not all_suppliers:
+                keep = lambda cell: supplier_cell_matches(cell, supplier_name)  # noqa: E731
             layout = build_layout_from_sheet(content, filename, keep)
         else:
             layout = build_layout(content)
+
+        # Checked before a single model call: without a Source column every row would
+        # come back belonging to nobody.
+        if all_suppliers and layout.ok and layout.colmap.supplier is None:
+            return {
+                "deals": [], "file_name": filename, "confidence": 0.0, "unreadable": False,
+                "warning": ("All suppliers needs a Source / Supplier column saying whose each row "
+                            "is, and this file has none. Pick the supplier instead."),
+            }
 
         # A multi-supplier sheet with nothing for the picked supplier: say so plainly
         # rather than "unreadable" — the sheet was read fine, it just isn't theirs.
@@ -983,6 +1119,13 @@ class AIDealExtractionService:
             note = (f"Only {supplier_name}'s rows were read — {left_out} row(s) from other "
                     f"suppliers in this sheet were left out ({listed}).")
             warning = f"{note} {warning}" if warning else note
+        if layout.unread_deal_sheets:
+            tabs = layout.unread_deal_sheets
+            named = " and ".join(f"'{t}'" for t in tabs)
+            note = (f"Only the '{layout.sheet_title}' tab was read. The {named} "
+                    f"tab{'s' if len(tabs) > 1 else ''} also {'have deal tables' if len(tabs) > 1 else 'has a deal table'} "
+                    f"— save {'each' if len(tabs) > 1 else 'it'} as its own file to upload it.")
+            warning = f"{warning} {note}" if warning else note
         logger.info(
             "ai-extract done file=%s engine=%s rows=%s deals=%s stats=%s",
             filename, layout.used_table_engine, len(layout.rows), len(deals), stats.as_dict(),
