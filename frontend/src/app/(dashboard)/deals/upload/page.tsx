@@ -445,18 +445,22 @@ const INLINE_INC_FIELDS:{field:string;label:string}[] = [
 const inlineIncentives=(incentives:string[])=>incentives.filter(i=>DATE_WISE_INCENTIVES.has(i));
 const incCellField=(key:string)=>key.startsWith("inc::")?(key.split("::")[2]??""):"";
 const isSlabPayout=(extra:Record<string,string>,inc:string)=>extra[`inc::${inc}::amountBasedType`]==="Slab Based";
+// A FLAT deal: a fixed amount per ticket (Fixed → Number), so it has no calc columns.
+const isFlatPayout=(extra:Record<string,string>,inc:string)=>extra[`inc::${inc}::incentiveNumPct`]==="Number";
 
 // An edit to one of those columns, with what the popup would do alongside it. A rate typed
 // on a row with no payout mode yet (an unread row) makes it the Fixed percentage the
-// extractor gives a read row; a slab payout has no single rate, so it is left alone. Calc On
+// extractor gives a read row; a slab payout has no single rate, so it is left alone. The rate
+// cell's % / ₹ switch (incentiveNumPct) turns a row into a FLAT deal — Amount Based → Fixed
+// → Number, the shape a sheet's FLAT rows come in — and keeps the amount typed. Calc On
 // carries Target Calc Columns with it wherever the two still agreed. A new Flight Type
 // drops slabs laid out for the old one's columns.
 function withIncentiveCellChange(extra:Record<string,string>,key:string,val:string):Record<string,string>{
   const [,inc,field]=key.split("::");
   const k=(f:string)=>`inc::${inc}::${f}`;
-  if(field==="incentiveAmtPct"&&isSlabPayout(extra,inc))return extra;
+  if((field==="incentiveAmtPct"||field==="incentiveNumPct")&&isSlabPayout(extra,inc))return extra;
   const out={...extra,[key]:val};
-  if(field==="incentiveAmtPct"&&val!==""){
+  if((field==="incentiveAmtPct"&&val!=="")||field==="incentiveNumPct"){
     if(!out[k("targetBased")])     out[k("targetBased")]="Amount Based";
     if(!out[k("amountBasedType")]) out[k("amountBasedType")]="Fixed";
     if(!out[k("incentiveNumPct")]) out[k("incentiveNumPct")]="Percentage";
@@ -483,7 +487,9 @@ function unreadGaps(r:ReviewRow,inline:string[]):string[]{
   const own=inline.filter(inc=>Object.keys(r.extra).some(k=>k.startsWith(`inc::${inc}::`)));
   for(const inc of own.length?own:inline.slice(0,1)){
     const blank=(f:string)=>!(r.extra[`inc::${inc}::${f}`]??"").trim();
-    for(const f of ["flightType","class","payoutCalcCols"]) if(blank(f)) gaps.push(`inc::${inc}::${f}`);
+    // A flat amount is paid as it stands — there is no Calc On to fill in.
+    const needed=isFlatPayout(r.extra,inc)?["flightType","class"]:["flightType","class","payoutCalcCols"];
+    for(const f of needed) if(blank(f)) gaps.push(`inc::${inc}::${f}`);
     if(!isSlabPayout(r.extra,inc)&&blank("incentiveAmtPct")) gaps.push(`inc::${inc}::incentiveAmtPct`);
   }
   return gaps;
@@ -1511,18 +1517,32 @@ function ReviewTable({
             </button>
           </td>
         );
-        const pct=row.extra[`inc::${inc}::incentiveNumPct`]!=="Number";
+        const flat=isFlatPayout(row.extra,inc);
         return(
           <td key={colKey} className={td}>
-            <div className="flex items-center">
+            <div className="flex items-center gap-0.5">
+              {flat&&<span className="text-[11px] text-gray-500">₹</span>}
               <input type="number" step="any" min={0} value={val} onChange={e=>change(e.target.value)} placeholder="—"
-                title={pct?"Rate in percent":"Fixed amount"}
+                title={flat?"Fixed amount per ticket (a FLAT deal)":"Rate in percent"}
                 className="w-16 bg-transparent text-[11px] font-semibold text-gray-800 text-right tabular-nums focus:outline-none focus:bg-blue-50 rounded px-1 py-0.5"/>
-              {pct&&<span className="text-[11px] text-gray-500 pl-0.5">%</span>}
+              {/* % ⇄ ₹: a percentage of the fare, or a FLAT amount per ticket. */}
+              <button type="button" onClick={()=>onChange(idx,`inc::${inc}::incentiveNumPct`,flat?"Percentage":"Number")}
+                title={flat?"Flat amount per ticket — click to make it a percentage":"Percentage — click to make it a flat amount per ticket"}
+                className={`text-[10px] font-semibold rounded px-1 py-0.5 border ${flat
+                  ?"bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100"
+                  :"bg-gray-50 text-gray-500 border-gray-200 hover:bg-gray-100"}`}>
+                {flat?"flat":"%"}
+              </button>
             </div>
           </td>
         );
       }
+      // A FLAT deal is paid as it stands, so it has no Calc On.
+      if(incField==="payoutCalcCols"&&isFlatPayout(row.extra,colKey.split("::")[1]))return(
+        <td key={colKey} className={td} title="A flat amount is paid per ticket as it stands — no Basic / + YQ base to take it on">
+          <span className={`text-[11px] text-gray-400 italic ${cellWidth(colKey)} inline-block px-1`}>flat amount</span>
+        </td>
+      );
       // Flight Type / Class / Calc On. A sheet value outside the list stays visible, to change.
       const base=getColMeta(colKey,entityOptions).options??[];
       const opts=val&&!base.includes(val)?[val,...base]:base;
@@ -2312,7 +2332,6 @@ export default function UploadDealPage(){
   const [sourceFilter,  setSourceFilter]  = useState("");
   // Review: show only the rows the file could not be read for (isUnreadRow).
   const [unreadOnly,    setUnreadOnly]    = useState(false);
-  const reviewCardRef = useRef<HTMLDivElement>(null);
   const [refreshingAgencies, setRefreshingAgencies] = useState(false);
   const [entitiesByAgency, setEntitiesByAgency] = useState<Record<number,string[]>>({});
   const loadAgencyEntities=useCallback(()=>
@@ -2603,10 +2622,6 @@ export default function UploadDealPage(){
   const unreadTotal=rows.filter(isUnreadRow).length;
   const unreadBlank=rows.filter(r=>unreadGaps(r,inlineIncs).length>0).length;
   const unreadActive=unreadOnly&&unreadTotal>0;
-  const showUnreadRows=()=>{
-    setUnreadOnly(true);setSourceFilter("");setBulkAirline("");
-    reviewCardRef.current?.scrollIntoView({behavior:"smooth",block:"start"});
-  };
   // The toolbar filters narrow the table: Supplier (All suppliers — the sheet's Source,
   // the same filter as "Show rows"), Rows not read, then Airline. The airline picker
   // offers the airlines of the rows the other two leave, with their counts.
@@ -2965,17 +2980,9 @@ export default function UploadDealPage(){
       }
     }
 
-    // A row the file could not be read for has no rate until someone types it — saved as
-    // it stands it would be a deal paying nothing. Show just those rows, and say what the
-    // first one still needs.
-    const blankUnread=rows.map((r,i)=>({row:i+1,gaps:unreadGaps(r,inlineIncs)})).filter(b=>b.gaps.length);
-    if(blankUnread.length){
-      const msg=blankUnread.length===1
-        ? `Row ${blankUnread[0].row} could not be read from the file and still needs ${gapLabels(blankUnread[0].gaps).join(", ")} — fill it in, or delete the row.`
-        : `${blankUnread.length} rows could not be read from the file and are still blank (rows ${blankUnread.slice(0,6).map(b=>b.row).join(", ")}${blankUnread.length>6?", …":""}) — fill them in, or delete them.`;
-      setSaveError(msg);notifyRequired(msg);showUnreadRows();
-      return;
-    }
+    // Rows the file could not be read for are NOT a reason to refuse the save (the user's
+    // call): they stay marked red and filterable under "Rows not read", and save as they
+    // stand — the deal is kept, to be completed from the repository later.
 
     // Every review row becomes its own deal, so the header fields the deal API
     // needs have to be present on each one. Nothing checked this before: the
@@ -3777,7 +3784,7 @@ export default function UploadDealPage(){
           )}
 
           {/* Review & Edit — one card: the filter + bulk-edit line, then the table. */}
-          <div ref={reviewCardRef} className="bg-white rounded-xl border border-gray-200 overflow-hidden scroll-mt-4">
+          <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
             {/* Filter + Bulk Edit Toolbar — always shown, on ONE line (the user's ask): pick
                 Supplier / Airline, tick rows in the table, then edit them here. Labels are kept
                 short so it fits; a narrow window scrolls it sideways rather than wrapping. */}

@@ -126,6 +126,10 @@ Return ONLY a JSON object: {"rows": [ ... ]}. One object per source row:
 - A BARE NUMBER IS A PERCENTAGE. Many sheets omit the sign entirely: «5.50»
   means p=5.5, «6» means p=6, «1.25» means p=1.25. Never null a slot just
   because the % sign is missing.
+- A FLAT deal pays a fixed amount per ticket instead: VALIDON= says «FLAT», or
+  the cell is a rupee amount («Rs 1350», «INR 2,700», «1350/-»). Its p is that
+  amount as a plain number (p=1350) and cc is null. Never null such a slot and
+  never scale or divide it.
 - A composite or annotated rate still yields a number: «3+5%», «3+5.00» and
   «3% IATA» all mean p=3 (the FIRST number). Copy the cell's full text into
   "rmk" so the reviewer can see what it originally said.
@@ -597,6 +601,32 @@ class Stats:
         return {k: v for k, v in self.__dict__.items()}
 
 
+# FLAT DEALS. Some rows pay a fixed amount per ticket, per class, rather than a percentage
+# — Yatra's weekly vendor sheet prints EK as 1350 / 2700 / 2700 with "FLAT" in its
+# Applicable column, and AA as 480 / — / 960. Read as percentages they are all over 100 and
+# were dropped, leaving a fill-in row. A slot is flat when the row's Applicable / VALID ON
+# cell says so, or when the rate cell is plainly a rupee amount.
+_FLAT_RE = re.compile(r"^\s*(?:flat|fixed)\b", re.I)
+_AMOUNT_RE = re.compile(r"(?:\b(?:rs\.?|inr)\s*\d|₹\s*\d|\d\s*/-)", re.I)
+# A flat amount has no percentage ceiling, but a cell this large is not a per-ticket amount.
+_MAX_FLAT_AMOUNT = 1_000_000
+
+
+def _cell_at(row: DocRow, ci) -> str:
+    return (row.cells[ci] or "") if ci is not None and ci < len(row.cells) else ""
+
+
+def _is_flat(row: DocRow, cm, slot: str) -> bool:
+    """Does this row pay a fixed amount in `slot` (ECO / PEY / BUS) rather than a %?"""
+    if cm is None:
+        return False
+    if _FLAT_RE.match(_cell_at(row, cm.valid_on)):
+        return True
+    ci = {"ECO": cm.eco, "PEY": cm.pey, "BUS": cm.bus}.get(slot)
+    text = _cell_at(row, ci if ci is not None else cm.commission)
+    return bool(_AMOUNT_RE.search(text))
+
+
 def _has_validity_cell(row: DocRow, cm) -> bool:
     if cm is None or cm.validity is None or cm.validity >= len(row.cells):
         return False
@@ -696,15 +726,19 @@ def expand_row(compact: dict, row: DocRow, stats: Stats, cm=None) -> list[dict]:
         if not isinstance(cell, dict):
             continue
         pct = canon_pct(cell.get("p"))
+        flat = _is_flat(row, cm, slot)
         # 0 is kept: several sheets print a literal "0.00%" for a suspended deal,
         # and dropping those loses real rows. A NIL or a dash arrives as null
         # instead (the prompt forbids emitting 0 for one), and a stray 118 — a
-        # flat service charge, not a rate — is out of range.
-        if pct is None or not 0 <= pct <= 100:
+        # flat service charge, not a rate — is out of range. A FLAT slot is an
+        # amount, so only its sign and size are checked.
+        if pct is None or not 0 <= pct <= (_MAX_FLAT_AMOUNT if flat else 100):
             if cell.get("p") is not None:
                 stats.dropped_bad_pct += 1
             continue
-        calc = norm_calc(cell.get("cc"))
+        # A flat amount is paid per ticket as it stands: no Basic / + YQ base to take a
+        # percentage of, so no calc columns (the deal form's Fixed → Number shape).
+        calc = None if flat else norm_calc(cell.get("cc"))
         out.append({
             "airline_type": airline_type,
             "airline_name": name,          # still the RAW cell — the API layer renames
@@ -728,7 +762,7 @@ def expand_row(compact: dict, row: DocRow, stats: Stats, cm=None) -> list[dict]:
                 "baseTargetAmount": None,
                 "segmentBasedType": None,
                 "baseTargetSegments": None,
-                "incentiveNumPct": "Percentage",
+                "incentiveNumPct": "Number" if flat else "Percentage",
                 "incentiveAmtPct": pct,
                 "cappedIncentive": None,
             }},

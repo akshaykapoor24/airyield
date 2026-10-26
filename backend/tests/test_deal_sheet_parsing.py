@@ -283,9 +283,31 @@ class VendorWorkbookTest(unittest.TestCase):
             by_src.setdefault(d["supplier_cell"], []).append(d)
         self.assertEqual(sorted(by_src), ["AKBAR", "BRIGHTSUN", "TSC"])
         self.assertEqual(len(by_src["AKBAR"]), 3)
-        # EK's FLAT amounts are no percentage: one fill-in row, still TSC's.
-        self.assertEqual([d["needs_manual"] for d in by_src["TSC"]], [True])
+        # EK pays FLAT amounts: three deals, one per class, still TSC's — not a fill-in row.
+        self.assertEqual([d["needs_manual"] for d in by_src["TSC"]], [False, False, False])
         self.assertIn("'LCC' tab also has a deal table", res["warning"])
+
+    def test_a_flat_row_is_a_fixed_amount_per_class(self):
+        """Applicable = FLAT: rupees per ticket, not a percentage — the deal form's
+        Amount Based → Fixed → Number shape, with no calc columns to take it on."""
+        res = self._extract(self.book(gds_extra=[
+            ["AA", "TSC", "0%", "480", "", "960", "FLAT", "Till 30SEP'27", "non stop"]]), all_suppliers=True)
+        flat = [(d["airline_name"], d["incentive_data"]["PLB"]) for d in res["deals"]
+                if d["supplier_cell"] == "TSC"]
+        self.assertEqual(
+            [(al, p["class"], p["incentiveNumPct"], p["incentiveAmtPct"], p["targetBased"],
+              p["amountBasedType"], p["payoutCalcCols"], p["targetCalcCols"]) for al, p in flat],
+            [("EK", "Economy", "Number", 1350.0, "Amount Based", "Fixed", None, None),
+             ("EK", "Premium", "Number", 2700.0, "Amount Based", "Fixed", None, None),
+             ("EK", "Business", "Number", 2700.0, "Amount Based", "Fixed", None, None),
+             ("AA", "Economy", "Number", 480.0, "Amount Based", "Fixed", None, None),
+             ("AA", "Business", "Number", 960.0, "Amount Based", "Fixed", None, None)])
+
+    def test_a_percentage_row_is_unchanged(self):
+        res = self._extract(self.book(), all_suppliers=True)
+        akbar = [d["incentive_data"]["PLB"] for d in res["deals"] if d["supplier_cell"] == "AKBAR"]
+        self.assertEqual({(p["incentiveNumPct"], p["incentiveAmtPct"], p["payoutCalcCols"]) for p in akbar},
+                         {("Percentage", 2.0, "Basic + YR")})
 
     def test_picked_supplier_still_keeps_only_its_rows(self):
         res = self._extract(self.book(), supplier_name="Akbar Travels of India Pvt Ltd")
@@ -422,6 +444,42 @@ class SampleSheetTest(unittest.TestCase):
         self.assertEqual(rates("SK"), ("2% (B+YQ)", "2% (B+YQ)", "0.0%"))
         self.assertEqual(rates("AZ", 1), ("2% (B+YQ+YR)",) * 3)    # the continuation row
         self.assertEqual(by_name["AZ"][1].cells[cm.validity], "FLOWN TILL 31ST Dec'26")
+
+
+class FlatSlotTest(unittest.TestCase):
+    """Which slots are a fixed amount (services/ai_deal_extraction._is_flat)."""
+
+    CM = SimpleNamespace(valid_on=3, eco=0, pey=1, bus=2, commission=None)
+
+    def flat(self, cells, slot="ECO"):
+        from app.services.ai_deal_extraction import _is_flat
+        return _is_flat(SimpleNamespace(cells=cells), self.CM, slot)
+
+    def test_the_applicable_column_says_so(self):
+        for word in ("FLAT", "Flat", " fixed ", "FLAT AMOUNT"):
+            with self.subTest(word=word):
+                self.assertTrue(self.flat(["1350", "2700", "2700", word]))
+
+    def test_a_rupee_amount_says_so_itself(self):
+        for cell in ("Rs 1350", "Rs.1350", "INR 2,700", "₹1350", "1350/-"):
+            with self.subTest(cell=cell):
+                self.assertTrue(self.flat([cell, "", "", ""]))
+
+    def test_a_percentage_row_is_not_flat(self):
+        for valid_on in ("B", "B+YQ", "B+YQ+YR", ""):
+            with self.subTest(valid_on=valid_on):
+                self.assertFalse(self.flat(["2%", "2.5", "3", valid_on]))
+
+    def test_a_stray_number_over_100_without_flat_is_still_no_rate(self):
+        """A service charge of 118 in a PLB column is not a 118% PLB, nor a flat deal."""
+        from app.services.ai_deal_extraction import Stats, expand_row
+        row = SimpleNamespace(cells=["118", "", "", "B"], n=1, page=0, raw="x", section=None)
+        cm = SimpleNamespace(**vars(self.CM), airline=None, remarks=None, period=None, validity=None,
+                             code=None, supplier=None, iata=None, cabin=None)
+        stats = Stats()
+        compact = {"al": "EK", "cl": {"ECO": {"p": 118, "cc": None}, "PEY": None, "BUS": None}}
+        self.assertEqual(expand_row(compact, row, stats, cm), [])
+        self.assertEqual(stats.dropped_bad_pct, 1)
 
 
 if __name__ == "__main__":
