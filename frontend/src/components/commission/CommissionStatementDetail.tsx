@@ -11,6 +11,7 @@ import { INCENTIVE_TYPE_COLS } from "@/lib/incentives";
 import type { CommissionSource } from "@/lib/commissionSources";
 import Pagination from "@/components/ui/Pagination";
 import CommissionDiagnosisModal from "./CommissionDiagnosisModal";
+import ThirdPartyStatementLines from "./ThirdPartyStatementLines";
 import {
   CommissionGap, CommissionRow, CommissionRowsPage, CommissionStatement,
   CommissionSummary, Facets, RunResponse, VarianceReport, facetValues, inr,
@@ -71,6 +72,12 @@ export default function CommissionStatementDetail({
   const [stmt, setStmt] = useState(statement);
   const [tab, setTab] = useState<Tab>("results");
   const [starting, setStarting] = useState(false);
+  // A consolidator statement that prints its own commission (Third Party GDS / LCC) is shown
+  // line by line against your deals — ThirdPartyStatementLines owns its cards and table, and
+  // reloads whenever this key moves. Every other source keeps the grid below.
+  const lineView = !!source.showsVariance;
+  const [refreshKey, setRefreshKey] = useState(0);
+  const bumpLines = () => setRefreshKey((k) => k + 1);
 
   // results
   const [rows, setRows] = useState<CommissionRow[]>([]);
@@ -120,6 +127,7 @@ export default function CommissionStatementDetail({
         if (next.status === "failed") toast.error(next.error || "Calculation failed.");
         else toast.success("Commission calculated.");
         setRows([]); setSummary(null); setGaps(null); setVarianceReport(null); setOffset(0);
+        setRefreshKey((k) => k + 1);
       }
     }, 3000);
     return () => clearInterval(t);
@@ -149,12 +157,13 @@ export default function CommissionStatementDetail({
   const goToPage = (off: number) => { setSelected(new Set()); loadRows(off); };
   const applyFilters = () => { setSelected(new Set()); loadRows(0); };
 
-  useEffect(() => { if (tab === "results") loadRows(0); }, [tab, loadRows]);
+  useEffect(() => { if (tab === "results" && !lineView) loadRows(0); }, [tab, loadRows, lineView]);
 
   useEffect(() => {
+    if (lineView) return;   // the line view lists its own airlines and invoice types
     api.get<Facets>(`${source.apiBase}/statements/${stmt.batch_id}/rows/facets`)
       .then(({ data }) => setFacets(data)).catch(() => {});
-  }, [stmt.batch_id, source]);
+  }, [stmt.batch_id, source, lineView]);
 
   useEffect(() => {
     if (tab !== "summary" || summary) return;
@@ -190,7 +199,9 @@ export default function CommissionStatementDetail({
     } finally { setStarting(false); }
   };
 
-  /** A hand-picked set of rows → calculated inline, results are immediate. */
+  /** A hand-picked set of rows → calculated inline, results are immediate. `ids` are
+   *  STATEMENT LINE ids — what the run's `row_ids` select (adapter.load_rows). The vendor
+   *  sources' grid used to send its calculation ids here, which ran other lines or none. */
   const runRows = async (ids: number[]) => {
     if (!ids.length) return;
     setBusyRows((prev) => new Set([...prev, ...ids]));
@@ -209,8 +220,9 @@ export default function CommissionStatementDetail({
         `${ids.length} row${ids.length === 1 ? "" : "s"} — ${bits || "no change"}` +
         (data.total_incentive ? ` · ₹${inr(data.total_incentive)}` : ""),
       );
-      await Promise.all([loadRows(offset), refreshStatement()]);
-      setSummary(null); setGaps(null);
+      if (lineView) bumpLines();
+      await Promise.all([lineView ? Promise.resolve() : loadRows(offset), refreshStatement()]);
+      setSummary(null); setGaps(null); setVarianceReport(null);
     } catch (e: unknown) {
       toast.error(errText(e, "Calculation failed."));
     } finally {
@@ -236,15 +248,16 @@ export default function CommissionStatementDetail({
     if (next.has(id)) next.delete(id); else next.add(id);
     return next;
   });
-  const allOnPageSelected = rows.length > 0 && rows.every((r) => selected.has(r.id));
-  const toggleAllOnPage = () => setSelected((prev) => {
-    if (allOnPageSelected) {
-      const next = new Set(prev);
-      rows.forEach((r) => next.delete(r.id));
-      return next;
-    }
-    return new Set([...prev, ...rows.map((r) => r.id)]);
+  const toggleMany = (ids: number[], on: boolean) => setSelected((prev) => {
+    const next = new Set(prev);
+    ids.forEach((id) => (on ? next.add(id) : next.delete(id)));
+    return next;
   });
+  // The id a run selects a row by: its statement line where the source keeps one apart from
+  // the calculation (every non-BSP source); BSP's row IS its settlement row.
+  const lineId = (r: CommissionRow) => r.source_row_id ?? r.id;
+  const allOnPageSelected = rows.length > 0 && rows.every((r) => selected.has(lineId(r)));
+  const toggleAllOnPage = () => toggleMany(rows.map(lineId), !allOnPageSelected);
 
   const downloadXlsx = async () => {
     try {
@@ -281,7 +294,10 @@ export default function CommissionStatementDetail({
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <button onClick={() => { refreshStatement(); if (tab === "results") loadRows(offset); }}
+          <button onClick={() => {
+              refreshStatement();
+              if (tab === "results") { if (lineView) bumpLines(); else loadRows(offset); }
+            }}
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-500 border border-slate-200 rounded-lg hover:bg-slate-50">
             <RefreshCw className="w-3.5 h-3.5" /> Refresh
           </button>
@@ -353,7 +369,8 @@ export default function CommissionStatementDetail({
         </div>
       )}
 
-      {/* Stat cards */}
+      {/* Stat cards — the line view has its own six, each a filter. */}
+      {!lineView && (
       <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3 mb-4">
         <Stat label="Estimated commission" value={`₹${inr(stmt.total_incentive)}`} accent="text-emerald-700" />
         <Stat label="IATA commission" value={`₹${inr(stmt.iata_total)}`} accent="text-teal-700" />
@@ -416,6 +433,7 @@ export default function CommissionStatementDetail({
           </>
         )}
       </div>
+      )}
 
       {/* Nothing has been calculated. Previously invisible: rows still at
           `pending` fell into no counter, so an untouched statement reported
@@ -486,7 +504,21 @@ export default function CommissionStatementDetail({
           ))}
       </div>
 
-      {tab === "results" && (
+      {tab === "results" && lineView && (
+        <ThirdPartyStatementLines
+          source={source}
+          batchId={stmt.batch_id}
+          refreshKey={refreshKey}
+          selected={selected}
+          onToggle={toggleRow}
+          onToggleMany={toggleMany}
+          busyRows={busyRows}
+          onRun={runRows}
+          onDiagnose={setDiagnoseRow}
+        />
+      )}
+
+      {tab === "results" && !lineView && (
         <>
           {/* Filters */}
           <div className="flex items-center gap-2 flex-wrap mb-3">
@@ -587,7 +619,7 @@ export default function CommissionStatementDetail({
                   ) : rows.map((r) => {
                     const st = STATUS_STYLE[r.commission_status] ?? STATUS_STYLE.pending;
                     const bd = r.incentive_breakdown || {};
-                    const busy = busyRows.has(r.id);
+                    const busy = busyRows.has(lineId(r));
                     // A row nobody has run is not a row that ran and found
                     // nothing — the blank cells mean "not looked at", including
                     // Sector/Class/Travel date, which are only written BY a run.
@@ -596,14 +628,14 @@ export default function CommissionStatementDetail({
                     return (
                       <tr key={r.id} className={cn(
                         "border-b border-slate-100 hover:bg-slate-50/60 whitespace-nowrap",
-                        selected.has(r.id) && "bg-blue-50/50",
+                        selected.has(lineId(r)) && "bg-blue-50/50",
                         notRun && "opacity-55 bg-slate-50/40",
                       )}>
                         <td className="px-3 py-2">
                           <input
                             type="checkbox"
-                            checked={selected.has(r.id)}
-                            onChange={() => toggleRow(r.id)}
+                            checked={selected.has(lineId(r))}
+                            onChange={() => toggleRow(lineId(r))}
                             aria-label={`Select document ${r.document_number ?? r.id}`}
                             className="w-3.5 h-3.5 accent-blue-600 cursor-pointer"
                           />
@@ -707,7 +739,7 @@ export default function CommissionStatementDetail({
                         </td>
                         <td className="px-3 py-2 text-center whitespace-nowrap">
                           <button
-                            onClick={() => runRows([r.id])}
+                            onClick={() => runRows([lineId(r)])}
                             disabled={busy}
                             className="p-1 text-slate-400 hover:text-emerald-600 disabled:opacity-40"
                             title="Run calculation for this row"

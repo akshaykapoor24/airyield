@@ -57,6 +57,14 @@ def build(headers, values, slug="tp-gds"):
     return fs.get(slug).build_row(dict(zip(headers, values)), headers)
 
 
+# The real export prints its GST as one "GST On SF" figure. GST On SF is not a column to map
+# any more (2026-10-26) — it is CGST + SGST + IGST — so the user maps that one column onto a
+# part, as here: IGST, the whole 18%.
+def build_triumphh(values):
+    colmap = {**fs.get("tp-gds").suggest_mapping(GDS_HEADERS), "igst": "GST On SF"}
+    return fs.get("tp-gds").build_row_mapped(dict(zip(GDS_HEADERS, values)), GDS_HEADERS, colmap)
+
+
 def net_from_components(d):
     """The vendor's own Net Amount, recomputed from the columns it prints."""
     f = lambda k: float(d.get(k) or 0)  # noqa: E731
@@ -68,9 +76,15 @@ def net_from_components(d):
 
 class TestGdsColumnMapping(unittest.TestCase):
     def test_every_real_header_maps(self):
+        """Every header of the real export maps, but the ones the user cut from the standard
+        columns (2026-10-25) — they said nothing a sale/refund Invoice Type does not — and the
+        two totals that are now their parts added up (2026-10-26): the user maps SSR Amount
+        and GST On SF onto a part by hand."""
         colmap = fs.get("tp-gds").build_col_map(GDS_HEADERS)
         unmapped = [h for h in GDS_HEADERS if h not in colmap]
-        self.assertEqual(unmapped, [], f"unmapped real-export headers: {unmapped}")
+        self.assertEqual(unmapped, ["Customer Name", "Customer ID", "Booking Type", "Username",
+                                    "Pax Type", "Trip Type", "Travel Type", "Issuing Office",
+                                    "SSR Amount", "GST On SF"])
 
     def test_money_headers_map_to_the_named_field(self):
         """The regression that mattered: every one of these missed before the rewrite, so
@@ -78,10 +92,10 @@ class TestGdsColumnMapping(unittest.TestCase):
         colmap = fs.get("tp-gds").build_col_map(GDS_HEADERS)
         for header, field in [
             ("Basic Fare", "base_fare"), ("YQ Fare", "yq"), ("Other Taxes", "other_taxes"),
-            ("SSR Amount", "ssr_amount"), ("Reschedule Charges", "reschedule_charges"),
+            ("Reschedule Charges", "reschedule_charges"),
             ("Agent Commission", "commission_amount"), ("Incentive", "incentive_amount"),
             ("TDS Amount", "tds"), ("Service Charge", "service_charge"), ("SF", "service_fee"),
-            ("GST On SF", "gst_on_sf"), ("Agent Penalty", "agent_penalty"),
+            ("Agent Penalty", "agent_penalty"),
             ("Cancellation Markup", "cancellation_markup"), ("Net Amount", "net_amount"),
         ]:
             self.assertEqual(colmap.get(header), field, f"{header!r} -> {colmap.get(header)!r}")
@@ -112,15 +126,21 @@ class TestGdsColumnMapping(unittest.TestCase):
         self.assertEqual(colmap.get("Markup"), "markup")
 
     def test_legacy_superset_still_parses(self):
-        """The pre-existing speculative schema is kept so another consolidator's file, and
-        any batch uploaded before the rewrite, still maps exactly as it did."""
+        """The pre-existing speculative schema is kept so another consolidator's file still
+        maps — onto the standard columns: Issue Date onto Booked / Issue Date, Type onto
+        Invoice Type, Passenger onto Pax First Name. Cut: Currency, and (2026-10-26) Agency
+        Code, Consolidator and GDS — Other is Payment Status and Remarks only."""
         legacy = ["Transaction Date", "Issue Date", "Travel Date", "PNR", "GDS PNR", "Ticket No",
                   "Type", "Airline", "Sector", "Flight No", "Passenger", "Pax", "Class",
                   "Base Fare", "Taxes", "YQ", "Total Fare", "Currency", "Commission", "Comm %",
                   "Markup", "Service Fee", "TDS", "Net Amount", "Invoice No", "Agency Code",
                   "Consolidator", "GDS", "Payment Status", "Remarks"]
         colmap = fs.get("tp-gds").build_col_map(legacy)
-        self.assertEqual([h for h in legacy if h not in colmap], [])
+        self.assertEqual([h for h in legacy if h not in colmap],
+                         ["Currency", "Agency Code", "Consolidator", "GDS"])
+        self.assertEqual(colmap["Issue Date"], "booking_date")
+        self.assertEqual(colmap["Type"], "ticket_status")
+        self.assertEqual(colmap["Passenger"], "first_name")
 
     def test_unknown_headers_reach_raw_data_only(self):
         out = build(["Ticket No", "Some Vendor Column"], ["123", "keep me"])
@@ -214,10 +234,12 @@ class TestDerivedFields(unittest.TestCase):
         self.assertEqual(d["issue_date"], "2026-08-08")
         self.assertEqual(d["issue_date_source"], "booked_date")
 
-    def test_an_explicit_issue_date_wins(self):
+    def test_booked_and_issue_date_are_one_column(self):
+        """The user's standard: one "Booked / Issue Date". A file printing both reads the
+        first, and the Issue Date is that same day."""
         d = build(["Issue Date", "Booked Date"], ["01-08-2026", "08-08-2026"])["data"]
+        self.assertEqual(d["booking_date"], "2026-08-01")
         self.assertEqual(d["issue_date"], "2026-08-01")
-        self.assertNotIn("issue_date_source", d)
 
     def test_total_fare_is_derived_for_plb_accrual(self):
         """plb_accrual sums `total_fare` for gross revenue; the export has no such column,
@@ -239,12 +261,12 @@ class TestNetAmountIdentity(unittest.TestCase):
              + Service Charge + SF + GST On SF + Agent Penalty + Cancellation Markup"""
 
     def test_turkish_row_closes(self):
-        d = build(GDS_HEADERS, ROW_TURKISH)["data"]
+        d = build_triumphh(ROW_TURKISH)["data"]
         self.assertAlmostEqual(net_from_components(d), float(d["net_amount"]), places=4)
         self.assertEqual(float(d["net_amount"]), 89437.0)
 
     def test_etihad_row_closes_and_proves_the_tds_relationship(self):
-        d = build(GDS_HEADERS, ROW_ETIHAD)["data"]
+        d = build_triumphh(ROW_ETIHAD)["data"]
         self.assertAlmostEqual(net_from_components(d), float(d["net_amount"]), places=4)
         commission, tds = float(d["commission_amount"]), float(d["tds"])
         self.assertAlmostEqual(tds, commission * 0.02, places=4)
@@ -252,7 +274,7 @@ class TestNetAmountIdentity(unittest.TestCase):
     def test_commission_is_gross_of_tds(self):
         """A variance that netted the TDS off first would print a phantom 2% shortfall on
         every commission-bearing row, so the direction of this is load-bearing."""
-        d = build(GDS_HEADERS, ROW_ETIHAD)["data"]
+        d = build_triumphh(ROW_ETIHAD)["data"]
         gross, tds = float(d["commission_amount"]), float(d["tds"])
         cash_received = gross - tds
         self.assertAlmostEqual(gross, 285.72, places=4)
@@ -263,8 +285,124 @@ class TestNetAmountIdentity(unittest.TestCase):
         values[GDS_HEADERS.index("Basic Fare")] = "66,250.00"
         values[GDS_HEADERS.index("Other Taxes")] = "23,069.00"
         values[GDS_HEADERS.index("Net Amount")] = "89,437.00"
-        d = build(GDS_HEADERS, values)["data"]
+        d = build_triumphh(values)["data"]
         self.assertAlmostEqual(net_from_components(d), 89437.0, places=4)
+
+
+# ── Brightsun, 01-07 Oct 2026 — SSR and GST in parts, UATP ─────────────────────
+# Its own headers, mapped as the user maps them; SellTax is the OTHER taxes (TotalAmt =
+# SellFare + SellTax + YQ + YR + K3 + … on all 125 lines), not the total.
+BS_MAP = {
+    "ticket_number": "TicketNumber", "base_fare": "SellFare", "other_taxes": "SellTax",
+    "yq": "SellTax_YQ", "yr": "Sale_YR", "k3": "Sale_K3",
+    "seat_selection": "Seat_Selection", "excess_baggage": "Excessbagage", "meals": "Meals",
+    "service_fee": "Booking_Fee_Sell", "cgst": "CGST_Sell", "sgst": "SGST_Sell", "igst": "IGST_Sell",
+    "commission_amount": "Comm_Sell", "tds": "TDS_Sell", "uatp_amount": "PaidByCreditCard",
+    "net_amount": "Net_AMT",
+}
+BS_HEADERS = list(BS_MAP.values())
+# Seat selection billed on its own line.
+BS_SEAT = ["1946958485", "0", "0", "0", "0", "0", "3072", "", "", "0", "0", "0", "", "0", "0", "0", "3072"]
+# A booking fee of 50 with 9% CGST + 9% SGST.
+BS_GST = ["3987190652", "28875", "5889", "8823", "2506", "0", "0", "", "", "50", "4.5", "4.5", "",
+          "0", "0", "", "46152"]
+# Paid by card straight to the airline: the vendor bills only its own fee.
+BS_CARD = ["3978247270", "2505", "3502", "6719", "1056", "0", "0", "", "", "50", "4.5", "4.5", "",
+           "0", "0", "-13782", "59"]
+
+
+def build_bs(values):
+    row = dict(zip(BS_HEADERS, values))
+    return fs.get("tp-gds").build_row_mapped(row, BS_HEADERS, BS_MAP)["data"]
+
+
+class TestSsrAndGstParts(unittest.TestCase):
+    def test_brightsun_headers_map_by_themselves(self):
+        colmap = fs.get("tp-gds").build_col_map(
+            ["Seat_Selection", "Excessbagage", "Meals", "RFD_SELL", "CAN_Charge", "CGST_Sell",
+             "SGST_Sell", "IGST_Sell", "ADM", "DIS_Sell", "PaidByCreditCard"])
+        self.assertEqual(colmap, {
+            "Seat_Selection": "seat_selection", "Excessbagage": "excess_baggage", "Meals": "meals",
+            "RFD_SELL": "refund_amount", "CGST_Sell": "cgst", "SGST_Sell": "sgst",
+            "IGST_Sell": "igst", "ADM": "adm", "DIS_Sell": "discount",
+            "PaidByCreditCard": "uatp_amount"})
+
+    def test_a_refund_charge_is_not_the_refund(self):
+        """The refund AMOUNT and the charge for refunding are different lines on the invoice."""
+        colmap = fs.get("tp-gds").build_col_map(["Refund Charges", "Refund"])
+        self.assertEqual(colmap, {"Refund Charges": "cancellation_markup", "Refund": "refund_amount"})
+
+    def test_a_percent_or_a_payer_never_lands_in_an_amount(self):
+        """Riya prints "Disc. %" beside "Disc. Amt."; TripJack's "UATP" says who paid."""
+        colmap = fs.get("tp-gds").build_col_map(["Disc. %", "UATP"])
+        self.assertEqual(colmap, {})
+        self.assertEqual(fs.get("tp-gds").build_col_map(["Disc. %", "Disc. Amt."]),
+                         {"Disc. Amt.": "discount"})
+
+    def test_ssr_amount_adds_up_its_parts(self):
+        d = build_bs(BS_SEAT)
+        self.assertEqual(float(d["ssr_amount"]), 3072.0)
+        self.assertEqual(d["ssr_source"], "derived")
+        self.assertEqual(float(d["total_fare"]), 3072.0)
+
+    def test_gst_on_sf_adds_up_cgst_sgst_igst(self):
+        d = build_bs(BS_GST)
+        self.assertEqual(float(d["gst_on_sf"]), 9.0)
+        self.assertEqual(d["gst_source"], "derived")
+
+    def test_the_totals_are_not_columns_to_map(self):
+        """The user's call (2026-10-26): SSR Amount and GST On SF are their parts added up.
+        Not on the mapping screen, not in the template, and no header auto-maps onto them."""
+        fields = {c["field"] for c in fs.TP_GDS_DISPLAY}
+        self.assertFalse({"ssr_amount", "gst_on_sf"} & fields)
+        self.assertEqual(fs.get("tp-gds").build_col_map(["SSR Amount", "SSR", "GST On SF"]), {})
+        self.assertIn("taxes", fields)   # Total Tax stays mappable: printed, or its parts
+
+    def test_a_batch_saved_with_a_total_keeps_it_on_reprocess(self):
+        """A batch uploaded while the totals were mappable re-runs with its stored mapping;
+        the total it read is kept rather than replaced by parts it never had."""
+        hdr = ["Ticket No", "SSR", "Seat", "GST", "CGST"]
+        colmap = {"ticket_number": "Ticket No", "ssr_amount": "SSR", "seat_selection": "Seat",
+                  "gst_on_sf": "GST", "cgst": "CGST"}
+        d = fs.get("tp-gds").build_row_mapped(dict(zip(hdr, ["1", "500", "100", "18", "4.5"])),
+                                              hdr, colmap)["data"]
+        self.assertEqual((d["ssr_amount"], d["gst_on_sf"]), ("500", "18"))
+        self.assertNotIn("ssr_source", d)
+        self.assertNotIn("gst_source", d)
+
+    def test_total_fare_is_basic_plus_total_tax_plus_the_three_ssr_parts(self):
+        d = build(["Ticket No", "Basic Fare", "YQ Tax", "Other Taxes", "Seat Selection",
+                   "Excess Baggage", "Meals"], ["1", "1000", "100", "50", "300", "200", "150"])["data"]
+        self.assertEqual(float(d["taxes"]), 150.0)
+        self.assertEqual(float(d["ssr_amount"]), 650.0)
+        self.assertEqual(float(d["total_fare"]), 1000 + 150 + 650)
+        self.assertEqual(d["total_fare_source"], "derived")
+
+    def test_a_mapped_total_tax_is_used_as_printed(self):
+        d = build(["Ticket No", "Basic Fare", "YQ Tax", "Total Tax"], ["1", "1000", "100", "400"])["data"]
+        self.assertEqual(d["taxes"], "400")
+        self.assertNotIn("total_tax_source", d)
+        self.assertEqual(float(d["total_fare"]), 1400.0)
+
+    def test_no_parts_no_total(self):
+        d = build(["Ticket No", "Basic Fare"], ["1", "100"])["data"]
+        self.assertNotIn("ssr_amount", d)
+        self.assertNotIn("gst_on_sf", d)
+
+    def test_every_derived_total_is_listed_for_the_edit_path(self):
+        """An edit drops each total marked derived so it is added up again — a total missing
+        from DERIVED_TOTALS would keep describing the row as it was before the edit."""
+        d = build(["Ticket No", "Basic Fare", "YQ Tax", "Seat Selection", "CGST"],
+                  ["1", "100", "10", "5", "1"])["data"]
+        marked = {k for k, v in d.items() if k.endswith("_source") and v == "derived"}
+        self.assertEqual(marked, {m for _t, m in fs.DERIVED_TOTALS})
+
+    def test_net_closes_with_the_card_payment_added_as_printed(self):
+        from app.services.commission.third_party import net_from_components as vendor_net
+        for row in (BS_SEAT, BS_GST, BS_CARD):
+            d = build_bs(row)
+            with self.subTest(ticket=d["ticket_number"]):
+                self.assertAlmostEqual(vendor_net(d), float(d["net_amount"]), places=4)
 
 
 class TestSourceFormat(unittest.TestCase):

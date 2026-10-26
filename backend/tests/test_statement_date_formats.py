@@ -144,7 +144,7 @@ class FormTests(unittest.TestCase):
     def test_required_where_the_wizard_always_sends_it(self):
         with self.assertRaises(HTTPException) as e:
             router._date_formats_form("tp-gds", None, required=True)
-        self.assertIn("Booked Date and Date of Travel", e.exception.detail)
+        self.assertIn("Booked / Issue Date and Travel Date", e.exception.detail)
         self.assertIsNone(router._date_formats_form("tp-gds", None, required=False))
 
     def test_a_missing_or_unknown_format_is_refused(self):
@@ -186,7 +186,7 @@ class DatesReadTests(unittest.TestCase):
         b, t = out["booking_date"], out["travel_date"]
         self.assertEqual((b["read"], b["first"], b["last"], b["unreadable"]), (3, "2026-08-01", "2026-08-07", 1))
         self.assertEqual(b["cells"], [{"index": 2, "value": "13/08/2026"}])
-        self.assertEqual((b["format"], b["header"], b["mapped"]), ("MDY", "Booked Date", True))
+        self.assertEqual((b["format"], b["header"], b["mapped"]), ("MDY", "Booked / Issue Date", True))
         self.assertEqual((t["read"], t["unreadable"]), (3, 1))
         self.assertEqual(t["cells"], [{"index": 3, "value": "31/31/2026"}])
 

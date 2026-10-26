@@ -1022,12 +1022,13 @@ export function SegmentIncentiveTabContent({ data, onChange }: {
 
 // B2B Standard standard-shaped incentives are date-wise, not frequency-wise: drop
 // the Frequency field and add explicit Travel Date Valid From/To right after the
-// contract dates. Other incentive types are left untouched.
-function b2bStandardFields(name: string, fields: FieldConfig[], b2bStandard: boolean): FieldConfig[] {
-  if (!b2bStandard || !DATE_WISE_INCENTIVES.has(name)) return fields;
+// contract dates. Other deals (travelDates — Airline, B2B Adhoc) get the same Travel
+// Date fields but keep Frequency. Other incentive types are left untouched.
+function b2bStandardFields(name: string, fields: FieldConfig[], b2bStandard: boolean, travelDates: boolean): FieldConfig[] {
+  if ((!b2bStandard && !travelDates) || !DATE_WISE_INCENTIVES.has(name)) return fields;
   const out: FieldConfig[] = [];
   for (const f of fields) {
-    if (f.key === "frequency") continue;   // removed — a date range is captured instead
+    if (b2bStandard && f.key === "frequency") continue;   // removed — a date range is captured instead
     out.push(f);
     if (f.key === "validTo") {
       out.push({ key: "travelValidFrom", label: `Travel Date Valid From for ${name}`, type: "date" });
@@ -1038,9 +1039,11 @@ function b2bStandardFields(name: string, fields: FieldConfig[], b2bStandard: boo
 }
 
 // ── incentive tab content ──────────────────────────────────────────────────
-export function IncentiveTabContent({ name, data, onChange, b2bStandard = false }: {
+export function IncentiveTabContent({ name, data, onChange, b2bStandard = false, travelDates = false }: {
   name: string; data: Record<string, string>; onChange: (k: string, v: string) => void;
   b2bStandard?: boolean;
+  // Adds Travel Date Valid From/To without the rest of the B2B date-wise shape (Airline, B2B Adhoc).
+  travelDates?: boolean;
 }) {
   if (name === "Ancillary") {
     return <AncillaryTabContent data={data} onChange={onChange} />;
@@ -1049,7 +1052,7 @@ export function IncentiveTabContent({ name, data, onChange, b2bStandard = false 
     return <SegmentIncentiveTabContent data={data} onChange={onChange} />;
   }
 
-  const allFields = b2bStandardFields(name, INCENTIVE_FIELDS[name] ?? [], b2bStandard);
+  const allFields = b2bStandardFields(name, INCENTIVE_FIELDS[name] ?? [], b2bStandard, travelDates);
 
   // Clear downstream fields when a parent field changes
   const handleFieldChange = (key: string, value: string) => {
@@ -1422,7 +1425,7 @@ export function incentiveEntryToForm(entry: Record<string, unknown>): Record<str
 // incl_excl_data ({inc: {ruleType: conditions}}) for a single PATCH.
 export function IncentiveRulesModal({
   incentiveTypes, incentiveData, inclExclData, initialIncType, onSave, onClose,
-  b2bStandard = false, airlineName,
+  b2bStandard = false, travelDates = false, airlineName,
 }: {
   incentiveTypes: string[];
   incentiveData: Record<string, Record<string, unknown>>;
@@ -1436,6 +1439,8 @@ export function IncentiveRulesModal({
   // B2B Standard: renders the date-wise incentive shape + airline class codes in
   // the Class field. Sourced from the deal (deal_type=b2b + deal_tag=standard).
   b2bStandard?: boolean;
+  // Travel Date Valid From/To on the incentive for every deal (see IncentiveTabContent).
+  travelDates?: boolean;
   airlineName?: string;
 }) {
   const [incForms, setIncForms] = useState<Record<string, Record<string, string>>>(() => {
@@ -1496,7 +1501,7 @@ export function IncentiveRulesModal({
           <>
             <TabBar tabs={incentiveTypes} active={inc} onSelect={setActiveInc} />
             <div className="overflow-y-auto flex-1">
-              <IncentiveTabContent name={inc} data={incForms[inc] ?? {}} onChange={setIncField} b2bStandard={b2bStandard} />
+              <IncentiveTabContent name={inc} data={incForms[inc] ?? {}} onChange={setIncField} b2bStandard={b2bStandard} travelDates={travelDates} />
               <div className="border-t border-gray-100 mt-1 pt-3">
                 <h3 className="px-4 text-[11px] font-bold text-gray-500 uppercase tracking-wide">Inclusion / Exclusion Rules</h3>
                 <div className="px-4 mt-2">

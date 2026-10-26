@@ -1261,6 +1261,9 @@ export default function NewDealPage() {
                     data={incentiveData[activeIncentiveTab] ?? {}}
                     onChange={(k, v) => setIncentiveField(activeIncentiveTab, k, v)}
                     b2bStandard={isB2bStandard}
+                    // Every deal (Airline / B2B, Standard / Adhoc, incoming and outgoing)
+                    // captures Travel Date Valid From/To; only B2B Standard also drops Frequency.
+                    travelDates
                   />
 
                   {/* Level B: incl/excl rule sub-sub-tabs */}

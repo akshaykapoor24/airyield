@@ -1625,6 +1625,7 @@ export default function DealBatchPage() {
           onSave={handleIncentiveRulesSave}
           onClose={() => setIncentiveRulesPopup(null)}
           b2bStandard={(incentiveRulesPopup.deal.deal_no?.startsWith("B2B") ?? !!incentiveRulesPopup.deal.business_type) && (incentiveRulesPopup.deal.deal_tag ?? "standard") === "standard"}
+          travelDates
           airlineName={incentiveRulesPopup.deal.airline_name ?? undefined}
         />
       )}

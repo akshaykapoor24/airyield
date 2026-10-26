@@ -13,12 +13,14 @@ Run:  python -m unittest discover -s tests      (from backend/)
 import os
 import sys
 import unittest
+from datetime import date
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.services.ai_deal_extraction import (  # noqa: E402
-    Stats, _simple_cell, deterministic_compact, expand_row,
+    AIDealExtractionService, Stats, _simple_cell, deterministic_compact, expand_row,
+    parse_period_window, parse_validity_window,
 )
 from app.services.airline_resolver import AirlineIndex, bare_designator, RESOLVED  # noqa: E402
 from app.services.pdf_table_rows import (  # noqa: E402
@@ -110,6 +112,10 @@ class FastPathTest(unittest.TestCase):
         got = {d["incentive_data"]["PLB"]["class"]: d["incentive_data"]["PLB"]["incentiveAmtPct"] for d in deals}
         self.assertEqual(got, {"Economy": 8.5, "Premium": 8.5, "Business": 10.5})
         self.assertEqual(deals[0]["contract_valid_to"], "2026-12-31")
+        # No period column: the validity cell is both windows' end, and travel's start is
+        # left to the review page (the contract start, once Valid From is known).
+        plb = deals[0]["incentive_data"]["PLB"]
+        self.assertEqual((plb["travelValidFrom"], plb["travelValidTo"]), (None, "2026-12-31"))
         self.assertEqual(deals[0]["airline_code"], "MH")       # the name cell IS the code
 
     def test_messy_row_goes_to_model(self):
@@ -167,6 +173,18 @@ class SpreadsheetTest(unittest.TestCase):
         wb.save(buf)
         return buf.getvalue()
 
+    def test_week_is_the_contract_and_validity_the_travel_window(self):
+        from app.services.pdf_table_rows import build_layout_from_sheet
+        L = build_layout_from_sheet(self.workbook(), "vendor.xlsx")
+        self.assertEqual(L.colmap.period, 0)
+        r = L.rows[0]                                         # 23-30SEP · Till 31DEC'26
+        deals = expand_row(deterministic_compact(r, L.colmap), r, Stats(), L.colmap)
+        week_from, week_to = parse_period_window("23-30SEP")
+        plb = deals[0]["incentive_data"]["PLB"]
+        self.assertEqual((deals[0]["contract_valid_from"], deals[0]["contract_valid_to"]), (week_from, week_to))
+        self.assertEqual((plb["validFrom"], plb["validTo"]), (week_from, week_to))
+        self.assertEqual((plb["travelValidFrom"], plb["travelValidTo"]), (week_from, "2026-12-31"))
+
     def test_reads_rates_and_keeps_one_supplier(self):
         from app.services.deal_supplier_check import supplier_cell_matches
         from app.services.pdf_table_rows import build_layout_from_sheet
@@ -187,6 +205,158 @@ class SpreadsheetTest(unittest.TestCase):
     def test_no_filter_keeps_everyone(self):
         from app.services.pdf_table_rows import build_layout_from_sheet
         self.assertEqual(len(build_layout_from_sheet(self.workbook(), "vendor.xlsx").rows), 3)
+
+    def test_deals_carry_their_source_cell(self):
+        from app.services.pdf_table_rows import build_layout_from_sheet
+        L = build_layout_from_sheet(self.workbook(), "vendor.xlsx")
+        got = [d["supplier_cell"] for r in L.rows
+               for d in expand_row(deterministic_compact(r, L.colmap), r, Stats(), L.colmap)]
+        self.assertEqual(got, ["AKBAR"] * 6 + ["BRIGHTSUN"] * 3)
+
+    def test_pdf_style_sheet_without_source_column_carries_none(self):
+        cm = build_colmap(VICKY_HEADER)
+        r = row(9, ["MH", "10.5%", "8.5% (B)", "8.5% (B)", "Dec'26", ""], cm)
+        deals = expand_row(deterministic_compact(r, cm), r, Stats(), cm)
+        self.assertTrue(all(d["supplier_cell"] is None for d in deals))
+
+
+def _xlsx(sheets):
+    """{title: [rows]} -> .xlsx bytes. A cell given as ("", fill) is formatted but empty."""
+    import io
+    import openpyxl
+    from openpyxl.styles import PatternFill
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    for title, rows in sheets.items():
+        ws = wb.create_sheet(title)
+        for ri, values in enumerate(rows, start=1):
+            for ci, v in enumerate(values, start=1):
+                if isinstance(v, tuple):
+                    ws.cell(row=ri, column=ci).fill = PatternFill("solid", fgColor="FFA500")
+                elif v is not None:
+                    ws.cell(row=ri, column=ci, value=v)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+VENDOR_HEADER = ["A/L", "Source", "IATA", "PLB(ECO)", "PLB(PRE ECO)", "PLB(BUS)",
+                 "Applicable", "Travel Validity", "Remarks"]
+
+
+class VendorWorkbookTest(unittest.TestCase):
+    """The weekly multi-supplier workbook: a GDS tab, an LCC tab, a Service Charge tab."""
+
+    def book(self, header=VENDOR_HEADER, gds_extra=()):
+        orange = ("", "fill")
+        return _xlsx({
+            # The header row's fill runs two columns past the table, as Excel sheets do.
+            "GDS": [header + [orange, orange],
+                    ["AA", "AKBAR", "0%", "2%", "2%", "2%", "B+YR", "Till 31DEC'26", "x"],
+                    ["AF", "BRIGHTSUN", "0%", "2.25%", "2.75%", "3%", "B+YR", "01JAN'27 Onwards", ""],
+                    ["EK", "TSC", "0%", "1350", "2700", "2700", "FLAT", "Till 15DEC'26", "flat"],
+                    *gds_extra],
+            "LCC": [VENDOR_HEADER, ["6E", "RIYA", "0%", "1%", "", "1%", "B", "Till 31DEC'26", ""]],
+            "Service Charge": [["A/L", "Source", "Charge"], ["AA", "AKBAR", "250"]],
+        })
+
+    def test_formatting_past_the_table_does_not_hide_its_header(self):
+        from app.services.pdf_table_rows import build_layout_from_sheet
+        L = build_layout_from_sheet(self.book(), "vendor.xlsx")
+        self.assertEqual((L.sheet_title, len(L.rows), L.header), ("GDS", 3, tuple(VENDOR_HEADER)))
+
+    def test_other_deal_tabs_are_named(self):
+        from app.services.pdf_table_rows import build_layout_from_sheet
+        self.assertEqual(build_layout_from_sheet(self.book(), "vendor.xlsx").unread_deal_sheets, ["LCC"])
+
+    def _extract(self, content, **kw):
+        import asyncio
+        import io
+        from fastapi import UploadFile
+        return asyncio.run(AIDealExtractionService.extract(
+            UploadFile(file=io.BytesIO(content), filename="vendor.xlsx"), **kw))
+
+    def test_all_suppliers_keeps_every_row_without_a_model_call(self):
+        res = self._extract(self.book(), all_suppliers=True)
+        by_src = {}
+        for d in res["deals"]:
+            by_src.setdefault(d["supplier_cell"], []).append(d)
+        self.assertEqual(sorted(by_src), ["AKBAR", "BRIGHTSUN", "TSC"])
+        self.assertEqual(len(by_src["AKBAR"]), 3)
+        # EK's FLAT amounts are no percentage: one fill-in row, still TSC's.
+        self.assertEqual([d["needs_manual"] for d in by_src["TSC"]], [True])
+        self.assertIn("'LCC' tab also has a deal table", res["warning"])
+
+    def test_picked_supplier_still_keeps_only_its_rows(self):
+        res = self._extract(self.book(), supplier_name="Akbar Travels of India Pvt Ltd")
+        self.assertEqual({d["supplier_cell"] for d in res["deals"]}, {"AKBAR"})
+        self.assertIn("left out", res["warning"])
+
+    def test_all_suppliers_needs_a_source_column(self):
+        header = [h for h in VENDOR_HEADER if h != "Source"]
+        content = _xlsx({"GDS": [header, ["AA", "0%", "2%", "2%", "2%", "B+YR", "Till 31DEC'26", ""]]})
+        res = self._extract(content, all_suppliers=True)
+        self.assertEqual(res["deals"], [])
+        self.assertIn("Source / Supplier column", res["warning"])
+
+    def test_onwards_opens_the_deal(self):
+        res = self._extract(self.book(), all_suppliers=True)
+        af = [d for d in res["deals"] if d["supplier_cell"] == "BRIGHTSUN"]
+        self.assertEqual({(d["contract_valid_from"], d["contract_valid_to"]) for d in af}, {("2027-01-01", None)})
+        self.assertEqual(af[0]["incentive_data"]["PLB"]["validFrom"], "2027-01-01")
+        plb = af[0]["incentive_data"]["PLB"]
+        self.assertEqual((plb["travelValidFrom"], plb["travelValidTo"]), ("2027-01-01", None))
+
+    def test_onwards_on_a_week_sheet_opens_travel_not_the_contract(self):
+        header = ("Week", "A/L", "Source", "IATA", "PLB(ECO)", "PLB(PRE ECO)", "PLB(BUS)",
+                  "Applicable", "Travel Validity", "Remarks")
+        cm = build_colmap(header)
+        r = row(1, ["01-07OCT'26", "AF", "BRIGHTSUN", "0%", "2.25%", "2.75%", "3%", "B+YR",
+                    "01JAN'27 Onwards", ""], cm)
+        deals = expand_row(deterministic_compact(r, cm), r, Stats(), cm)
+        plb = deals[0]["incentive_data"]["PLB"]
+        self.assertEqual((deals[0]["contract_valid_from"], deals[0]["contract_valid_to"]),
+                         ("2026-10-01", "2026-10-07"))
+        self.assertEqual((plb["travelValidFrom"], plb["travelValidTo"]), ("2027-01-01", None))
+
+
+class PeriodWindowTest(unittest.TestCase):
+    TODAY = date(2026, 10, 25)
+
+    def test_week_cells(self):
+        for cell, want in (
+            ("01-07OCT", ("2026-10-01", "2026-10-07")),
+            ("01-07OCT'26", ("2026-10-01", "2026-10-07")),
+            ("23-30SEP26", ("2026-09-23", "2026-09-30")),
+            ("28SEP-04OCT", ("2026-09-28", "2026-10-04")),
+            ("01OCT-07OCT", ("2026-10-01", "2026-10-07")),
+            ("01 Oct 2026 - 07 Oct 2026", ("2026-10-01", "2026-10-07")),
+            ("01/10/2026 - 07/10/2026", ("2026-10-01", "2026-10-07")),
+        ):
+            with self.subTest(cell):
+                self.assertEqual(parse_period_window(cell, self.TODAY), want)
+
+    def test_missing_year_is_the_nearest_one(self):
+        self.assertEqual(parse_period_window("29DEC-04JAN", date(2027, 1, 2)), ("2026-12-29", "2027-01-04"))
+        self.assertEqual(parse_period_window("29DEC-04JAN", date(2026, 12, 20)), ("2026-12-29", "2027-01-04"))
+
+    def test_not_a_period(self):
+        for cell in (None, "", "Till 31DEC'26", "W.E.F 07OCT'26", "01JAN'27 Onwards", "Week 40"):
+            with self.subTest(cell):
+                self.assertEqual(parse_period_window(cell, self.TODAY), (None, None))
+
+
+class ValidityWindowTest(unittest.TestCase):
+    def test_till_is_an_end(self):
+        self.assertEqual(parse_validity_window("TKTG Till 31DEC'26"), (None, "2026-12-31"))
+        self.assertEqual(parse_validity_window("O/B Till 31DEC'26"), (None, "2026-12-31"))
+        self.assertEqual(parse_validity_window("Till Futher Notice"), (None, None))
+
+    def test_onwards_is_a_start(self):
+        self.assertEqual(parse_validity_window("01JAN'27 Onwards"), ("2027-01-01", None))
+        self.assertEqual(parse_validity_window("Travel 01JAN'27 onwards till 31MAR'27"),
+                         ("2027-01-01", "2027-03-31"))
+        self.assertEqual(parse_validity_window(None), (None, None))
 
 
 # ── the real sheets ──────────────────────────────────────────────────────────

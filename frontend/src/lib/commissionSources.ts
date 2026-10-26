@@ -10,11 +10,11 @@
 // response shapes agree, which the backend guarantees by making schemas/commission.py a
 // superset of schemas/bsp_commission.py.
 
-export type CommissionSourceSlug =
-  | "bsp" | "ndc" | "lcc-detailed" | "tp-gds" | "tp-lcc" | "tp-api";
+export type CommissionSourceSlug = "bsp" | "ndc" | "lcc-detailed" | "tp-gds" | "tp-lcc" | "tp-api";
 
 export type CommissionSource = {
   slug: CommissionSourceSlug;
+  /** Its tab on the page. */
   label: string;
   apiBase: string;
   /** What the empty state calls a statement of this kind. */
@@ -57,7 +57,7 @@ export const COMMISSION_SOURCES: Record<CommissionSourceSlug, CommissionSource> 
   },
   ndc: {
     slug: "ndc",
-    label: "NDC",
+    label: "BSP-NDC",
     apiBase: "/commission/vendor/ndc",
     statementNoun: "NDC statement",
     uploadHref: "/vendors/statements/bsp/ndc",
@@ -87,7 +87,7 @@ export const COMMISSION_SOURCES: Record<CommissionSourceSlug, CommissionSource> 
   },
   "tp-gds": {
     slug: "tp-gds",
-    label: "GDS",
+    label: "Third Party GDS",
     apiBase: "/commission/vendor/tp-gds",
     statementNoun: "third-party GDS statement",
     uploadHref: "/vendors/statements/third-party/gds",
@@ -101,7 +101,7 @@ export const COMMISSION_SOURCES: Record<CommissionSourceSlug, CommissionSource> 
   },
   "tp-lcc": {
     slug: "tp-lcc",
-    label: "LCC",
+    label: "Third Party LCC",
     apiBase: "/commission/vendor/tp-lcc",
     statementNoun: "third-party LCC statement",
     uploadHref: "/vendors/statements/third-party/lcc",
@@ -115,7 +115,7 @@ export const COMMISSION_SOURCES: Record<CommissionSourceSlug, CommissionSource> 
   },
   "tp-api": {
     slug: "tp-api",
-    label: "API",
+    label: "Third Party API",
     apiBase: "/commission/vendor/tp-api",
     statementNoun: "third-party API statement",
     uploadHref: "/vendors/statements/third-party/api",
@@ -132,37 +132,14 @@ export const COMMISSION_SOURCES: Record<CommissionSourceSlug, CommissionSource> 
   },
 };
 
-export type CommissionTab = {
-  slug: string;
-  label: string;
-  sources: CommissionSourceSlug[];
-};
-
-/** The three top-level tabs, each holding the documents of one family — the same two
- *  questions in the same order as the Statements page: which family, then which document.
+/** The page's tabs, in order — one per source, in one row: BSP · BSP-NDC · LCC · Third
+ *  Party GDS · Third Party LCC · Third Party API. Each is its own document with its own
+ *  column shape, so each keeps its own grid.
  *
- *  The inner switch is not decoration. Every source in a family is a DIFFERENT DOCUMENT
- *  with a different column shape and a different set of things it can prove: a BSP
- *  settlement row knows neither class nor sector while the NDC export beside it prints
- *  both, and an aggregator's API file carries four products that no airline deal covers.
- *  Merging any two of them into one grid would merge two column shapes and quietly change
- *  what a figure means.
- *
- *  LCC has ONE source and therefore no inner switch — the shell renders the second row
- *  only when a family holds more than one. The four other LCC statement types (DI, Divided
- *  PNR, Flown Report, CTA/BTA) are ledgers and reports rather than sales documents: there
- *  is no fare to price on them, so they are uploadable but deliberately not listed here. */
-export const COMMISSION_TABS: CommissionTab[] = [
-  { slug: "bsp", label: "BSP", sources: ["bsp", "ndc"] },
-  { slug: "lcc", label: "LCC", sources: ["lcc-detailed"] },
-  { slug: "third-party", label: "Third Party", sources: ["tp-gds", "tp-lcc", "tp-api"] },
-];
+ *  Not listed: the four other LCC statement types (DI, Divided PNR, Flown Report, CTA/BTA),
+ *  which are ledgers and reports with no fare to price. They stay uploadable under Statements. */
+export const COMMISSION_TABS: CommissionSourceSlug[] = ["bsp", "ndc", "lcc-detailed", "tp-gds", "tp-lcc", "tp-api"];
 
 export function getSource(slug: string | null | undefined): CommissionSource | undefined {
   return COMMISSION_SOURCES[(slug ?? "") as CommissionSourceSlug];
-}
-
-export function tabForSource(slug: string): CommissionTab {
-  return COMMISSION_TABS.find((t) => t.sources.includes(slug as CommissionSourceSlug))
-    ?? COMMISSION_TABS[0];
 }

@@ -32,19 +32,30 @@ from app.services.report_download.registry import get_source  # noqa: E402
 G = ThirdPartyGds
 MIGRATION = os.path.join(os.path.dirname(__file__), "..", "alembic", "versions",
                          "tp_gds_columns_01_typed_columns.py")
+# The columns added since, by migrations that ADD to the table rather than build it.
+ADDED_BY = [os.path.join(os.path.dirname(__file__), "..", "alembic", "versions", f)
+            for f in ("tp_gds_std_01_tax_parts.py", "tp_gds_std_02_ssr_gst_parts.py",
+                      "tp_gds_std_03_refund.py")]
 
-# The columns the user listed, as the Third Party GDS statement prints them.
+# The standard columns the user set (2026-10-25), as the mapping screen names them, and the
+# real export's own spelling of the ones it prints differently.
 STATEMENT_HEADERS = [
-    "Week", "Booked Date", "Transaction Date", "Issue Date", "Date of Travel", "Customer Name",
-    "Customer ID", "Airline Name", "Airline Code", "Ticket Prefix", "Airline Category", "S PNR",
-    "Airline PNR", "CRS PNR", "Ticket No", "Status", "Type", "Booking Type", "Username",
-    "Issuing Office", "Pax Type", "First Name", "Last Name", "Pax", "Sector", "Flight No",
-    "Trip Type", "Travel Type", "Class", "Payment Mode", "Currency", "Basic Fare", "YQ Fare",
-    "Other Taxes", "Total Tax", "SSR Amount", "Reschedule Charges", "Total Fare",
-    "Agent Commission", "Comm %", "Incentive", "TDS Amount", "Service Charge", "SF",
-    "GST On SF", "Markup", "Agent Penalty", "Cancellation Markup", "Net Amount", "Invoice No",
-    "Agency Code", "Consolidator", "GDS", "Payment Status", "Remarks",
+    "Week", "Booked / Issue Date", "Transaction Date", "Travel Date", "Airline Name",
+    "Airline Code", "Ticket Prefix", "Segment Type", "S PNR", "Airline PNR", "CRS PNR",
+    "Ticket No", "Invoice Type", "Invoice No", "Pax First Name", "Pax Last Name", "Pax Count",
+    "Sector", "Flight No", "Class", "Payment Mode", "Card Type", "Basic Fare", "YQ Tax",
+    "YR Tax", "K3 Tax", "Other Taxes", "Total Tax", "Seat Selection", "Excess Baggage", "Meals",
+    "Total Fare", "Reschedule Charges", "Cancellation Charges", "Refund", "ADM",
+    "Agent Commission", "Incentive", "Discount", "Comm %", "Service Charge", "SF", "CGST",
+    "SGST", "IGST", "TDS Amount", "Markup", "Agent Penalty", "UATP Amount",
+    "Net Amount", "Payment Status", "Remarks",
 ]
+REAL_EXPORT_SPELLINGS = ["Booked Date", "Date of Travel", "Airline Category", "TicketPrefix",
+                         "Status", "First Name", "Last Name", "YQ Fare", "Cancellation Markup",
+                         # Brightsun, Riya and Akbar, October 2026
+                         "Seat_Selection", "Excessbagage", "CGST_Sell", "SGST_Sell", "IGST_Sell",
+                         "DIS_Sell", "PaidByCreditCard", "UATP Amt.", "Disc. Amt.", "CardAmt",
+                         "RFD_SELL"]
 
 # One full line of the real export, as the parser hands it over.
 LINE = {
@@ -72,6 +83,8 @@ class SchemaTests(unittest.TestCase):
         builder = flat_statement.get("tp-gds")
         fields = builder.build_col_map(STATEMENT_HEADERS)
         self.assertEqual(len(fields), len(STATEMENT_HEADERS), "a header no longer parses")
+        for spelling in REAL_EXPORT_SPELLINGS:
+            self.assertIn(spelling, builder.build_col_map([spelling]), spelling)
         keys = {f.key for f in G.data_fields()}
         for header, field in fields.items():
             with self.subTest(header=header):
@@ -228,10 +241,16 @@ class MigrationTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("tp_gds_columns_01", MIGRATION)
         cls.mig = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cls.mig)
+        cls.added = []
+        for path in ADDED_BY:
+            spec = importlib.util.spec_from_file_location(os.path.basename(path)[:-3], path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            cls.added += mod._COLUMNS
 
     def test_columns_match_the_model(self):
         model = {f.attr: (f.key, f.kind) for f in G.data_fields()}
-        migration = {c: (k, self.mig._kind(t)) for c, k, t in self.mig._COLUMNS}
+        migration = {c: (k, self.mig._kind(t)) for c, k, t in self.mig._COLUMNS + self.added}
         self.assertEqual(migration, model)
 
     def test_frozen_coercion_agrees_with_the_model(self):

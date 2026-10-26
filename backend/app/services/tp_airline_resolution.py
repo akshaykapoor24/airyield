@@ -37,7 +37,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.airline import Airline
@@ -62,6 +62,26 @@ def normalize_prefix(value) -> str | None:
     return s.zfill(3) if len(s) <= 3 else None
 
 
+_DIGITS_ONLY = re.compile(r"\d{1,3}")
+
+
+def numeric_code(value) -> str | None:
+    """An Airline Code cell holding the carrier's 3-digit accounting code ("465") rather than
+    its 2-letter designator — TripJack prints its "Supplier Code" that way, and that is the
+    column mapped to Airline Code. None for anything else.
+
+    The WHOLE cell must be digits: "6E" is IndiGo's designator, and stripping its letter
+    (as `normalize_prefix` would) reads it as 006, which is Delta.
+    """
+    s = str(value or "").strip()
+    return normalize_prefix(s) if _DIGITS_ONLY.fullmatch(s) else None
+
+
+# One master row as the index holds it: (id, IATA code, name, 3-digit numeric code). The
+# numeric code is None for a carrier with none — its ICAO key is never a ticket prefix.
+Carrier = tuple
+
+
 @dataclass(frozen=True)
 class TpAirlineIndex:
     """The airline master, keyed the three ways a statement row can name a carrier.
@@ -69,10 +89,12 @@ class TpAirlineIndex:
     A key whose value is None resolved to more than one master row: two carriers sharing a
     normalized name key are not a match, they are an ambiguity, and guessing between them
     would attribute a whole statement's commission to the wrong airline.
+
+    Each value is (id, IATA code, name, 3-digit numeric code or None) — `Carrier`.
     """
-    by_numeric: dict[str, tuple[int, str, str] | None] = field(default_factory=dict)
-    by_code: dict[str, tuple[int, str, str] | None] = field(default_factory=dict)
-    by_name_key: dict[str, tuple[int, str, str] | None] = field(default_factory=dict)
+    by_numeric: dict[str, Carrier | None] = field(default_factory=dict)
+    by_code: dict[str, Carrier | None] = field(default_factory=dict)
+    by_name_key: dict[str, Carrier | None] = field(default_factory=dict)
 
     def __bool__(self) -> bool:
         return bool(self.by_numeric or self.by_code or self.by_name_key)
@@ -90,6 +112,8 @@ class TpAirlineMatch:
     iata_code: str | None = None
     name: str | None = None
     source: str | None = None
+    # The master's 3-digit accounting code ("098") — what a ticket prefix is.
+    numeric_code: str | None = None
     # The prefix and the name each resolved, to different carriers. The prefix is used.
     conflict: bool = False
     conflict_name: str | None = None
@@ -109,11 +133,18 @@ def resolve_tp_airline(
     airline_name: str | None,
     index: TpAirlineIndex,
 ) -> TpAirlineMatch:
-    """PURE. Ticket prefix, then the 2-letter code, then the name. See the module docstring."""
+    """PURE. Ticket prefix, then the code, then the name. See the module docstring.
+
+    The code is the 2-letter designator, or — where the file prints the 3-digit accounting
+    code in that column (`numeric_code`) — that, looked up as a prefix is."""
     by_prefix = _lookup(index.by_numeric, normalize_prefix(prefix))
 
-    code, _multi = clean_airline_code(airline_code)
-    by_code = _lookup(index.by_code, code)
+    numeric = numeric_code(airline_code)
+    if numeric:
+        by_code = _lookup(index.by_numeric, numeric)
+    else:
+        code, _multi = clean_airline_code(airline_code)
+        by_code = _lookup(index.by_code, code)
 
     key = airline_match_key(airline_name)
     by_name = _lookup(index.by_name_key, key)
@@ -134,6 +165,7 @@ def resolve_tp_airline(
 
     return TpAirlineMatch(
         airline_id=winner[0], iata_code=winner[1], name=winner[2], source=source,
+        numeric_code=winner[3] if len(winner) > 3 else None,
         conflict=conflict, conflict_name=(other[2] if conflict else None),
     )
 
@@ -150,11 +182,11 @@ async def build_index(db: AsyncSession) -> TpAirlineIndex:
         .where(Airline.is_active.is_(True))
     )).all()
 
-    by_numeric: dict[str, tuple[int, str, str] | None] = {}
-    by_code: dict[str, tuple[int, str, str] | None] = {}
-    by_name_key: dict[str, tuple[int, str, str] | None] = {}
+    by_numeric: dict[str, Carrier | None] = {}
+    by_code: dict[str, Carrier | None] = {}
+    by_name_key: dict[str, Carrier | None] = {}
 
-    def put(table: dict, key: str | None, value: tuple[int, str, str]) -> None:
+    def put(table: dict, key: str | None, value: Carrier) -> None:
         if not key:
             return
         existing = table.get(key, ...)
@@ -164,7 +196,8 @@ async def build_index(db: AsyncSession) -> TpAirlineIndex:
             table[key] = None     # two carriers share this key — refuse to choose
 
     for pk, numeric, icao, iata, name in rows:
-        value = (pk, (iata or "").strip().upper(), name)
+        digits = (numeric or "").strip()
+        value = (pk, (iata or "").strip().upper(), name, digits.zfill(3) if digits.isdigit() else None)
         code = (numeric or icao or "").strip()
         if code:
             put(by_numeric, code.zfill(3) if code.isdigit() else code.upper(), value)
@@ -187,18 +220,78 @@ def stamp(data: dict, match: TpAirlineMatch) -> bool:
 
     `airline_name` keeps the FILE's spelling — it is what the vendor sent and the drill-in
     should show it. `airline_master_name` is the canonical one, and it is the only one deal
-    matching may use. `airline_code` is filled in only when blank, so a file that states
-    its own code keeps it.
+    matching may use. The three ways a file names its carrier — `airline_name`,
+    `airline_code` (the 2-letter designator, "AI") and `ticket_prefix` (the 3-digit
+    accounting code, "098") — are each filled in from the master only when blank: map any
+    one of them and the other two come from the Airline Master; a file that prints its own
+    keeps it.
+
+    An Airline Code that is the 3-digit accounting code (`numeric_code`) is not one: PLB
+    accrual joins `airlines.iata_code` to it and would drop the row. The designator takes
+    its place, and the number moves to Ticket Prefix, where it belongs, unless the file
+    printed one there.
     """
     if not match.resolved:
         return False
     data[MASTER_NAME_FIELD] = match.name
     data[AIRLINE_ID_FIELD] = str(match.airline_id)
+    numeric = numeric_code(data.get("airline_code"))
+    if numeric and match.iata_code:
+        if not data.get("ticket_prefix"):
+            data["ticket_prefix"] = numeric
+        data["airline_code"] = match.iata_code
     if not data.get("airline_code") and match.iata_code:
         data["airline_code"] = match.iata_code
+    if not data.get("airline_name") and match.name:
+        data["airline_name"] = match.name
+    if not data.get("ticket_prefix") and match.numeric_code:
+        data["ticket_prefix"] = match.numeric_code
     if match.conflict:
         data[CONFLICT_FIELD] = (
             f"Ticket prefix says {match.name}; the Airline Name column says "
             f"{match.conflict_name}. The prefix was used."
         )
     return True
+
+
+# Saved lines whose carrier did not resolve, whose Airline Code is a 3-digit accounting code
+# (TripJack uploads before `numeric_code` existed), or that lack one of the three carrier
+# fields `stamp` fills (lines saved before it filled them all).
+_NUMERIC_SQL = r"^\s*\d{1,3}\s*$"
+_CARRIER_FIELDS = ("airline_name", "airline_code", "ticket_prefix")
+
+
+async def restamp_saved(db: AsyncSession, model, index: TpAirlineIndex) -> tuple[int, set[tuple[int, int, str]]]:
+    """Resolve the carrier of the SAVED lines of `model` again, against `index`.
+
+    For lines saved before a rule here changed, or before the Airline Master had their
+    carrier: an upload is stamped once, at ingest, and nothing else revisits it. Only lines
+    that are unresolved, carry a numeric Airline Code or miss one of the three carrier
+    fields are read; the rest are as this would leave them.
+
+    Returns (lines changed, {(tenant_id, created_by_id, batch_id)} they belong to) — the
+    caller re-projects those statements (income_board.refresh), which copy the carrier.
+    Writes through `data`, so a typed table (third_party_gds) and a JSONB one alike.
+    """
+    rows = (await db.execute(
+        select(model).where(
+            model.data["row_kind"].astext.is_(None),        # a balance line has no carrier
+            or_(
+                model.data["airline_id"].astext.is_(None),
+                model.data["airline_code"].astext.op("~")(_NUMERIC_SQL),
+                *[model.data[f].astext.is_(None) for f in _CARRIER_FIELDS],
+            ),
+        ).order_by(model.id)
+    )).scalars().all()
+    changed, batches = 0, set()
+    for row in rows:
+        data = dict(row.data or {})
+        before = dict(data)
+        if not stamp(data, resolve_tp_airline(
+                data.get("ticket_prefix"), data.get("airline_code"), data.get("airline_name"), index)):
+            continue
+        if data != before:
+            row.data = data
+            changed += 1
+            batches.add((row.tenant_id, row.created_by_id, row.batch_id))
+    return changed, batches

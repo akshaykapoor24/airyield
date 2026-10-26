@@ -32,7 +32,7 @@ from app.services.statement_display import display_columns, flatten_record  # no
 # Captured from api/v1/statements._display_columns before it moved (identical output verified).
 # Spec columns the view deliberately leaves out. Third-party statements show First Name and
 # Last Name; "Passenger" is only the two joined, so it stays in `data` but not on screen.
-HIDDEN = {"tp-gds": {"passenger_name"}, "tp-lcc": {"passenger_name"}}
+HIDDEN = {"tp-lcc": {"passenger_name"}}
 
 DERIVED_COLUMNS = {
     "tgq-hmpr": [(0, "Leg", "__leg__"), (6, "Airline_Code", "airline_code"), (65, "Taxes", "__taxes__")],
@@ -41,12 +41,18 @@ DERIVED_COLUMNS = {
     "lcc-divided-pnr": [(10, "Format", "__format__")],
     "lcc-flown-report": [(31, "Format", "__format__")],
     "lcc-cta-bta": [(28, "Format", "__format__")],
-    # One earlier than the spec would put it: "Passenger" is hidden on these two (see HIDDEN).
-    "tp-gds": [(55, "Format", "__format__")],
+    # The standard GDS columns (no "Passenger" of their own — a full name maps to Pax First Name),
+    # with the SSR and GST parts, Refund, ADM, Discount, UATP Amount and Card Type (2026-10-26).
+    # SSR Amount and GST On SF are not columns to map, so they are shown here, after their
+    # parts. Other is Payment Status and Remarks only.
+    "tp-gds": [(31, "SSR Amount", "ssr_amount"), (46, "GST On SF", "gst_on_sf"),
+               (54, "Format", "__format__")],
+    # One earlier than the spec would put it: "Passenger" is hidden here (see HIDDEN).
     "tp-lcc": [(43, "Format", "__format__")],
     "tp-api": [(93, "Format", "__format__")],
     # Payment Module's MO statement: the tp-gds columns plus Booking ID, so one further on.
-    "mo-gds": [(57, "Format", "__format__")],
+    "mo-gds": [(32, "SSR Amount", "ssr_amount"), (47, "GST On SF", "gst_on_sf"),
+               (55, "Format", "__format__")],
 }
 
 # Record keys that describe the row rather than fill a column.
@@ -78,7 +84,9 @@ class TestDisplayColumns(unittest.TestCase):
                 self.assertEqual([c for c in cols if c["field"] in spec_fields], expected_rest)
                 for c in cols:
                     if c["field"] not in spec_fields:
-                        self.assertEqual(set(c), {"header", "field"})
+                        # `readonly`: a total shown from its parts (GDS SSR / GST), never typed over.
+                        self.assertEqual(set(c) - {"readonly"}, {"header", "field"})
+                        self.assertEqual("readonly" in c, c["field"] in ("ssr_amount", "gst_on_sf"))
 
     def test_airline_code_sits_immediately_before_ticket_no(self):
         headers = [c["header"] for c in display_columns("tgq-hmpr")]

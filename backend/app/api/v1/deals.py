@@ -30,7 +30,7 @@ from app.schemas.uploaded_deal import (
     ExtractionPreview, ConfirmUploadPayload,
     ExtractedRow,
     DealRepositoryItem, DealBatchRead,
-    AIDeal, AIExtractResponse, AIConfirmPayload,
+    AIDeal, AIExtractResponse, AIConfirmPayload, SupplierSourceSummary,
     DealUpdatePayload,
 )
 from app.schemas.approval_workflow import (
@@ -45,6 +45,7 @@ from app.schemas.approval_workflow import (
 )
 from app.services.deal_extraction import DealExtractionService
 from app.services.ai_deal_extraction import AIDealExtractionService
+from app.services import deal_vendor_resolver as dvr
 from app.services.airline_resolver import (
     RESOLVED,
     AirlineIndex,
@@ -251,6 +252,100 @@ async def _resolve_vendor_agency(
                    f"supplier from the list, or onboard them in User master → Agency Master.",
         )
     return agency
+
+
+async def _attribute_vendors(
+    db: AsyncSession, current_user: User, deals: list[AIDeal],
+) -> list[SupplierSourceSummary]:
+    """"All suppliers": say which Agency Master row each deal's Source cell names.
+
+    Every deal gets its group, status and — only when the Source names one agency for
+    certain, or the user picked one for it on an earlier upload — a pre-selected agency.
+    One line per (Source, channel) comes back for the review step, in sheet order.
+
+    ADVISORY ONLY, like airline_status. Nothing is written here, and confirm_upload
+    trusts nothing but the agency the reviewer leaves on each row, ownership-checked.
+    See services/deal_vendor_resolver.py for what counts as certain.
+    """
+    agencies = [
+        dvr.AgencyRef(id=a.id, name=a.name, channels=a.channels, branch_code=a.branch_code,
+                      branch_name=a.branch_name, agency_code=a.agency_code)
+        for a in (await db.execute(
+            select(Agency).where(Agency.user_id == current_user.id, Agency.is_active.is_(True))
+        )).scalars()
+    ]
+    # What earlier uploads of this user's multi-supplier sheets decided, newest first.
+    remembered = dvr.remembered_from((await db.execute(
+        select(DealStatement.column_map)
+        .where(
+            DealStatement.created_by_id == current_user.id,
+            DealStatement.direction == DealDirection.INBOUND,
+            DealStatement.deal_type == DealKind.B2B,
+            DealStatement.column_map.has_key(dvr.SOURCE_MAP_KEY),
+        )
+        .order_by(DealStatement.id.desc())
+        .limit(25)
+    )).scalars())
+
+    matches: dict[tuple[str, str], dvr.VendorMatch] = {}
+    summary: dict[str, SupplierSourceSummary] = {}
+    source_rows: dict[str, set] = {}
+    for deal in deals:
+        # Agencies are onboarded once per channel, so the same Source can name two rows.
+        channel = (deal.airline_type or "GDS").strip().upper()
+        key = dvr.source_key(deal.supplier_cell)
+        group = f"{key}|{channel}"
+        match = matches.get((key, channel))
+        if match is None:
+            match = matches[(key, channel)] = dvr.resolve_source(
+                deal.supplier_cell, channel, agencies, remembered)
+        deal.supplier_group = group
+        deal.vendor_status = match.status
+        deal.vendor_agency_id = match.agency_id
+        line = summary.get(group)
+        if line is None:
+            line = summary[group] = SupplierSourceSummary(
+                group=group, source=(deal.supplier_cell or "").strip(), channel=channel,
+                status=match.status, agency_id=match.agency_id,
+                candidates=match.candidates, note=match.note,
+            )
+        line.deals += 1
+        source_rows.setdefault(group, set()).add(deal.src_n)
+    for group, line in summary.items():
+        line.rows = len(source_rows[group])
+    return list(summary.values())
+
+
+async def _resolve_row_vendors(
+    db: AsyncSession, current_user: User, rows: list[ExtractedRow],
+) -> dict[int, Agency]:
+    """"All suppliers" save: every row's own Agency Master row, authorised, by id.
+
+    A row without one is refused rather than saved supplier-less: an incoming B2B deal
+    that names no supplier matches EVERY vendor's statements (_supplier_guard's
+    "unrestricted"), which is the opposite of what a vendor sheet's row means. Ids are
+    ownership-checked exactly as _resolve_vendor_agency checks the single one."""
+    missing = [i + 1 for i, r in enumerate(rows) if r.vendor_agency_id is None]
+    if missing:
+        listed = ", ".join(map(str, missing[:5])) + (f" and {len(missing) - 5} more" if len(missing) > 5 else "")
+        raise HTTPException(
+            status_code=400,
+            detail=(f"Row{'s' if len(missing) > 1 else ''} {listed} "
+                    f"{'have' if len(missing) > 1 else 'has'} no supplier. Pick the agency "
+                    f"for each in Review & Edit, or remove those rows."),
+        )
+    ids = {r.vendor_agency_id for r in rows}
+    found = {a.id: a for a in (await db.execute(
+        select(Agency).where(Agency.id.in_(ids), Agency.user_id == current_user.id)
+    )).scalars()}
+    unknown = sorted(ids - found.keys())
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Agency id {unknown[0]} is not in your Agency Master. Pick the supplier "
+                   f"from the list, or onboard them in User master → Agency Master.",
+        )
+    return found
 
 
 def _same_vendor(a: Optional[str], b: Optional[str]) -> bool:
@@ -487,6 +582,9 @@ async def ai_extract_deals(
     # Incoming B2B: the supplier picked in step 1. A multi-supplier spreadsheet (a
     # vendor comparison with a Source column) is narrowed to that supplier's rows.
     agency_id: int | None = Form(default=None),
+    # Incoming B2B "All suppliers": keep every supplier's rows and say, per row, which
+    # Agency Master row its Source names (see _attribute_vendors). Wins over agency_id.
+    all_suppliers: bool = Form(default=False),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -507,25 +605,31 @@ async def ai_extract_deals(
     await file.seek(0)
 
     supplier_name = None
-    if agency_id is not None:
+    if agency_id is not None and not all_suppliers:
         agency = (await db.execute(
             select(Agency).where(Agency.id == agency_id, Agency.user_id == current_user.id)
         )).scalar_one_or_none()
         supplier_name = agency.name if agency else None
 
-    result = await AIDealExtractionService.extract(file, supplier_name=supplier_name)
+    result = await AIDealExtractionService.extract(
+        file, supplier_name=supplier_name, all_suppliers=all_suppliers)
     if result.get("unreadable"):
         # Better an honest refusal than a wrong-but-plausible layout — the
         # column-mapping path handles anything this parser can't.
         is_sheet = (file.filename or "").lower().endswith((".xlsx", ".xlsm", ".xls", ".csv"))
-        raise HTTPException(
-            status_code=422,
-            detail=("No deal table could be found in this spreadsheet — it needs a header row "
-                    "naming the airline and rate columns. Turn off AI Extraction and use column "
-                    "mapping instead." if is_sheet else
-                    "This PDF's table structure could not be read. "
-                    "Turn off AI Extraction and use column mapping instead."),
-        )
+        if all_suppliers:
+            # Column mapping is not on offer here: it cannot split rows by supplier.
+            detail = ("No deal table could be found in this file — All suppliers needs a header "
+                      "row naming the airline, rate and Source / Supplier columns. To load one "
+                      "supplier's sheet with column mapping, pick that supplier instead.")
+        elif is_sheet:
+            detail = ("No deal table could be found in this spreadsheet — it needs a header row "
+                      "naming the airline and rate columns. Turn off AI Extraction and use column "
+                      "mapping instead.")
+        else:
+            detail = ("This PDF's table structure could not be read. "
+                      "Turn off AI Extraction and use column mapping instead.")
+        raise HTTPException(status_code=422, detail=detail)
     deals = [AIDeal(**d) for d in result.get("deals", [])]
 
     # ── Airline-master resolution — READ ONLY ────────────────────────────────
@@ -603,26 +707,39 @@ async def ai_extract_deals(
     # Reads contract_year off the index already loaded above; before the names
     # were resolved this lookup could never match, because every name still
     # carried its "(XO SALE)" qualifier.
-    if valid_from and deals:
-        vf_date: date | None = None
+    #
+    # Counted from the deal's OWN start when its validity names one ("01JAN'27
+    # Onwards"), else from the step-1 Valid From. Counting an onwards deal from the
+    # step-1 date would end it before it opens.
+    step_vf: date | None = None
+    if valid_from:
         try:
-            vf_date = date.fromisoformat(valid_from)
+            step_vf = date.fromisoformat(valid_from)
         except ValueError:
             pass
 
-        if vf_date:
-            for deal in deals:
-                cy = index.contract_year_for(deal.airline_name)
-                if not cy:
-                    continue
-                fallback = _fallback_valid_to(vf_date, cy).isoformat()
+    for deal in deals:
+        try:
+            base = date.fromisoformat(deal.contract_valid_from) if deal.contract_valid_from else step_vf
+        except ValueError:
+            base = step_vf
+        if base is None:
+            continue
+        cy = index.contract_year_for(deal.airline_name)
+        if not cy:
+            continue
+        fallback = _fallback_valid_to(base, cy).isoformat()
 
-                if not deal.contract_valid_to:
-                    deal.contract_valid_to = fallback
+        if not deal.contract_valid_to:
+            deal.contract_valid_to = fallback
 
-                plb = (deal.incentive_data or {}).get("PLB")
-                if isinstance(plb, dict) and not plb.get("validTo"):
-                    plb["validTo"] = fallback
+        plb = (deal.incentive_data or {}).get("PLB")
+        if isinstance(plb, dict) and not plb.get("validTo"):
+            plb["validTo"] = fallback
+
+    supplier_summary: list[SupplierSourceSummary] = []
+    if all_suppliers and deals:
+        supplier_summary = await _attribute_vendors(db, current_user, deals)
 
     return AIExtractResponse(
         deals=deals,
@@ -630,6 +747,7 @@ async def ai_extract_deals(
         confidence=result.get("confidence", 0.0),
         warning=result.get("warning"),
         airline_summary=airline_summary,
+        supplier_summary=supplier_summary,
     )
 
 
@@ -1187,6 +1305,7 @@ def _unified_deal_to_repo_item(d: UnifiedDeal) -> DealRepositoryItem:
         source_agent=d.source_agent,
         airline_type=d.airline_type,
         airline_name=d.airline_name,
+        iata_commission=d.iata_commission,
         contract_year=d.contract_year,
         valid_from=d.valid_from,
         valid_to=d.valid_to,
@@ -1217,6 +1336,29 @@ def _unified_deal_to_repo_item(d: UnifiedDeal) -> DealRepositoryItem:
         agency_entity_id=d.agency_entity_id,
         scope_party_name=d.scope_party_name,
     )
+
+
+async def _attach_airline_codes(db: AsyncSession, items: list[DealRepositoryItem]) -> None:
+    """Fill each item's airline_code from the airline master, in one query. A deal keeps
+    only the airline's name; an upload sets it to the master's own name whenever the row
+    resolved, so an exact (case-insensitive) name match is the master row it meant. A
+    name that is not in the master is left without a code rather than guessed."""
+    from app.models.airline import Airline
+
+    names = {i.airline_name.strip().upper() for i in items if i.airline_name and i.airline_name.strip()}
+    if not names:
+        return
+    rows = (await db.execute(
+        select(Airline.name, Airline.iata_code)
+        .where(func.upper(func.trim(Airline.name)).in_(names))
+        .order_by(Airline.is_active.desc(), Airline.id)      # an active row wins a duplicate name
+    )).all()
+    code_by_name: dict[str, str] = {}
+    for name, code in rows:
+        code_by_name.setdefault(name.strip().upper(), code)
+    for i in items:
+        if i.airline_name:
+            i.airline_code = code_by_name.get(i.airline_name.strip().upper())
 
 
 async def _seed_approval_unified(
@@ -1386,6 +1528,29 @@ async def confirm_upload(
     # row as before. `vendor_agency` is already None for anything that is not incoming B2B.
     party_from_agency = vendor_agency is not None
 
+    # Incoming B2B "All suppliers": a multi-supplier sheet. No one agency signs the upload
+    # — every row carries its own, and that agency is the row's supplier outright (name,
+    # supplier id, link), exactly as the picked agency is on a single-supplier upload's
+    # own rows. The batch and statement are labelled with all of them.
+    multi_vendor = bool(payload.multi_vendor)
+    row_agencies: dict[int, Agency] = {}
+    column_map = payload.column_map or None
+    if multi_vendor:
+        if direction != DealDirection.INBOUND or not use_b2b:
+            raise HTTPException(status_code=400, detail="All suppliers applies to incoming B2B uploads only.")
+        if payload.vendor_agency_id is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="Send one supplier for the whole upload, or one per row (All suppliers) — not both.",
+            )
+        row_agencies = await _resolve_row_vendors(db, current_user, rows)
+        supplier_name = dvr.multi_vendor_label(a.name for a in row_agencies.values())
+        # What this upload decided for each Source value, kept on its statement so the
+        # next upload of the same sheet starts from it (see _attribute_vendors).
+        learned = dvr.learn_mappings((r.supplier_cell, r.vendor_agency_id) for r in rows)
+        if learned:
+            column_map = {**(payload.column_map or {}), dvr.SOURCE_MAP_KEY: learned}
+
     # Keep DealBatch for /batches endpoint backward compat
     batch = DealBatch(
         batch_id=batch_id,
@@ -1413,7 +1578,7 @@ async def confirm_upload(
         file_name=file_name or None,
         file_type=file_type or None,
         batch_id=batch_id,
-        column_map=payload.column_map or None,
+        column_map=column_map,
         supplier_name=supplier_name or None,
         created_by_id=current_user.id,
     )
@@ -1458,15 +1623,22 @@ async def confirm_upload(
         # another vendor must not be matched by the picked agency's supplier_id, or its
         # statement would price against the wrong contract. Such rows keep name-only
         # matching, which is exactly what every uploaded deal had before.
-        row_supplier = (
-            supplier_name if direction == DealDirection.OUTBOUND
-            else ((r.supplier_name or supplier_name) if use_b2b else None)
-        )
-        row_vendor = (
-            vendor_agency
-            if vendor_agency is not None and _same_vendor(row_supplier, vendor_agency.name)
-            else None
-        )
+        #
+        # ALL SUPPLIERS has no picked agency to compare with: the row's own agency, checked
+        # by _resolve_row_vendors, IS its supplier.
+        if multi_vendor:
+            row_vendor = row_agencies[r.vendor_agency_id]
+            row_supplier = row_vendor.name
+        else:
+            row_supplier = (
+                supplier_name if direction == DealDirection.OUTBOUND
+                else ((r.supplier_name or supplier_name) if use_b2b else None)
+            )
+            row_vendor = (
+                vendor_agency
+                if vendor_agency is not None and _same_vendor(row_supplier, vendor_agency.name)
+                else None
+            )
 
         # The deal's entity and credentials, per row.
         #
@@ -1492,6 +1664,13 @@ async def confirm_upload(
             row_entity = payload.entity or None
             row_login_id = (payload.login_id or r.login_id) or None
             row_login_ids = payload.login_ids or None
+        elif multi_vendor:
+            # ALL SUPPLIERS: no upload-wide entity or credentials exist to fall back on.
+            # A row has its own agency's, set in review, or none — never a value from the
+            # deal-level payload, which would be some OTHER row's, i.e. another vendor's.
+            row_entity = r.entity or None
+            row_login_id = r.login_id or None
+            row_login_ids = None
         elif party_from_agency and row_vendor is None:
             row_entity = None
             row_login_id = r.login_id or None
@@ -1526,7 +1705,9 @@ async def confirm_upload(
             corporate_id=scope.corporate_id,
             agency_entity_id=scope.agency_entity_id,
             scope_party_name=scope.party_name,
-            source_agent=source_agent,
+            # A single-supplier B2B upload sends the agency's name here; per row, so does
+            # an All-suppliers one.
+            source_agent=row_vendor.name if multi_vendor else source_agent,
             deal_maker_name=(r.deal_maker_name or payload.deal_maker_name) or None,
             # Outbound ignores any per-row supplier cell: the counterparty is the
             # scope, picked once for the whole upload. Letting a stray sheet column
@@ -1550,7 +1731,10 @@ async def confirm_upload(
             payout_type=None if use_b2b else (r.payout_type or payload.payout_type or None),
             entity=row_entity,
             iata_number=(r.iata_code or payload.iata_number) or None,
-            iata_commission=(r.iata_commission or payload.iata_commission) or None,
+            # The row's own IATA % only. A vendor sheet prints it on the few airlines that
+            # pay one; falling back to the upload-wide value gave every other row the
+            # first such row's %.
+            iata_commission=r.iata_commission or None,
             business_type=(r.business_type or payload.business_type) or None,
             entity_lcc=(r.entity_lcc or payload.entity_lcc) or None,
             # Per row — see row_entity / row_login_id / row_login_ids above.
@@ -1898,6 +2082,7 @@ async def get_deal_repository(
     unified_result = await db.execute(unified_q)
     for d in unified_result.scalars().all():
         items.append(_unified_deal_to_repo_item(d))
+    await _attach_airline_codes(db, items)
 
     # Outbound (floated) deals live only in the unified table — legacy tables are all
     # inbound, so skip them entirely for the floated view.
@@ -2479,7 +2664,10 @@ async def _update_unified_deal(
         .execution_options(populate_existing=True)
     )
     deal = result.scalar_one()
-    return _unified_deal_to_repo_item(deal)
+    # The repository swaps its row for this response, so it carries the code too.
+    item = _unified_deal_to_repo_item(deal)
+    await _attach_airline_codes(db, [item])
+    return item
 
 
 # ── Delete a deal from the repository ────────────────────────────────────

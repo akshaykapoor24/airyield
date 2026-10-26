@@ -333,15 +333,18 @@ _FIELD_GROUP = {
     # Itinerary
     "sector": "Itinerary", "flight_number": "Itinerary", "trip_type": "Itinerary",
     "travel_type": "Itinerary", "booking_class": "Itinerary",
-    "payment_method": "Itinerary",
+    "payment_method": "Itinerary", "card_type": "Itinerary",
     # Money
-    "currency": "Money", "base_fare": "Money", "yq": "Money", "other_taxes": "Money",
-    "taxes": "Money", "ssr_amount": "Money", "reschedule_charges": "Money",
+    "currency": "Money", "base_fare": "Money", "yq": "Money", "yr": "Money", "k3": "Money",
+    "other_taxes": "Money", "taxes": "Money", "ssr_amount": "Money", "reschedule_charges": "Money",
+    "seat_selection": "Money", "excess_baggage": "Money", "meals": "Money",
     "convenience_fee": "Money", "other_charges": "Money", "total_fare": "Money",
-    "commission_amount": "Money", "commission_rate": "Money",
-    "incentive_amount": "Money", "tds": "Money", "service_charge": "Money",
-    "service_fee": "Money", "gst_on_sf": "Money", "markup": "Money",
-    "agent_penalty": "Money", "cancellation_markup": "Money", "net_amount": "Money",
+    "adm": "Money", "commission_amount": "Money", "commission_rate": "Money",
+    "incentive_amount": "Money", "discount": "Money", "tds": "Money", "service_charge": "Money",
+    "service_fee": "Money", "cgst": "Money", "sgst": "Money", "igst": "Money",
+    "gst_on_sf": "Money", "markup": "Money", "agent_penalty": "Money",
+    "cancellation_markup": "Money", "refund_amount": "Money", "uatp_amount": "Money",
+    "net_amount": "Money",
 }
 
 # What a row is unusable without, and what it is merely unpriceable without. Each entry is
@@ -369,8 +372,14 @@ ADVISORY_GROUPS = [
 ]
 
 
-def _cols(pairs: list[tuple[str, str]]) -> list[dict]:
-    return [{"header": h, "field": f, "group": _FIELD_GROUP.get(f, "Other")} for f, h in pairs]
+def _cols(pairs: list[tuple[str, str]], fills: dict[str, dict] | None = None) -> list[dict]:
+    out = []
+    for f, h in pairs:
+        c = {"header": h, "field": f, "group": _FIELD_GROUP.get(f, "Other")}
+        if fills and f in fills:
+            c["fills"] = fills[f]
+        out.append(c)
+    return out
 
 
 def column_groups(parser_name: str) -> list[dict]:
@@ -425,11 +434,16 @@ def _assert_headers_round_trip(parser_name: str, builder: _FlatBuilder) -> None:
 
 
 def register(parser_name: str, columns: list[tuple[str, str]], aliases: dict[str, list[str]],
-             source_format: str, derive: Callable[..., None] | None = None) -> list[dict]:
+             source_format: str, derive: Callable[..., None] | None = None,
+             fills: dict[str, dict] | None = None) -> list[dict]:
     """`derive(data, date_formats)` — normalises one row in place; `date_formats` is the
-    upload's declared {date field: order}, or None."""
+    upload's declared {date field: order}, or None.
+
+    `fills` — {field: {label, from: [field, …]}} for a field filled in when the file does
+    not have it, once one of `from` is mapped. The mapping screen shows `label` in place of
+    "not in file", so nobody hunts for a column whose value is coming anyway."""
     _assert_unique_aliases(parser_name, aliases)
-    b = _FlatBuilder(_cols(columns), aliases, source_format, derive)
+    b = _FlatBuilder(_cols(columns, fills), aliases, source_format, derive)
     _assert_headers_round_trip(parser_name, b)
     _REGISTRY[parser_name] = b
     return b.display_columns
@@ -524,13 +538,55 @@ _COMMON_ALIASES = {
 # Amount fields normalized to a bare numeric string by `_derive`. Anything a downstream
 # SUM or the commission runner reads must be in here.
 _MONEY_FIELDS = (
-    "base_fare", "yq", "other_taxes", "taxes", "ssr_amount", "reschedule_charges",
+    "base_fare", "yq", "yr", "k3", "other_taxes", "taxes", "ssr_amount", "reschedule_charges",
+    "seat_selection", "excess_baggage", "meals",
     "total_fare", "commission_amount", "commission_rate", "incentive_amount", "tds",
-    "service_charge", "service_fee", "gst_on_sf", "agent_penalty", "cancellation_markup",
+    "service_charge", "service_fee", "gst_on_sf", "cgst", "sgst", "igst",
+    "agent_penalty", "cancellation_markup", "refund_amount", "adm", "discount", "uatp_amount",
     "markup", "net_amount", "convenience_fee", "other_charges", "passenger_count",
 )
 
 DATE_FIELDS = ("transaction_date", "booking_date", "issue_date", "travel_date")
+
+# The parts of a ticket's tax bill a consolidator may print. `taxes` — Total Tax — is the
+# WHOLE bill, YQ included; where the file does not print it, it is these added up. One rule
+# for ingest (`_derive_tp_gds`), the commission net check and the Payment Module's tax
+# figure, so the three can never disagree.
+TAX_PARTS = ("yq", "yr", "k3", "other_taxes")
+# The SSR and the GST on the service fee, likewise: SSR Amount and GST On SF are the totals,
+# and a consolidator that prints them in parts (Brightsun: Seat_Selection / Excessbagage /
+# Meals, CGST_Sell / SGST_Sell / IGST_Sell) gets the total added up. Every reader of the
+# totals — commission, the Payment Module, vendor reconciliation — is unaffected.
+SSR_PARTS = ("seat_selection", "excess_baggage", "meals")
+GST_PARTS = ("cgst", "sgst", "igst")
+
+# What `_derive_tp_gds` adds up when the file does not print it, and the key marking each
+# one derived, in the order they are derived (Total Fare adds in the other two). An edit
+# to a part drops the derived total so it is added up again (api/v1/statements.py).
+DERIVED_TOTALS = (("taxes", "total_tax_source"), ("ssr_amount", "ssr_source"),
+                  ("gst_on_sf", "gst_source"), ("total_fare", "total_fare_source"))
+
+
+def _printed_or_parts(data: dict, total: str, parts: tuple[str, ...]) -> float | None:
+    if data.get(total) not in (None, ""):
+        return _f(data, total)
+    printed = [f for f in parts if data.get(f) not in (None, "")]
+    return sum(_f(data, f) for f in printed) if printed else None
+
+
+def total_tax(data: dict) -> float | None:
+    """Total Tax as printed, else YQ + YR + K3 + Other Taxes. None when none is printed."""
+    return _printed_or_parts(data, "taxes", TAX_PARTS)
+
+
+def ssr_total(data: dict) -> float | None:
+    """SSR Amount as printed, else Seat Selection + Excess Baggage + Meals."""
+    return _printed_or_parts(data, "ssr_amount", SSR_PARTS)
+
+
+def gst_total(data: dict) -> float | None:
+    """GST On SF as printed, else CGST + SGST + IGST."""
+    return _printed_or_parts(data, "gst_on_sf", GST_PARTS)
 
 
 def _normalize_common(data: dict, date_formats: dict | None = None) -> None:
@@ -563,21 +619,38 @@ def _normalize_common(data: dict, date_formats: dict | None = None) -> None:
 def _derive_tp_gds(data: dict, date_formats: dict | None = None) -> None:
     _normalize_common(data, date_formats)
 
-    # ISSUE DATE. The real export has no ticketing-date column, and deal validity keys off
-    # the issue date (deal_matching: contract_date = issue_date or travel_date). The booked
-    # date is the sale date and the only defensible stand-in — recorded, never assumed
-    # silently, so the diagnosis popup can say which date the contract window was tested
-    # against. A consolidator who books and issues on different days shifts window edges.
+    # ISSUE DATE. Booked and Issue Date are one column on the mapping screen ("Booked /
+    # Issue Date", mapped to `booking_date`) — the user's call: a consolidator's sheet
+    # prints one or the other, never two different days. Deal validity keys off the issue
+    # date (deal_matching: contract_date = issue_date or travel_date), so it is copied
+    # across — recorded, so the diagnosis popup can say which date the window was tested on.
     if not data.get("issue_date") and data.get("booking_date"):
         data["issue_date"] = data["booking_date"]
         data["issue_date_source"] = "booked_date"
 
+    # TOTAL TAX. The whole tax bill, YQ included (`total_tax`). Added up from its parts when
+    # the file prints only those — the real export prints YQ and Other Taxes alone.
+    if not data.get("taxes"):
+        tax = total_tax(data)
+        if tax is not None:
+            data["taxes"] = to_number_str(f"{tax:.2f}")
+            data["total_tax_source"] = "derived"
+
+    # SSR AMOUNT and GST ON SF. The same, from their parts — before Total Fare, which adds
+    # the SSR in.
+    for total, add_up, marker in (("ssr_amount", ssr_total, "ssr_source"),
+                                  ("gst_on_sf", gst_total, "gst_source")):
+        if not data.get(total):
+            v = add_up(data)
+            if v is not None:
+                data[total] = to_number_str(f"{v:.2f}")
+                data[marker] = "derived"
+
     # TOTAL FARE. Not a column on this export, but plb_accrual sums `total_fare` for gross
     # revenue, so without it a third-party statement contributes a gross of zero.
+    # Basic + Total Tax + SSR, the SSR being Seat + Baggage + Meals.
     if not data.get("total_fare"):
-        gross = (_f(data, "base_fare") + _f(data, "yq")
-                 + (_f(data, "other_taxes") or _f(data, "taxes"))
-                 + _f(data, "ssr_amount"))
+        gross = _f(data, "base_fare") + (total_tax(data) or 0) + (ssr_total(data) or 0)
         if gross:
             data["total_fare"] = to_number_str(f"{gross:.2f}")
             data["total_fare_source"] = "derived"
@@ -597,76 +670,175 @@ def _derive_tp_lcc(data: dict, date_formats: dict | None = None) -> None:
 
 
 # ── Third Party GDS ──────────────────────────────────────────────────────────
-# Ordered as the real export reads, with the earlier superset fields interleaved where
-# they belong rather than appended — so a file of either shape reads naturally in the
-# drill-in. "(real export)" marks one of the forty columns actually supplied.
+# The STANDARD columns, section by section, as the user set them (2026-10-25) for every
+# consolidator's GDS statement — TRIUMPHH, GLOBE, Yatra each print their own layout, and
+# this is the one they are all mapped onto. What was cut, and where its column goes now:
+#
+#   Issue Date                one column with Booked Date — "Booked / Issue Date"
+#   Status, Type              "Invoice Type": whether the line is a sale or a refund
+#   Booking Type, Username,   not mapped — they only ever said sale or refund, which
+#     Issuing Office            Invoice Type now carries
+#   Passenger                 a single full-name column maps to Pax First Name
+#   Customer Name/ID, Pax     not mapped — the customer is the tenant itself on every line
+#     Type, Trip/Travel Type,
+#     Currency
+#   Agency Code, Consolidator, not mapped (2026-10-26) — Other is Payment Status and Remarks
+#     GDS                       only; the vendor is the upload's own supplier
+#
+# Their table columns stay (models/statement_row._GdsLineFields), so lines saved before
+# keep them. Ticket Prefix and Class were not on the user's list but are kept: the prefix
+# is how a carrier is found when the file's Airline Code is blank (tp_airline_resolution),
+# and a deal's RBD rule cannot be checked without the class.
+#
+# Added 2026-10-26 (the user, from Brightsun's statement): the SSR in parts (Seat Selection,
+# Excess Baggage, Meals) and the GST on SF in parts (CGST, SGST, IGST), plus Refund (RFD_SELL),
+# ADM, Discount (DIS_Sell), UATP (paid by card to the airline) and Card Type.
+#
+# SSR Amount and GST On SF are NOT columns to map (the user's call): they are always the
+# parts added up (`_derive_tp_gds`). They are still stored — commission, the Payment Module
+# and vendor reconciliation read the totals — and the statement view shows them read-only
+# (statement_display). A file printing one GST figure maps it onto a part (IGST for one 18%).
+# Total Tax stays mappable: printed, or YQ + YR + K3 + Other added up.
 _TP_GDS_COLUMNS = [
-    ("week", "Week"),                                    # real export
-    ("booking_date", "Booked Date"),                     # real export
+    # Dates
+    ("week", "Week"),
+    ("booking_date", "Booked / Issue Date"),
     ("transaction_date", "Transaction Date"),
-    ("issue_date", "Issue Date"),
-    ("travel_date", "Date of Travel"),                   # real export
-    ("customer_name", "Customer Name"),                  # real export
-    ("customer_id", "Customer ID"),                      # real export
-    ("airline_name", "Airline Name"),                    # real export
-    ("airline_code", "Airline Code"),                    # real export
-    ("ticket_prefix", "Ticket Prefix"),                  # real export
-    ("segment_type", "Airline Category"),                # real export
-    ("pnr", "S PNR"),                                    # real export
-    ("airline_pnr", "Airline PNR"),                      # real export
-    ("gds_pnr", "CRS PNR"),                              # real export
-    ("ticket_number", "Ticket No"),                      # real export
-    ("ticket_status", "Status"),                         # real export
-    ("transaction_type", "Type"),
-    ("booking_type", "Booking Type"),                    # real export
-    ("username", "Username"),                            # real export
-    ("issuing_office", "Issuing Office"),                # real export
-    ("pax_type", "Pax Type"),                            # real export
-    ("first_name", "First Name"),                        # real export
-    ("last_name", "Last Name"),                          # real export
-    ("passenger_name", "Passenger"),
-    ("passenger_count", "Pax"),
-    ("sector", "Sector"),                                # real export
-    ("flight_number", "Flight No"),                      # real export
-    ("trip_type", "Trip Type"),                          # real export
-    ("travel_type", "Travel Type"),                      # real export
-    ("booking_class", "Class"),                          # real export
-    ("payment_method", "Payment Mode"),                  # real export
-    ("currency", "Currency"),
-    ("base_fare", "Basic Fare"),                         # real export
-    ("yq", "YQ Fare"),                                   # real export
-    ("other_taxes", "Other Taxes"),                      # real export
-    ("taxes", "Total Tax"),
-    ("ssr_amount", "SSR Amount"),                        # real export
-    ("reschedule_charges", "Reschedule Charges"),        # real export
-    ("total_fare", "Total Fare"),
-    ("commission_amount", "Agent Commission"),           # real export
-    ("commission_rate", "Comm %"),
-    ("incentive_amount", "Incentive"),                   # real export
-    ("tds", "TDS Amount"),                               # real export
-    ("service_charge", "Service Charge"),                # real export
-    ("service_fee", "SF"),                               # real export
-    ("gst_on_sf", "GST On SF"),                          # real export
-    ("markup", "Markup"),
-    ("agent_penalty", "Agent Penalty"),                  # real export
-    ("cancellation_markup", "Cancellation Markup"),      # real export
-    ("net_amount", "Net Amount"),                        # real export
+    ("travel_date", "Travel Date"),
+    # Carrier
+    ("airline_name", "Airline Name"),
+    ("airline_code", "Airline Code"),
+    ("ticket_prefix", "Ticket Prefix"),
+    ("segment_type", "Segment Type"),                   # INTERNATIONAL / DOMESTIC
+    # Document
+    ("pnr", "S PNR"),
+    ("airline_pnr", "Airline PNR"),
+    ("gds_pnr", "CRS PNR"),
+    ("ticket_number", "Ticket No"),
+    ("ticket_status", "Invoice Type"),                  # sale or refund (CONFIRMED / CANCELLED)
     ("invoice_number", "Invoice No"),
-    ("agency_code", "Agency Code"),
-    ("consolidator_name", "Consolidator"),
-    ("gds", "GDS"),
+    # Passenger
+    ("first_name", "Pax First Name"),
+    ("last_name", "Pax Last Name"),
+    ("passenger_count", "Pax Count"),
+    # Itinerary
+    ("sector", "Sector"),
+    ("flight_number", "Flight No"),
+    ("booking_class", "Class"),
+    ("payment_method", "Payment Mode"),
+    ("card_type", "Card Type"),
+    # Money — each set of parts just before the total it adds up to
+    ("base_fare", "Basic Fare"),
+    ("yq", "YQ Tax"),
+    ("yr", "YR Tax"),
+    ("k3", "K3 Tax"),
+    ("other_taxes", "Other Taxes"),
+    ("taxes", "Total Tax"),
+    ("seat_selection", "Seat Selection"),
+    ("excess_baggage", "Excess Baggage"),
+    ("meals", "Meals"),
+    ("total_fare", "Total Fare"),
+    ("reschedule_charges", "Reschedule Charges"),
+    ("cancellation_markup", "Cancellation Charges"),
+    ("refund_amount", "Refund"),
+    ("adm", "ADM"),
+    ("commission_amount", "Agent Commission"),
+    ("incentive_amount", "Incentive"),
+    ("discount", "Discount"),
+    ("commission_rate", "Comm %"),
+    ("service_charge", "Service Charge"),
+    ("service_fee", "SF"),
+    ("cgst", "CGST"),
+    ("sgst", "SGST"),
+    ("igst", "IGST"),
+    ("tds", "TDS Amount"),
+    ("markup", "Markup"),
+    ("agent_penalty", "Agent Penalty"),
+    ("uatp_amount", "UATP Amount"),
+    ("net_amount", "Net Amount"),
+    # Other
     ("payment_status", "Payment Status"),
     ("remarks", "Remarks"),
 ]
+
+
+def _merged(*fields: str) -> list[str]:
+    return [a for f in fields for a in _COMMON_ALIASES[f]]
+
+
+# Only the fields on the mapping screen, so a column is never auto-mapped to a field the
+# user has no dropdown to see or undo. A cut field's aliases go to the field that took its
+# place, so a file printing "Issue Date", "Type" or "Pax Name" still maps by itself.
 _TP_GDS_ALIASES = {
-    **_COMMON_ALIASES,
-    "gds": ["gds", "gds_name", "gdsname", "booking_system", "bookingsystem"],
+    **{f: _COMMON_ALIASES[f] for f, _h in _TP_GDS_COLUMNS if f in _COMMON_ALIASES},
+    "booking_date":  _merged("booking_date", "issue_date") + ["booked_issue_date", "booking_issue_date"],
+    "ticket_status": _merged("ticket_status", "transaction_type") + ["invoice_type", "invoicetype", "inv_type"],
+    "first_name":    _merged("first_name", "passenger_name"),
+    "passenger_count": _merged("passenger_count") + ["no_of_pax", "noofpax", "pax_no"],
+    "yr":           ["yr", "yr_tax", "yrtax", "yr_fare", "yrfare"],
+    "k3":            ["k3", "k3_tax", "k3tax", "k3_gst", "k3gst", "gst_on_fare", "airline_gst"],
+    "cancellation_markup": _merged("cancellation_markup") + [
+        "cancellation_charges", "cancellationcharges", "cancellation_charge", "cancel_charges",
+        "cancellation_fee", "cancellationfee", "refund_charges", "refundcharges"],
+    # Added 2026-10-26. Spellings from the October vendor files: Brightsun (Seat_Selection,
+    # Excessbagage, CGST_Sell, DIS_Sell, PaidByCreditCard), Riya (Disc. Amt., UATP Amt.),
+    # Akbar (CardAmt), TripJack (Card Type). Two are left out on purpose: a bare "Disc"
+    # (Riya prints "Disc. %" beside "Disc. Amt.") and a bare "UATP" (TripJack's holds who
+    # paid — "Customer" / "Corporate" — not an amount). Map those by hand.
+    "seat_selection": ["seat_selection", "seatselection", "seat", "seats", "seat_charge",
+                       "seat_charges", "seat_fee", "seat_amount", "seat_sell"],
+    "excess_baggage": ["excess_baggage", "excessbaggage", "excess_bagage", "excessbagage",
+                       "excess_bag", "extra_baggage", "baggage", "bagage", "baggage_charges",
+                       "baggage_sell"],
+    "meals":          ["meals", "meal", "meal_charges", "meals_charges", "meal_amount",
+                       "meal_sell", "meals_sell"],
+    "cgst":           ["cgst", "cgst_sell", "cgstsell", "cgst_amount", "cgst_amt", "cgst_on_sf"],
+    "sgst":           ["sgst", "sgst_sell", "sgstsell", "sgst_amount", "sgst_amt", "sgst_on_sf",
+                       "utgst", "sgst_utgst"],
+    "igst":           ["igst", "igst_sell", "igstsell", "igst_amount", "igst_amt", "igst_on_sf"],
+    # The refund AMOUNT. "Refund Charges" is not one: it is Cancellation Charges' (above).
+    "refund_amount":  ["refund_amount", "refundamount", "refund", "refund_amt", "refundamt",
+                       "refund_sell", "rfd_sell", "rfdsell", "rfd", "rfd_amount"],
+    "adm":            ["adm", "adm_amount", "admamount", "adm_amt", "adm_sell", "debit_memo",
+                       "agency_debit_memo"],
+    "discount":       ["discount", "dis_sell", "dissell", "disc_amt", "discamt", "discount_amt",
+                       "discount_amount", "discountamount", "discount_sell"],
+    "uatp_amount":    ["uatp_amount", "uatpamount", "uatp_amt", "uatpamt", "paid_by_credit_card",
+                       "paidbycreditcard", "paid_by_card", "card_amt", "cardamt", "card_amount",
+                       "cardamount"],
+    # No bare "card" or "card_name": either may hold a card number or the cardholder's
+    # name, which reports must never carry (services/report_download/pii.py).
+    "card_type":      ["card_type", "cardtype", "cc_type", "credit_card_type", "card_scheme"],
 }
+
+# What fills a field the file does not print (`register`'s `fills`). Airline Name, Airline
+# Code ("AI") and Ticket Prefix ("098") each name the carrier: map any one and the Airline
+# Master fills the other two at ingest (`_airline_stamper` in api/v1/statements.py,
+# tp_airline_resolution.stamp). The totals are `_derive_tp_gds`'s.
+_TP_GDS_FILLS = {
+    "airline_name":  {"label": "from Airline Master", "from": ["airline_code", "ticket_prefix"]},
+    "airline_code":  {"label": "from Airline Master", "from": ["airline_name", "ticket_prefix"]},
+    "ticket_prefix": {"label": "from Airline Master", "from": ["airline_name", "airline_code"]},
+    "taxes":        {"label": "calculated: YQ + YR + K3 + Other", "from": list(TAX_PARTS)},
+    "total_fare":   {"label": "calculated: Basic + Total Tax + Seat + Baggage + Meals",
+                     "from": ["base_fare"]},
+}
+
+# ADVISORY_GROUPS in the standard columns' own words: Issue Date is not a field of its own.
+TP_GDS_ADVISORY_GROUPS = [
+    {"label": "the airline", "fields": ["airline_name", "airline_code", "ticket_prefix"],
+     "headers": "Airline Name, Airline Code or Ticket Prefix",
+     "consequence": "Commission income cannot find a deal for a row whose carrier it does not know."},
+    {"label": "a date", "fields": ["booking_date", "transaction_date"],
+     "headers": "Booked / Issue Date or Transaction Date",
+     "consequence": "Deal validity is checked against the issue date, so rows without one stay unmatched."},
+]
+
 TP_GDS_DISPLAY = register(
     "tp-gds", _TP_GDS_COLUMNS, _TP_GDS_ALIASES,
     # v2 = mapped against the real 40-column export. Batches still carrying the v1 label
     # were parsed by the speculative schema and are offered a Reprocess (api/v1/statements.py).
-    "third-party-gds-v2", _derive_tp_gds,
+    "third-party-gds-v2", _derive_tp_gds, fills=_TP_GDS_FILLS,
 )
 
 
@@ -693,6 +865,7 @@ _MO_GDS_ALIASES = {
 }
 MO_GDS_DISPLAY = register(
     "mo-gds", _MO_GDS_COLUMNS, _MO_GDS_ALIASES, "mid-office-gds-v1", _derive_tp_gds,
+    fills=_TP_GDS_FILLS,
 )
 
 

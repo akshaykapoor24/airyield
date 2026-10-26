@@ -84,9 +84,14 @@ class TestNormaliser(unittest.TestCase):
     def test_tax_is_yq_plus_the_rest_of_the_bill(self):
         self.assertEqual(row(1, yq="150", other_taxes="200").amounts["tax"], D("350"))
 
-    def test_total_tax_stands_in_for_other_taxes_never_beside_it(self):
+    def test_yr_and_k3_are_part_of_the_bill(self):
+        r = row(1, yq="150", yr="40", k3="60", other_taxes="200")
+        self.assertEqual(r.amounts["tax"], D("450"))
+
+    def test_a_printed_total_tax_is_the_whole_bill(self):
+        """Total Tax includes YQ (flat_statement.total_tax) — it is not added to it."""
         r = row(1, yq="150", other_taxes=None, taxes="200")
-        self.assertEqual(r.amounts["tax"], D("350"))
+        self.assertEqual(r.amounts["tax"], D("200"))
 
     def test_tax_is_none_when_nothing_is_printed(self):
         self.assertIsNone(row(1, yq=None, other_taxes=None).amounts["tax"])

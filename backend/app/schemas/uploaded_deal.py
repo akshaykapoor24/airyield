@@ -80,6 +80,12 @@ class ExtractedRow(BaseModel):
     login_id:         Optional[str] = None
     deal_maker_name:  Optional[str] = None
     supplier_name:    Optional[str] = None
+    # "All suppliers" uploads only (ConfirmUploadPayload.multi_vendor): the Agency Master
+    # row the reviewer left on THIS row, and the sheet's own Source cell it came from
+    # ("AKBAR"). The id decides the deal's supplier; the cell is remembered against it so
+    # the next upload of the sheet pre-fills the same choice.
+    vendor_agency_id: Optional[int] = None
+    supplier_cell:    Optional[str] = None
     contract_year:    Optional[str] = None
     trigger_type:     Optional[str] = None
     payout_type:      Optional[str] = None
@@ -112,6 +118,10 @@ class DealRepositoryItem(BaseModel):
     source_agent:     str
     airline_type:     Optional[str]  = None
     airline_name:     Optional[str]  = None
+    # The airline master's carrier code for airline_name — looked up, not stored on the
+    # deal (see deals._attach_airline_codes). None when the name is not in the master.
+    airline_code:     Optional[str]  = None
+    iata_commission:  Optional[str]  = None
     contract_year:    Optional[str]  = None  # null for b2b
     valid_from:       Optional[date] = None
     valid_to:         Optional[date] = None
@@ -221,6 +231,32 @@ class AIDeal(BaseModel):
     # still occupies a review row so the user can fill it in by hand: a source
     # row must never vanish silently.
     needs_manual: bool = False
+    # ── Supplier attribution (multi-supplier sheets) ─────────────────────────
+    # The row's Source / Supplier cell as printed ("YATRA(TSI)"); None when the
+    # file has no such column. TRANSPORT ONLY, like airline_code.
+    supplier_cell: Optional[str] = None
+    # Set only on an "All suppliers" extract. Advisory, like airline_status:
+    # confirm_upload trusts nothing but the agency the reviewer leaves on the row.
+    #   supplier_group    joins the deal to its line in supplier_summary
+    #   vendor_status     remembered | matched | suggested | ambiguous | not_onboarded | blank
+    #   vendor_agency_id  pre-selected agency — only when remembered / matched
+    supplier_group: Optional[str] = None
+    vendor_status: Optional[str] = None
+    vendor_agency_id: Optional[int] = None
+
+
+class SupplierSourceSummary(BaseModel):
+    """One Source value of an "All suppliers" sheet and what it resolved to — a line
+    of the review step's "Suppliers in this sheet" panel."""
+    group: str                          # "akbar|GDS" — AIDeal.supplier_group
+    source: str                         # as printed; "" for rows with no Source
+    channel: Optional[str] = None       # GDS | LCC — agencies are onboarded per channel
+    rows: int = 0                       # rows of the sheet
+    deals: int = 0                      # review rows they became (one per class)
+    status: str
+    agency_id: Optional[int] = None     # pre-selected: remembered / matched only
+    candidates: list[int] = []          # offered: suggested / ambiguous
+    note: Optional[str] = None
 
 
 class AIExtractResponse(BaseModel):
@@ -232,6 +268,8 @@ class AIExtractResponse(BaseModel):
     # (name, code) pairs, not deal rows, so it reads as "12 airlines" and not
     # "36 rows". Drives the review-table banner.
     airline_summary: dict[str, int] = {}
+    # "All suppliers" only: one line per Source value, in sheet order.
+    supplier_summary: list[SupplierSourceSummary] = []
 
 
 class DealBatchRead(BaseModel):
@@ -289,7 +327,9 @@ class ConfirmUploadPayload(DealScopeFields):
     remark:          Optional[str]  = None
     # GDS-specific
     iata_number:     Optional[str]  = None
-    iata_commission: Optional[str]  = None   # IATA commission % (deal-level fallback)
+    # Not applied to rows: IATA commission % is per row (rows[].iata_commission). Kept so
+    # an older client that still sends it is accepted.
+    iata_commission: Optional[str]  = None
     # LCC-specific
     business_type:   Optional[str]  = None
     entity_lcc:      Optional[str]  = None
@@ -307,6 +347,10 @@ class ConfirmUploadPayload(DealScopeFields):
     # deal matched by name alone. Ignored on an outgoing upload, whose counterparty is
     # the scope block.
     vendor_agency_id: Optional[int] = None
+    # Incoming B2B "All suppliers": a multi-supplier sheet, where every ROW names its own
+    # Agency Master row (ExtractedRow.vendor_agency_id) and `vendor_agency_id` above is
+    # not sent. Each row is then that agency's deal — name, supplier id and link.
+    multi_vendor:    bool           = False
     # incentives (same as new deal form)
     incentive_types: list[str]      = []     # ["PLB", "Super PLB"]
     incentive_data:  dict           = {}     # {PLB: {validFrom: ..., frequency: ...}}

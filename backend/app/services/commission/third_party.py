@@ -22,10 +22,11 @@ What this file decides, and why each is a judgement rather than a lookup:
     third-party row is BETTER evidence than a BSP one, and only class-restricted deals
     withhold.
 
-  * **YR.** There is no YR column; it is folded into "Other Taxes". `yr` is therefore None,
-    which UNDER-STATES the base for a deal calculating on Basic+YQ+YR. Under-stating is
-    conservative — you claim less than you might be owed — and withholding instead would
-    zero every YR-based deal on every third-party statement. But the row says so.
+  * **YR.** Read from the YR Tax column where the statement prints one. The real export
+    does not — it folds YR into "Other Taxes" — and then `yr` is None, which UNDER-STATES
+    the base for a deal calculating on Basic+YQ+YR. Under-stating is conservative — you
+    claim less than you might be owed — and withholding instead would zero every YR-based
+    deal on such a statement. But the row says so.
 
   * **SSR.** One undifferentiated "SSR Amount", while a deal pays Ancillary per sub-type
     (baggage / meals / seat). There is no honest split, so NOTHING is claimed for it: the
@@ -47,7 +48,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.statement_batch_supplier import StatementBatchSupplier
 from app.models.statement_row import STATEMENT_MODELS
-from app.services import statement_balance
+from app.services import flat_statement, statement_balance
 from app.services.commission.mo_index import MoTicket, load_mo_index
 from app.services.commission.calc_row import (
     KIND_ISSUE, KIND_REFUND, KIND_SKIP, BatchInfo, CalcRow, DeclaredAmounts,
@@ -59,8 +60,11 @@ from app.services.deal_matching import SKIP_CLASS
 # unrecognised behaves like an issue and says so. Consolidator status vocabularies vary,
 # and a whitelist-only issue rule would silently zero a whole file the first time one of
 # them wrote "TICKETED" instead of "CONFIRMED".
+# The column is "Invoice Type" on the Third Party GDS mapping screen: a consolidator
+# prints the ticket's status there (CONFIRMED / CANCELLED) or the document's type (SALE /
+# REFUND / CREDIT NOTE), so both vocabularies are read.
 _REFUND_STATUS = {"REFUNDED", "REFUND", "RFND", "REFUND PROCESSED", "REFUNDED-FULL",
-                  "REFUNDED-PARTIAL"}
+                  "REFUNDED-PARTIAL", "CREDIT NOTE", "CREDITNOTE"}
 _SKIP_STATUS = {"CANCELLED", "CANCELED", "CANCEL", "VOID", "VOIDED", "FAILED",
                 "PENDING", "HOLD", "ON HOLD", "EXPIRED", "REJECTED"}
 # For COMMISSION, a consolidator's CANCELLED line is a refund, not a non-sale: the vendor
@@ -147,38 +151,78 @@ def _s(data: dict, key: str) -> str | None:
     return v or None
 
 
-def net_from_components(data: dict) -> float:
+def net_from_components(data: dict, refund: bool = False) -> float:
     """Recompute the vendor's Net Amount from the columns it printed.
 
-        Net = Basic + YQ + Other Taxes + SSR + Reschedule
-              - Agent Commission - Incentive + TDS
+        Net = Basic + Total Tax + SSR + Reschedule + ADM
+              - Agent Commission - Incentive - Discount + TDS
               + Service Charge + SF + GST On SF + Agent Penalty + Cancellation Markup
+              + Refund + UATP Amount
 
-    Verified against both rows of the real export: 66250 + 23069 + 100 + 18 = 89437, and
+    Agent Commission and Incentive come OFF a sale and go back ON a refund (the reversal),
+    whichever sign the vendor prints them with. TRIUMPHH prints a sale's commission positive
+    (… − 285.72); Brightsun prints it negative and adds it (TotalAmt = … + Comm_Sell, with
+    −5001.06 on a sale and +673.64 on a credit note — all 125 lines of 01-07 Oct 2026). Both
+    are the same arithmetic once the sign comes from the line's kind, not the cell.
+
+    Total Tax is the whole tax bill — as printed, else YQ + YR + K3 + Other Taxes
+    (flat_statement.total_tax, the rule ingest derives it by). SSR and GST On SF likewise
+    are their totals, as printed or added up from their parts. Verified against both rows
+    of the real export: 66250 + 23069 + 100 + 18 = 89437, and
     31670 + 21544 - 285.72 + 5.7144 = 52933.9944.
+
+    UATP Amount is the part the airline charged to a card, printed as a NEGATIVE amount
+    that the vendor adds: Brightsun's Net_AMT = TotalAmt + PaidByCreditCard on all 125 lines
+    of its 01-07 Oct 2026 statement. ADM is a debit and Discount comes off like commission.
+    Refund is added as printed: a refund line credits it back, so a vendor prints it negative.
     """
+    s = -1.0 if refund else 1.0
     return (
-        _f0(data, "base_fare") + _f0(data, "yq") + _f0(data, "other_taxes")
-        + _f0(data, "ssr_amount") + _f0(data, "reschedule_charges")
-        - _f0(data, "commission_amount") - _f0(data, "incentive_amount")
+        _f0(data, "base_fare") + (flat_statement.total_tax(data) or 0.0)
+        + (flat_statement.ssr_total(data) or 0.0) + _f0(data, "reschedule_charges")
+        + _f0(data, "adm")
+        - s * abs(_f0(data, "commission_amount")) - s * abs(_f0(data, "incentive_amount"))
+        - _f0(data, "discount")
         + _f0(data, "tds")
-        + _f0(data, "service_charge") + _f0(data, "service_fee") + _f0(data, "gst_on_sf")
+        + _f0(data, "service_charge") + _f0(data, "service_fee")
+        + (flat_statement.gst_total(data) or 0.0)
         + _f0(data, "agent_penalty") + _f0(data, "cancellation_markup")
+        + _f0(data, "refund_amount") + _f0(data, "uatp_amount")
     )
 
 
 # Columns whose SIGN in the Net Amount identity has never been seen against real data —
 # every one of them is blank in both sample rows. When the arithmetic fails AND one of
 # these is non-zero, the honest answer is "cannot judge", not "the vendor is wrong".
-_UNVERIFIED_SIGN_FIELDS = ("reschedule_charges", "agent_penalty", "cancellation_markup")
+# ADM, Discount and Refund are blank on every October 2026 vendor file. UATP's sign held on
+# Brightsun's, but Akbar prints its CardAmt positive, so it is not settled either.
+_UNVERIFIED_SIGN_FIELDS = ("reschedule_charges", "agent_penalty", "cancellation_markup",
+                           "refund_amount", "adm", "discount", "uatp_amount")
 
 
-def build_declared(data: dict) -> DeclaredAmounts:
-    """The vendor's own figures, plus whether its arithmetic closes."""
+def _by_kind(v: float | None, refund: bool) -> float | None:
+    """A commission figure the way the deal side counts it: earned (+) on a sale, given back
+    (−) on a refund — not the sign the vendor happened to print."""
+    if v is None:
+        return None
+    return -abs(v) if refund else abs(v)
+
+
+def build_declared(data: dict, kind: str | None = None) -> DeclaredAmounts:
+    """The vendor's own figures, plus whether its arithmetic closes.
+
+    Commission and Incentive are signed by the line's KIND (`_by_kind`), so they compare
+    with what a deal computes: a sale's earning is positive and a refund's reversal negative
+    (runner reverses the original's incentive). Read as printed, Brightsun's −5001.06 on a
+    sale counted as commission the vendor took, and every gap came out doubled. `kind`
+    defaults to the line's own classification."""
+    if kind is None:
+        kind, _ = classify(data, cancelled_as_refund=True)
+    refund = kind == KIND_REFUND
     net = _f(data, "net_amount")
     declared = DeclaredAmounts(
-        commission=_f(data, "commission_amount"),
-        incentive=_f(data, "incentive_amount"),
+        commission=_by_kind(_f(data, "commission_amount"), refund),
+        incentive=_by_kind(_f(data, "incentive_amount"), refund),
         tds=_f(data, "tds"),
         net=net,
     )
@@ -186,7 +230,7 @@ def build_declared(data: dict) -> DeclaredAmounts:
         declared.net_ok = None
         return declared
 
-    computed = net_from_components(data)
+    computed = net_from_components(data, refund=refund)
     if abs(computed - net) <= NET_TOLERANCE:
         declared.net_ok = True
     elif any(_f0(data, f) for f in _UNVERIFIED_SIGN_FIELDS):
@@ -212,7 +256,10 @@ def classify(data: dict, cancelled_as_refund: bool = False) -> tuple[str, str | 
         return KIND_REFUND, None
     if not status:
         return KIND_ISSUE, None
-    if status not in ("CONFIRMED", "TICKETED", "ISSUED", "OK", "ACTIVE", "COMPLETED"):
+    # DEBIT NOTE: Brightsun bills a booking fee on a line of its own (50 + 9% CGST + 9% SGST)
+    # — a charge, so a sale-side line, not something unrecognised.
+    if status not in ("CONFIRMED", "TICKETED", "ISSUED", "OK", "ACTIVE", "COMPLETED",
+                      "SALE", "SALES", "INVOICE", "ISSUE", "DEBIT NOTE", "DEBITNOTE"):
         # Treated as a sale, but flagged — see the module note on fall-through.
         return KIND_ISSUE, f"Unrecognised status '{status}' — treated as an issue."
     return KIND_ISSUE, None
@@ -265,9 +312,9 @@ def build_calc_row(row, supplier_name: str | None, supplier_id: int | None,
         tour_code=_s(data, "tour_code"),
         fare_amount=_f(data, "base_fare"),
         yq=_f(data, "yq"),
-        # No YR column on this export — see the module docstring. Deliberately None, never
-        # a share of Other Taxes.
-        yr=None,
+        # Only where the statement prints a YR Tax column — see the module docstring.
+        # Otherwise None, never a share of Other Taxes.
+        yr=_f(data, "yr"),
         # All three None on purpose: the statement gives one combined SSR figure and a deal
         # pays Ancillary per sub-type, so there is no honest split to feed the engine.
         seat_selection=None, excess_baggage=None, meals=None,
@@ -278,7 +325,7 @@ def build_calc_row(row, supplier_name: str | None, supplier_id: int | None,
         invoice_type=INVOICE_TYPE,
         supplier_agency=supplier_name,
         supplier_agency_id=supplier_id,
-        declared=build_declared(data),
+        declared=build_declared(data, kind),
     )
 
     if kind_reason:

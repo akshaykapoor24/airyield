@@ -14,6 +14,7 @@ import asyncio
 import hashlib
 import io
 import json
+import logging
 import math
 import os
 import re
@@ -31,6 +32,7 @@ from fastapi import (
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import Numeric, and_, case, cast, delete, func, literal, or_, select, update
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, defer
 from starlette.background import BackgroundTask
@@ -54,7 +56,7 @@ from app.services import flat_statement as _flat
 from app.services import income_board
 from app.services import sector_split, spec_mapping, spreadsheet, statement_spec as spec
 from app.services import statement_balance, statement_export, statement_period, tp_gds_reupload
-from app.services import date_format_detect, excel_dates
+from app.services import date_format_detect, excel_dates, saved_mapping
 from app.models.statement_batch_control import StatementBatchControl
 from app.services import statement_supplier_selection as supplier_selection
 from app.services import tp_airline_resolution as tp_airline
@@ -63,6 +65,7 @@ from app.services.statement_display import display_columns as _display_columns, 
 from app.services.lcc_airline_selection import resolve_for_upload
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 _MIN_MATCHED_COLUMNS = 3
 _TAX_TYPE_RE = re.compile(r"^tax_type(\d+)$")
@@ -683,6 +686,13 @@ async def _supplier_selection(db: AsyncSession, slug: str, supplier_id: int | No
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+async def _proposed_mapping(db: AsyncSession, slug: str, user: User, supplier, columns: list[str],
+                            by_name: dict[str, str]) -> saved_mapping.Proposal:
+    """The mapping the wizard opens with: the one this vendor's statements were last SAVED
+    with, where it fits this file, else the alias map's (`by_name`) — services/saved_mapping.py."""
+    return await saved_mapping.propose_for(db, user, slug, supplier, columns, set(spec.fields(slug)), by_name)
+
+
 def _period_form(slug: str, period_from: str | None, period_to: str | None) -> tuple[date, date] | None:
     """The statement period an upload declares, checked — for the types that capture one
     (statement_spec.captures_period). None for every other type, whatever was sent.
@@ -827,11 +837,13 @@ async def _write_lines(db: AsyncSession, slug: str, user: User, objs: list, *, b
                        source_file: str | None, file_url: str | None, uploaded_at: datetime,
                        period: tuple[date, date] | None = None,
                        decision: tp_gds_reupload.Decision | None = None,
-                       date_formats: dict[str, str] | None = None) -> None:
+                       date_formats: dict[str, str] | None = None,
+                       screen: tp_gds_reupload.Screen | None = None) -> None:
     """Add an upload's lines — after its header, for the types that have one
     (models/third_party_statement.py), with its statement period on the header and on every
     line when it declares one, its declared date formats on the header, and its tally
-    counting the lines it left out as duplicates (Third Party GDS). Shared by `/upload` and
+    counting the lines it left out as duplicates (Third Party GDS). Those lines are kept
+    too, after the saved ones (`tp_gds_reupload.left_out_rows`). Shared by `/upload` and
     `/confirm`."""
     if slug in THIRD_PARTY_SLUGS:
         new = sum(1 for o in objs
@@ -854,6 +866,12 @@ async def _write_lines(db: AsyncSession, slug: str, user: User, objs: list, *, b
         for o in objs:
             o.period_from, o.period_to = period
     db.add_all(objs)
+    if screen is not None and decision is not None and decision.left_out:
+        # Flushed first: a line left out as a repeat of an earlier line of this very file
+        # points at that line's id.
+        await db.flush()
+        db.add_all(tp_gds_reupload.left_out_rows(
+            screen, decision, tenant_id=user.tenant_id, created_by_id=user.id, batch_id=batch_id))
 
 
 def _upload_facts(slug: str, model, batch_id: str, user: User):
@@ -930,27 +948,22 @@ def _read_for_mapping(content: bytes, filename: str, builder, header_row: int | 
     second read is the trap: a mapping is a list of column NAMES, so a different header row
     would silently rename every column and drop the whole mapping on the floor.
 
-    Detection is by recognised-column count, like `_detect_df`, but it returns the INDEX as
-    well as the frame — which is the only reason this exists rather than calling that.
+    Detection is spreadsheet.detect_header's: the first 25 rows, ranked by recognised-column
+    count and then by how much a row looks like a header (words, numbers under it). Only
+    rows 1–3 used to be tried, so a statement with a title block above its header — GLOBE's
+    and Yatra's "TICKET STATEMENT" .xls (header on row 4), a ledger with its account
+    details on rows 1–8 — read a title row as the header, and every dropdown listed
+    "Column 1", "Column 2", … instead of the file's own names.
     """
     if header_row is None:
-        best = None
-        last_err: Exception | None = None
-        for hr in (0, 1, 2):
-            try:
-                df = _read_df(content, filename, hr)
-            except Exception as e:  # noqa: BLE001 — unreadable at this offset, try the next
-                last_err = e
-                continue
-            df.dropna(how="all", inplace=True)
-            score = len(builder.build_col_map([str(c) for c in df.columns]))
-            if best is None or score > best[0]:
-                best = (score, df, hr)
-        if best is None:
+        try:
+            found = spreadsheet.read_table(
+                content, filename, recognise=lambda names: len(builder.build_col_map(names)))
+        except Exception as exc:  # noqa: BLE001 — any reader failure is the user's file
             raise HTTPException(
                 status_code=400,
-                detail=f"Could not read the file: {last_err}. Upload a valid .xlsx, .xls or .csv.")
-        _score, df, header_row = best
+                detail=f"Could not read the file: {exc}. Upload a valid .xlsx, .xls or .csv.")
+        df, header_row = found.df, found.header_row
     else:
         try:
             df = _read_df(content, filename, header_row)
@@ -1030,6 +1043,11 @@ async def detect_date_formats(
     # read one way alone ("13/08/2026") count.
     period_from: str | None = Form(default=None),
     period_to: str | None = Form(default=None),
+    # The vendor, when the upload step has one picked: its remembered mapping is what names
+    # the date columns of a layout the alias map does not know (TripJack's "Posting Date").
+    supplier_id: int | None = Form(default=None),
+    agency_id: int | None = Form(default=None),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """The order each declared date column of the file is written in, as far as the file
@@ -1052,7 +1070,12 @@ async def detect_date_formats(
     if not content:
         raise HTTPException(status_code=400, detail="The uploaded file is empty.")
     df, columns, _header_row = _read_for_mapping(content, file.filename or "", builder, None)
-    suggested = builder.suggest_mapping(columns)
+    try:
+        supplier = await _supplier_selection(db, slug, supplier_id, agency_id, current_user)
+    except HTTPException:
+        supplier = None     # a vendor still being picked: read by the alias map alone
+    suggested = (await _proposed_mapping(db, slug, current_user, supplier, columns,
+                                         builder.suggest_mapping(columns))).mapping
     # No formats yet — they are what this finds out — so every date column may be put back.
     fix = _read_stored_dates(slug, content, file.filename or "", df, period, suggested, None)
     found = date_format_detect.detect(df, {f["field"]: suggested.get(f["field"]) for f in fields}, period, fix)
@@ -1142,7 +1165,8 @@ async def extract_statement(
     if not columns:
         raise HTTPException(status_code=400, detail="No columns were found in the file.")
     suggested = builder.suggest_mapping(columns)
-    date_fix = _read_stored_dates(slug, content, file.filename or "", df, period, suggested, formats)
+    proposal = await _proposed_mapping(db, slug, current_user, supplier, columns, suggested)
+    date_fix = _read_stored_dates(slug, content, file.filename or "", df, period, proposal.mapping, formats)
     # Null for every type but Third Party API. Shown on the mapping step as reassurance, and
     # deliberately NOT offered as a dropdown: for a spec-driven type the mapping IS the
     # parser, so overriding this would write a provenance claim that changes nothing and
@@ -1167,7 +1191,12 @@ async def extract_statement(
         "preview_rows": len(sample),
         "preview_limit": _PREVIEW_ROWS,
         "columns": columns,
-        "suggested_mapping": suggested,
+        # What the mapping step opens with — the vendor's remembered mapping where one fits
+        # (`remembered_mapping` says whose, from which file), else `name_mapping`.
+        "suggested_mapping": proposal.mapping,
+        "remembered_mapping": proposal.info(),
+        # The alias map's own answer — "Map by column names instead" on the mapping step.
+        "name_mapping": suggested,
         "matched_columns": len(suggested),
         "standard_total": len(spec.columns(slug)),
         # A file built from our own Template comes back fully mapped; the wizard says so
@@ -1509,6 +1538,22 @@ def _row_marks(lines: _MappedLines) -> dict:
     return {"balance_rows": balance, "unparsed_rows": unparsed}
 
 
+async def _remember_mapping(db: AsyncSession, slug: str, user: User, supplier,
+                            req: _MappingRequest, source_file: str | None, batch_id: str) -> None:
+    """Keep the mapping this statement is saved with, for the vendor's next file
+    (services/saved_mapping.py).
+
+    In a SAVEPOINT: remembering is a convenience, and a failure in it must cost the user the
+    convenience, never the statement they are saving."""
+    try:
+        async with db.begin_nested():
+            await saved_mapping.remember(
+                db, user, slug, supplier, req.columns, req.colmap, set(spec.fields(slug)),
+                source_file=source_file, batch_id=batch_id)
+    except SQLAlchemyError:
+        logger.exception("Could not remember the column mapping of %s upload %s", slug, batch_id)
+
+
 @router.post("/{slug}/confirm")
 async def confirm_statement(
     slug: str,
@@ -1578,7 +1623,7 @@ async def confirm_statement(
         o.file_url = file_url
     await _write_lines(db, slug, current_user, objs, batch_id=batch_id,
                        source_file=file.filename, file_url=file_url, uploaded_at=uploaded_at,
-                       period=period, decision=decision, date_formats=formats)
+                       period=period, decision=decision, date_formats=formats, screen=screen)
     if supplier is not None:
         db.add(_supplier_link(current_user.tenant_id, slug, batch_id, supplier))
     control = _control_row(
@@ -1588,6 +1633,7 @@ async def confirm_statement(
     if control is not None:
         db.add(control)
     await _project(db, slug, current_user, batch_id)
+    await _remember_mapping(db, slug, current_user, supplier, req, file.filename, batch_id)
     await db.commit()
     rowfilter = spec.row_filter(slug)
     return {
@@ -1825,7 +1871,7 @@ async def upload_statement(
         o.file_url = file_url
     await _write_lines(db, slug, current_user, objs, batch_id=batch_id,
                        source_file=file.filename, file_url=file_url, uploaded_at=uploaded_at,
-                       period=period, decision=decision, date_formats=formats)
+                       period=period, decision=decision, date_formats=formats, screen=screen)
     for ta in airlines:
         db.add(StatementBatchAirlineId(
             tenant_id=current_user.tenant_id, slug=slug,
@@ -2730,13 +2776,16 @@ async def edit_record(
         edited.add(field)
 
     # Values the upload DERIVED must follow the edit, or they keep describing the old row:
-    # the passenger name when it was only First + Last joined, and a computed total fare.
+    # the passenger name when it was only First + Last joined, and every total that was added
+    # up from its parts (Total Tax, SSR Amount, GST On SF, Total Fare) — dropped here, added
+    # up again by the derive below. One typed over by hand is kept as typed.
     if ({"first_name", "last_name"} & payload.fields.keys()
             and data.get("passenger_name") in (old_joined, None) and "passenger_name" not in payload.fields):
         data.pop("passenger_name", None)
-    if data.get("total_fare_source") == "derived" and "total_fare" not in payload.fields:
-        data.pop("total_fare", None)
-        data.pop("total_fare_source", None)
+    for total, marker in flat_statement.DERIVED_TOTALS:
+        if data.get(marker) == "derived" and total not in payload.fields:
+            data.pop(total, None)
+            data.pop(marker, None)
     builder = flat_statement.get(spec.parser(slug) or "")
     derive = getattr(builder, "_derive", None) if builder else None
     if derive:

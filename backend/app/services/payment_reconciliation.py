@@ -86,6 +86,10 @@ PAYMENT_FIELD_SPECS: list[FieldSpec] = [
     FieldSpec("gst_on_sf",           "GST on SF",           "warning",  _TOL, _NO_PCT),
     FieldSpec("agent_penalty",       "Agent penalty",       "warning",  _TOL, _NO_PCT),
     FieldSpec("cancellation_markup", "Cancellation markup", "warning",  _TOL, _NO_PCT),
+    FieldSpec("refund",              "Refund",              "warning",  _TOL, _NO_PCT),
+    FieldSpec("adm",                 "ADM",                 "warning",  _TOL, _NO_PCT),
+    FieldSpec("discount",            "Discount",            "warning",  _TOL, _NO_PCT),
+    FieldSpec("uatp",                "UATP amount",         "warning",  _TOL, _NO_PCT),
     FieldSpec("net",                 "Net amount",          "critical", _TOL, _NO_PCT),
 ]
 PAYMENT_FIELDS = tuple(s.key for s in PAYMENT_FIELD_SPECS)
@@ -97,7 +101,9 @@ _DATA_KEY = {
     "commission": "commission_amount", "incentive": "incentive_amount", "tds": "tds",
     "service_charge": "service_charge", "service_fee": "service_fee",
     "gst_on_sf": "gst_on_sf", "agent_penalty": "agent_penalty",
-    "cancellation_markup": "cancellation_markup", "net": "net_amount",
+    "cancellation_markup": "cancellation_markup",
+    "refund": "refund_amount", "adm": "adm", "discount": "discount", "uatp": "uatp_amount",
+    "net": "net_amount",
 }
 
 # ── balance / total lines ────────────────────────────────────────────────────
@@ -125,15 +131,18 @@ def _pax_key(name: str | None) -> str | None:
     return " ".join(sorted(words)) or None
 
 
-def _tax_total(yq: Decimal | None, other: Decimal | None, taxes: Decimal | None):
-    """YQ plus the rest of the tax bill — None only when neither is printed.
+def _tax_total(taxes: Decimal | None, *parts: Decimal | None):
+    """The whole tax bill — Total Tax as printed, else its parts (YQ, YR, K3, Other Taxes)
+    added up; None only when none is printed.
 
-    `taxes` stands in for `other_taxes`, never beside it: the same rule ingest uses to
-    derive `total_fare` (flat_statement._derive_tp_gds), so the two can never disagree.
+    The same rule ingest uses for Total Tax and Total Fare (flat_statement.total_tax), so
+    the two can never disagree. Lines saved before Total Tax was derived carry only YQ and
+    Other Taxes, which add up to what they always did.
     """
-    rest = other if other is not None else taxes
-    parts = [p for p in (yq, rest) if p is not None]
-    return sum(parts) if parts else None
+    if taxes is not None:
+        return taxes
+    printed = [p for p in parts if p is not None]
+    return sum(printed) if printed else None
 
 
 # ── one statement row, normalised ────────────────────────────────────────────
@@ -187,7 +196,7 @@ def build_pay_row(row_id: int, data: dict | None, *, origin: dict | None = None)
         return val
 
     amounts: dict[str, Decimal | None] = {k: money(dk) for k, dk in _DATA_KEY.items()}
-    amounts["tax"] = _tax_total(amounts["yq"], money("other_taxes"), money("taxes"))
+    amounts["tax"] = _tax_total(money("taxes"), amounts["yq"], money("yr"), money("k3"), money("other_taxes"))
 
     tn = _s(data.get("ticket_number"))
     prefix = _s(data.get("ticket_prefix"))

@@ -65,6 +65,10 @@ class ColumnMap:
     # column ("TYPE" = INTL / DOM) instead of in the airline name.
     supplier: int | None = None
     scope: int | None = None
+    # The deal's own CONTRACT period, printed per row ("Week" = "01-07OCT") on the weekly
+    # vendor sheet — the window the deal is booked in, as opposed to the travel-validity
+    # column above. Read by Python only; the model never sees it as a role.
+    period: int | None = None
 
     @property
     def rate_columns(self) -> tuple[int, ...]:
@@ -92,6 +96,9 @@ class DocLayout:
     # belong to a different supplier — {supplier cell: row count}.
     sheet_title: str | None = None
     skipped_suppliers: dict[str, int] = field(default_factory=dict)
+    # Spreadsheet only: later tabs that hold a deal table too but were not read (a
+    # vendor workbook's "LCC" tab behind its "GDS" one), so the caller can say so.
+    unread_deal_sheets: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -190,6 +197,8 @@ def build_colmap(header: tuple[str, ...]) -> ColumnMap:
             cm.supplier = i
         elif h in ("TYPE", "SECTOR", "SCOPE") and cm.scope is None:
             cm.scope = i
+        elif h in ("WEEK", "PERIOD", "DEALPERIOD", "CONTRACTPERIOD", "VALIDPERIOD") and cm.period is None:
+            cm.period = i
 
     # Fall back to position 0 for the airline column — every observed layout
     # leads with it, and without it forward-fill and chunk nudging are blind.
@@ -647,6 +656,39 @@ def _sheet_grids(content: bytes, filename: str) -> list[tuple[str, list[tuple[st
     return grids
 
 
+def _drop_empty_columns(grid: list[tuple[str, ...]]) -> list[tuple[str, ...]]:
+    """Remove columns that are blank on every row. Excel reports a sheet as wide as its
+    widest FORMATTING, so a header row read from it can end in empty cells — and a
+    header with an empty cell is never recognised (_find_header). A column holding
+    nothing anywhere carries nothing to lose."""
+    width = max((len(r) for r in grid), default=0)
+    keep = [i for i in range(width) if any(i < len(r) and r[i] for r in grid)]
+    if len(keep) == width:
+        return grid
+    return [tuple(r[i] if i < len(r) else "" for i in keep) for r in grid]
+
+
+def _sheet_table(grid: list[tuple[str, ...]]) -> tuple[int, tuple[str, ...], ColumnMap] | None:
+    """The deal table on one sheet — (header row index, header, column map) — or None."""
+    hdr_idx, header = _find_header(grid)
+    if header is None:
+        return None
+    cm = build_colmap(header)
+    if cm.airline is None:
+        return None
+
+    # "Code" on some sheets is the numeric ticket-stock code (AA = 001), not the
+    # carrier designator. A code column of digits only is no airline code.
+    if cm.code is not None:
+        vals = [r[cm.code] for r in grid[hdr_idx + 1:] if cm.code < len(r) and r[cm.code]]
+        if vals and all(v.isdigit() for v in vals):
+            cm.code = None
+
+    if cm.format_hint == "unknown":
+        return None
+    return hdr_idx, header, cm
+
+
 def build_layout_from_sheet(content: bytes, filename: str, keep_supplier=None) -> DocLayout:
     """Parse an Excel deal sheet into the same DocLayout a PDF produces.
 
@@ -656,7 +698,8 @@ def build_layout_from_sheet(content: bytes, filename: str, keep_supplier=None) -
     what was left out — never silently.
 
     The first sheet with a recognisable header wins; vendor sheets keep one table
-    per file, and mixing column maps from two sheets would mislabel rates.
+    per file, and mixing column maps from two sheets would mislabel rates. Later
+    tabs that hold a deal table too are named in `layout.unread_deal_sheets`.
     """
     try:
         grids = _sheet_grids(content, filename)
@@ -664,28 +707,23 @@ def build_layout_from_sheet(content: bytes, filename: str, keep_supplier=None) -
         logger.exception("could not read spreadsheet %s", filename)
         return DocLayout()
 
+    chosen = None
+    unread: list[str] = []
     for title, grid in grids:
         grid = [tuple(c.strip() for c in r) for r in grid]
-        grid = [r for r in grid if any(r)]
+        grid = _drop_empty_columns([r for r in grid if any(r)])
         if not grid:
             continue
-        hdr_idx, header = _find_header(grid)
-        if header is None:
+        table = _sheet_table(grid)
+        if table is None:
             continue
-        cm = build_colmap(header)
-        if cm.airline is None:
-            continue
+        if chosen is None:
+            chosen = (title, grid, table)
+        else:
+            unread.append(title)
 
-        # "Code" on some sheets is the numeric ticket-stock code (AA = 001), not the
-        # carrier designator. A code column of digits only is no airline code.
-        if cm.code is not None:
-            vals = [r[cm.code] for r in grid[hdr_idx + 1:] if cm.code < len(r) and r[cm.code]]
-            if vals and all(v.isdigit() for v in vals):
-                cm.code = None
-
-        if cm.format_hint == "unknown":
-            continue
-
+    if chosen is not None:
+        title, grid, (hdr_idx, header, cm) = chosen
         rows: list[DocRow] = []
         skipped: dict[str, int] = {}
         section: str | None = None
@@ -732,6 +770,7 @@ def build_layout_from_sheet(content: bytes, filename: str, keep_supplier=None) -
         )
         layout.sheet_title = title
         layout.skipped_suppliers = skipped
+        layout.unread_deal_sheets = unread
         return layout
     return DocLayout()
 

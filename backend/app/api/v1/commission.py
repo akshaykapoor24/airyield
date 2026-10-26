@@ -22,10 +22,15 @@ from app.database import get_db
 from app.dependencies import get_current_user
 from app.models.commission_calculation import CommissionCalculation as Calc
 from app.models.commission_run import ENGINE_VERSION, CommissionRun
+from app.models.deal import Deal
 from app.models.statement_batch_supplier import StatementBatchSupplier
 from app.models.user import User
 from app.schemas.commission import (
     CommissionAirlineSummary,
+    CommissionLine,
+    CommissionLineColumn,
+    CommissionLinesPage,
+    CommissionLineTotals,
     CommissionReasonGroup,
     CommissionRowRead,
     CommissionRowsPage,
@@ -40,6 +45,7 @@ from app.services import commission_core as core
 from app.services import statement_spec as spec
 from app.services.deal_matching import segment_letter
 from app.services.commission import CommissionRunner, get_adapter
+from app.services.commission import statement_lines as sl
 
 router = APIRouter()
 
@@ -405,6 +411,75 @@ def _row_read(r: Calc) -> CommissionRowRead:
     )
 
 
+@router.get("/{source}/statements/{batch_id}/lines", response_model=CommissionLinesPage)
+async def list_lines(
+    source: str, batch_id: str,
+    bucket: str = Query("all", description="all | matched | unmatched | other | pending | "
+                                            "statement | iata | expected | difference"),
+    search: str = Query(""),
+    air: str = Query(""),
+    txn: str = Query("", description="The statement's own Invoice Type"),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Every ticket line of a consolidator statement — calculated or not — with its own
+    columns, and what it earned: the vendor's commission, your deal's, and the gap
+    (services/commission/statement_lines.py). `totals` are the whole statement's, never the
+    filtered set, so a card keeps its number while it filters the table.
+
+    Only for a source whose statements declare their own commission: without one there is
+    nothing to compare, and a page of zeros would read as "paid in full".
+    """
+    adapter, source = _resolve(source)
+    if not getattr(adapter, "has_declared_amounts", False):
+        raise HTTPException(
+            status_code=404,
+            detail=f"{adapter.label} statements do not declare their own commission.")
+    if bucket not in sl.BUCKETS:
+        raise HTTPException(status_code=400, detail=f"Unknown filter '{bucket}'.")
+
+    rows = await adapter.load_rows(db, current_user.tenant_id, current_user.id, batch_id)
+    if not rows:
+        raise HTTPException(status_code=404, detail="Statement not found.")
+    calcs = {c.source_row_id: c for c in (await db.execute(
+        select(Calc).where(*_scope(current_user), Calc.source == source, Calc.batch_id == batch_id)
+    )).scalars().all()}
+    lines = [sl.build_line(source, r, calcs.get(r.id)) for r in rows if sl.is_ticket(r)]
+    # Each matched deal's IATA %, as written on the deal — shown beside what it came to, so
+    # "₹0" reads as "this deal has no IATA %", not as "IATA was not calculated".
+    deal_ids = {c.matched_deal_id for c in calcs.values() if c.matched_deal_id}
+    iata_pct = dict((await db.execute(
+        select(Deal.id, Deal.iata_commission)
+        .where(Deal.id.in_(deal_ids), Deal.tenant_id == current_user.tenant_id)
+    )).all()) if deal_ids else {}
+
+    shown = [ln for ln in lines
+             if sl.in_bucket(ln, bucket) and sl.matches(ln, search=search, air=air, txn=txn)]
+    # File order, except the Difference card: the biggest gaps are the ones to chase first.
+    if bucket == "difference":
+        shown.sort(key=lambda ln: -abs(ln.difference or 0.0))
+    cols = sl.columns(source, lines)
+    keep = [c["field"] for c in cols]
+    page = shown[offset:offset + limit]
+    return CommissionLinesPage(
+        columns=[CommissionLineColumn(**c) for c in cols],
+        rows=[CommissionLine(
+            line_id=ln.line_id, values={f: ln.values.get(f) for f in keep}, kind=ln.kind,
+            statement_commission=ln.statement, expected_commission=ln.expected,
+            difference=ln.difference, net_ok=ln.net_ok,
+            iata_pct=iata_pct.get(ln.calc.matched_deal_id) if ln.calc is not None else None,
+            iata_commission=_f(ln.calc.iata_commission) if ln.calc is not None else None,
+            calc=_row_read(ln.calc) if ln.calc is not None else None,
+        ) for ln in page],
+        total=len(shown), offset=offset, limit=limit,
+        totals=CommissionLineTotals(**sl.totals(lines)),
+        airlines=sorted({ln.airline for ln in lines if ln.airline}),
+        invoice_types=sorted({ln.invoice_type for ln in lines if ln.invoice_type}),
+    )
+
+
 @router.get("/{source}/statements/{batch_id}/rows/facets")
 async def row_facets(
     source: str, batch_id: str,
@@ -563,6 +638,84 @@ async def gaps(
     ]
 
 
+async def _diagnose_calc(db: AsyncSession, user: User, adapter, calc: Calc, link) -> list:
+    """The engine's step-by-step trace of every deal for this calculation's airline, rebuilt
+    from the calculation's own input snapshot. Needs an airline and an issue date.
+
+    Every input feeds the incl/excl rule trace. Omitting any (as an earlier version did)
+    makes a route or date rule evaluate against nulls, so a popup could report a rule as
+    failing that the run itself passed. Shared by both popups so they can never disagree."""
+    from app.services.deal_matching import DealMatchingService
+
+    skipped = list(calc.skipped_criteria or [])
+    return await DealMatchingService.diagnose_match(
+        db=db,
+        airline_name=calc.airline_name,
+        travel_date=calc.travel_date or calc.issue_date,
+        tenant_id=user.tenant_id,
+        created_by_id=user.id,
+        issue_date=calc.issue_date,
+        segment_type=calc.segment_type,
+        booking_class=calc.booking_class,
+        invoice_type="Sales",
+        sell_fare=_f(calc.fare_amount),
+        sell_tax_yq=_f(calc.yq),
+        sale_yr=_f(calc.yr),
+        ticket_sector=calc.sector,
+        ticket_date_raw=calc.issue_date.isoformat(),
+        ticket_departure_raw=calc.travel_date.isoformat() if calc.travel_date else None,
+        ticket_airline_name=calc.airline_name,
+        supplier_agency=getattr(link, "supplier_name", None),
+        supplier_agency_id=getattr(link, "supplier_id", None),
+        statement_type=adapter.statement_type,
+        # Only the two the matcher understands; "sector" is a display label, not a filter.
+        skip_criteria=set(skipped) & {"class", "travel_date"},
+        rule_skip_fields={"class"} if "class" in skipped else set(),
+    )
+
+
+@router.get("/{source}/rows/{calc_id}/applied-deal")
+async def applied_deal(
+    source: str, calc_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The deal this line was priced with: its terms, every criterion it was matched on,
+    and the arithmetic — each incentive on its base, IATA % on the basic fare, against the
+    vendor's statement (services/commission/applied_deal.py). The match-diagnosis popup
+    still answers the wider question of every deal considered."""
+    from app.services.commission import applied_deal as ad
+
+    adapter, source = _resolve(source)
+    calc = (await db.execute(
+        select(Calc).where(Calc.id == calc_id, *_scope(current_user), Calc.source == source)
+    )).scalar_one_or_none()
+    if calc is None:
+        raise HTTPException(status_code=404, detail="Row not found.")
+    if not calc.matched_deal_id:
+        raise HTTPException(status_code=404, detail="No deal was applied to this line.")
+    deal = (await db.execute(
+        select(Deal).where(Deal.id == calc.matched_deal_id, Deal.tenant_id == current_user.tenant_id)
+    )).scalar_one_or_none()
+    link = await adapter.supplier_for_batch(db, current_user.tenant_id, calc.batch_id)
+
+    # The vendor's side, read off the statement line exactly as the line view reads it.
+    statement = None
+    if getattr(adapter, "has_declared_amounts", False):
+        m = adapter.model
+        row = (await db.execute(select(m).where(
+            m.id == calc.source_row_id, m.tenant_id == current_user.tenant_id,
+            m.created_by_id == current_user.id))).scalar_one_or_none()
+        if row is not None:
+            statement = sl.build_line(source, row, calc).statement
+
+    diag = None
+    if calc.airline_name and calc.issue_date:
+        deals = await _diagnose_calc(db, current_user, adapter, calc, link)
+        diag = next((d for d in deals if d.deal_id == calc.matched_deal_id), None)
+    return ad.build(calc, deal, diag, statement)
+
+
 @router.get("/{source}/rows/{calc_id}/match-diagnosis")
 async def match_diagnosis(
     source: str, calc_id: int,
@@ -582,12 +735,8 @@ async def match_diagnosis(
     if calc is None:
         raise HTTPException(status_code=404, detail="Row not found.")
 
-    from app.services.deal_matching import DealMatchingService
-
     link = await adapter.supplier_for_batch(db, current_user.tenant_id, calc.batch_id)
     skipped = list(calc.skipped_criteria or [])
-    # Only the two the matcher understands; "sector" is a display label, not a filter.
-    skips = set(skipped) & {"class", "travel_date"}
 
     # SAME KEYS AS /bsp-commission/rows/{id}/match-diagnosis, so one modal component serves
     # every source tab. The third-party extras are additional keys, never renamed ones.
@@ -631,32 +780,7 @@ async def match_diagnosis(
         return {**base, "deals": [], "total_deals_checked": 0, "matched_count": 0,
                 "note": "Row has no issue date — deal validity cannot be checked."}
 
-    # Every one of these feeds the incl/excl rule trace. Omitting them (as an earlier
-    # version did) makes a route or date rule evaluate against nulls, so the popup can
-    # report a rule as failing that the run itself passed.
-    deals = await DealMatchingService.diagnose_match(
-        db=db,
-        airline_name=calc.airline_name,
-        travel_date=calc.travel_date or calc.issue_date,
-        tenant_id=current_user.tenant_id,
-        created_by_id=current_user.id,
-        issue_date=calc.issue_date,
-        segment_type=calc.segment_type,
-        booking_class=calc.booking_class,
-        invoice_type="Sales",
-        sell_fare=_f(calc.fare_amount),
-        sell_tax_yq=_f(calc.yq),
-        sale_yr=_f(calc.yr),
-        ticket_sector=calc.sector,
-        ticket_date_raw=calc.issue_date.isoformat(),
-        ticket_departure_raw=calc.travel_date.isoformat() if calc.travel_date else None,
-        ticket_airline_name=calc.airline_name,
-        supplier_agency=getattr(link, "supplier_name", None),
-        supplier_agency_id=getattr(link, "supplier_id", None),
-        statement_type=adapter.statement_type,
-        skip_criteria=skips,
-        rule_skip_fields={"class"} if "class" in skipped else set(),
-    )
+    deals = await _diagnose_calc(db, current_user, adapter, calc, link)
     return {
         **base,
         "deals": deals,

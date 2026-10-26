@@ -101,7 +101,10 @@ type BatchBilling = {
   unlatched_rows: number;
 };
 // `kind: "money"` is set by the backend for amount columns so they right-align and format.
-type Column = { header: string; field: string; kind?: string };
+// `readonly` marks a value worked out from other columns (GDS SSR Amount / GST On SF): it is
+// shown, never typed over — the edit goes to its parts.
+type Column = { header: string; field: string; kind?: string; readonly?: boolean };
+const editableCol = (c: Column) => !c.field.startsWith("__") && !c.readonly;
 type Row = Record<string, string | number | null> & { id: number };
 
 // Declared per statement type in the backend spec; absent for types that have no filters,
@@ -526,7 +529,7 @@ export default function AdjustmentStatementsView({
 
   const startEdit = (r: Row) => {
     const d: Record<string, string> = {};
-    for (const c of columns) if (!c.field.startsWith("__")) d[c.field] = r[c.field] != null ? String(r[c.field]) : "";
+    for (const c of columns) if (editableCol(c)) d[c.field] = r[c.field] != null ? String(r[c.field]) : "";
     setDraft(d);
     setEditingId(Number(r.id));
   };
@@ -835,7 +838,7 @@ export default function AdjustmentStatementsView({
                     )}
                     {columns.map((c) => {
                       const v = r[c.field];
-                      if (editingId === r.id && !c.field.startsWith("__")) {
+                      if (editingId === r.id && editableCol(c)) {
                         return <td key={c.field} className="px-1.5 py-1">
                           <input value={draft[c.field] ?? ""}
                             onChange={e => setDraft(d => ({ ...d, [c.field]: e.target.value }))}

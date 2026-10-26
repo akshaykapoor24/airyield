@@ -130,12 +130,13 @@ _TP_SUMMARY = [
 
 # Filtering on `airline_master_name`, not the file's `airline_name`: the master spelling is
 # what the deal was written against, so it is also the grouping a user reasons about.
+# No Customer filter: Customer Name is not one of the standard columns any more (it is the
+# tenant's own name on every line), so new uploads leave it blank.
 _TP_GDS_FILTERS = [
-    {"field": "airline_master_name", "label": "Airline",   "type": "select"},
-    {"field": "segment_type",        "label": "Category",  "type": "select"},
-    {"field": "ticket_status",       "label": "Status",    "type": "select"},
-    {"field": "customer_name",       "label": "Customer",  "type": "select"},
-    {"field": "ticket_number",       "label": "Ticket No", "type": "text"},
+    {"field": "airline_master_name", "label": "Airline",      "type": "select"},
+    {"field": "segment_type",        "label": "Segment Type", "type": "select"},
+    {"field": "ticket_status",       "label": "Invoice Type", "type": "select"},
+    {"field": "ticket_number",       "label": "Ticket No",    "type": "text"},
     {"field": "pnr",                 "label": "PNR",       "type": "text"},
     {"field": "passenger_name",      "label": "Name",      "type": "text"},
 ]
@@ -266,10 +267,11 @@ STATEMENT_SPECS: dict[str, dict] = {
         "resolve_airline": True,
         "requires_supplier": True,
         "supports_mapping": True,
+        "advisory_groups": _flat.TP_GDS_ADVISORY_GROUPS,
         "balance_lines": True,
         "captures_controls": True,
         "captures_period": True,
-        "date_formats": [("booking_date", "Booked Date"), ("travel_date", "Date of Travel")],
+        "date_formats": [("booking_date", "Booked / Issue Date"), ("travel_date", "Travel Date")],
         "filters": _TP_GDS_FILTERS,
         "summary": _TP_SUMMARY,
     },
@@ -305,6 +307,7 @@ STATEMENT_SPECS: dict[str, dict] = {
         "resolve_airline": True,
         "requires_supplier": True,
         "supports_mapping": True,
+        "advisory_groups": _flat.TP_GDS_ADVISORY_GROUPS,
         "balance_lines": True,
         "captures_controls": True,
         "filters": _TP_GDS_FILTERS,
@@ -711,10 +714,10 @@ def money_fields(slug: str) -> set[str]:
 
 
 # The header row a consolidator's ticket statement actually carries (Triumphh's GDS
-# export, the format Third Party statements arrive in). The download template uses it
+# export, the format Third Party statements arrive in). The LCC download template uses it
 # verbatim so a filled template and a real statement are the same file shape — every
-# header here is already in flat_statement's alias map. Shared by GDS and LCC on request:
-# both arrive from the same consolidators in the same layout.
+# header here is already in flat_statement's alias map. GDS no longer does: its template
+# is its standard columns (the mapping screen's), so a filled one maps field for field.
 THIRD_PARTY_TEMPLATE_HEADERS = [
     "Week", "Booked Date", "Customer Name", "Customer ID", "Airline Name", "Airline Category",
     "S PNR", "Airline PNR", "CRS PNR", "TicketPrefix", "Ticket No", "Status", "Booking Type",
@@ -724,7 +727,7 @@ THIRD_PARTY_TEMPLATE_HEADERS = [
     "Agent Commission", "Incentive", "TDS Amount", "Service Charge", "SF", "GST On SF",
     "Agent Penalty", "Cancellation Markup", "Net Amount",
 ]
-_TEMPLATE_OVERRIDES = {"tp-gds": THIRD_PARTY_TEMPLATE_HEADERS, "tp-lcc": THIRD_PARTY_TEMPLATE_HEADERS}
+_TEMPLATE_OVERRIDES = {"tp-lcc": THIRD_PARTY_TEMPLATE_HEADERS}
 
 
 def template_headers(slug: str) -> list[str]:

@@ -38,8 +38,10 @@ THE TALLY — `total_entries` = `new_entries` + `duplicate_entries`, entries onl
 statement's own OLD / BALANCE / payment lines are not entries). `new_entries` are the lines
 saved as this statement's own — duplicates the user chose to save included, flagged on the
 line; `duplicate_entries` are the lines of its file left out as duplicates of lines already
-saved for the same agency (or of the file's own) — they are counted here and nowhere else. Only Third Party GDS compares, so LCC and API always
-read 0. Written with the lines; deleting one line takes one off `new` and `total`.
+saved for the same agency (or of the file's own) — not among its lines, and kept, each with
+the line it repeats, in `third_party_gds_left_out` (models/statement_row.ThirdPartyGdsLeftOut;
+uploads made before that table only counted them here). Only Third Party GDS compares, so LCC
+and API always read 0. Written with the lines; deleting one line takes one off `new` and `total`.
 
 THE DATE FORMATS — `date_formats`, the order the uploader declared each date column of the
 file is written in, {field: "DMY" | "MDY" | "YMD"} (statement_spec.date_format_fields):

@@ -60,10 +60,12 @@ class TestMappedBuild(unittest.TestCase):
 
     def test_the_aliases_are_not_consulted(self):
         """`Tax` would alias to `taxes`, but the user mapped it to `other_taxes`. The
-        user's choice must win, or the mapping screen is theatre."""
+        user's choice must win, or the mapping screen is theatre — Total Tax is then added
+        up from YQ + Other Taxes, not read off the `Tax` column."""
         d = build(OTHER_HEADERS, OTHER_ROW, MAPPING)["data"]
         self.assertEqual(d["other_taxes"], "23069")
-        self.assertNotIn("taxes", d)
+        self.assertEqual(d["taxes"], "23069.00")
+        self.assertEqual(d["total_tax_source"], "derived")
 
     def test_an_unmapped_column_is_not_imported(self):
         d = build(OTHER_HEADERS, OTHER_ROW, {"ticket_number": "Tkt"})["data"]
@@ -166,7 +168,7 @@ class TestColumnGroups(unittest.TestCase):
     def test_required_and_advisory_name_real_fields(self):
         """A required group listing a field that does not exist would be unsatisfiable."""
         fields = {c["field"] for c in fs.get("tp-gds").display_columns}
-        for g in fs.REQUIRED_GROUPS + fs.ADVISORY_GROUPS:
+        for g in fs.REQUIRED_GROUPS + fs.TP_GDS_ADVISORY_GROUPS:
             for f in g["fields"]:
                 self.assertIn(f, fields, f"{g['label']} names unknown field {f!r}")
 

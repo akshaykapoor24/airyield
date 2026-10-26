@@ -1098,15 +1098,16 @@ class DealMatchingService:
                 if vf and vt and not (vf <= contract_date <= vt):
                     continue
 
-                # Travel-date window (B2B Standard, date-wise). Only enforced when both
-                # bounds are set; NULL on legacy/airline deals ⇒ no travel filter, and
-                # therefore nothing to be unsure about.
+                # Travel-date window (any Airline / B2B deal). Each bound is enforced on
+                # its own — an "01JAN'27 Onwards" deal has a start and no end, and must
+                # still not match a December flight. NULL on legacy deals ⇒ no travel
+                # filter, and therefore nothing to be unsure about.
                 tvf = config.travel_valid_from
                 tvt = config.travel_valid_to
                 if SKIP_TRAVEL_DATE in skips:
-                    if tvf and tvt:
+                    if tvf or tvt:
                         config_unconfirmed.add(SKIP_TRAVEL_DATE)
-                elif tvf and tvt and not (tvf <= travel_date <= tvt):
+                elif (tvf and travel_date < tvf) or (tvt and travel_date > tvt):
                     continue
                 if config.ancillary_items:
                     # Ancillary → from the ticket's own fee columns, not the base fare.
@@ -1432,29 +1433,30 @@ class DealMatchingService:
                     detail=sv_detail,
                 ))
 
-                # Travel Date validity (B2B Standard date-wise; matched against the
-                # ticket TRAVEL/departure date). Enforced only when both bounds are set.
+                # Travel Date validity (any Airline / B2B deal; matched against the
+                # ticket TRAVEL/departure date). Each bound is enforced on its own, as in
+                # the matcher above — an "onwards" deal has only a start.
                 tvf_cfg = config.travel_valid_from
                 tvt_cfg = config.travel_valid_to
-                if tvf_cfg and tvt_cfg and SKIP_TRAVEL_DATE in skips:
+                if (tvf_cfg or tvt_cfg) and SKIP_TRAVEL_DATE in skips:
                     steps.append(MatchStepResult(
                         step="Travel Date Validity",
                         passed=True,
                         ticket_value="not printed",
-                        deal_value=f"{tvf_cfg} → {tvt_cfg}",
+                        deal_value=f"{tvf_cfg or '—'} → {tvt_cfg or '—'}",
                         detail="this statement does not print a travel date — travel window skipped",
                     ))
-                elif tvf_cfg and tvt_cfg:
-                    tv_pass = tvf_cfg <= travel_date <= tvt_cfg
+                elif tvf_cfg or tvt_cfg:
+                    tv_pass = not ((tvf_cfg and travel_date < tvf_cfg) or (tvt_cfg and travel_date > tvt_cfg))
                     tv_detail = (
-                        f"config travelValidFrom='{tvf_cfg}', travelValidTo='{tvt_cfg}', travel_date={travel_date}; "
+                        f"config travelValidFrom='{tvf_cfg or ''}', travelValidTo='{tvt_cfg or ''}', travel_date={travel_date}; "
                         + ("within range" if tv_pass else "OUTSIDE range — extend config travel dates")
                     )
                     steps.append(MatchStepResult(
                         step="Travel Date Validity",
                         passed=tv_pass,
                         ticket_value=str(travel_date),
-                        deal_value=f"{tvf_cfg} → {tvt_cfg}",
+                        deal_value=f"{tvf_cfg or '—'} → {tvt_cfg or '—'}",
                         detail=tv_detail,
                     ))
 

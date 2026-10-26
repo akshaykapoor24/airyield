@@ -59,6 +59,9 @@ ALLOWED_SENSITIVE: frozenset[str] = frozenset({
     "totalgst", "gstonsf", "gstonservicefee", "ersgstinvoicenumber", "gstamount",
     "cardscheme", "pcc", "bookingpcc", "accountname", "accounttype", "accounttransactionid",
     "fop", "formofpayment", "formsofpayment",
+    # Third Party GDS (2026-10-26): the card TYPE and the AMOUNT paid by card — neither is a
+    # card number. A bare "Card" or "Card Name" column is deliberately not mapped to these.
+    "cardtype", "cctype", "cardamount", "cardamt", "paidbycard",
 })
 
 # Tokens (of the lower-cased original key split on non-alphanumerics) and squashed substrings

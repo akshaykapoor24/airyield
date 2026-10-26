@@ -6,7 +6,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Plus, Upload, Filter, RefreshCw, X, CheckCircle, XCircle, AlertCircle, MinusCircle, User, Save, Trash2, FileText, FileSpreadsheet, ChevronLeft, ChevronRight, Building2, Calendar, Hash, History, Pencil, List } from "lucide-react";
 import api from "@/lib/api";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
-import { IncentiveTabContent, InclExclTabContent, IEFieldValue, CONTINENTS, COUNTRY_GROUPS, IncentiveRulesModal } from "@/components/deals/IncentiveInclExclShared";
+import { IncentiveTabContent, InclExclTabContent, IEFieldValue, CONTINENTS, COUNTRY_GROUPS, IncentiveRulesModal, DATE_WISE_INCENTIVES } from "@/components/deals/IncentiveInclExclShared";
 
 // ── types ── batch ─────────────────────────────────────────────────────────
 type DealBatch = {
@@ -35,6 +35,9 @@ type DealRepositoryItem = {
   source_agent:    string;
   airline_type:    string | null;
   airline_name:    string | null;
+  // From the airline master, by name — null when the name is not in it.
+  airline_code?:   string | null;
+  iata_commission?: string | null;
   contract_year:   string | null;
   valid_from:      string | null;
   valid_to:        string | null;
@@ -781,10 +784,42 @@ function DealEditPanel({ deal, onSave, onClose }: {
 }
 
 // ── DealFlatTable ──────────────────────────────────────────────────────────
-// Row rendering for the "All Deals" repository view.
-const TH = "px-2 py-2.5 text-left text-[11px] font-semibold text-white/80 uppercase tracking-wide whitespace-nowrap";
+// Row rendering for the "All Deals" repository view. Laid out like the upload's Review &
+// Edit table — the same groups in the same order — so a deal reads the same before and
+// after it is saved: whose deal, which airline, its incentive column by column, then the
+// contract fields, the notes and where it stands.
+const TH_GROUP = "px-2 py-1.5 text-left text-[10px] font-bold text-white uppercase tracking-wider whitespace-nowrap border-l border-white/15";
+const TH = "px-2 py-1.5 text-left text-[10px] font-semibold text-white/85 whitespace-nowrap border-l border-white/10";
+const TD = "px-2 py-2 text-xs text-gray-700 whitespace-nowrap";
+const HEAD = "#1e3a5f", SUBHEAD = "#2d4f7c";
 /** Actions stay on screen while the rest of the row scrolls; the shadow marks the seam. */
 const ACTIONS_STICKY = "sticky right-0 shadow-[-6px_0_8px_-6px_rgba(15,23,42,0.18)]";
+
+/** The deal's standard-shaped incentives (PLB, Super PLB, …) — the ones the table shows
+ *  column by column. The rest (DI, Ancillary, Cashback, Segment Incentive) are listed
+ *  under Rules only, as their fields have no single class or rate to show. */
+function inlineIncentivesOf(d: DealRepositoryItem) {
+  return (d.incentive_types ?? [])
+    .filter(t => DATE_WISE_INCENTIVES.has(t))
+    .map(t => ({ inc: t, data: d.incentive_data?.[t] ?? {} }));
+}
+
+/** "2%", "1,350" for a fixed amount, or "Slabs" — a slab payout has no single rate. */
+function rateOf(data: Record<string, string>) {
+  if (data.amountBasedType === "Slab Based") return "Slabs";
+  const v = data.incentiveAmtPct;
+  if (v == null || v === "") return null;
+  const n = Number(v);
+  const shown = Number.isFinite(n) ? n.toLocaleString("en-IN", { maximumFractionDigits: 4 }) : v;
+  return data.incentiveNumPct === "Number" ? shown : `${shown}%`;
+}
+
+/** The travel window. No end date is open-ended — the sheet's "X Onwards". */
+function travelOf(data: Record<string, string>) {
+  const from = data.travelValidFrom, to = data.travelValidTo;
+  if (!from && !to) return null;
+  return `${from ? formatDate(from) : "—"} → ${to ? formatDate(to) : "onwards"}`;
+}
 
 function DealFlatTable({ deals, outbound, onOpenHistory, onEdit, onDelete, onOpenIncentiveRules }: {
   deals: DealRepositoryItem[];
@@ -797,24 +832,52 @@ function DealFlatTable({ deals, outbound, onOpenHistory, onEdit, onDelete, onOpe
   if (deals.length === 0) {
     return <p className="px-4 py-10 text-center text-xs text-gray-400">No deals match the filters.</p>;
   }
+  const groups: { label: string; color: string; cols: string[] }[] = [
+    { label: "Deal",              color: "#94a3b8", cols: ["Deal Name / ID", outbound ? "Customer" : "Supplier Name", "Deal Type", "Deal Tag"] },
+    { label: "Airline",           color: "#14b8a6", cols: ["Airline Name", "Code", "Type"] },
+    { label: "Incentive & Rules", color: "#818cf8", cols: ["Travel Valid Period", "Flight Type", "Class", "Calc On", "Rate", "Rules"] },
+    { label: "Contract Details",  color: "#60a5fa", cols: ["Business Type", "Contract Valid Period", "Entity", "Login IDs", "IATA %"] },
+    { label: "Notes",             color: "#94a3b8", cols: ["Remarks"] },
+    { label: "Status",            color: "#34d399", cols: ["Approval", "Deal Status"] },
+  ];
+  const dash = <span className="text-gray-400">—</span>;
+  // One value per standard incentive. A deal with one shows it plainly; with several,
+  // each line is labelled with its incentive so no value is hidden behind another.
+  const incCell = (incs: { inc: string; data: Record<string, string> }[],
+                   pick: (data: Record<string, string>) => string | null | undefined, cls = "") => {
+    const vals = incs.map(x => ({ inc: x.inc, v: pick(x.data) || null }));
+    if (!vals.some(x => x.v)) return dash;
+    if (vals.length === 1) return <span className={cls}>{vals[0].v}</span>;
+    return (
+      <div className="space-y-0.5">
+        {vals.map(x => (
+          <div key={x.inc} className="leading-tight">
+            <span className="text-[9px] font-semibold text-gray-400 mr-1">{x.inc}</span>
+            {x.v ? <span className={cls}>{x.v}</span> : dash}
+          </div>
+        ))}
+      </div>
+    );
+  };
   return (
     <div className="overflow-x-auto">
       <table className="w-full">
         <thead>
-          <tr style={{ background: "#1e3a5f" }}>
-            <th className={`${TH} pl-4`}>Deal Name / ID</th>
-            <th className={TH}>{outbound ? "Customer" : "Supplier Name"}</th>
-            <th className={TH}>Deal Type</th>
-            <th className={TH}>Business Type</th>
-            <th className={TH}>Airline / Maker</th>
-            <th className={TH}>Contract Valid Period</th>
-            <th className={TH}>Entity</th>
-            <th className={TH}>Login IDs</th>
-            <th className={TH}>Incentive &amp; Rules</th>
-            <th className={TH}>Approval Status</th>
-            <th className={TH}>Deal Status</th>
+          <tr style={{ background: HEAD }}>
+            {groups.map((g, gi) => (
+              <th key={g.label} colSpan={g.cols.length}
+                className={`${TH_GROUP} ${gi === 0 ? "pl-4 border-l-0" : ""}`}
+                style={{ boxShadow: `inset 0 -3px 0 ${g.color}` }}>
+                {g.label}
+              </th>
+            ))}
             {/* Pinned to the right edge so the actions never scroll out of view. */}
-            <th className={`${TH} ${ACTIONS_STICKY} z-10 bg-[#1e3a5f]`}>Actions</th>
+            <th rowSpan={2} className={`${TH_GROUP} ${ACTIONS_STICKY} z-10 bg-[#1e3a5f]`}>Actions</th>
+          </tr>
+          <tr style={{ background: SUBHEAD }}>
+            {groups.flatMap((g, gi) => g.cols.map((c, ci) => (
+              <th key={`${g.label}:${c}`} className={`${TH} ${gi === 0 && ci === 0 ? "pl-4 border-l-0" : ""}`}>{c}</th>
+            )))}
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-100">
@@ -824,27 +887,25 @@ function DealFlatTable({ deals, outbound, onOpenHistory, onEdit, onDelete, onOpe
             const dealName = dealNameOf(d);
             const supplier = supplierOf(d);
             const businessType = businessTypeOf(d);
+            const incs = inlineIncentivesOf(d);
+            const ruleCount = (d.incl_excl_types ?? []).length;
             return (
               <tr key={`${d.deal_type}-${d.id}`} className="group hover:bg-blue-50/30 transition-colors">
-                <td className="pl-4 pr-2 py-2.5 text-xs font-semibold text-gray-800 whitespace-nowrap max-w-[180px]" title={dealName}>
+                {/* ── Deal ── */}
+                <td className="pl-4 pr-2 py-2 text-xs font-semibold text-gray-800 whitespace-nowrap max-w-[180px]" title={dealName}>
                   <span className="block truncate">{dealName}</span>
                 </td>
-                <td className="px-2 py-2.5 text-xs text-gray-700 max-w-[150px]" title={supplier ?? undefined}>
+                <td className="px-2 py-2 text-xs text-gray-700 max-w-[170px]" title={supplier ?? undefined}>
                   <span className="block truncate">{supplier || "—"}</span>
                 </td>
-                <td className="px-2 py-2.5">
-                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase border whitespace-nowrap ${dtStyle.cls}`}>
+                <td className={TD}>
+                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase border ${dtStyle.cls}`}>
                     {dtStyle.label}
                   </span>
                 </td>
-                <td className="px-2 py-2.5">
-                  {businessType ? (
-                    <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-gray-100 text-gray-600 border border-gray-200 whitespace-nowrap">{businessType}</span>
-                  ) : (
-                    <span className="text-xs text-gray-400">—</span>
-                  )}
-                </td>
-                <td className="px-2 py-2.5 text-xs text-gray-700 max-w-[140px]" title={d.airline_name ?? d.deal_maker_name ?? undefined}>
+                <td className={TD}>{d.deal_tag === "adhoc" ? "Adhoc" : "Standard"}</td>
+                {/* ── Airline ── */}
+                <td className="px-2 py-2 text-xs text-gray-700 max-w-[170px]" title={d.airline_name ?? d.deal_maker_name ?? undefined}>
                   <span className="block truncate">{d.airline_name || d.deal_maker_name || "—"}</span>
                   {/* Who it is floated to. The chip says which KIND of scope; this
                       says which party, which is the part you actually search for. */}
@@ -854,25 +915,20 @@ function DealFlatTable({ deals, outbound, onOpenHistory, onEdit, onDelete, onOpe
                     </span>
                   )}
                 </td>
-                <td className="px-2 py-2.5 whitespace-nowrap">
-                  <span className="text-xs text-gray-700">{formatDate(d.valid_from)}</span>
-                  <span className="text-gray-400 mx-1">→</span>
-                  <span className="text-xs text-gray-700">{formatDate(d.valid_to)}</span>
+                <td className={`${TD} font-mono font-semibold text-gray-800`}>{d.airline_code || dash}</td>
+                <td className={TD}>
+                  {d.airline_type
+                    ? <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-gray-100 text-gray-600 border border-gray-200">{d.airline_type}</span>
+                    : dash}
                 </td>
-                <td className="px-2 py-2.5 text-xs text-gray-700 max-w-[120px] truncate" title={d.entity ?? d.entity_lcc ?? undefined}>
-                  {d.entity || d.entity_lcc || "—"}
-                </td>
-                <td className="px-2 py-2.5">
-                  {(d.login_ids ?? []).length > 0 ? (
-                    <div className="flex flex-wrap gap-0.5 max-w-[140px]">
-                      {d.login_ids!.map(l => (
-                        <span key={l} className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200 whitespace-nowrap">{l}</span>
-                      ))}
-                    </div>
-                  ) : <span className="text-xs text-gray-400">—</span>}
-                </td>
-                <td className="px-2 py-2.5">
-                  <div className="flex flex-wrap gap-0.5 max-w-[160px]">
+                {/* ── Incentive & Rules ── */}
+                <td className={TD}>{incCell(incs, travelOf)}</td>
+                <td className={TD}>{incCell(incs, x => x.flightType)}</td>
+                <td className={TD}>{incCell(incs, x => x.class)}</td>
+                <td className={TD}>{incCell(incs, x => x.payoutCalcCols)}</td>
+                <td className={TD}>{incCell(incs, rateOf, "font-semibold text-gray-900 tabular-nums")}</td>
+                <td className="px-2 py-2">
+                  <div className="flex flex-wrap items-center gap-0.5 max-w-[170px]">
                     {(d.incentive_types ?? []).length > 0
                       ? d.incentive_types!.map(t => (
                           <button key={t} onClick={() => onOpenIncentiveRules(d, t)} title="Edit incentive details & inclusion/exclusion rules"
@@ -880,22 +936,56 @@ function DealFlatTable({ deals, outbound, onOpenHistory, onEdit, onDelete, onOpe
                             {t}
                           </button>
                         ))
-                      : <span className="text-xs text-gray-400">—</span>}
+                      : dash}
+                    {ruleCount > 0 && (
+                      <span className="text-[10px] text-gray-500 whitespace-nowrap ml-0.5" title={(d.incl_excl_types ?? []).join("\n")}>
+                        · {ruleCount} rule{ruleCount !== 1 ? "s" : ""}
+                      </span>
+                    )}
                   </div>
                 </td>
-                <td className="px-2 py-2.5">
+                {/* ── Contract Details ── */}
+                <td className={TD}>
+                  {businessType
+                    ? <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-gray-100 text-gray-600 border border-gray-200">{businessType}</span>
+                    : dash}
+                </td>
+                <td className={TD}>
+                  {formatDate(d.valid_from)}
+                  <span className="text-gray-400 mx-1">→</span>
+                  {formatDate(d.valid_to)}
+                </td>
+                <td className="px-2 py-2 text-xs text-gray-700 max-w-[120px] truncate" title={d.entity ?? d.entity_lcc ?? undefined}>
+                  {d.entity || d.entity_lcc || "—"}
+                </td>
+                <td className="px-2 py-2">
+                  {(d.login_ids ?? []).length > 0 ? (
+                    <div className="flex flex-wrap gap-0.5 max-w-[140px]">
+                      {d.login_ids!.map(l => (
+                        <span key={l} className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200 whitespace-nowrap">{l}</span>
+                      ))}
+                    </div>
+                  ) : dash}
+                </td>
+                <td className={`${TD} tabular-nums`}>{d.iata_commission ? `${d.iata_commission}%` : dash}</td>
+                {/* ── Notes ── */}
+                <td className="px-2 py-2 text-xs text-gray-600 max-w-[200px]" title={d.remark ?? undefined}>
+                  <span className="block truncate">{d.remark || "—"}</span>
+                </td>
+                {/* ── Status ── */}
+                <td className="px-2 py-2">
                   <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border whitespace-nowrap ${STATUS_STYLE[d.status] ?? "bg-gray-50 text-gray-500 border-gray-200"}`}>
                     <span className={`w-1.5 h-1.5 rounded-full ${STATUS_DOT[d.status] ?? "bg-gray-400"}`} />
                     {STATUS_LABEL[d.status] ?? d.status}
                   </span>
                 </td>
-                <td className="px-2 py-2.5">
+                <td className="px-2 py-2">
                   <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border whitespace-nowrap ${LIFECYCLE_STYLE[d.deal_lifecycle_status ?? "draft"] ?? LIFECYCLE_STYLE.draft}`}>
                     <span className={`w-1.5 h-1.5 rounded-full ${LIFECYCLE_DOT[d.deal_lifecycle_status ?? "draft"] ?? LIFECYCLE_DOT.draft}`} />
                     {LIFECYCLE_LABEL[d.deal_lifecycle_status ?? "draft"] ?? "Draft"}
                   </span>
                 </td>
-                <td className={`px-2 py-2.5 whitespace-nowrap ${ACTIONS_STICKY} z-[1] bg-white group-hover:bg-[#fafcff]`}>
+                <td className={`px-2 py-2 whitespace-nowrap ${ACTIONS_STICKY} z-[1] bg-white group-hover:bg-[#fafcff]`}>
                   <div className="flex items-center gap-1">
                     <button onClick={() => onOpenHistory(d)}
                       className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium border border-gray-200 text-gray-600 hover:bg-gray-50 hover:border-gray-300 transition-colors">
@@ -1607,6 +1697,7 @@ export default function DealsPage() {
           onSave={handleIncentiveRulesSave}
           onClose={() => setIncentiveRulesPopup(null)}
           b2bStandard={isB2bDeal(incentiveRulesPopup.deal) && (incentiveRulesPopup.deal.deal_tag ?? "standard") === "standard"}
+          travelDates
           airlineName={incentiveRulesPopup.deal.airline_name ?? undefined}
         />
       )}

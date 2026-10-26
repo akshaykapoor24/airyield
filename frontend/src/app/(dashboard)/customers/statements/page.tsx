@@ -15,28 +15,22 @@
 import { useState } from "react";
 import { Briefcase, Building2, Ticket, User } from "lucide-react";
 import StatementsView, { type StatementCustomerType } from "@/components/tickets/StatementsView";
-import AllTicketsView from "@/components/tickets/AllTicketsView";
 
-type Tab = StatementCustomerType | "tickets";
-
-const TABS: { id: Tab; label: string; hint: string; icon: typeof Ticket }[] = [
+const TABS: { id: StatementCustomerType; label: string; hint: string; icon: typeof Ticket }[] = [
   { id: "agency",    label: "B2B",         hint: "Tickets sold to your sub-agencies (Agency Master)", icon: Building2 },
   { id: "corporate", label: "Corporate",   hint: "Tickets sold to corporates (Corporate Master)",     icon: Briefcase },
   { id: "direct",    label: "Direct",      hint: "Tickets sold to direct customers (Employee Master)", icon: User },
-  { id: "tickets",   label: "All tickets", hint: "Every ticket, flat across statements",             icon: Ticket },
 ];
 
 export default function CustomerStatementPage() {
-  const [tab, setTab] = useState<Tab>("agency");
+  const [tab, setTab] = useState<StatementCustomerType>("agency");
 
   return (
     <div className="space-y-4">
       <div>
         <h1 className="text-lg font-bold text-gray-900 leading-tight">Statement</h1>
         <p className="text-xs text-gray-500 mt-0.5">
-          {tab === "tickets"
-            ? "Every ticket you sold, across all statements"
-            : "Tickets you sold, one statement per upload — by who they were sold to"}
+          Tickets you sold, one statement per upload — by who they were sold to
         </p>
       </div>
 
@@ -58,12 +52,8 @@ export default function CustomerStatementPage() {
         ))}
       </div>
 
-      {/* One list, re-filtered per tab (keyed so each tab starts with clean filters);
-          All tickets stays mounted so switching back keeps its page position. */}
-      {tab !== "tickets" && <StatementsView key={tab} showCustomer customerType={tab} allowDelete apiBase="/tickets" />}
-      <div className={tab === "tickets" ? "" : "hidden"}>
-        <AllTicketsView allowDelete />
-      </div>
+      {/* One list, re-filtered per tab — keyed so each tab starts with clean filters. */}
+      <StatementsView key={tab} showCustomer customerType={tab} allowDelete apiBase="/tickets" />
     </div>
   );
 }
