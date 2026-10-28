@@ -1188,8 +1188,29 @@ export function IncentiveTabContent({ name, data, onChange, b2bStandard = false,
   );
 }
 
+// The windows a rule's Valid From / To can start from when its Date Exclusion is picked:
+// the incentive's CONTRACT validity for "Ticket Date", its TRAVEL validity for "Travel Date"
+// — the two dates the rule is then tested against (services/exclusion_evaluator).
+export type RuleDateDefaults = {
+  ticket?: { from?: string; to?: string };
+  travel?: { from?: string; to?: string };
+};
+
+/** RuleDateDefaults from one incentive's own fields. `contract` is the deal's header
+ *  validity, used where the incentive carries no contract dates of its own. */
+export function ruleDateDefaults(
+  inc: Record<string, unknown> | undefined,
+  contract?: { from?: string; to?: string },
+): RuleDateDefaults {
+  const s = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim().slice(0, 10) : undefined);
+  return {
+    ticket: { from: s(inc?.validFrom) ?? s(contract?.from), to: s(inc?.validTo) ?? s(contract?.to) },
+    travel: { from: s(inc?.travelValidFrom), to: s(inc?.travelValidTo) },
+  };
+}
+
 // ── incl/excl tab content (multi-value across all condition fields) ────────
-export function InclExclTabContent({ suffix, isExclusion, data, onChange, viceVersa, onViceVersa, continentOptions, countryGroupOptions, airlineName, incentiveClass }: {
+export function InclExclTabContent({ suffix, isExclusion, data, onChange, viceVersa, onViceVersa, continentOptions, countryGroupOptions, airlineName, incentiveClass, dateDefaults }: {
   suffix: string; isExclusion: boolean;
   data: Record<string, IEFieldValue>; onChange: (k: string, v: IEFieldValue) => void;
   viceVersa: boolean; onViceVersa: () => void;
@@ -1197,6 +1218,8 @@ export function InclExclTabContent({ suffix, isExclusion, data, onChange, viceVe
   // When an airline is supplied (B2B Standard), the Class field offers that airline's
   // real booking-class CODES from the class master, narrowed by the incentive's Class.
   airlineName?: string; incentiveClass?: string;
+  // Picking Ticket Date / Travel Date fills Valid From / To from these — ruleDateDefaults.
+  dateDefaults?: RuleDateDefaults;
 }) {
   const [originCountries, setOriginCountries] = useState<string[]>([]);
   const [destCountries,   setDestCountries]   = useState<string[]>([]);
@@ -1204,6 +1227,7 @@ export function InclExclTabContent({ suffix, isExclusion, data, onChange, viceVe
   const [destAirports,    setDestAirports]    = useState<string[]>([]);
   const [allCountries,    setAllCountries]    = useState<string[]>([]);
   const [allAirports,     setAllAirports]     = useState<string[]>([]);
+  const [allCities,       setAllCities]       = useState<string[]>([]);
   const [classMaster,     setClassMaster]     = useState<{ class_type: string; class_code: string }[]>([]);
 
   // Load the airline's class/RBD rows once per airline. Empty airline → no override
@@ -1238,11 +1262,15 @@ export function InclExclTabContent({ suffix, isExclusion, data, onChange, viceVe
   const destCountry   = asArray(data["destCountry"])[0] ?? "";
 
   useEffect(() => {
-    api.get<{ iata_code: string; country: string | null }[]>("/airports/?limit=5000")
+    api.get<{ iata_code: string; country: string | null; city_airport_name: string | null }[]>("/airports/?limit=5000")
       .then(r => {
         setAllAirports(r.data.map(a => a.iata_code).filter(Boolean));
         const countries = [...new Set(r.data.map(a => a.country).filter(Boolean))] as string[];
         setAllCountries(countries.sort());
+        // The Airport Master's city — "Delhi" out of "Delhi - Indira Gandhi International
+        // Airport" — the same name a City rule is judged against (models/airport.city_of).
+        const cities = [...new Set(r.data.map(a => (a.city_airport_name ?? "").split(" - ")[0].trim()).filter(Boolean))];
+        setAllCities(cities.sort((a, b) => a.localeCompare(b)));
       })
       .catch(() => {});
   }, []);
@@ -1287,6 +1315,7 @@ export function InclExclTabContent({ suffix, isExclusion, data, onChange, viceVe
     destCountry:        destContinent ? destCountries   : allCountries,
     originAirport:      origCountry   ? originAirports  : allAirports,
     destAirport:        destCountry   ? destAirports    : allAirports,
+    city:               allCities.length ? allCities : CITIES,
   };
   // B2B Standard: replace the generic Class options with the airline's class codes.
   if (classCodeOptions) localOptions.class = classCodeOptions;
@@ -1317,19 +1346,41 @@ export function InclExclTabContent({ suffix, isExclusion, data, onChange, viceVe
         ? { key:"soto", label:"SOTO for Exclusion", isMulti:"select" }
         : { key:"tourCode", label:`Tour Code ${suffix}`, isTag:true },
     ],
-    ...(isExclusion
-      ? [[{ key:"tourCode", label:`Tour Code ${suffix}`, isTag:true } as RowField, { key:"domesticCountry", label:`Domestic Country ${suffix}`, isMulti:"search" as const } as RowField]]
-      : [[{ key:"domesticCountry", label:`Domestic Country ${suffix}`, isMulti:"search" as const } as RowField]]),
+    // Domestic Country was taken off the form (2026-10-27); the engine no longer judges it.
+    ...(isExclusion ? [[{ key:"tourCode", label:`Tour Code ${suffix}`, isTag:true } as RowField]] : []),
   ];
+
+  // Corporate / Excursion / Tour are identified by tour code — the rule's Tour Code is their
+  // parameter, so it is required while one of them is picked (services/exclusion_evaluator).
+  const needsTourCode = asArray(data["fareTypeCategory"]).some(v => ["Corporate", "Excursion", "Tour"].includes(v));
 
   const dateExclusionValues = [
     ...(data["dateExclusionTicket"] === "true" ? ["Ticket Date"] : []),
     ...(data["dateExclusionTravel"] === "true" ? ["Travel Date"] : []),
   ];
+  // Picking a date to test fills Valid From / To with that date's own window — the contract
+  // validity for Ticket Date, the travel validity for Travel Date — ready to narrow. A date
+  // the user typed is left alone: only a blank field, or one still holding one of these
+  // windows, is filled, so switching Ticket ⇄ Travel moves with the pick.
   const handleDateExclusionChange = (selected: string[]) => {
+    const picked = selected.filter(s => !dateExclusionValues.includes(s)).pop();
     onChange("dateExclusionTicket", selected.includes("Ticket Date") ? "true" : "");
     onChange("dateExclusionTravel", selected.includes("Travel Date") ? "true" : "");
+    const win = picked === "Ticket Date" ? dateDefaults?.ticket : picked === "Travel Date" ? dateDefaults?.travel : undefined;
+    if (!win) return;
+    const known = new Set([dateDefaults?.ticket?.from, dateDefaults?.ticket?.to,
+                           dateDefaults?.travel?.from, dateDefaults?.travel?.to].filter(Boolean));
+    const free = (v: IEFieldValue | undefined) => !v || (typeof v === "string" && known.has(v));
+    if (win.from && free(data["validFrom"])) onChange("validFrom", win.from);
+    if (win.to && free(data["validTo"])) onChange("validTo", win.to);
   };
+  const dateHint = dateExclusionValues.length === 2
+    ? "Valid From / To are tested against both the ticket date and the travel date."
+    : dateExclusionValues[0] === "Ticket Date"
+      ? "Valid From / To are tested against the ticket (issue) date — filled from the contract validity."
+      : dateExclusionValues[0] === "Travel Date"
+        ? "Valid From / To are tested against the travel date — filled from the travel validity."
+        : "Ticket Date fills Valid From / To with the contract validity, Travel Date with the travel validity. Without one, the travel date is tested.";
 
   return (
     <div className="px-4 py-3 space-y-3">
@@ -1341,6 +1392,7 @@ export function InclExclTabContent({ suffix, isExclusion, data, onChange, viceVe
           values={dateExclusionValues}
           onChange={handleDateExclusionChange}
         />
+        <p className="-mt-2 text-[10px] text-gray-400">{dateHint}</p>
       </div>
       {rows.map((pair, ri) => (
           <div key={ri} className={`grid gap-3 ${pair.length === 2 ? "grid-cols-2" : "grid-cols-1 max-w-[50%]"}`}>
@@ -1349,11 +1401,34 @@ export function InclExclTabContent({ suffix, isExclusion, data, onChange, viceVe
                 {f.isDate
                   ? <DateField label={f.label} value={(data[f.key] as string) ?? ""} onChange={v => onChange(f.key, v)}/>
                   : f.isTag
-                    ? <TagInput label={f.label} values={asArray(data[f.key])} onChange={v => onChange(f.key, v)}/>
+                    ? <TagInput label={f.label} values={asArray(data[f.key])} onChange={v => onChange(f.key, v)}
+                        required={f.key === "tourCode" && needsTourCode}/>
                     : f.isMulti === "select"
                       ? <MultiCheckboxDropdown label={f.label} options={localOptions[f.key]??[]} values={asArray(data[f.key])} onChange={v => onChange(f.key, v)}/>
                       : <MultiSearchSelectField label={f.label} placeholder={f.placeholder} options={localOptions[f.key]??[]} values={asArray(data[f.key])} onChange={v => onChange(f.key, v)}/>
                 }
+                {f.key === "fareTypeCategory" && (
+                  <p className="mt-1 text-[10px] text-gray-400">
+                    Normal: every class · Group: G class · Corporate / Excursion / Tour: the tour codes listed in Tour Code.
+                  </p>
+                )}
+                {f.key === "soto" && (
+                  <p className="mt-1 text-[10px] text-gray-400">
+                    SOTO = journey starts outside India. All: any such ticket · Within India: ends in India · Outside India: ends outside India.
+                  </p>
+                )}
+                {f.key === "class" && (
+                  <p className="mt-1 text-[10px] text-gray-400">
+                    {isExclusion
+                      ? "Excludes a ticket if any of its segments is in a listed class."
+                      : "Includes a ticket only if every segment is in a listed class."}
+                  </p>
+                )}
+                {f.key === "tourCode" && needsTourCode && asArray(data["tourCode"]).length === 0 && (
+                  <p className="mt-1 text-[10px] text-amber-600">
+                    Corporate / Excursion / Tour match tickets whose tour code is listed here — add at least one.
+                  </p>
+                )}
               </div>
             ))}
           </div>
@@ -1529,6 +1604,7 @@ export function IncentiveRulesModal({
                   countryGroupOptions={countryGroupOptions}
                   airlineName={b2bStandard ? airlineName : undefined}
                   incentiveClass={incForms[inc]?.class}
+                  dateDefaults={ruleDateDefaults(incForms[inc])}
                 />
               </div>
             </div>

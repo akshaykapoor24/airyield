@@ -15,7 +15,7 @@ import {
   CONTINENTS, COUNTRY_GROUPS,
   INCENTIVE_FIELDS, FIELD_OPTIONS, ANCILLARY_ITEMS,
   DATE_WISE_INCENTIVES, FLIGHT_TYPE_OPTIONS, CLASS_OPTIONS, PAYOUT_CALC_OPTIONS,
-  TabBar, IncentiveTabContent, InclExclTabContent,
+  TabBar, IncentiveTabContent, InclExclTabContent, ruleDateDefaults,
 } from "@/components/deals/IncentiveInclExclShared";
 import OutgoingScopeFields, { type ScopeSelection } from "@/components/deals/OutgoingScopeFields";
 import { loadVendorAgencies, vendorAgencyOptions, type VendorAgency } from "@/lib/vendorAgency";
@@ -115,7 +115,6 @@ const INCL_EXCL_FIELDS: FieldConfig[] = [
   {key:"class",              label:"Class",                    type:"select"},
   {key:"soto",               label:"SOTO",                     type:"select"},
   {key:"tourCode",           label:"Tour Code",                type:"search"},
-  {key:"domesticCountry",    label:"Domestic Country",         type:"search"},
 ];
 
 // INCENTIVE_FIELDS now imported from the shared module (same field set the manual
@@ -363,6 +362,10 @@ function convertAIDealsToRows(deals: AIDeal[]): ReviewRow[] {
     // on — and the server re-resolves from scratch anyway, so a tampered status
     // cannot influence what gets written.
     if (deal.airline_status)      extra["__air_status"] = deal.airline_status;
+    // The sheet's own name and code, to tell a "needs a look" row the reviewer has since
+    // corrected from one still as it was (airIssueOpen).
+    extra["__air_name0"] = deal.airline_name || "";
+    extra["__air_code0"] = deal.airline_code || "";
     if (deal.airline_master_name) extra["__air_master"] = deal.airline_master_name;
     if (deal.airline_note)        extra["__air_note"]   = deal.airline_note;
     if (deal.iata_commission != null && deal.iata_commission !== "")
@@ -475,6 +478,50 @@ function withIncentiveCellChange(extra:Record<string,string>,key:string,val:stri
 // Rows the AI extractor could not read. They arrive holding only what the row's place in
 // the file gave away (airline, dates, Source) — see backend _manual_placeholder.
 const isUnreadRow=(r:ReviewRow)=>r.extra["__needs_manual"]==="1";
+
+// The airline problems the summary lists — "needs a look", "no code", "will be added" — by
+// row, from how the extractor resolved each row against the airline master (__air_status).
+// That status is fixed at extraction, and it is what puts a row in a toolbar filter, so a row
+// stays in its filter while it is being fixed. `airIssueOpen` says whether the fix has been
+// made: a code typed in, or the sheet's own name / code changed (__air_name0 / __air_code0).
+type RowIssue = "unread" | "look" | "nocode" | "new";
+const AIR_LOOK = new Set(["conflict", "ambiguous", "multi_carrier"]);
+function airIssueOf(r:ReviewRow):"look"|"nocode"|"new"|null{
+  const s=r.extra["__air_status"]??"";
+  if(AIR_LOOK.has(s))return "look";
+  if(s==="unresolved")return "nocode";
+  if(s==="new")return "new";
+  return null;
+}
+const airEdited=(r:ReviewRow)=>
+  (r.extra["c__airline_name"]??"").trim()!==(r.extra["__air_name0"]??"").trim()
+  ||(r.extra["c__airline_code"]??"").trim()!==(r.extra["__air_code0"]??"").trim();
+function airIssueOpen(r:ReviewRow):boolean{
+  const k=airIssueOf(r);
+  if(k==="nocode")return !(r.extra["c__airline_code"]??"").trim();
+  if(k==="look")return !airEdited(r);
+  return false;   // "new" is news, not a problem: it is added to the master on save
+}
+const inIssue=(r:ReviewRow,k:RowIssue)=>k==="unread"?isUnreadRow(r):airIssueOf(r)===k;
+
+// The review toolbar's problem filters, in the order the summary lists them.
+const ISSUE_CHIPS:{key:RowIssue;label:string;tone:"red"|"amber"|"sky";title:string}[]=[
+  {key:"unread", label:"Rows not read", tone:"red",
+   title:"Show only the rows the file could not be read for — they need filling in by hand"},
+  {key:"look",   label:"Needs a look",  tone:"amber",
+   title:"Show only the rows whose airline the airline master could not settle — check the name and code; a row clears once you change either"},
+  {key:"nocode", label:"No airline code", tone:"red",
+   title:"Show only the rows whose airline is not in the master and has no code — fill in the Code to add it"},
+  {key:"new",    label:"New airline",   tone:"sky",
+   title:"Show only the rows whose airline will be added to the airline master when you save"},
+];
+// [idle, active] classes per tone.
+const ISSUE_TONE:Record<"red"|"amber"|"sky"|"green",[string,string]>={
+  red:   ["border-red-300 bg-red-50 text-red-700 hover:bg-red-100", "bg-red-600 border-red-600 text-white hover:bg-red-700"],
+  amber: ["border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100", "bg-amber-500 border-amber-500 text-white hover:bg-amber-600"],
+  sky:   ["border-sky-300 bg-sky-50 text-sky-700 hover:bg-sky-100", "bg-sky-600 border-sky-600 text-white hover:bg-sky-700"],
+  green: ["border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100", "bg-emerald-600 border-emerald-600 text-white hover:bg-emerald-700"],
+};
 
 // What an unread row still lacks, as column keys so the table can mark those cells; empty
 // once it is filled in, and always empty for a row that was read. A read row always has
@@ -831,6 +878,8 @@ function IncentiveDataRowModal({
                       onViceVersa={()=>onInclExclViceVersa(incType,activeRuleType)}
                       continentOptions={continentOptions}
                       countryGroupOptions={countryGroupOptions}
+                      // Date Exclusion → Valid From / To from this row's contract / travel dates.
+                      dateDefaults={ruleDateDefaults(getData(incType))}
                     />
                   </div>
                 </>
@@ -1336,7 +1385,9 @@ function ReviewTable({
   };
 
   // `gaps`: what this row still needs filling in by hand (unreadGaps) — those cells are marked.
-  const renderCell=(row:ReviewRow,idx:number,colKey:string,gaps:string[])=>{
+  // `gaps`: cells still missing (red) — an unread row's blanks, an airline's missing code.
+  // `soft`: cells to check (amber) — an airline the master could not settle.
+  const renderCell=(row:ReviewRow,idx:number,colKey:string,gaps:string[],soft:string[]=[])=>{
     // Special: read-only provenance. Never edited, never saved — it exists so the
     // reviewer can find this row on the printed page.
     if(colKey==="__src__"){
@@ -1375,7 +1426,13 @@ function ReviewTable({
       // The master's name only when it differs from the row's — repeating the Airline
       // Name cell next to it says nothing and doubles the column's width.
       const rowName=(row.extra["c__airline_name"]||row.airline_name||"").trim().toLowerCase();
-      if(status==="resolved"){
+      // Fixed since extraction: a code typed for an airline the master lacks will add it;
+      // a "needs a look" row whose name / code was changed is settled again on save.
+      if(airIssueOf(row)==="nocode"&&!airIssueOpen(row)){
+        content=badge("bg-sky-50 text-sky-700 border-sky-200",`+ will be added (${code})`);
+      }else if(airIssueOf(row)==="look"&&!airIssueOpen(row)){
+        content=badge("bg-gray-50 text-gray-600 border-gray-200","✎ edited — checked on save");
+      }else if(status==="resolved"){
         content=badge("bg-emerald-50 text-emerald-700 border-emerald-200",
           "✓ "+(master&&master.trim().toLowerCase()!==rowName?master:"matched"));
       }else if(status==="new"){
@@ -1496,7 +1553,8 @@ function ReviewTable({
     const val = getCellValue(row,colKey);
     const change = (v:string)=>onChange(idx,colKey,v);
     // A cell an unread row still needs — outlined red until it is filled in.
-    const td = `px-1 py-1 border-l border-gray-100${gaps.includes(colKey)?" bg-red-100/70 ring-1 ring-inset ring-red-300":""}`;
+    const td = `px-1 py-1 border-l border-gray-100${gaps.includes(colKey)?" bg-red-100/70 ring-1 ring-inset ring-red-300"
+      :soft.includes(colKey)?" bg-amber-100/60 ring-1 ring-inset ring-amber-300":""}`;
 
     // The incentive's own columns (INLINE_INC_FIELDS) — the same values the popup edits.
     const incField=incCellField(colKey);
@@ -1683,19 +1741,31 @@ function ReviewTable({
             const unread=isUnreadRow(row);
             const gaps=unreadGaps(row,inline);
             const blank=gaps.length>0;
-            const stickyBg=blank?(isSelected?"bg-red-100":"bg-red-50 group-hover:bg-red-100")
+            // An airline the master could not settle, until it is fixed: no code → red on the
+            // Code cell; "needs a look" → amber on the name and code (airIssueOpen).
+            const air=airIssueOpen(row)?airIssueOf(row):null;
+            const redCells=air==="nocode"?[...gaps,"c__airline_code"]:gaps;
+            const amberCells=air==="look"?["c__airline_name","c__airline_code"]:[];
+            const tone:"red"|"amber"|null=blank||air==="nocode"?"red":air==="look"?"amber":null;
+            const stickyBg=tone==="red"?(isSelected?"bg-red-100":"bg-red-50 group-hover:bg-red-100")
+              :tone==="amber"?(isSelected?"bg-amber-100":"bg-amber-50 group-hover:bg-amber-100")
               :isSelected?"bg-blue-50":"bg-white group-hover:bg-blue-50";
             const unreadTitle=unread?[
               blank?`Could not be read from the file — fill in ${gapLabels(gaps).join(", ")}.`
                 :"Could not be read from the file — filled in by hand.",
               row.extra["__src"]?`In the file: ${row.extra["__src"]}`:"",
-            ].filter(Boolean).join("\n"):undefined;
+            ].filter(Boolean).join("\n")
+              :air==="nocode"?"This airline is not in the airline master and has no code — fill in its Code to add it."
+              :air==="look"?`The airline master could not settle this airline${row.extra["__air_note"]?` — ${row.extra["__air_note"]}`:""}. Check the name and code.`
+              :undefined;
             return(
-              <tr key={idx} className={`border-b group ${blank
+              <tr key={idx} className={`border-b group ${tone==="red"
                 ?`border-red-200 ${isSelected?"bg-red-100":"bg-red-50 hover:bg-red-100/60"}`
+                :tone==="amber"
+                ?`border-amber-200 ${isSelected?"bg-amber-100":"bg-amber-50/70 hover:bg-amber-100/60"}`
                 :`border-gray-100 ${isSelected?"bg-blue-50":"hover:bg-blue-50/40"}`}`}>
                 <td className={`w-9 min-w-9 px-2 py-1.5 sticky left-0 z-10 ${stickyBg}`}
-                  style={blank?{boxShadow:"inset 3px 0 0 #ef4444"}:undefined}>
+                  style={tone?{boxShadow:`inset 3px 0 0 ${tone==="red"?"#ef4444":"#f59e0b"}`}:undefined}>
                   <input type="checkbox" checked={isSelected} onChange={()=>onToggleRow(idx)} className="accent-blue-500 cursor-pointer"/>
                 </td>
                 <td className={`px-2 py-1.5 text-[10px] sticky left-9 z-10 whitespace-nowrap ${stickyBg}`} title={unreadTitle}>
@@ -1703,9 +1773,13 @@ function ReviewTable({
                     ?<span className={`inline-flex items-center gap-0.5 font-semibold ${blank?"text-red-600":"text-emerald-600"}`}>
                       {blank?<AlertTriangle className="w-3 h-3"/>:<Check className="w-3 h-3"/>}{idx+1}
                     </span>
+                    :air
+                    ?<span className={`inline-flex items-center gap-0.5 font-semibold ${air==="nocode"?"text-red-600":"text-amber-600"}`}>
+                      <AlertTriangle className="w-3 h-3"/>{idx+1}
+                    </span>
                     :<span className="text-gray-400">{idx+1}</span>}
                 </td>
-                {allCols.map(c=>renderCell(row,idx,c.key,gaps))}
+                {allCols.map(c=>renderCell(row,idx,c.key,redCells,amberCells))}
                 <td className="px-2 py-1.5">
                   <button onClick={()=>onDelete(idx)} className="opacity-0 group-hover:opacity-100 p-1 hover:bg-red-50 rounded text-red-400"><Trash2 className="w-3.5 h-3.5"/></button>
                 </td>
@@ -2331,7 +2405,7 @@ export default function UploadDealPage(){
   const [sourceSummary, setSourceSummary] = useState<SupplierSource[]>([]);
   const [sourceFilter,  setSourceFilter]  = useState("");
   // Review: show only the rows the file could not be read for (isUnreadRow).
-  const [unreadOnly,    setUnreadOnly]    = useState(false);
+  const [issueFilter,   setIssueFilter]   = useState<RowIssue|"">("");
   const [refreshingAgencies, setRefreshingAgencies] = useState(false);
   const [entitiesByAgency, setEntitiesByAgency] = useState<Record<number,string[]>>({});
   const loadAgencyEntities=useCallback(()=>
@@ -2600,7 +2674,7 @@ export default function UploadDealPage(){
   const handleAddRow=()=>{
     const newIdx=rows.length;
     setSourceFilter("");   // a new row belongs to no Source, so a Source filter would hide it
-    setUnreadOnly(false);  // nor is it an unread row
+    setIssueFilter("");    // nor has it a problem to be filtered by
     setRows(prev=>[...prev,{...EMPTY_ROW(),row_order:prev.length,extra:fillStepParty({c__deal_tag:dealTag==="adhoc"?"Adhoc":"Standard"})}]);
     if(selectedInclExcl.length>0){
       setRowInclExcl(prev=>({...prev,[newIdx]:{types:selectedInclExcl,data:{},viceVersa:{}}}));
@@ -2615,27 +2689,36 @@ export default function UploadDealPage(){
     setSelectedRows(prev=>{const next=new Set(prev);if(allSelected)filteredIndices.forEach(i=>next.delete(i));else filteredIndices.forEach(i=>next.add(i));return next;});
   },[]);
   const rowAirline=(r:ReviewRow)=>(r.extra["c__airline_name"]||r.airline_name||"").trim();
-  // Rows the file could not be read for: how many, and how many are still blank. The
-  // filter only bites while there are any — deleting the last one must not leave an
-  // empty table behind a filter that is no longer offered.
+  // The rows with something to fix, by kind: not read from the file, an airline the master
+  // could not settle ("look"), one with no code ("nocode"), one the save will add ("new").
+  // `total` puts a row in its filter for good; `open` counts those not fixed yet. A filter
+  // only bites while its kind has rows — deleting the last one must not leave an empty table
+  // behind a filter that is no longer offered.
   const inlineIncs=inlineIncentives(selectedIncentives);
-  const unreadTotal=rows.filter(isUnreadRow).length;
-  const unreadBlank=rows.filter(r=>unreadGaps(r,inlineIncs).length>0).length;
-  const unreadActive=unreadOnly&&unreadTotal>0;
+  const issueCounts:Record<RowIssue,{total:number;open:number}>={
+    unread:{total:0,open:0}, look:{total:0,open:0}, nocode:{total:0,open:0}, new:{total:0,open:0},
+  };
+  for(const r of rows){
+    if(isUnreadRow(r)){ issueCounts.unread.total++; if(unreadGaps(r,inlineIncs).length) issueCounts.unread.open++; }
+    const k=airIssueOf(r);
+    if(k){ issueCounts[k].total++; if(airIssueOpen(r)) issueCounts[k].open++; }
+  }
+  const issueActive:RowIssue|""=issueFilter&&issueCounts[issueFilter].total>0?issueFilter:"";
+  const showIssue=(k:RowIssue)=>{ setIssueFilter(k); setSourceFilter(""); setBulkAirline(""); };
   // The toolbar filters narrow the table: Supplier (All suppliers — the sheet's Source,
-  // the same filter as "Show rows"), Rows not read, then Airline. The airline picker
+  // the same filter as "Show rows"), a problem kind, then Airline. The airline picker
   // offers the airlines of the rows the other two leave, with their counts.
   const rowPassesFilters=(r:ReviewRow)=>
-    (!sourceFilter||r.extra["__src_group"]===sourceFilter)&&(!unreadActive||isUnreadRow(r));
+    (!sourceFilter||r.extra["__src_group"]===sourceFilter)&&(!issueActive||inIssue(r,issueActive));
   const filterAirlines=useMemo(()=>{
     const counts=new Map<string,number>();
     rows.forEach(r=>{
       if(sourceFilter&&r.extra["__src_group"]!==sourceFilter) return;
-      if(unreadActive&&!isUnreadRow(r)) return;
+      if(issueActive&&!inIssue(r,issueActive)) return;
       const n=rowAirline(r); if(n) counts.set(n,(counts.get(n)??0)+1);
     });
     return [...counts.entries()].sort((a,b)=>a[0].localeCompare(b[0]));
-  },[rows,sourceFilter,unreadActive]);
+  },[rows,sourceFilter,issueActive]);
   // A picked airline the other filters no longer leave falls back to "all".
   const activeBulkAirline=filterAirlines.some(([a])=>a===bulkAirline)?bulkAirline:"";
   // Same test as ReviewTable's filteredIndices, so "visible" means the same thing here.
@@ -2751,7 +2834,7 @@ export default function UploadDealPage(){
     // A file loaded from an email skips pickFile, so the type is checked here too.
     if(!UPLOAD_FILE_RE.test(file.name)){ setUploadError(UPLOAD_FILE_ERROR); return; }
     setUploading(true);setUploadError("");setIsMultiTab(false);setAiWarning("");setAirlineSummary({});
-    setSourceSummary([]);setSourceFilter("");setUnreadOnly(false);
+    setSourceSummary([]);setSourceFilter("");setIssueFilter("");
     try{
       // All suppliers splits a sheet by its Source column — which only the AI reader
       // finds. Column mapping and the tabbed template cannot say whose each row is.
@@ -2976,7 +3059,7 @@ export default function UploadDealPage(){
         const srcs=[...new Set(open.map(r=>r.extra["c__supplier_cell"]||"(no Source)"))];
         const msg=`${open.length} row${open.length!==1?"s have":" has"} no supplier — ${srcs.slice(0,4).join(", ")}${srcs.length>4?` and ${srcs.length-4} more`:""}. `
           +`Pick the agency for ${srcs.length>1?"each":"it"} under "Suppliers in this sheet", or remove those rows.`;
-        setSaveError(msg);notifyRequired(msg);setSourceFilter("");setBulkAirline("");setUnreadOnly(false);return;
+        setSaveError(msg);notifyRequired(msg);setSourceFilter("");setBulkAirline("");setIssueFilter("");return;
       }
     }
 
@@ -3006,7 +3089,7 @@ export default function UploadDealPage(){
         ? `Row ${badRows[0].row}: ${missingMessage(badRows[0].missing)}`
         : `${badRows.length} rows are missing required fields (${cols.join(", ")}). First problem is row ${badRows[0].row}.`;
       setSaveError(msg);notifyRequired(msg);
-      setSourceFilter("");setBulkAirline("");setUnreadOnly(false);   // clear any filter hiding the bad row
+      setSourceFilter("");setBulkAirline("");setIssueFilter("");   // clear any filter hiding the bad row
       return;
     }
 
@@ -3198,7 +3281,7 @@ export default function UploadDealPage(){
           <button onClick={()=>router.push(`/deals/${savedBatchId}`)} className="bg-[#1e3a5f] text-white px-5 py-2 rounded-lg text-sm font-medium hover:bg-[#16304f]">View Batch</button>
         )}
         <button onClick={()=>router.push(dealsHref(direction))} className="border border-[#1e3a5f] text-[#1e3a5f] px-5 py-2 rounded-lg text-sm font-medium hover:bg-blue-50">View All Deals</button>
-        <button onClick={()=>{setStep(1);setFile(null);setPreview(null);setRows([]);setDealType(outbound?"b2b":"");setSupplierName("");setVendorAgencyId(null);setAllSuppliers(false);setSourceSummary([]);setSourceFilter("");setUnreadOnly(false);setEntity("");setLoginIds([]);setValidFromDate("");setColumnMap({});setSelectedIncentives([]);setSelectedInclExcl([]);setRowInclExcl({});setAiMode(false);setAiFileName("");setAiConfidence(0);setSavedBatchId(null);setFileStoreError("");setCopyPrevInclExcl(true);setIsMultiTab(false);
+        <button onClick={()=>{setStep(1);setFile(null);setPreview(null);setRows([]);setDealType(outbound?"b2b":"");setSupplierName("");setVendorAgencyId(null);setAllSuppliers(false);setSourceSummary([]);setSourceFilter("");setIssueFilter("");setEntity("");setLoginIds([]);setValidFromDate("");setColumnMap({});setSelectedIncentives([]);setSelectedInclExcl([]);setRowInclExcl({});setAiMode(false);setAiFileName("");setAiConfidence(0);setSavedBatchId(null);setFileStoreError("");setCopyPrevInclExcl(true);setIsMultiTab(false);
           // The scope is Step-1 state too — leaving it set would silently float the
           // next upload to the previous upload's agency. dealType stays "b2b" on an
           // outgoing upload, since the query param effect only runs on mount.
@@ -3715,20 +3798,17 @@ export default function UploadDealPage(){
             // routinely occupies 3 rows (Economy / Premium / Business).
             const n=(k:string)=>airlineSummary[k]??0;
             const airlinesTotal=Object.values(airlineSummary).reduce((a,b)=>a+b,0);
-            const needLook=n("conflict")+n("ambiguous")+n("multi_carrier");
             const unassigned=multiVendor?rows.filter(r=>!r.extra["c__vendor_agency_id"]).length:0;
             const warning=aiMode?aiWarning:preview?.warning;
             const pl=(c:number,one:string,many:string)=>`${c} ${c===1?one:many}`;
             // Rows the file could not be read for are not listed here — the toolbar's
             // "Rows not read" filter and the red rows say it where they are fixed.
+            // The airline problems ("needs a look", "no code", "will be added") are not listed
+            // here — the user's call: the toolbar's filter buttons say it, by row, where they
+            // are fixed.
             const notes:{tone:"red"|"amber"|"sky";text:string}[]=[];
             if(unassigned) notes.push({tone:"red",text:`${pl(unassigned,"row still needs","rows still need")} a supplier — pick it under Suppliers in this sheet.`});
-            if(needLook)   notes.push({tone:"red",text:`${pl(needLook,"airline needs","airlines need")} a look — check the Master column.`});
             if(warning)    notes.push({tone:"amber",text:warning});
-            if(n("unresolved")) notes.push({tone:"amber",text:n("unresolved")===1
-              ?"1 airline is not in the airline master and has no code — fill in its Code to add it."
-              :`${n("unresolved")} airlines are not in the airline master and have no code — fill in their Code to add them.`});
-            if(n("new"))   notes.push({tone:"sky",text:`${pl(n("new"),"airline","airlines")} will be added to the airline master when you save.`});
             const TONE={red:"text-red-700",amber:"text-amber-700",sky:"text-sky-700"};
             const stat=(label:string,value:React.ReactNode,cls="text-gray-800")=>(
               <div key={label} className="px-4 text-right">
@@ -3807,24 +3887,24 @@ export default function UploadDealPage(){
                     })}
                   </select>
                 )}
-                {/* Only the rows the file could not be read for — red while any is still blank. */}
-                {unreadTotal>0&&(
-                  <button
-                    type="button"
-                    onClick={()=>setUnreadOnly(v=>!v)}
-                    aria-pressed={unreadActive}
-                    title={unreadActive?"Show every row again"
-                      :"Show only the rows the file could not be read for — they need filling in by hand"}
-                    className={`inline-flex items-center gap-1.5 border rounded-lg px-2 py-1.5 text-xs font-semibold whitespace-nowrap transition-colors ${
-                      unreadBlank
-                        ?(unreadActive?"bg-red-600 border-red-600 text-white hover:bg-red-700":"border-red-300 bg-red-50 text-red-700 hover:bg-red-100")
-                        :(unreadActive?"bg-emerald-600 border-emerald-600 text-white hover:bg-emerald-700":"border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100")}`}
-                  >
-                    {unreadBlank?<AlertTriangle className="w-3.5 h-3.5"/>:<Check className="w-3.5 h-3.5"/>}
-                    Rows not read ({unreadTotal})
-                    {unreadBlank>0&&unreadBlank<unreadTotal&&<span className="font-normal">· {unreadBlank} left</span>}
-                  </button>
-                )}
+                {/* What still needs fixing — one chip per kind that has rows, each showing just
+                    those rows. Red / amber while any is open, green once all are fixed; a new
+                    airline is news, not a problem. */}
+                {ISSUE_CHIPS.filter(c=>issueCounts[c.key].total>0).map(c=>{
+                  const {total,open}=issueCounts[c.key];
+                  const active=issueActive===c.key;
+                  const tone=c.tone==="sky"?"sky":open?c.tone:"green";
+                  return(
+                    <button key={c.key} type="button" aria-pressed={active}
+                      onClick={()=>active?setIssueFilter(""):showIssue(c.key)}
+                      title={active?"Show every row again":c.title}
+                      className={`inline-flex items-center gap-1.5 border rounded-lg px-2 py-1.5 text-xs font-semibold whitespace-nowrap transition-colors ${ISSUE_TONE[tone][active?1:0]}`}>
+                      {tone==="sky"?<Info className="w-3.5 h-3.5"/>:open?<AlertTriangle className="w-3.5 h-3.5"/>:<Check className="w-3.5 h-3.5"/>}
+                      {c.label} ({total})
+                      {open>0&&open<total&&<span className="font-normal">· {open} left</span>}
+                    </button>
+                  );
+                })}
                 <select
                   value={activeBulkAirline}
                   onChange={e=>setBulkAirline(e.target.value)}
@@ -3835,8 +3915,8 @@ export default function UploadDealPage(){
                   <option value="">All airlines ({filterAirlines.length})</option>
                   {filterAirlines.map(([a,n])=><option key={a} value={a}>{a} ({n})</option>)}
                 </select>
-                {(activeBulkAirline||sourceFilter||unreadActive)&&(
-                  <button onClick={()=>{setBulkAirline("");setSourceFilter("");setUnreadOnly(false);}} title="Clear filters"
+                {(activeBulkAirline||sourceFilter||issueActive)&&(
+                  <button onClick={()=>{setBulkAirline("");setSourceFilter("");setIssueFilter("");}} title="Clear filters"
                     className="inline-flex items-center gap-1 text-[11px] text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg px-1.5 py-1 whitespace-nowrap">
                     {visibleCount} of {rows.length} <X className="w-3.5 h-3.5"/>
                   </button>
@@ -3945,7 +4025,7 @@ export default function UploadDealPage(){
               lockedCols={lockedPartyCols}
               vendorChoices={multiVendor?vendorChoices:undefined}
               entityOptionsFor={multiVendor?rowEntityOptions:undefined}
-              rowFilter={sourceFilter||unreadActive?rowPassesFilters:undefined}
+              rowFilter={sourceFilter||issueActive?rowPassesFilters:undefined}
             />
           </div>
 

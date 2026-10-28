@@ -16,7 +16,6 @@ const IE_CONTINENTS     = ["Africa","Asia","Europe","North America","Oceania","S
 const IE_COUNTRY_GROUPS = ["APAC","EUROPEAN NATIONS","GCC/MIDDLE EAST","LATIN AMERICA","MEAI","NAM","OTHER","SAARC"];
 const IE_CITIES         = ["Delhi","Mumbai","Dubai","Doha","London","Frankfurt","New York","Singapore","Sydney"];
 const IE_FARE_TYPE_CATS = ["Normal","Group","Corporate","Excursion","Tour"];
-const IE_DOMESTIC_CTRS  = ["India","UAE","UK","USA","Australia"];
 const IE_CLASS_OPTIONS  = ["All","Economy","Premium Economy","Business","First"];
 const IE_SOTO_OPTIONS   = ["SOTO All","SOTO within India","SOTO outside India"];
 
@@ -497,7 +496,8 @@ function InclExclTypeForm({ typeName, form, onChange }: {
         setAllAirports(r.data.map(a=>a.iata_code).filter(Boolean));
         const countries=[...new Set(r.data.map(a=>a.country).filter(Boolean))] as string[];
         setAllCountries(countries.sort());
-        const cities=[...new Set(r.data.map(a=>a.city_airport_name).filter(Boolean))].sort();
+        // The city part of the master's name — what a City rule is judged against (models/airport.city_of).
+        const cities=[...new Set(r.data.map(a=>(a.city_airport_name??"").split(" - ")[0].trim()).filter(Boolean))].sort();
         setAllCities(cities);
       }).catch(()=>{});
   },[]);
@@ -514,7 +514,6 @@ function InclExclTypeForm({ typeName, form, onChange }: {
     originAirport:allAirports,              destAirport:allAirports,
     city:allCities.length?allCities:IE_CITIES, fareTypeCategory:IE_FARE_TYPE_CATS,
     class:IE_CLASS_OPTIONS, soto:IE_SOTO_OPTIONS,
-    domesticCountry:allCountries.length?allCountries:IE_DOMESTIC_CTRS,
   };
 
   const dateExclusionValues=[
@@ -549,10 +548,8 @@ function InclExclTypeForm({ typeName, form, onChange }: {
         ?{key:"soto",label:"SOTO for Exclusion"}
         :{key:"tourCode",label:`Tour Code ${suffix}`,isTag:true},
     ],
-    ...(isExcl
-      ?[[{key:"tourCode",label:`Tour Code ${suffix}`,isTag:true},{key:"domesticCountry",label:`Domestic Country ${suffix}`,isSearch:true,placeholder:"Search and select"}]]
-      :[[{key:"domesticCountry",label:`Domestic Country ${suffix}`,isSearch:true,placeholder:"Search and select"}]]
-    ),
+    // Domestic Country was taken off the form (2026-10-27); the engine no longer judges it.
+    ...(isExcl?[[{key:"tourCode",label:`Tour Code ${suffix}`,isTag:true}]]:[]),
   ];
 
   return (

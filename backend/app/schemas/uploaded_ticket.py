@@ -540,7 +540,10 @@ class ExclusionRuleStep(BaseModel):
     field:        str
     rule_value:   str
     ticket_value: str
-    matched:      bool
+    # None: the ticket does not carry what this field needs (no sector, an airport not in
+    # the Airport Master, no travel date) — not judged, and not passed either.
+    matched:      Optional[bool]
+    label:        Optional[str] = None      # "Destination country" for field "destCountry"
 
 
 class ExclusionRuleDiagnostic(BaseModel):
@@ -548,6 +551,8 @@ class ExclusionRuleDiagnostic(BaseModel):
     is_excluded: bool
     reason:      str
     steps:       list[ExclusionRuleStep]
+    # The rule could not be decided for this ticket (see ExclusionRuleStep.matched).
+    undecided:   bool = False
 
 
 class DealDiagnostic(BaseModel):

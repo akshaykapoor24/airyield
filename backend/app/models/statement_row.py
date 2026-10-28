@@ -266,6 +266,7 @@ class _GdsLineFields:
     trip_type:           Mapped[str | None]  = mapped_column(Text)                     # not mapped
     travel_type:         Mapped[str | None]  = mapped_column(Text)                     # not mapped
     booking_class:       Mapped[str | None]  = mapped_column(Text)                     # Class
+    tour_code:           Mapped[str | None]  = mapped_column(Text)                     # Tour Code
     payment_method:      Mapped[str | None]  = mapped_column(Text)                     # Payment Mode
     card_type:           Mapped[str | None]  = mapped_column(Text)                     # Card Type
 

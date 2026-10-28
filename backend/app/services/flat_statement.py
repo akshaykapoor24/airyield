@@ -332,7 +332,7 @@ _FIELD_GROUP = {
     "customer_name": "Passenger", "customer_id": "Passenger",
     # Itinerary
     "sector": "Itinerary", "flight_number": "Itinerary", "trip_type": "Itinerary",
-    "travel_type": "Itinerary", "booking_class": "Itinerary",
+    "travel_type": "Itinerary", "booking_class": "Itinerary", "tour_code": "Itinerary",
     "payment_method": "Itinerary", "card_type": "Itinerary",
     # Money
     "currency": "Money", "base_fare": "Money", "yq": "Money", "yr": "Money", "k3": "Money",
@@ -725,6 +725,7 @@ _TP_GDS_COLUMNS = [
     ("sector", "Sector"),
     ("flight_number", "Flight No"),
     ("booking_class", "Class"),
+    ("tour_code", "Tour Code"),                         # deal rules: Tour Code, Corporate / Excursion / Tour
     ("payment_method", "Payment Mode"),
     ("card_type", "Card Type"),
     # Money — each set of parts just before the total it adds up to
@@ -809,6 +810,9 @@ _TP_GDS_ALIASES = {
     # No bare "card" or "card_name": either may hold a card number or the cardholder's
     # name, which reports must never carry (services/report_download/pii.py).
     "card_type":      ["card_type", "cardtype", "cc_type", "credit_card_type", "card_scheme"],
+    # Added 2026-10-27 for the deal rules that pay by tour code. No bare "tour" or "code".
+    "tour_code":      ["tour_code", "tourcode", "tour_cd", "tour_deal_code", "tour_or_deal_code",
+                       "deal_code", "dealcode"],
 }
 
 # What fills a field the file does not print (`register`'s `fills`). Airline Name, Airline

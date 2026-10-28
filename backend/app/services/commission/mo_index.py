@@ -1,4 +1,5 @@
-"""Class, sector and travel date from the mid-office (MO) statement, for pricing TP GDS rows.
+"""Class, sector, travel date and tour code from the mid-office (MO) statement, for pricing
+TP GDS rows. (Tour code since 2026-10-27, for the deal rules that pay by it.)
 
 Payment Module step 6E: "map class / sectors / date of travel for inclusion and exclusion
 validation". A consolidator's GDS statement prints no class at all (blank on every row of
@@ -47,6 +48,7 @@ class MoTicket:
     sector: str | None = None
     travel_date: date | None = None
     segment_type: str | None = None
+    tour_code: str | None = None
     batch_id: str | None = None
     source_file: str | None = None
 
@@ -115,7 +117,7 @@ def fold_rows(rows) -> MoIndex:
             m = merged[serial] = {"prefix": prefix, "batch_id": batch_id,
                                   "source_file": source_file}
             order.append(serial)
-        for key in ("booking_class", "sector", "segment_type"):
+        for key in ("booking_class", "sector", "segment_type", "tour_code"):
             if not m.get(key) and _s(data.get(key)):
                 m[key] = _s(data.get(key))
         if not m.get("travel_date"):
@@ -125,6 +127,7 @@ def fold_rows(rows) -> MoIndex:
         index.add(serial, m["prefix"], MoTicket(
             booking_class=m.get("booking_class"), sector=m.get("sector"),
             travel_date=m.get("travel_date"), segment_type=m.get("segment_type"),
+            tour_code=m.get("tour_code"),
             batch_id=m["batch_id"], source_file=m.get("source_file"),
         ))
     return index

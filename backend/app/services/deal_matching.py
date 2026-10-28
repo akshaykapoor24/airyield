@@ -66,7 +66,7 @@ from app.models.deal import (
     DealLifecycleType,
     DealDirection,
     DealScopeType,
-    build_rule_dict,
+    rule_payload,
 )
 
 # ── Cabin class groupings ──────────────────────────────────────────────────
@@ -136,8 +136,16 @@ CumulativeProvider = Callable[[str, date, date, "str | None", "str | None"], Awa
 
 
 def _normalize_class_type(raw: str) -> str:
-    """'ECONOMY CLASS' → 'Economy', 'BUSINESS CLASS' → 'Business', 'FIRST CLASS' → 'First'."""
-    r = raw.upper()
+    """'ECONOMY CLASS' → 'Economy', 'PREMIUM ECONOMY CLASS' → 'Premium Economy',
+    'BUSINESS CLASS' → 'Business', 'FIRST CLASS' → 'First'.
+
+    Premium Economy is its own cabin. It used to fall through to Economy, which both let an
+    Economy deal pay a Premium Economy ticket and left a deal written for "Premium" with no
+    ticket it could ever match.
+    """
+    r = (raw or "").upper()
+    if "PREMIUM" in r:
+        return "Premium Economy"
     if "BUSINESS" in r:
         return "Business"
     if "FIRST" in r:
@@ -145,25 +153,43 @@ def _normalize_class_type(raw: str) -> str:
     return "Economy"
 
 
-async def _resolve_cabin_groups(
-    db: AsyncSession,
-    airline_name: str,
-    booking_class: str | None,
-) -> set[str]:
-    """Query AirlineClassMaster for per-airline class mapping; fall back to hardcoded sets.
+# Lowest first. A code the master lists under two cabins (Air Astana's G is both ECONOMY
+# and BUSINESS CLASS) resolves to the lower one — the claim that cannot overstate what the
+# ticket earned — and, more importantly, to the SAME one every run.
+_CABIN_RANK = {"Economy": 0, "Premium Economy": 1, "Business": 2, "First": 3}
 
-    The master lookup is memoised per session (`db.info`), which matters once BSP rows carry
-    a real booking class: this then fires once per row in the matcher AND once per `class`
-    rule field in the exclusion evaluator, over tens of thousands of rows. Only the resolved
-    {code: group} strings are cached — never ORM rows, which the run's periodic commits
-    would expire.
+# What a deal's (or a rule's) Class covers, in class-master cabins. "Premium" spans Premium
+# Economy and First — the user's rule (2026-10-27), and the same mapping the deal form's
+# class-code picker uses (INCENTIVE_CLASS_TO_MASTER).
+_CLASS_COVERS = {
+    "economy":         {"Economy"},
+    "premium":         {"Premium Economy", "First"},
+    "premium economy": {"Premium Economy"},
+    "business":        {"Business"},
+    "first":           {"First"},
+}
+
+
+def _split_class_codes(booking_class: str | None) -> list[str]:
+    """'H/ H/ E/ N' → ['H', 'H', 'E', 'N'] — one code per segment, as statements print it."""
+    return [p.strip().upper() for p in (booking_class or "").replace(" ", "").split("/") if p.strip()]
+
+
+def _fallback_cabin(code: str) -> str:
+    if code in _BUSINESS_CLASSES:
+        return "Business"
+    if code in _FIRST_CLASSES:
+        return "First"
+    return "Economy"
+
+
+async def _class_master_map(db: AsyncSession, airline_name: str) -> dict[str, str]:
+    """{class code: cabin} for one airline, from the Airline Class Master.
+
+    Memoised per session (`db.info`): it fires once per row in the matcher AND once per
+    `class` rule field, over tens of thousands of rows. Only plain strings are cached —
+    never ORM rows, which the run's periodic commits would expire.
     """
-    if not booking_class:
-        return {"Economy"}
-    codes = [p.strip().upper() for p in booking_class.replace(" ", "").split("/") if p.strip()]
-    if not codes:
-        return {"Economy"}
-
     airline_key = (airline_name or "").lower()
     cache: dict[str, dict[str, str]] = db.info.setdefault("_class_master_cache", {})
     master_map = cache.get(airline_key)
@@ -174,27 +200,55 @@ async def _resolve_cabin_groups(
                 AirlineClassMaster.is_active == True,
             )
         )
-        master_map = {row.class_code: _normalize_class_type(row.class_type) for row in res.scalars()}
+        master_map = {}
+        for row in res.scalars():
+            cabin = _normalize_class_type(row.class_type)
+            have = master_map.get(row.class_code)
+            if have is None or _CABIN_RANK[cabin] < _CABIN_RANK[have]:
+                master_map[row.class_code] = cabin
         cache[airline_key] = master_map
+    return master_map
 
-    groups: set[str] = set()
-    for code in codes:
-        if code in master_map:
-            groups.add(master_map[code])
-        else:
-            if code in _BUSINESS_CLASSES:
-                groups.add("Business")
-            elif code in _FIRST_CLASSES:
-                groups.add("First")
-            else:
-                groups.add("Economy")
-    return groups or {"Economy"}
+
+async def _resolve_cabin_groups(
+    db: AsyncSession,
+    airline_name: str,
+    booking_class: str | None,
+) -> set[str]:
+    """The cabins a ticket's booking class codes belong to, per the Airline Class Master;
+    codes the master does not hold fall back to the hardcoded C/J/D/I · F/A/P sets."""
+    codes = _split_class_codes(booking_class)
+    if not codes:
+        return {"Economy"}
+    master_map = await _class_master_map(db, airline_name)
+    return {master_map.get(code) or _fallback_cabin(code) for code in codes} or {"Economy"}
+
+
+async def describe_cabin(db: AsyncSession, airline_name: str | None,
+                         booking_class: str | None) -> str | None:
+    """'Economy' / 'Economy, Premium Economy' — the cabin the matcher read a booking class
+    as, for display beside the code. Says so when a code was not in the class master and
+    the hardcoded default was used instead. None when there is no class."""
+    codes = _split_class_codes(booking_class)
+    if not codes:
+        return None
+    master_map = await _class_master_map(db, airline_name or "")
+    cabins = sorted({master_map.get(c) or _fallback_cabin(c) for c in codes},
+                    key=lambda g: _CABIN_RANK.get(g, 0))
+    label = ", ".join(cabins)
+    unknown = sorted({c for c in codes if c not in master_map})
+    if unknown:
+        label += f" (default — {'/'.join(unknown)} not in class master)"
+    return label
 
 
 def _class_matches_groups(cabin_groups: set[str], plb_class: str | None) -> bool:
     if not plb_class or plb_class.lower() in ("all", "both", ""):
         return True
-    return plb_class.strip().title() in cabin_groups
+    covers = _CLASS_COVERS.get(plb_class.strip().lower())
+    if covers is None:
+        return plb_class.strip().title() in cabin_groups
+    return bool(covers & cabin_groups)
 
 
 def _class_is_restrictive(plb_class: str | None) -> bool:
@@ -621,6 +675,49 @@ def _pick_amount_slab_cell(slab: DealIncentiveSlab, seg_key: str, class_key: str
     return None
 
 
+TRIGGER_CATEGORIES = ("trigger_inclusion", "trigger_exclusion")
+
+
+async def _trigger_rules(db: AsyncSession, config: DealIncentiveConfig) -> list | None:
+    """This incentive's Inclusion / Exclusion For Trigger rules as
+    [(is_inclusion, rule_dict, vice_versa)], or None when it has none.
+
+    TRIGGER decides which tickets COUNT TOWARD A SLAB TARGET (user's rule, 2026-10-27); the
+    payout rules decide which tickets are paid. Memoised per session by config id: the slab
+    path asks once per statement row. Plain tuples only — never ORM rows, which a run's
+    periodic commits would expire.
+    """
+    cache: dict[int, list | None] = db.info.setdefault("_trigger_rule_cache", {})
+    if config.id in cache:
+        return cache[config.id]
+    res = await db.execute(
+        select(DealRule).options(selectinload(DealRule.conditions))
+        .where(DealRule.incentive_id == config.id,
+               DealRule.rule_category.in_(TRIGGER_CATEGORIES))
+        .order_by(DealRule.rule_order)
+    )
+    rules = [(r.rule_category == "trigger_inclusion", rule_payload(r), bool(r.vice_versa))
+             for r in res.scalars()]
+    rules = [r for r in rules if r[1]] or None
+    cache[config.id] = rules
+    return rules
+
+
+def _counts_toward_target(facts, trigger_rules: list) -> str:
+    """'counted' | 'left_out' (a trigger rule keeps it out of the target) | 'unknown' (a rule
+    needed what the ticket does not carry). An unknown ticket is NOT counted: the band a
+    target reaches must never rest on a ticket nobody could check."""
+    from app.services.exclusion_evaluator import evaluate_rule
+
+    verdicts = [evaluate_rule(rd, facts, inclusion=inc, vice_versa=vv)
+                for inc, rd, vv in trigger_rules]
+    if any(v.blocks for v in verdicts):
+        return "left_out"
+    if any(v.undecided for v in verdicts):
+        return "unknown"
+    return "counted"
+
+
 async def _period_cumulative_base(
     db: AsyncSession,
     airline_name: str,
@@ -633,6 +730,33 @@ async def _period_cumulative_base(
 ) -> float:
     """Sum the base of every ticket for this airline whose departure date is in
     [start, end] and whose segment matches the incentive's flight type."""
+    total, _left_out, _unknown = await _period_cumulative(
+        db, airline_name, start, end, flight_type, target_calc_cols, tenant_id, created_by_id)
+    return total
+
+
+async def _period_cumulative(
+    db: AsyncSession,
+    airline_name: str,
+    start: date,
+    end: date,
+    flight_type: str | None,
+    target_calc_cols: str | None,
+    tenant_id: int,
+    created_by_id: int,
+    trigger_rules: list | None = None,
+    cache_key=None,
+) -> tuple[float, int, int]:
+    """(achieved base, tickets trigger rules left out, tickets they could not judge) over
+    every uploaded ticket for this airline whose departure date is in [start, end] and whose
+    segment matches the incentive's flight type.
+
+    `cache_key` memoises the answer for the session — it depends on the period and the
+    incentive, never on the row being priced, and the slab path asks once per row.
+    """
+    cache: dict = db.info.setdefault("_slab_cumulative_cache", {})
+    if cache_key is not None and cache_key in cache:
+        return cache[cache_key]
     ares = await db.execute(select(Airline).where(func.lower(Airline.name) == airline_name.lower()))
     airline = ares.scalar_one_or_none()
     variants: set[str] = set()
@@ -646,12 +770,13 @@ async def _period_cumulative_base(
                 variants.add(c.zfill(3))
                 variants.add(c.lstrip("0") or c)
     if not variants:
-        return 0.0
+        return 0.0, 0, 0
 
     tres = await db.execute(
         select(
             UploadedTicket.sell_fare, UploadedTicket.sell_tax_yq, UploadedTicket.sale_yr,
             UploadedTicket.departure_datetime, UploadedTicket.ticket_date, UploadedTicket.segment_type,
+            UploadedTicket.sector, UploadedTicket.booking_class, UploadedTicket.tour_code,
         ).where(
             UploadedTicket.tenant_id == tenant_id,
             UploadedTicket.created_by_id == created_by_id,
@@ -664,7 +789,8 @@ async def _period_cumulative_base(
         )
     )
     total = 0.0
-    for sf, yq, yr, dep, tdate, seg in tres.all():
+    left_out = unknown = 0
+    for sf, yq, yr, dep, tdate, seg, sector, bclass, tour in tres.all():
         if sf is None:
             continue
         if not _flight_type_matches(seg, flight_type):
@@ -672,13 +798,29 @@ async def _period_cumulative_base(
         d = _safe_date(dep, tdate)
         if d is None or not (start <= d <= end):
             continue
+        if trigger_rules:
+            from app.services.exclusion_evaluator import load_facts
+
+            facts = await load_facts(
+                db, sector=sector, booking_class=bclass, issue_date=tdate,
+                travel_date=dep, airline_name=airline_name, tour_code=tour)
+            verdict = _counts_toward_target(facts, trigger_rules)
+            if verdict == "left_out":
+                left_out += 1
+                continue
+            if verdict == "unknown":
+                unknown += 1
+                continue
         total += _calc_base(
             float(sf),
             float(yq) if yq is not None else None,
             float(yr) if yr is not None else None,
             target_calc_cols,
         )
-    return round(total, 2)
+    out = (round(total, 2), left_out, unknown)
+    if cache_key is not None:
+        cache[cache_key] = out
+    return out
 
 
 _SEG_LABEL = {"dom": "Domestic", "intl": "International"}
@@ -739,15 +881,35 @@ async def _compute_slab_cumulative_detailed(
         "period_range": f"{start:%d %b %Y} → {end:%d %b %Y}",
     })
 
+    trigger_rules = await _trigger_rules(db, config)
+    trigger_note = ""
     if cumulative_provider is not None:
         cumulative = await cumulative_provider(
             airline_name, start, end, config.flight_type, config.target_calc_cols,
         )
+        if trigger_rules:
+            trigger_note = ("trigger rules not applied — this target is the airline "
+                            "settlement's own total")
     else:
-        cumulative = await _period_cumulative_base(
-            db, airline_name, start, end, config.flight_type, config.target_calc_cols, tenant_id, created_by_id,
+        cumulative, left_out, unknown = await _period_cumulative(
+            db, airline_name, start, end, config.flight_type, config.target_calc_cols,
+            tenant_id, created_by_id, trigger_rules=trigger_rules,
+            cache_key=(tenant_id, created_by_id, airline_name.lower(), start, end,
+                       config.flight_type, config.target_calc_cols,
+                       config.id if trigger_rules else None),
         )
+        if trigger_rules:
+            trigger_note = f"trigger rules kept {left_out} ticket(s) out of the target"
+            if unknown:
+                trigger_note += f"; {unknown} could not be checked and were not counted"
     det["achieved"] = round(cumulative, 2)
+    if trigger_note:
+        det["trigger_note"] = trigger_note
+
+    def _with_note(value):
+        if trigger_note:
+            det["formula"] = f"{det.get('formula', '')} · {trigger_note}"
+        return value, det
 
     if candidates is None:
         def _slab_in_period(s: DealIncentiveSlab) -> bool:
@@ -768,14 +930,14 @@ async def _compute_slab_cumulative_detailed(
         det["formula"] = (
             f"{label}: achieved ₹{cumulative:,.0f} < min target ₹{min_target:,.0f} → target not met (₹0)"
         )
-        return 0.0, det   # target not met
+        return _with_note(0.0)   # target not met
 
     target = float(chosen.base_target_amount or 0)
     det["target"] = round(target, 2)
     cell = _pick_amount_slab_cell(chosen, seg_key, class_key)
     if cell is None:
         det["formula"] = f"{label}: band ≥₹{target:,.0f} reached, but no rate set for {cell_label}"
-        return None, det
+        return _with_note(None)
 
     det["cell_pct"] = cell
     if "percent" in num_pct:
@@ -790,7 +952,7 @@ async def _compute_slab_cumulative_detailed(
             f"{label} achieved ₹{cumulative:,.0f} → band ≥₹{target:,.0f} → {cell_label} flat ₹{inc:,.2f}"
         )
     det["incentive"] = inc
-    return inc, det
+    return _with_note(inc)
 
 
 async def _compute_slab_cumulative(
@@ -1192,6 +1354,8 @@ class DealMatchingService:
         statement_type:      str | None = None,
         skip_criteria:       set[str] | None = None,
         rule_skip_fields:    set[str] | None = None,
+        # False when the source prints no tour code at all — as the run judged it.
+        tour_code_known:     bool = True,
         cumulative_provider: CumulativeProvider | None = None,
         direction:           DealDirection = DealDirection.INBOUND,
         customer_scope:      CustomerScope | None = None,
@@ -1526,31 +1690,30 @@ class DealMatchingService:
 
                 # Inclusion/Exclusion rules attached to this incentive config
                 for rule in (config.rules or []):
-                    rule_dict = build_rule_dict(rule.conditions)
+                    rule_dict = rule_payload(rule)
                     if not rule_dict:
                         continue
+                    # The same engine, inputs and vice-versa flag the run used. One trace
+                    # per kind per deal: the first incentive carrying such a rule, named.
+                    rule_kw = dict(
+                        db=db,
+                        sector=ticket_sector,
+                        booking_class=booking_class,
+                        ticket_date_raw=ticket_date_raw,
+                        departure_raw=ticket_departure_raw,
+                        airline_name=ticket_airline_name or airline_name,
+                        tour_code=tour_code,
+                        skip_fields=rule_skip_fields,
+                        vice_versa=bool(rule.vice_versa),
+                        incentive_type=config.incentive_type,
+                        tour_code_known=tour_code_known,
+                    )
                     if rule.rule_category == "payout_inclusion" and incl_diagnostic is None:
                         incl_diagnostic = await diagnose_inclusion_for_payout(
-                            incl_data=rule_dict, db=db,
-                            sector=ticket_sector,
-                            booking_class=booking_class,
-                            ticket_date_raw=ticket_date_raw,
-                            departure_raw=ticket_departure_raw,
-                            airline_name=ticket_airline_name or airline_name,
-                            tour_code=tour_code,
-                            skip_fields=rule_skip_fields,
-                        )
+                            incl_data=rule_dict, **rule_kw)
                     elif rule.rule_category == "payout_exclusion" and excl_diagnostic is None:
                         excl_diagnostic = await diagnose_exclusion_for_payout(
-                            excl_data=rule_dict, db=db,
-                            sector=ticket_sector,
-                            booking_class=booking_class,
-                            ticket_date_raw=ticket_date_raw,
-                            departure_raw=ticket_departure_raw,
-                            airline_name=ticket_airline_name or airline_name,
-                            tour_code=tour_code,
-                            skip_fields=rule_skip_fields,
-                        )
+                            excl_data=rule_dict, **rule_kw)
 
                 plb_diagnostics.append(PLBDiagnostic(
                     plb_key=config.incentive_type or f"config-{config.id}",
@@ -1728,36 +1891,25 @@ async def _resolve_cabin_groups_with_detail(
     airline_name: str,
     booking_class: str | None,
 ) -> tuple[set[str], str]:
-    """Like _resolve_cabin_groups but also returns a human-readable trace string."""
+    """Like _resolve_cabin_groups but also returns a human-readable trace string. Reads the
+    same memoised master map, so the popup can never resolve a code differently from the run."""
     if not booking_class:
         return {"Economy"}, "booking_class is empty → defaulted to Economy"
 
-    codes = [p.strip().upper() for p in booking_class.replace(" ", "").split("/") if p.strip()]
+    codes = _split_class_codes(booking_class)
     if not codes:
         return {"Economy"}, "booking_class parsed to no codes → defaulted to Economy"
 
-    res = await db.execute(
-        select(AirlineClassMaster).where(
-            func.lower(AirlineClassMaster.airline_name) == airline_name.lower(),
-            AirlineClassMaster.class_code.in_(codes),
-            AirlineClassMaster.is_active == True,
-        )
-    )
-    master_map = {row.class_code: _normalize_class_type(row.class_type) for row in res.scalars()}
+    master_map = await _class_master_map(db, airline_name)
 
     groups: set[str] = set()
     trace_parts: list[str] = []
-    for code in codes:
+    for code in dict.fromkeys(codes):
         if code in master_map:
             groups.add(master_map[code])
             trace_parts.append(f"{code}→{master_map[code]} (AirlineClassMaster)")
         else:
-            if code in _BUSINESS_CLASSES:
-                g = "Business"
-            elif code in _FIRST_CLASSES:
-                g = "First"
-            else:
-                g = "Economy"
+            g = _fallback_cabin(code)
             groups.add(g)
             trace_parts.append(f"{code}→{g} (hardcoded fallback)")
 

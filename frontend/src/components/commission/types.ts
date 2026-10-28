@@ -204,6 +204,8 @@ export type CommissionLine = {
   // The matched deal's IATA % as written ("3"), and what it came to on the basic fare.
   iata_pct: string | null;
   iata_commission: number | null;
+  // The cabin the class codes resolve to via the Airline Class Master ("Economy").
+  cabin?: string | null;
   calc: CommissionRow | null;
 };
 

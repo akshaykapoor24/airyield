@@ -78,6 +78,10 @@ class CalcRow:
     booking_class: str | None = None
     sector: str | None = None
     tour_code: str | None = None
+    # Does a blank tour_code mean "no tour code"? Only when the source prints the column.
+    # A consolidator statement that never maps one leaves every tour-code rule unjudgeable,
+    # so its rows say False and those rules come back undecided (needs_data), not failed.
+    tour_code_known: bool = True
 
     fare_amount: float | None = None
     yq: float | None = None

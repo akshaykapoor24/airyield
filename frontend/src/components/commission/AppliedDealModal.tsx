@@ -19,8 +19,9 @@ type Criterion = {
   ticket_value: string; deal_value: string; detail: string;
 };
 type Rule = {
-  kind: string; passed: boolean; reason: string;
-  steps: { field: string; rule_value: string; ticket_value: string; matched: boolean }[];
+  kind: string; name?: string; passed: boolean; undecided?: boolean; reason: string;
+  // matched null: the ticket does not carry what this condition needs — not judged.
+  steps: { field: string; label?: string; rule_value: string; ticket_value: string; matched: boolean | null }[];
 };
 type Incentive = {
   incentive_type: string; applied: boolean; calc_on: string;
@@ -35,6 +36,7 @@ type Applied = {
     ticket_number: string | null; pnr: string | null; passenger_name: string | null; airline: string | null;
     issue_date: string | null; travel_date: string | null; segment_type: string | null;
     booking_class: string | null; sector: string | null; invoice_type: string | null;
+    cabin?: string | null; route?: string | null; route_missing_airports?: string[];
     basic_fare: number | null; yq: number | null; yr: number | null;
   };
   deal: {
@@ -121,9 +123,13 @@ export default function AppliedDealModal({
                   <Field label="Invoice type" value={t.invoice_type} />
                   <Field label="Issue date" value={t.issue_date} />
                   <Field label="Travel date" value={t.travel_date} />
-                  <Field label="Class" value={t.booking_class} />
+                  <Field label="Class" value={t.booking_class ? `${t.booking_class}${t.cabin ? ` → ${t.cabin}` : ""}` : null} />
                   <Field label="Flight type" value={t.segment_type} />
                   <Field label="Sector" value={t.sector} wide />
+                  <Field label="Route (for rules)" wide
+                    value={t.route
+                      ? t.route + (t.route_missing_airports?.length ? ` · ${t.route_missing_airports.join(", ")} not in Airport Master` : "")
+                      : t.sector ? "not a route — route rules cannot be checked" : null} />
                   <Field label="Basic fare" value={inr(t.basic_fare)} />
                   <Field label="YQ / YR" value={`${inr(t.yq)} / ${inr(t.yr)}`} />
                 </Panel>
@@ -182,16 +188,19 @@ export default function AppliedDealModal({
                 {data.rules.map((r) => (
                   <div key={r.kind} className="mt-2 border border-slate-200 rounded-lg px-3 py-2">
                     <p className="text-xs flex items-center gap-1.5">
-                      {r.passed ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" /> : <XCircle className="w-3.5 h-3.5 text-red-500" />}
-                      <span className="font-semibold text-slate-700">{r.kind} rule</span>
+                      {r.undecided ? <MinusCircle className="w-3.5 h-3.5 text-amber-500" />
+                        : r.passed ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" /> : <XCircle className="w-3.5 h-3.5 text-red-500" />}
+                      <span className="font-semibold text-slate-700">{r.name ?? `${r.kind} rule`}</span>
                       <span className="text-slate-500">— {r.reason}</span>
                     </p>
                     <ul className="mt-1 ml-5 space-y-0.5">
                       {r.steps.map((s, i) => (
                         <li key={i} className="text-[11px] text-slate-500">
-                          {s.field}: rule <span className="font-medium text-slate-600">{s.rule_value}</span>, ticket{" "}
+                          {s.label ?? s.field}: rule <span className="font-medium text-slate-600">{s.rule_value}</span>, ticket{" "}
                           <span className="font-medium text-slate-600">{s.ticket_value}</span>{" "}
-                          <span className={s.matched ? "text-amber-700" : "text-slate-400"}>{s.matched ? "(matches)" : "(no match)"}</span>
+                          <span className={s.matched === null ? "text-amber-600" : s.matched ? "text-amber-700" : "text-slate-400"}>
+                            {s.matched === null ? "(not known)" : s.matched ? "(matches)" : "(no match)"}
+                          </span>
                         </li>
                       ))}
                     </ul>

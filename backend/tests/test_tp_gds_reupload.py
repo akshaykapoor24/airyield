@@ -40,6 +40,7 @@ LEFT_OUT_MIGRATION = VERSIONS / "tp_gds_left_out_01_left_out_lines.py"
 STD_MIGRATION = VERSIONS / "tp_gds_std_01_tax_parts.py"
 STD_02_MIGRATION = VERSIONS / "tp_gds_std_02_ssr_gst_parts.py"
 STD_03_MIGRATION = VERSIONS / "tp_gds_std_03_refund.py"
+STD_04_MIGRATION = VERSIONS / "tp_gds_std_04_tour_code.py"
 
 USER = SimpleNamespace(id=7, tenant_id=3, full_name="Test User")
 AGENCY = SimpleNamespace(id=751, agency_id=28)          # Globe Air Travels, SUPP-0751
@@ -759,10 +760,11 @@ class LeftOutMigrationTests(unittest.TestCase):
     def test_creates_every_model_column(self):
         frozen = {name for name, _key, _type in self.mig._COLUMNS}
         # Added to both line tables later: YR, K3 and a derived Total Tax; then the SSR and GST
-        # parts, ADM, Discount, UATP Amount and Card Type; then Refund.
+        # parts, ADM, Discount, UATP Amount and Card Type; then Refund; then Tour Code.
         added = {name for name, _key, _type in _load(STD_MIGRATION, "tp_gds_std_01")._COLUMNS}
         added |= {name for name, _key, _type in _load(STD_02_MIGRATION, "tp_gds_std_02")._COLUMNS}
         added |= {name for name, _key, _type in _load(STD_03_MIGRATION, "tp_gds_std_03")._COLUMNS}
+        added |= {name for name, _key, _type in _load(STD_04_MIGRATION, "tp_gds_std_04")._COLUMNS}
         self.assertEqual(frozen | added, {f.attr for f in ThirdPartyGdsLeftOut.data_fields()})
         own = set(ThirdPartyGdsLeftOut.__table__.c.keys()) - frozen - added
         for col in own:

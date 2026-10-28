@@ -12,7 +12,7 @@ import {
   INCENTIVE_TYPES, INCLUSIONS_EXCLUSIONS,
   CONTINENTS, COUNTRY_GROUPS,
   SelectField, SearchSelectField, MultiSearchSelectField, DateField, TabBar, SectionCard,
-  IncentiveTabContent, InclExclTabContent, incentiveEntryToForm,
+  IncentiveTabContent, InclExclTabContent, incentiveEntryToForm, ruleDateDefaults,
 } from "@/components/deals/IncentiveInclExclShared";
 import OutgoingScopeFields, { type ScopeSelection } from "@/components/deals/OutgoingScopeFields";
 import {
@@ -1299,6 +1299,9 @@ export default function NewDealPage() {
                           // narrowed by this incentive's selected Class.
                           airlineName={isB2bStandard ? airlineName : undefined}
                           incentiveClass={incentiveData[activeIncentiveTab]?.class}
+                          // Date Exclusion → Valid From / To from this incentive's contract
+                          // (Ticket Date) or travel (Travel Date) validity.
+                          dateDefaults={ruleDateDefaults(incentiveData[activeIncentiveTab], { from: validFrom, to: validTo })}
                         />
                       );
                     })()}
