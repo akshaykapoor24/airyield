@@ -35,13 +35,18 @@ def _step(s, group: str) -> dict:
 
 def _rule(diag, kind: str) -> dict | None:
     """An inclusion / exclusion trace. `is_excluded` True means the rule blocks the payout,
-    for both kinds (services/exclusion_evaluator)."""
+    for both kinds (services/exclusion_evaluator); `undecided` that it could not be judged.
+    A step's `matched` stays None when the ticket did not carry what it needed — "not
+    known" is not "no match", and the popup says which."""
     if diag is None or not diag.steps:
         return None
     return {
-        "kind": kind, "passed": not diag.is_excluded, "reason": diag.reason,
-        "steps": [{"field": s.field, "rule_value": s.rule_value, "ticket_value": s.ticket_value,
-                   "matched": bool(s.matched)} for s in diag.steps],
+        "kind": kind, "name": getattr(diag, "rule_name", None) or kind,
+        "passed": not diag.is_excluded,
+        "undecided": bool(getattr(diag, "undecided", False)), "reason": diag.reason,
+        "steps": [{"field": s.field, "label": getattr(s, "label", None) or s.field,
+                   "rule_value": s.rule_value, "ticket_value": s.ticket_value,
+                   "matched": s.matched} for s in diag.steps],
     }
 
 
@@ -66,10 +71,12 @@ def _incentive(p, stored: dict) -> dict:
     }
 
 
-def build(calc, deal, diag, statement: float | None) -> dict:
+def build(calc, deal, diag, statement: float | None, read_as: dict | None = None) -> dict:
     """The popup's payload. `diag` is this deal's DealDiagnostic, or None when the engine
     could not trace it (no airline / issue date, or the deal is no longer approved);
-    `statement` is the vendor's commission on the line (statement_lines), None if unknown."""
+    `statement` is the vendor's commission on the line (statement_lines), None if unknown;
+    `read_as` how the engine read the class and sector (api/v1/commission._read_as)."""
+    read_as = read_as or {}
     reversed_ = calc.status == "reversed"
     incentive = _f(calc.incentive) or 0.0
     iata_amount = _f(calc.iata_commission) or 0.0
@@ -120,7 +127,10 @@ def build(calc, deal, diag, statement: float | None) -> dict:
             "passenger_name": calc.passenger_name, "airline": calc.airline_name,
             "issue_date": calc.issue_date, "travel_date": calc.travel_date,
             "segment_type": calc.segment_type, "booking_class": calc.booking_class,
-            "sector": calc.sector, "invoice_type": calc.transaction_type,
+            "cabin": read_as.get("cabin"),
+            "sector": calc.sector, "route": read_as.get("route"),
+            "route_missing_airports": read_as.get("route_missing_airports") or [],
+            "invoice_type": calc.transaction_type,
             "basic_fare": _f(calc.fare_amount), "yq": _f(calc.yq), "yr": _f(calc.yr),
         },
         "deal": None if deal is None else {

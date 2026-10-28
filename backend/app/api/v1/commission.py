@@ -43,7 +43,8 @@ from app.schemas.commission import (
 )
 from app.services import commission_core as core
 from app.services import statement_spec as spec
-from app.services.deal_matching import segment_letter
+from app.services.deal_matching import describe_cabin, segment_letter
+from app.services.route_resolution import resolve_route
 from app.services.commission import CommissionRunner, get_adapter
 from app.services.commission import statement_lines as sl
 
@@ -463,6 +464,13 @@ async def list_lines(
     cols = sl.columns(source, lines)
     keep = [c["field"] for c in cols]
     page = shown[offset:offset + limit]
+    # The cabin each line's class codes resolve to, through the Airline Class Master — the
+    # page only, and memoised per airline, so this is a handful of lookups.
+    cabin = {ln.line_id: await describe_cabin(
+                 db, ln.airline,
+                 (ln.calc.booking_class if ln.calc is not None else None)
+                 or ln.values.get("booking_class"))
+             for ln in page}
     return CommissionLinesPage(
         columns=[CommissionLineColumn(**c) for c in cols],
         rows=[CommissionLine(
@@ -471,6 +479,7 @@ async def list_lines(
             difference=ln.difference, net_ok=ln.net_ok,
             iata_pct=iata_pct.get(ln.calc.matched_deal_id) if ln.calc is not None else None,
             iata_commission=_f(ln.calc.iata_commission) if ln.calc is not None else None,
+            cabin=cabin.get(ln.line_id),
             calc=_row_read(ln.calc) if ln.calc is not None else None,
         ) for ln in page],
         total=len(shown), offset=offset, limit=limit,
@@ -638,6 +647,19 @@ async def gaps(
     ]
 
 
+async def _read_as(db: AsyncSession, airline: str | None, booking_class: str | None,
+                   sector: str | None) -> dict:
+    """How the engine read this line's class and sector — shown beside the raw values, so
+    "S" is seen as Economy (Airline Class Master) and "DEL/ALA/DEL" as DEL → ALA, the
+    origin and destination every route rule was judged on."""
+    route = await resolve_route(db, sector)
+    return {
+        "cabin": await describe_cabin(db, airline, booking_class),
+        "route": route.label if route else None,
+        "route_missing_airports": list(route.missing) if route else [],
+    }
+
+
 async def _diagnose_calc(db: AsyncSession, user: User, adapter, calc: Calc, link) -> list:
     """The engine's step-by-step trace of every deal for this calculation's airline, rebuilt
     from the calculation's own input snapshot. Needs an airline and an issue date.
@@ -665,6 +687,8 @@ async def _diagnose_calc(db: AsyncSession, user: User, adapter, calc: Calc, link
         ticket_date_raw=calc.issue_date.isoformat(),
         ticket_departure_raw=calc.travel_date.isoformat() if calc.travel_date else None,
         ticket_airline_name=calc.airline_name,
+        tour_code=calc.tour_code,
+        tour_code_known=calc.tour_code_known is not False,
         supplier_agency=getattr(link, "supplier_name", None),
         supplier_agency_id=getattr(link, "supplier_id", None),
         statement_type=adapter.statement_type,
@@ -713,7 +737,8 @@ async def applied_deal(
     if calc.airline_name and calc.issue_date:
         deals = await _diagnose_calc(db, current_user, adapter, calc, link)
         diag = next((d for d in deals if d.deal_id == calc.matched_deal_id), None)
-    return ad.build(calc, deal, diag, statement)
+    read_as = await _read_as(db, calc.airline_name, calc.booking_class, calc.sector)
+    return ad.build(calc, deal, diag, statement, read_as)
 
 
 @router.get("/{source}/rows/{calc_id}/match-diagnosis")
@@ -752,7 +777,7 @@ async def match_diagnosis(
         "fare_amount": _f(calc.fare_amount),
         "sell_tax_yq": _f(calc.yq),
         "sale_yr": _f(calc.yr),
-        "tour_code": None,
+        "tour_code": calc.tour_code,
         "skipped_criteria": skipped,
         "sector": calc.sector,
         "booking_class": calc.booking_class,
@@ -771,6 +796,7 @@ async def match_diagnosis(
         "declared_commission": _f(calc.declared_commission),
         "declared_incentive": _f(calc.declared_incentive),
         "variance_total": _f(calc.variance_total),
+        **(await _read_as(db, calc.airline_name, calc.booking_class, calc.sector)),
     }
 
     if not calc.airline_name:

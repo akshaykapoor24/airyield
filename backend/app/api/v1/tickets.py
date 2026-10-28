@@ -1848,7 +1848,7 @@ async def _run_single(
                 Deal as UnifiedDeal,
                 DealIncentiveConfig,
                 DealRule,
-                build_rule_dict,
+                rule_payload,
             )
             u_res = await db.execute(
                 select(UnifiedDeal)
@@ -1865,7 +1865,7 @@ async def _run_single(
                     if config.incentive_type not in (match.incentive_breakdown or {}):
                         continue
                     for rule in config.rules:
-                        rule_dict = build_rule_dict(rule.conditions)
+                        rule_dict = rule_payload(rule)   # + its vice-versa flag
                         if not rule_dict:
                             continue
                         if rule.rule_category == "payout_inclusion":

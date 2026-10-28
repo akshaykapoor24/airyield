@@ -91,6 +91,10 @@ class CommissionCalculation(Base):
     segment_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
     booking_class: Mapped[str | None] = mapped_column(String(30), nullable=True)
     sector: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Tour-code rules (Tour Code, Corporate / Excursion / Tour fare types). `known` False:
+    # the statement printed no tour code column, so a blank is unknown, not "none".
+    tour_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    tour_code_known: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     fare_amount: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
     yq: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
     yr: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)

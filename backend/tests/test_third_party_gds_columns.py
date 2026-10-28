@@ -35,7 +35,7 @@ MIGRATION = os.path.join(os.path.dirname(__file__), "..", "alembic", "versions",
 # The columns added since, by migrations that ADD to the table rather than build it.
 ADDED_BY = [os.path.join(os.path.dirname(__file__), "..", "alembic", "versions", f)
             for f in ("tp_gds_std_01_tax_parts.py", "tp_gds_std_02_ssr_gst_parts.py",
-                      "tp_gds_std_03_refund.py")]
+                      "tp_gds_std_03_refund.py", "tp_gds_std_04_tour_code.py")]
 
 # The standard columns the user set (2026-10-25), as the mapping screen names them, and the
 # real export's own spelling of the ones it prints differently.

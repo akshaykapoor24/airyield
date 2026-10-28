@@ -35,6 +35,7 @@ from app.services import commission_core as core
 from app.services.bsp_reconciliation import norm_tn
 from app.services.commission.calc_row import KIND_REFUND, KIND_SKIP, CalcRow
 from app.services.deal_matching import DealMatchingService
+from app.services.exclusion_evaluator import load_facts
 
 logger = logging.getLogger(__name__)
 
@@ -168,8 +169,9 @@ class CommissionRunner:
 
         # 4. Deal search. `statement_type` is what confines a third-party row to B2B deals
         #    and an LCC one to airline deals; `supplier_agency_id` is what tells two
-        #    channels of one consolidator apart.
-        match = await DealMatchingService.find_best_deal(
+        #    channels of one consolidator apart. EVERY covering deal, best first — the
+        #    payout rules below decide which of them this ticket can actually be paid on.
+        matches = await DealMatchingService.find_all_deals(
             db=db,
             airline_name=ctx.airline_name,
             travel_date=ctx.travel_date or ctx.issue_date,
@@ -191,17 +193,58 @@ class CommissionRunner:
             skip_criteria=ctx.skip_criteria,
             cumulative_provider=cumulative_provider,
         )
-        if match is None:
+        if not matches:
             reason = ("No matching approved B2B deal found for this consolidator."
                       if ctx.statement_type == "B2B"
                       else "No matching approved airline deal found.")
             return core.RowCalcResult(row_id=rid, status="unmatched", reason=reason)
 
-        breakdown = match.incentive_breakdown or {}
-        total = round(sum(breakdown.values()), 2) if breakdown else match.calculated_incentive
-        # The deal's own % on the settled fare. Its own column, deliberately NOT part of
-        # the incentive total — the two are different entitlements.
-        iata = round(_pct(match.iata_commission) / 100.0 * float(ctx.fare_amount or 0), 2)
+        # 5. Payout rules, deal by deal. An inclusion rule means "only these tickets": a
+        #    ticket outside it is simply not covered by that deal, so the next deal that
+        #    does cover it applies. Picking the best deal FIRST and then excluding the row
+        #    when its rule said no (as this used to) paid nothing on tickets another deal
+        #    covered. The best deal is the one paying most AFTER its rules.
+        facts = await load_facts(
+            db, sector=ctx.sector, booking_class=ctx.booking_class,
+            issue_date=ctx.issue_date, travel_date=ctx.travel_date,
+            airline_name=ctx.airline_name, tour_code=ctx.tour_code,
+            skip_fields=ctx.skip_rule_fields, tour_code_known=ctx.tour_code_known)
+        chosen = None                     # (match, outcome, post-rule total)
+        passed_over: list = []            # (match, outcome) ranked above it, rules said no
+        for m in matches:
+            out = await core.judge_payout_rules(db, m.deal_id, m.incentive_breakdown or {},
+                                                ctx, facts)
+            if not out.kept:
+                if chosen is None:
+                    passed_over.append((m, out))
+                continue
+            total = round(sum(out.kept.values()), 2)
+            if chosen is None or total > chosen[2]:
+                chosen = (m, out, total)
+
+        def iata_of(m) -> float:
+            # The deal's own % on the settled fare. Its own column, deliberately NOT part of
+            # the incentive total — the two are different entitlements.
+            return round(_pct(m.iata_commission) / 100.0 * float(ctx.fare_amount or 0), 2)
+
+        if chosen is None:
+            # Every covering deal's rules leave this ticket out. Report the best of them.
+            m, out = passed_over[0]
+            return core.RowCalcResult(
+                row_id=rid, status="excluded", incentive=0, iata_commission=iata_of(m),
+                deal_id=m.deal_id, deal_type=m.deal_type, deal_name=m.deal_name,
+                reason=out.reason)
+
+        match, out, total = chosen
+        breakdown = out.kept
+        iata = iata_of(match)
+        for note in out.notes:
+            ctx.note(note)
+        for m, skipped in passed_over:
+            ctx.note(f"Deal {m.deal_no} pays more but its rules leave this ticket out "
+                     f"({skipped.reason}) — {match.deal_no} applied instead.")
+        if out.blocked:
+            ctx.note(f"Not paid on {match.deal_no} — {out.reason}.")
 
         # A deal that pays Ancillary cannot be honoured from one combined SSR figure.
         if ctx.ancillary_amount and "Ancillary" in breakdown:
@@ -209,20 +252,13 @@ class CommissionRunner:
                      f"seat), but the statement prints one combined SSR amount of "
                      f"{ctx.ancillary_amount:,.2f} — the split is unknown, so none was claimed.")
 
-        blocked, _had_inclusion, reason, rule_unconfirmed = await core.apply_payout_rules(
-            db, match.deal_id, breakdown, ctx)
-        if blocked:
-            return core.RowCalcResult(
-                row_id=rid, status="excluded", incentive=0, iata_commission=iata,
-                deal_id=match.deal_id, deal_type=match.deal_type, deal_name=match.deal_name,
-                reason=reason)
-
         # Did we actually check everything this deal pays on? A criterion the document does
-        # not print was SKIPPED by the matcher, not satisfied by it. Where the deal
-        # restricts by such a criterion the figure is a guess, so nothing is claimed and
-        # nothing is shown — a column reading ₹245.40 on a row that pays nothing is read as
-        # money however the status is labelled.
-        unconfirmed = sorted(set(match.unconfirmed_criteria) | rule_unconfirmed)
+        # not print was SKIPPED by the matcher, not satisfied by it — and a rule that needed
+        # something the row does not carry was not judged at all. Where the deal depends on
+        # either, the figure is a guess, so nothing is claimed and nothing is shown — a
+        # column reading ₹245.40 on a row that pays nothing is read as money however the
+        # status is labelled.
+        unconfirmed = sorted(set(match.unconfirmed_criteria) | out.unconfirmed)
         if unconfirmed:
             return core.RowCalcResult(
                 row_id=rid, status="needs_data", incentive=None,
@@ -263,6 +299,7 @@ class CommissionRunner:
             issue_date=ctx.issue_date, travel_date=ctx.travel_date,
             segment_type=ctx.segment_type, booking_class=ctx.booking_class,
             sector=ctx.sector, fare_amount=ctx.fare_amount, yq=ctx.yq, yr=ctx.yr,
+            tour_code=ctx.tour_code, tour_code_known=ctx.tour_code_known,
             ancillary_amount=ctx.ancillary_amount,
             document_number=ctx.document_number, ticket_number=ctx.ticket_number,
             pnr=ctx.pnr, passenger_name=ctx.passenger_name,

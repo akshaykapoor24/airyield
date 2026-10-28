@@ -65,6 +65,16 @@ def split_categorization(value: str | None) -> list[str]:
     return groups
 
 
+def city_of(city_airport_name: str | None) -> str | None:
+    """The city part of CITY_AIRPORT_NAME — the master writes some rows as
+    "Delhi - Indira Gandhi International Airport" and others as "Almaty" or
+    "London Heathrow". The deal form offers this as the City option, and a City
+    rule compares against it, so the two always speak the same name."""
+    if not city_airport_name:
+        return None
+    return city_airport_name.split(" - ", 1)[0].strip() or None
+
+
 def join_categorization(groups) -> str | None:
     """Join base groups back into the slash-joined form stored in the column.
 

@@ -45,14 +45,14 @@ DERIVED_COLUMNS = {
     # with the SSR and GST parts, Refund, ADM, Discount, UATP Amount and Card Type (2026-10-26).
     # SSR Amount and GST On SF are not columns to map, so they are shown here, after their
     # parts. Other is Payment Status and Remarks only.
-    "tp-gds": [(31, "SSR Amount", "ssr_amount"), (46, "GST On SF", "gst_on_sf"),
-               (54, "Format", "__format__")],
+    "tp-gds": [(32, "SSR Amount", "ssr_amount"), (47, "GST On SF", "gst_on_sf"),
+               (55, "Format", "__format__")],
     # One earlier than the spec would put it: "Passenger" is hidden here (see HIDDEN).
     "tp-lcc": [(43, "Format", "__format__")],
     "tp-api": [(93, "Format", "__format__")],
     # Payment Module's MO statement: the tp-gds columns plus Booking ID, so one further on.
-    "mo-gds": [(32, "SSR Amount", "ssr_amount"), (47, "GST On SF", "gst_on_sf"),
-               (55, "Format", "__format__")],
+    "mo-gds": [(33, "SSR Amount", "ssr_amount"), (48, "GST On SF", "gst_on_sf"),
+               (56, "Format", "__format__")],
 }
 
 # Record keys that describe the row rather than fill a column.

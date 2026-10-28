@@ -182,6 +182,9 @@ class CommissionLine(BaseModel):
     # this line's basic fare — part of `expected_commission`. None: no deal, or it has none.
     iata_pct: Optional[str] = None
     iata_commission: Optional[float] = None
+    # The cabin the line's class codes resolve to via the Airline Class Master ("Economy"),
+    # shown beside the code. None when the line has no class.
+    cabin: Optional[str] = None
     calc: Optional[CommissionRowRead] = None
 
 

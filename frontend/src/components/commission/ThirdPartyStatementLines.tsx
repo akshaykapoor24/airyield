@@ -309,7 +309,9 @@ export default function ThirdPartyStatementLines({
                 const busy = busyRows.has(ln.line_id);
                 const isSel = selected.has(ln.line_id);
                 const bg = isSel ? "bg-blue-50" : "bg-white group-hover:bg-slate-50";
-                const pinBg = isSel ? "bg-blue-50" : "bg-amber-50/60 group-hover:bg-amber-50";
+                // Opaque: the statement's columns scroll UNDER the pinned check, and any
+                // transparency lets their text show through it.
+                const pinBg = isSel ? "bg-blue-50" : "bg-amber-50 group-hover:bg-amber-100";
                 return (
                   <tr key={ln.line_id} className={cn("group whitespace-nowrap", !c && "text-slate-400")}>
                     <td className={cn("sticky left-0 z-10 px-3 py-2 border-b border-slate-100", bg)}>
@@ -320,13 +322,17 @@ export default function ThirdPartyStatementLines({
                     {cols.map((col) => {
                       const v = ln.values[col.field];
                       const money = col.kind === "money";
+                      // Class: the vendor's code with the cabin the Airline Class Master reads it as.
+                      const cabin = col.field === "booking_class" ? ln.cabin : null;
                       return (
                         <td key={col.field}
                           className={cn("px-3 py-2 text-xs border-b border-slate-100 max-w-[220px] truncate", bg,
                             money ? "text-right tabular-nums" : "text-left",
                             c ? "text-slate-700" : "text-slate-400")}
-                          title={!money && v != null ? String(v) : undefined}>
+                          title={cabin ? `${v ?? "—"} → ${cabin} (Airline Class Master)`
+                            : !money && v != null ? String(v) : undefined}>
                           {cellValue(v, money)}
+                          {cabin && <span className="ml-1 text-[10px] text-slate-400">· {cabin}</span>}
                         </td>
                       );
                     })}

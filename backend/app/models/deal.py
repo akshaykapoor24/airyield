@@ -527,3 +527,16 @@ def build_rule_dict(conditions: list[DealRuleCondition]) -> dict:
         elif cond.operator in (RuleOperatorEnum.EQUALS, RuleOperatorEnum.STARTS_WITH):
             result[cond.condition_field] = cond.value_text
     return result
+
+
+def rule_payload(rule: DealRule) -> dict:
+    """build_rule_dict plus the rule's own "route is vice versa" flag.
+
+    The flag arrives two ways — the Create Deal form stores it on `deal_rules.vice_versa`,
+    the repository's Incentive & Rules editor as a `viceVersa` condition — and the evaluator
+    must honour either. Empty when the rule has no conditions: a bare flag constrains nothing.
+    """
+    result = build_rule_dict(rule.conditions)
+    if result and rule.vice_versa:
+        result["viceVersa"] = "true"
+    return result

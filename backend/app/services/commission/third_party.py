@@ -281,7 +281,8 @@ def build_calc_row(row, supplier_name: str | None, supplier_id: int | None,
     if mo is not None:
         for key, label, value in (("booking_class", "class", mo.booking_class),
                                   ("sector", "sector", mo.sector),
-                                  ("segment_type", "airline category", mo.segment_type)):
+                                  ("segment_type", "airline category", mo.segment_type),
+                                  ("tour_code", "tour code", mo.tour_code)):
             if not _s(data, key) and value:
                 data[key] = value
                 from_mo.append(label)
@@ -434,9 +435,29 @@ class ThirdPartyAdapter:
         index = None
         if self.source == "tp-gds" and supplier_id is not None:
             index = await load_mo_index(db, tenant_id, user_id, supplier_id)
-        return [build_calc_row(r, name, supplier_id,
+        ctxs = [build_calc_row(r, name, supplier_id,
                                mo=index.lookup(r.data or {}) if index else None)
                 for r in rows]
+        # Whether this upload carries tour codes at all. A file that maps the Tour Code
+        # column prints a blank on a ticket with none; a file that does not, prints nothing
+        # anywhere — and then a blank is "unknown", so a tour-code rule withholds instead
+        # of failing. A run over selected rows decides from the whole upload, not the pick.
+        known = (any(c.tour_code for c in ctxs)
+                 or await self._batch_has_tour_code(db, tenant_id, user_id, batch_id))
+        for c in ctxs:
+            c.tour_code_known = known
+        return ctxs
+
+    async def _batch_has_tour_code(self, db: AsyncSession, tenant_id: int, user_id: int,
+                                   batch_id: str) -> bool:
+        m = self.model
+        if not hasattr(m, "tour_code"):
+            return False
+        return (await db.execute(
+            select(m.id).where(m.batch_id == batch_id, m.tenant_id == tenant_id,
+                               m.created_by_id == user_id, m.tour_code.is_not(None),
+                               m.tour_code != "").limit(1)
+        )).first() is not None
 
     async def cumulative_provider(self, db: AsyncSession, tenant_id: int, user_id: int):
         """None → the engine's default (a scan of uploaded tickets).

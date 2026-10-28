@@ -12,6 +12,16 @@ type Plb = {
   incentive_breakdown: Record<string, unknown> | null;
   plb_overall_match: boolean;
 };
+// An inclusion / exclusion trace (services/exclusion_evaluator). is_excluded: the rule
+// stops the payout; undecided: it could not be judged. A step's matched is null when the
+// ticket does not carry what that condition needs.
+type RuleDiag = {
+  rule_name: string;
+  is_excluded: boolean;
+  undecided?: boolean;
+  reason: string;
+  steps: { field: string; label?: string | null; rule_value: string; ticket_value: string; matched: boolean | null }[];
+};
 type DealDiag = {
   deal_id: number;
   deal_no: string;
@@ -23,6 +33,8 @@ type DealDiag = {
   plbs: Plb[];
   overall_match: boolean;
   best_incentive: number | null;
+  inclusion_diagnostic?: RuleDiag | null;
+  exclusion_diagnostic?: RuleDiag | null;
 };
 type Diagnosis = {
   row_id: number;
@@ -41,6 +53,11 @@ type Diagnosis = {
   // From the TGQ HMPR counterpart, when one was found.
   sector: string | null;
   booking_class: string | null;
+  // How the engine read them: the cabin via the Airline Class Master, and the origin →
+  // destination every route rule was judged on (services/route_resolution).
+  cabin?: string | null;
+  route?: string | null;
+  route_missing_airports?: string[];
   travel_date: string | null;
   travel_date_source: string | null;
   leg_count: number | null;
@@ -127,7 +144,15 @@ export default function CommissionDiagnosisModal({
                   <Field label="YR" value={inr(data.sale_yr)} />
                   {data.tour_code && <Field label="Tour code" value={data.tour_code} />}
                   {data.sector && <Field label="Sector" value={data.sector} />}
-                  {data.booking_class && <Field label="Class" value={data.booking_class} />}
+                  {data.sector && (
+                    <Field label="Route (for rules)"
+                      value={data.route
+                        ? data.route + (data.route_missing_airports?.length ? ` · ${data.route_missing_airports.join(", ")} not in Airport Master` : "")
+                        : "not a route"} />
+                  )}
+                  {data.booking_class && (
+                    <Field label="Class" value={`${data.booking_class}${data.cabin ? ` → ${data.cabin}` : ""}`} />
+                  )}
                   {data.travel_date && (
                     <Field
                       label="Travel date"
@@ -199,6 +224,8 @@ export default function CommissionDiagnosisModal({
                             ) : null}
                           </div>
                         ))}
+                        {[d.inclusion_diagnostic, d.exclusion_diagnostic].map((r) =>
+                          r && r.steps.length > 0 ? <RuleBlock key={r.rule_name} rule={r} /> : null)}
                       </div>
                     )}
                   </div>
@@ -217,6 +244,31 @@ function Field({ label, value }: { label: string; value: string | null | undefin
     <div>
       <p className="text-[10px] uppercase tracking-wide text-slate-400">{label}</p>
       <p className="text-slate-700 font-medium">{value || "—"}</p>
+    </div>
+  );
+}
+
+function RuleBlock({ rule }: { rule: RuleDiag }) {
+  return (
+    <div className="pl-2 border-l-2 border-amber-200">
+      <p className="text-[11px] font-semibold text-slate-600 mb-1 flex items-center gap-1.5">
+        {rule.undecided ? <MinusCircle className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+          : rule.is_excluded ? <XCircle className="w-3.5 h-3.5 text-red-500 shrink-0" />
+          : <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />}
+        {rule.rule_name}
+        <span className="font-normal text-slate-500">— {rule.reason}</span>
+      </p>
+      {rule.steps.map((s, i) => (
+        <div key={i} className="flex items-start gap-2 text-[11px] py-0.5 pl-5">
+          <span className="font-medium text-slate-600 w-36 shrink-0">{s.label ?? s.field}</span>
+          <span className="text-slate-500">
+            rule {s.rule_value} · ticket {s.ticket_value}{" "}
+            <span className={s.matched === null ? "text-amber-600" : s.matched ? "text-slate-700 font-medium" : "text-slate-400"}>
+              {s.matched === null ? "(not known)" : s.matched ? "(matches)" : "(no match)"}
+            </span>
+          </span>
+        </div>
+      ))}
     </div>
   );
 }
