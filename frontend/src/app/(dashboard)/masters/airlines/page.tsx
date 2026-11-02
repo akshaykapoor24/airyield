@@ -20,6 +20,13 @@ type Airline = {
   logo_url: string | null;
   is_active: boolean;
   contract_year: "CY" | "FY" | null;
+  /** GDS / LCC, read from the Classes & RBD master by airline name — not editable here. */
+  airline_type?: string | null;
+};
+
+const AIRLINE_TYPE_STYLE: Record<string, string> = {
+  GDS: "bg-sky-50 text-sky-700 border-sky-200",
+  LCC: "bg-orange-50 text-orange-700 border-orange-200",
 };
 
 type BulkResult = { total: number; success: number; failed: number; errors: string[] };
@@ -826,24 +833,31 @@ export default function AirlinesPage() {
           <table className="w-full">
             <thead>
               <tr style={{ background: "#1e4d8c" }}>
-                {["AIRLINE", "CODE", "IATA_NUMERIC_CODE", "CONTRACT YEAR", "STATUS", ...(isPlatformAdmin ? ["ACTIONS"] : [])].map(h => (
+                {["AIRLINE", "CODE", "AIRLINE TYPE", "IATA_NUMERIC_CODE", "CONTRACT YEAR", "STATUS", ...(isPlatformAdmin ? ["ACTIONS"] : [])].map(h => (
                   <th key={h} className="px-3 py-2.5 text-left text-[10px] font-semibold text-white uppercase tracking-wider whitespace-nowrap">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={isPlatformAdmin ? 6 : 5} className="px-4 py-12 text-center text-xs text-gray-400">
+                <tr><td colSpan={isPlatformAdmin ? 7 : 6} className="px-4 py-12 text-center text-xs text-gray-400">
                   <RefreshCw className="w-4 h-4 animate-spin mx-auto mb-2 text-gray-300" /> Loading airlines...
                 </td></tr>
               ) : airlines.length === 0 ? (
-                <tr><td colSpan={isPlatformAdmin ? 6 : 5} className="px-4 py-12 text-center text-xs text-gray-400">No airlines found.</td></tr>
+                <tr><td colSpan={isPlatformAdmin ? 7 : 6} className="px-4 py-12 text-center text-xs text-gray-400">No airlines found.</td></tr>
               ) : airlines.map((a, idx) => (
                 <tr key={a.id}
                   className={`border-b border-gray-50 hover:bg-sky-50/30 transition-colors group ${idx % 2 === 0 ? "bg-white" : "bg-gray-50/30"}`}>
                   <td className="px-3 py-2 text-[11px] text-gray-800">{a.name}</td>
                   <td className="px-3 py-2">
                     <span className="font-mono text-[11px] font-bold text-sky-600 bg-sky-50 px-2 py-0.5 rounded">{a.iata_code}</span>
+                  </td>
+                  <td className="px-3 py-2">
+                    {a.airline_type
+                      ? <span className={`font-mono text-[11px] font-semibold px-2 py-0.5 rounded border ${
+                          AIRLINE_TYPE_STYLE[a.airline_type] ?? "bg-amber-50 text-amber-700 border-amber-200"
+                        }`}>{a.airline_type}</span>
+                      : <span className="text-[11px] text-gray-300" title="No class with an airline type for this airline name in the Classes & RBD master">—</span>}
                   </td>
                   <td className="px-3 py-2 text-[11px] font-mono text-gray-600">{a.icao_code ?? "—"}</td>
                   <td className="px-3 py-2">

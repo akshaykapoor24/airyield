@@ -507,14 +507,13 @@ export default function CommissionStatementDetail({
       {tab === "results" && lineView && (
         <ThirdPartyStatementLines
           source={source}
-          batchId={stmt.batch_id}
+          url={`${source.apiBase}/statements/${stmt.batch_id}/lines`}
           refreshKey={refreshKey}
           selected={selected}
           onToggle={toggleRow}
           onToggleMany={toggleMany}
           busyRows={busyRows}
           onRun={runRows}
-          onDiagnose={setDiagnoseRow}
         />
       )}
 

@@ -14,7 +14,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Calendar, CheckCircle, FileText, Lock, Sparkles, Tag, Users } from "lucide-react";
+import { Calendar, CheckCircle, ChevronDown, FileText, Layers, Lock, Sparkles, Tag, Users } from "lucide-react";
 import api from "@/lib/api";
 import { agencyLabel, type AgencyRow } from "@/lib/counterparty";
 import { corporateLabel, customerLabel, partyName, type Party } from "@/lib/party";
@@ -23,6 +23,7 @@ import {
   CUSTOMER_TYPES, CUSTOMER_TYPE_MASTER, isTagComplete,
   type CustomerTag, type CustomerType,
 } from "@/lib/customerType";
+import { STATEMENT_CATEGORIES, STATEMENT_CATEGORY_SHORT, type StatementCategory } from "@/lib/ticketFields";
 
 /** A note under a field saying what the attached file said about it — Internal Statement
  *  reads the customer and the period off the file (backend /internal-tickets/upload/guess).
@@ -33,12 +34,18 @@ export type FieldHint = {
   candidates?: { customer_type: CustomerType; id: number; name: string }[];
 };
 
+/** The B2B agency choice for a file holding every vendor's tickets (Internal Statement). */
+export const ALL_VENDORS_LABEL = "All vendors — multi-vendor file";
+export const ALL_VENDORS_NAME = "All vendors";
+
 export default function CustomerPartyPanel({
   tag, setTag,
   statementName, setStatementName,
   validFrom, setValidFrom,
   validTo, setValidTo,
   touched, lockedReason, partyHint, periodHint, nameHint,
+  allowAllVendors = false, multiVendor = false, setMultiVendor,
+  askPeriod = true, category, setCategory,
 }: {
   tag: CustomerTag; setTag: (t: CustomerTag) => void;
   statementName: string; setStatementName: (v: string) => void;
@@ -52,6 +59,17 @@ export default function CustomerPartyPanel({
   periodHint?: FieldHint | null;
   /** Replaces the statement-name help line, e.g. "Filled in from the customer and period". */
   nameHint?: string | null;
+  /** Internal Statement: B2B offers "All vendors — multi-vendor file" above the agencies —
+   *  a file of every vendor's tickets, each row's vendor found from its Supplier Name. */
+  allowAllVendors?: boolean;
+  multiVendor?: boolean;
+  setMultiVendor?: (v: boolean) => void;
+  /** Off on Internal Statement: no Valid From / To — the statement is filed under the first
+   *  and last Booking Date of its tickets (backend tickets.py _booking_period). */
+  askPeriod?: boolean;
+  /** Internal Statement's Statement Type — Booking / MO or Accounting. Shown when given. */
+  category?: StatementCategory;
+  setCategory?: (c: StatementCategory) => void;
 }) {
   const [agencies,   setAgencies]   = useState<AgencyRow[]>([]);
   const [corporates, setCorporates] = useState<Party[]>([]);
@@ -78,7 +96,9 @@ export default function CustomerPartyPanel({
   }, []);
 
   const locked = !!lockedReason;
-  const complete = isTagComplete(tag) && validFrom !== "" && validTo !== "" && validTo >= validFrom;
+  const allVendors = allowAllVendors && multiVendor && tag.customerType === "agency";
+  const complete = (allVendors || isTagComplete(tag))
+    && (!askPeriod || (validFrom !== "" && validTo !== "" && validTo >= validFrom));
   const fieldCls = (val: string) =>
     `w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 ${
       touched && !val.trim() ? "border-red-300 bg-red-50" : "border-gray-200 bg-white"
@@ -88,13 +108,16 @@ export default function CustomerPartyPanel({
   // Agencies MUST be labelled name — branch · channel: one vendor is onboarded
   // once per branch AND once per channel, so a bare name shows duplicate options.
   const partyOptions =
-    tag.customerType === "agency"    ? agencies.map(agencyLabel)
+    tag.customerType === "agency"    ? [...(allowAllVendors ? [ALL_VENDORS_LABEL] : []), ...agencies.map(agencyLabel)]
   : tag.customerType === "corporate" ? corporates.map(corporateLabel)
   : tag.customerType === "direct"    ? customers.map(customerLabel)
   : [];
 
   const pickParty = (label: string) => {
-    if (tag.customerType === "agency") {
+    if (allowAllVendors) setMultiVendor?.(tag.customerType === "agency" && label === ALL_VENDORS_LABEL);
+    if (tag.customerType === "agency" && label === ALL_VENDORS_LABEL) {
+      setTag({ ...tag, agencyId: null, partyName: ALL_VENDORS_NAME });
+    } else if (tag.customerType === "agency") {
       const a = agencies.find(x => agencyLabel(x) === label);
       setTag({ ...tag, agencyId: a?.id ?? null, partyName: a?.name ?? label });
     } else if (tag.customerType === "corporate") {
@@ -107,6 +130,7 @@ export default function CustomerPartyPanel({
   };
 
   const pickCandidate = (type: CustomerType, id: number) => {
+    setMultiVendor?.(false);
     if (type === "agency") {
       const a = agencies.find(x => x.id === id);
       if (a) setTag({ customerType: "agency", agencyId: a.id, corporateId: null, customerId: null, partyName: a.name });
@@ -127,7 +151,8 @@ export default function CustomerPartyPanel({
     tag.customerType === type && (type === "agency" ? tag.agencyId === id : tag.corporateId === id);
 
   const currentLabel =
-    tag.customerType === "agency"
+    allVendors ? ALL_VENDORS_LABEL
+  : tag.customerType === "agency"
       ? (agencies.find(a => a.id === tag.agencyId) ? agencyLabel(agencies.find(a => a.id === tag.agencyId)!) : "")
   : tag.customerType === "corporate"
       ? (corporates.find(c => c.id === tag.corporateId) ? corporateLabel(corporates.find(c => c.id === tag.corporateId)!) : "")
@@ -135,8 +160,11 @@ export default function CustomerPartyPanel({
       ? (customers.find(c => c.id === tag.customerId) ? customerLabel(customers.find(c => c.id === tag.customerId)!) : tag.partyName)
       : "";
 
-  const derivedName = tag.partyName && validFrom
-    ? `${labelFor(tag.customerType)} - ${tag.partyName} - ${validFrom}` : "";
+  // With no period asked, the first booking date ends the name once the rows are read.
+  const derivedName = !tag.partyName ? ""
+    : askPeriod ? (validFrom ? `${labelFor(tag.customerType)} - ${tag.partyName} - ${validFrom}` : "")
+    : [labelFor(tag.customerType), tag.partyName, category ? STATEMENT_CATEGORY_SHORT[category] : ""]
+        .filter(Boolean).join(" - ");
 
   const emptyMaster = loaded && tag.customerType && partyOptions.length === 0;
 
@@ -171,9 +199,10 @@ export default function CustomerPartyPanel({
                 type="button"
                 disabled={locked}
                 // Changing the type invalidates every id under it.
-                onClick={() => setTag({
-                  customerType: t.key, agencyId: null, corporateId: null, customerId: null, partyName: "",
-                })}
+                onClick={() => {
+                  setMultiVendor?.(false);
+                  setTag({ customerType: t.key, agencyId: null, corporateId: null, customerId: null, partyName: "" });
+                }}
                 className={`py-2 px-1 transition-colors border-r border-gray-200 last:border-r-0 disabled:cursor-not-allowed ${
                   tag.customerType === t.key
                     ? "bg-[#1e3a5f] text-white"
@@ -214,6 +243,12 @@ export default function CustomerPartyPanel({
             />
           )
         )}
+        {allVendors && (
+          <p className="-mt-2 px-2.5 py-2 rounded-lg border border-violet-200 bg-violet-50 text-[11px] text-violet-800">
+            One file of every vendor&apos;s tickets. Each row&apos;s vendor is found from its Supplier Name — you
+            confirm them on the preview, once per supplier.
+          </p>
+        )}
         {partyHint && <HintNote hint={partyHint}>
           {partyHint.candidates && partyHint.candidates.length > 0 && (
             <div className="mt-1.5 flex flex-wrap gap-1.5">
@@ -231,6 +266,26 @@ export default function CustomerPartyPanel({
           )}
         </HintNote>}
 
+        {/* Statement Type — which system's report the file is (Internal Statement) */}
+        {setCategory && (
+          <div>
+            <label htmlFor="statement-category" className="block text-xs font-semibold text-gray-600 mb-1.5 uppercase tracking-wide">
+              <Layers className="w-3.5 h-3.5 inline mr-1" />
+              Statement Type <span className="text-red-500">*</span>
+            </label>
+            <div className="relative">
+              <select
+                id="statement-category" value={category ?? "booking"} disabled={locked}
+                onChange={e => setCategory(e.target.value as StatementCategory)}
+                className="w-full appearance-none border border-gray-200 bg-white rounded-lg pl-3 pr-9 py-2 text-sm text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-400 disabled:opacity-60 cursor-pointer"
+              >
+                {STATEMENT_CATEGORIES.map(c => <option key={c.key} value={c.key}>{c.label}</option>)}
+              </select>
+              <ChevronDown className="w-4 h-4 text-gray-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+            </div>
+          </div>
+        )}
+
         {/* Statement Name */}
         <div>
           <label className="block text-xs font-semibold text-gray-600 mb-1.5 uppercase tracking-wide">
@@ -246,13 +301,14 @@ export default function CustomerPartyPanel({
             {nameHint ? nameHint
               : statementName.trim()
               ? "Used as the statement's name in the repository."
+              : !askPeriod ? "Leave blank to name it from the customer, the statement type and the first booking date."
               : derivedName ? `Leave blank to name it “${derivedName}”.`
               : "Leave blank to name it from the customer and start date."}
           </p>
         </div>
 
         {/* The period on one row — From and To side by side, what is wrong with it below both. */}
-        <div>
+        {askPeriod && <div>
           <div className="grid grid-cols-2 gap-3">
             <div className="min-w-0">
               <label className="block text-xs font-semibold text-gray-600 mb-1.5 uppercase tracking-wide">
@@ -277,7 +333,7 @@ export default function CustomerPartyPanel({
           {touched && !validTo && <p className="text-[11px] text-red-500 mt-1">Valid to date is required</p>}
           {dateError && <p className="text-[11px] text-red-500 mt-1">Valid to must be on or after valid from</p>}
           {periodHint && <HintNote hint={periodHint} />}
-        </div>
+        </div>}
 
         <div className={`flex items-center gap-2 px-3 py-2.5 rounded-lg text-xs font-medium ${
           complete ? "bg-green-50 text-green-700 border border-green-200" : "bg-gray-50 text-gray-400 border border-gray-200"

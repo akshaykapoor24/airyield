@@ -149,11 +149,18 @@ def _vendor_ids(supplier) -> tuple[int | None, int | None]:
     return getattr(supplier, "agency_id", None), getattr(supplier, "id", None)
 
 
-def _same_vendor(row: StatementColumnMapping, agency_id: int | None, supplier_id: int | None) -> bool:
+def _party_key(supplier) -> str | None:
+    """Internal Statement's "who it was for" — "agency:12", "all-vendors" … — or None."""
+    return getattr(supplier, "party_key", None) if supplier is not None else None
+
+
+def _same_vendor(row: StatementColumnMapping, agency_id: int | None, supplier_id: int | None,
+                 party_key: str | None = None) -> bool:
     """By either id, like tp_gds_reupload.vendor_condition: an agency awaiting approval has no
-    supplier id yet, and an agency re-onboarded keeps its supplier's."""
+    supplier id yet, and an agency re-onboarded keeps its supplier's. Or by party key."""
     return ((agency_id is not None and row.agency_id == agency_id)
-            or (supplier_id is not None and row.supplier_id == supplier_id))
+            or (supplier_id is not None and row.supplier_id == supplier_id)
+            or (party_key is not None and row.party_key == party_key))
 
 
 def _owned(user, slug: str):
@@ -164,12 +171,13 @@ def _owned(user, slug: str):
 async def load(db: AsyncSession, user, slug: str, supplier) -> list[Saved]:
     """This user's remembered mappings of this type, newest first."""
     agency_id, supplier_id = _vendor_ids(supplier)
+    party_key = _party_key(supplier)
     M = StatementColumnMapping
     rows = (await db.execute(
         select(M).where(*_owned(user, slug)).order_by(M.updated_at.desc(), M.id.desc()).limit(_LOAD_LIMIT)
     )).scalars().all()
     return [Saved(signature=r.signature, columns=tuple(r.columns or ()), column_map=dict(r.column_map or {}),
-                  same_vendor=_same_vendor(r, agency_id, supplier_id), vendor_name=r.vendor_name,
+                  same_vendor=_same_vendor(r, agency_id, supplier_id, party_key), vendor_name=r.vendor_name,
                   source_file=r.source_file, saved_at=r.updated_at)
             for r in rows]
 
@@ -179,7 +187,7 @@ async def propose_for(db: AsyncSession, user, slug: str, supplier, columns: list
     agency_id, supplier_id = _vendor_ids(supplier)
     saved = await load(db, user, slug, supplier)
     return propose(columns, fields, by_name, saved,
-                   has_vendor=agency_id is not None or supplier_id is not None)
+                   has_vendor=agency_id is not None or supplier_id is not None or _party_key(supplier) is not None)
 
 
 async def remember(db: AsyncSession, user, slug: str, supplier, columns: list[str],
@@ -197,15 +205,16 @@ async def remember(db: AsyncSession, user, slug: str, supplier, columns: list[st
     if not mapping:
         return None
     agency_id, supplier_id = _vendor_ids(supplier)
+    party_key = _party_key(supplier)
     sig = signature(columns)
     M = StatementColumnMapping
     rows = (await db.execute(
         select(M).where(*_owned(user, slug), M.signature == sig).order_by(M.updated_at.desc(), M.id.desc())
     )).scalars().all()
-    if agency_id is None and supplier_id is None:
-        row = next((r for r in rows if r.agency_id is None and r.supplier_id is None), None)
+    if agency_id is None and supplier_id is None and party_key is None:
+        row = next((r for r in rows if r.agency_id is None and r.supplier_id is None and r.party_key is None), None)
     else:
-        row = next((r for r in rows if _same_vendor(r, agency_id, supplier_id)), None)
+        row = next((r for r in rows if _same_vendor(r, agency_id, supplier_id, party_key)), None)
 
     now = datetime.utcnow()
     if row is None:
@@ -214,6 +223,7 @@ async def remember(db: AsyncSession, user, slug: str, supplier, columns: list[st
     # Whole new values, never edited in place: JSONB change tracking sees reassignment only.
     row.agency_id = agency_id if agency_id is not None else row.agency_id
     row.supplier_id = supplier_id if supplier_id is not None else row.supplier_id
+    row.party_key = party_key if party_key is not None else row.party_key
     row.vendor_name = getattr(supplier, "name", None) if supplier is not None else None
     row.columns = list(columns)
     row.column_map = mapping

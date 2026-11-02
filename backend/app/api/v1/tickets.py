@@ -10,11 +10,13 @@ from typing import Optional
 
 from dateutil import parser as dateutil_parser
 from fastapi import APIRouter, Depends, Form, UploadFile, File, HTTPException, status, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 import pandas as pd
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 from sqlalchemy import select, or_, func
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -55,6 +57,7 @@ from pydantic import BaseModel
 from app.models.deal import DealDirection
 from app.api.v1.lcc_detailed import _resolve_bill_party
 from app.services import customer_resolver as cres
+from app.services import saved_mapping
 from app.services import sector_split
 from app.services import ticket_duplicates
 from app.services.deal_matching import CustomerScope, DealMatchingService, SCOPE_SPECIFIC
@@ -62,7 +65,7 @@ from app.services.exclusion_evaluator import evaluate_exclusion_for_payout, eval
 from app.services import flat_statement as _flat
 from app.services.ticket_extraction import (
     TicketExtractionService, TEMPLATE_HEADERS, AIRLINE_TEMPLATE_HEADERS,
-    DATE_FORMAT_FIELDS, derive_ticket_rows,
+    DATE_FORMAT_FIELDS, derive_ticket_rows, _COL_ALIASES as _TICKET_COL_ALIASES,
 )
 
 router = APIRouter()
@@ -85,6 +88,29 @@ DUPLICATE_CHECK = False
 # day-first fallback. Off here — Customer data → Statement reads dates as it always has —
 # and on in Internal Statement's copy (api/v1/internal_tickets.py).
 DATE_FORMATS_REQUIRED = False
+
+# Internal Statement's standard format (api/v1/internal_tickets.py turns these on):
+#   KEEP_RAW_DATA     off there — a ticket keeps its standard columns, not every source cell;
+#                     the columns left unmapped are the ones the user skips, and the file
+#                     itself is kept with the statement.
+#   INTERNAL_STANDARD Net Fare and Sales Channel filled by its rules
+#                     (ticket_extraction.apply_internal_standard).
+#   MULTI_VENDOR      "All vendors — multi-vendor file": a B2B statement with no one agency,
+#                     each row's vendor its own Payable To.
+KEEP_RAW_DATA = True
+INTERNAL_STANDARD = False
+MULTI_VENDOR = False
+# The `agency` an all-vendors statement is filed under — its Customer in the list.
+ALL_VENDORS_NAME = "All vendors"
+
+# Internal Statement's Statement Type — which system's report the file is — and how a derived
+# statement name writes it. Kept on ticket_statements.statement_category; nothing else reads it.
+STATEMENT_CATEGORIES = {"booking": "Booking/MO", "accounting": "Accounting"}
+
+# The statement_column_mappings type an upload's column mapping is remembered under, for the
+# next file with the same columns (services/saved_mapping.py) — as Third Party GDS does. None
+# here; Internal Statement's copy sets it.
+REMEMBER_MAPPING_SLUG: str | None = None
 
 # Mirrors MAX_SEND_ROWS / MAX_SELECTION in the LCC worklist, so the two bulk
 # controls in this product refuse at the same size.
@@ -212,6 +238,19 @@ def _period_or_none(valid_from: Optional[str], valid_to: Optional[str]) -> tuple
     return (start, end) if start <= end else None
 
 
+def _booking_period(rows: list[TicketRow]) -> tuple[date, date] | None:
+    """The first and last Booking Date of a file's tickets — a row's Doc Date where it has
+    none — or None when no row has a readable one. A statement uploaded without a period
+    (Internal Statement asks for none) is filed under this."""
+    days: list[date] = []
+    for r in rows:
+        try:
+            days.append(date.fromisoformat((r.ticket_date or r.doc_date or "")[:10]))
+        except ValueError:
+            continue
+    return (min(days), max(days)) if days else None
+
+
 @router.post("/upload/extract", response_model=TicketExtractionPreview)
 async def extract_ticket_file(
     file: UploadFile = File(...),
@@ -225,6 +264,8 @@ async def extract_ticket_file(
     date_formats: Optional[str] = Form(None),
     valid_from: Optional[str] = Form(None),
     valid_to: Optional[str] = Form(None),
+    # False on a file's first read: columns, samples and the suggested mapping only.
+    include_rows: bool = Form(True),
     current_user: User = Depends(get_current_user),
 ):
     """Step 1 — Upload a spreadsheet, parse it and return a preview for user review.
@@ -268,11 +309,14 @@ async def extract_ticket_file(
             split_legs=SPLIT_MULTI_SECTOR,
             date_formats=formats,
             valid_period=_period_or_none(valid_from, valid_to),
+            include_rows=include_rows,
+            keep_raw=KEEP_RAW_DATA,
+            internal_standard=INTERNAL_STANDARD,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
-    return TicketExtractionPreview(
+    preview = TicketExtractionPreview(
         file_name=result["file_name"],
         total_rows=result["total_rows"],
         rows=[TicketRow(**r) for r in result["rows"]],
@@ -292,6 +336,14 @@ async def extract_ticket_file(
         fuzzy_suggestions=result.get("fuzzy_suggestions", {}),
         date_fix=result.get("date_fix"),
     )
+    if INTERNAL_STANDARD:
+        # A 30,000-line sales report × every ticket field, most of them empty: each row leaves
+        # its empty fields out (the page reads a missing field as blank), which more than
+        # halves what is sent.
+        body = preview.model_dump(mode="json", exclude={"rows"})
+        body["rows"] = [r.model_dump(mode="json", exclude_none=True) for r in preview.rows]
+        return JSONResponse(body)
+    return preview
 
 
 # ── Shared row construction (upload confirm + manual append) ───────────────
@@ -367,6 +419,29 @@ class CustomerParty:
 
 
 _PARTY_LABEL = {"agency": "B2B", "corporate": "Corporate", "direct": "Direct"}
+
+
+def mapping_party(party: "CustomerParty | None", multi_vendor: bool = False):
+    """Who a statement was for, as services/saved_mapping.py keys a remembered column mapping:
+    "agency:12", "corporate:5", "direct:3" (a walk-in: "direct"), "all-vendors" — or no key
+    for an untyped statement, whose mapping is then reused on an exact column layout only."""
+    if multi_vendor:
+        key = "all-vendors"
+    elif party is None or not party.customer_type:
+        key = None
+    elif party.customer_type == "agency":
+        key = f"agency:{party.agency_id}" if party.agency_id is not None else None
+    elif party.customer_type == "corporate":
+        key = f"corporate:{party.corporate_id}" if party.corporate_id is not None else None
+    else:
+        key = f"direct:{party.customer_id}" if party.customer_id is not None else "direct"
+    return SimpleNamespace(agency_id=None, id=None, party_key=key,
+                           name=ALL_VENDORS_NAME if multi_vendor else (party.name if party else None))
+
+
+def mapping_fields() -> set[str]:
+    """Every field a ticket upload can map a column to."""
+    return set(_TICKET_COL_ALIASES)
 
 
 async def _resolve_customer_party(
@@ -503,8 +578,13 @@ async def _build_uploaded_tickets(
     created_by_id:  int,
     now:            datetime,
     party:          "CustomerParty | None" = None,
+    multi_vendor:   bool = False,
 ) -> list[UploadedTicket]:
     """Build UploadedTicket rows from preview rows. Not added to the session.
+
+    `multi_vendor` ("All vendors" — Internal Statement): the statement names no agency, so
+    each row's B2B agency is its own vendor — the Payable To agency it was given on the
+    preview, which is what a one-vendor statement gives every row of it.
 
     Left unset on purpose: ticket_status (server default 'draft'),
     is_billed/billing_id, and the whole matched_deal_* / incentive block — those
@@ -546,7 +626,11 @@ async def _build_uploaded_tickets(
         if matched and (resolved_airline_code or "").strip().isdigit():
             resolved_airline_code = matched.iata_code or resolved_airline_code
 
-        adm_acm_ra, invoice_override = _classify_ticket(row.ticket_number, row.invoice_type)
+        # Not on Internal Statement's standard format: an OTA's sales record lists tickets, and
+        # its ticket numbers are not BSP memo serials — 6901466337 is a sale, not an ADM, and
+        # marking it a Credit Note made it a refund (migration internal_std_05).
+        adm_acm_ra, invoice_override = ((None, None) if INTERNAL_STANDARD
+                                        else _classify_ticket(row.ticket_number, row.invoice_type))
 
         built.append(UploadedTicket(
             batch_id=batch_id,
@@ -618,6 +702,24 @@ async def _build_uploaded_tickets(
             doc_date=row.doc_date,
             reference=row.reference,
             narration=row.narration,
+            # ── Internal Statement standard format ─────────────────────────
+            adt_ref=row.adt_ref,
+            booking_status=row.booking_status,
+            sales_channel=row.sales_channel,
+            supplier_can_charge=row.supplier_can_charge,
+            reschedule_charge=row.reschedule_charge,
+            supplier_name=row.supplier_name,
+            iata_no=row.iata_no,
+            customer_code=row.customer_code,
+            vendor_code=row.vendor_code,
+            booked_by=row.booked_by,
+            iata_comm_amt=row.iata_comm_amt,
+            plb_amount=row.plb_amount,
+            payment_mode=row.payment_mode,
+            segment_count=row.segment_count,
+            cabin_class=row.cabin_class,
+            cancellation_date=row.cancellation_date,
+            net_cancellation_amount=row.net_cancellation_amount,
             # Every source cell, keyed by its original header. A column the
             # mapping had no home for is preserved here rather than dropped, so
             # "import any statement" does not quietly mean "import the parts of
@@ -627,7 +729,8 @@ async def _build_uploaded_tickets(
             # reads the TICKET, never the statement — one file can hold rows sold
             # to different customers, and Create Tickets files them one at a time.
             customer_type=(party.customer_type if party else None),
-            customer_agency_id=(party.agency_id if party else None),
+            customer_agency_id=(payable.get("payable_agency_id") if multi_vendor
+                                else party.agency_id if party else None),
             corporate_id=(party.corporate_id if party else None),
             customer_id=(party.customer_id if party else None),
             # Payable To — the ticket's own, never the statement's (one statement can
@@ -704,22 +807,69 @@ async def confirm_ticket_upload(
     already loaded — services/ticket_duplicates.py — and a file of nothing but duplicates is
     refused (409) with nothing written.
     """
+    result = await save_statement(db, current_user, payload)
+    await db.commit()
+    await _rematch_series_contracts(
+        db, tenant_id=current_user.tenant_id, created_by_id=current_user.id, batch_id=result.batch_id,
+    )
+    return result
+
+
+# Tickets built and added to the session at a time. A lakh-line statement built in one go
+# held every ticket object at once.
+SAVE_CHUNK = 5000
+
+
+async def save_statement(
+    db: AsyncSession,
+    current_user: User,
+    payload: ConfirmTicketUploadPayload,
+    *,
+    progress=None,
+) -> ConfirmTicketUploadResult:
+    """The statement and its tickets, added to `db` — NOT committed; the caller commits.
+
+    What /upload/confirm saves, and what Internal Statement's background upload saves from its
+    staging rows (services/internal_import.py, in the worker): one save, so the two can never
+    disagree on a duplicate, a name or a period. Raises HTTPException for what the user must
+    change, before anything is added.
+
+    `progress(done, total)`, when given, is awaited after each SAVE_CHUNK of tickets is flushed
+    — the worker's progress bar. Without it nothing is flushed until the caller commits, as
+    before.
+    """
     if not payload.rows:
         raise HTTPException(status_code=400, detail="No rows to save.")
     # A punched batch has no sheet: its dates came from date pickers, already ISO.
     uploaded = (payload.file_name or "") != MANUAL_ENTRY_FILE_NAME
     formats = _checked_date_formats(payload.date_formats, required=DATE_FORMATS_REQUIRED and uploaded)
+    category = payload.statement_category or None
+    if category is not None and category not in STATEMENT_CATEGORIES:
+        raise HTTPException(status_code=422, detail="Statement type must be a Booking / MO or an Accounting statement.")
 
     now = datetime.utcnow()
     batch_id = str(uuid.uuid4())
+    # No period sent (Internal Statement does not ask): the days the file's tickets were
+    # booked on — every line of it, duplicates included, as that is what the file covers.
+    if payload.valid_from and payload.valid_to:
+        valid_from, valid_to = payload.valid_from, payload.valid_to
+    else:
+        valid_from, valid_to = _booking_period(payload.rows) or (now.date(), now.date())
 
     # WHO it was sold to. Authorised here, not trusted from the payload: an FK
     # alone would let one user tag a statement to another user's agency.
-    party = await _resolve_customer_party(
-        db, current_user,
-        payload.customer_type, payload.customer_agency_id,
-        payload.corporate_id, payload.customer_id,
-    )
+    if payload.multi_vendor:
+        # "All vendors" (Internal Statement): B2B, no one agency — each row's vendor is its
+        # own Payable To, authorised row by row in _build_uploaded_tickets.
+        if not MULTI_VENDOR:
+            raise HTTPException(status_code=422, detail="An all-vendors statement is uploaded through Internal Statement.")
+        party = CustomerParty("agency", name=ALL_VENDORS_NAME, label="B2B")
+    else:
+        party = await _resolve_customer_party(
+            db, current_user,
+            payload.customer_type, payload.customer_agency_id,
+            payload.corporate_id, payload.customer_id,
+        )
 
     rows, dupes = list(payload.rows), None
     # Create Ticket's hand-punched batches are not a statement: not checked, only keyed below.
@@ -744,7 +894,9 @@ async def confirm_ticket_upload(
         # corporate statement reads "Corporate - Infosys Ltd - …" rather than
         # "B2B - Infosys Ltd - …", which named the wrong thing entirely.
         statement_name=(payload.statement_name or "").strip()
-                       or f"{party.label or payload.statement_type} - {party.name or payload.agency} - {payload.valid_from}",
+                       or f"{party.label or payload.statement_type} - {party.name or payload.agency}"
+                          f"{f' - {STATEMENT_CATEGORIES[category]}' if category else ''} - {valid_from}",
+        statement_category=category,
         agency=party.name or payload.agency,
         # Only an agency-typed statement sets agency_id, so Agency Billing keeps
         # claiming exactly the statements it did before and no others.
@@ -753,8 +905,8 @@ async def confirm_ticket_upload(
         customer_agency_id=party.agency_id,
         corporate_id=party.corporate_id,
         customer_id=party.customer_id,
-        valid_from=payload.valid_from,
-        valid_to=payload.valid_to,
+        valid_from=valid_from,
+        valid_to=valid_to,
         file_name=payload.file_name,
         created_by_id=current_user.id,
         created_at=now,
@@ -767,28 +919,53 @@ async def confirm_ticket_upload(
             "duplicate_of": dupes.duplicate_of} if dupes is not None else {}),
     ))
 
-    built = await _build_uploaded_tickets(
-        rows, db,
-        batch_id=batch_id,
-        file_name=payload.file_name,
-        statement_type=payload.statement_type,
-        tenant_id=current_user.tenant_id,
-        created_by_id=current_user.id,
-        now=now,
-        party=party,
-    )
-    _stamp_keys(built, rows)
-    for ticket in built:
-        db.add(ticket)
+    for n in range(0, len(rows), SAVE_CHUNK):
+        part = rows[n:n + SAVE_CHUNK]
+        built = await _build_uploaded_tickets(
+            part, db,
+            batch_id=batch_id,
+            file_name=payload.file_name,
+            statement_type=payload.statement_type,
+            tenant_id=current_user.tenant_id,
+            created_by_id=current_user.id,
+            now=now,
+            party=party,
+            multi_vendor=payload.multi_vendor,
+        )
+        _stamp_keys(built, part)
+        for ticket in built:
+            db.add(ticket)
+        if progress is not None:
+            # Flushed tickets are let go by the session once nothing here holds them.
+            await db.flush()
+            await progress(n + len(part), len(rows))
+    await _remember_mapping(db, current_user, payload, mapping_party(party, payload.multi_vendor), batch_id)
 
-    await db.commit()
-    await _rematch_series_contracts(
-        db, tenant_id=current_user.tenant_id, created_by_id=current_user.id, batch_id=batch_id,
-    )
     return ConfirmTicketUploadResult(
         batch_id=batch_id, created_count=len(rows),
         duplicates=dupes.summary() if dupes is not None else None,
     )
+
+
+async def _remember_mapping(db: AsyncSession, user: User, payload: ConfirmTicketUploadPayload,
+                            who, batch_id: str) -> None:
+    """Keep the column mapping this statement is saved with, so the next file with the same
+    columns — for the same customer first — opens already mapped (services/saved_mapping.py,
+    as Third Party GDS does). Only where REMEMBER_MAPPING_SLUG is set (Internal Statement),
+    and only for an uploaded file that says which columns it had and how they were mapped.
+
+    In a SAVEPOINT: remembering is a convenience, and a failure in it must cost the user the
+    convenience, never the statement they are saving."""
+    if not REMEMBER_MAPPING_SLUG or not payload.columns or not payload.column_map:
+        return
+    try:
+        async with db.begin_nested():
+            await saved_mapping.remember(
+                db, user, REMEMBER_MAPPING_SLUG, who, payload.columns, payload.column_map, mapping_fields(),
+                source_file=payload.file_name, batch_id=batch_id)
+    except SQLAlchemyError:
+        logging.getLogger(__name__).exception(
+            "Could not remember the column mapping of ticket upload %s", batch_id)
 
 
 def _stamp_keys(built: list[UploadedTicket], rows: list[TicketRow]) -> None:
@@ -1065,6 +1242,7 @@ async def list_ticket_statements(
             corporate_id=stmt.corporate_id,
             customer_id=stmt.customer_id,
             statement_name=stmt.statement_name,
+            statement_category=stmt.statement_category,
             agency=stmt.agency,
             valid_from=stmt.valid_from,
             valid_to=stmt.valid_to,
@@ -1185,6 +1363,7 @@ async def get_ticket_statement(
         corporate_id=stmt.corporate_id,
         customer_id=stmt.customer_id,
         statement_name=stmt.statement_name,
+        statement_category=stmt.statement_category,
         agency=stmt.agency,
         valid_from=stmt.valid_from,
         valid_to=stmt.valid_to,
@@ -1205,7 +1384,7 @@ async def get_ticket_statement(
 INCENTIVE_TYPE_KEYS = [
     "PLB", "Super PLB", "Transaction Fee", "Deposit Incentive (DI)",
     "Marketing Fund", "Ancillary", "Frontend", "Backend", "Cashback",
-    "Segment Incentive", "Push Action",
+    "Segment Incentive", "Push Action", "NDC",
 ]
 
 

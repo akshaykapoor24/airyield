@@ -18,9 +18,10 @@ const INCENTIVE_TYPE_COLS = [
   { key: "Cashback",               label: "Cashback"            },
   { key: "Segment Incentive",      label: "Segment Incentive"   },
   { key: "Push Action",            label: "Push Action"         },
+  { key: "NDC",                    label: "NDC"                 },
 ] as const;
 
-const BAR_COLORS = ["#3b82f6", "#8b5cf6", "#f59e0b", "#10b981", "#ef4444", "#06b6d4", "#ec4899", "#6366f1", "#84cc16", "#f97316", "#14b8a6"];
+const BAR_COLORS = ["#3b82f6", "#8b5cf6", "#f59e0b", "#10b981", "#ef4444", "#06b6d4", "#ec4899", "#6366f1", "#84cc16", "#f97316", "#14b8a6", "#a855f7"];
 
 type SupplierStatement = {
   batch_id:       string;

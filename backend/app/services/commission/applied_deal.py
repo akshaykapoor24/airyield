@@ -63,6 +63,11 @@ def _incentive(p, stored: dict) -> dict:
         "rate": bd.get("incentiveAmtPct"),
         "rate_kind": bd.get("incentive_num_pct") or "Percentage",
         "formula": bd.get("formula"),
+        # The rate as agreed, and the GST the vendor takes out of it (deal_matching
+        # .net_of_gst) — None on an outgoing deal, which is paid as its rate says.
+        "gross": bd.get("gross"),
+        "gst": ({"mode": bd.get("gst_mode"), "label": bd.get("gst_label"),
+                 "amount": bd.get("gst_amount")} if bd.get("gst_mode") else None),
         "amount": bd.get("result"),
         "stored": _f(stored.get(p.plb_key)) if p.plb_key in stored else None,
         "slab": ({"period": bd.get("slab_period"), "range": bd.get("slab_period_range"),

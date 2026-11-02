@@ -1,30 +1,33 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDropzone } from "react-dropzone";
 import {
   Upload, CheckCircle, AlertCircle, RefreshCw, ChevronLeft,
   FileSpreadsheet, X, Download, ArrowRight, ChevronDown, Trash2, Plus, Search,
-  FileText, CopyX, CalendarDays,
+  FileText, CopyX, CalendarDays, History, ArrowLeft,
 } from "lucide-react";
 import api from "@/lib/api";
 import { useStatementSectionBase } from "@/lib/statementSection";
 import StatementFormPanel, { isStatementComplete as statementComplete, type StatementType } from "@/components/tickets/StatementFormPanel";
-import CustomerPartyPanel, { type FieldHint } from "@/components/statements/CustomerPartyPanel";
+import CustomerPartyPanel, { ALL_VENDORS_NAME, type FieldHint } from "@/components/statements/CustomerPartyPanel";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import {
   CUSTOMER_TYPE_LABEL, EMPTY_TAG, buildTagPayload, isTagComplete, type CustomerTag, type CustomerType,
 } from "@/lib/customerType";
-import { formatDay, formatPeriod, formatUploadedAt } from "@/lib/statementPeriod";
+import { formatDay, formatPeriod, formatUploadedAt, uploadedAtParts } from "@/lib/statementPeriod";
 import {
   type DateField, type DateFormats, type DateOrder, type DatesRead, type DetectedFormat,
   DateFormatSection, DatesReadList, orderLabel, useDateFormats,
 } from "@/components/statements/dateFormat";
+import ImportProgress from "@/components/tickets/ImportProgress";
+import ImportReviewGrid from "@/components/tickets/ImportReviewGrid";
+import { importApi, type ImportHead, type ImportJob, type ImportView } from "@/lib/ticketImport";
 
 /** Internal Statement's declared date columns — backend services/ticket_extraction.py
  *  DATE_FORMAT_FIELDS. Doc Date follows the Ticket Date there. */
 const TICKET_DATE_FIELDS: DateField[] = [
-  { field: "ticket_date", header: "Ticket Date" },
+  { field: "ticket_date", header: "Booking Date" },
   { field: "departure_datetime", header: "Travel Date" },
 ];
 const NO_DATE_FIELDS: DateField[] = [];
@@ -42,8 +45,9 @@ type AgencyOpt = { id: number; name: string; branch_name: string | null; branch_
 const agencyOptionLabel = (a: AgencyOpt) =>
   `${a.name} — ${a.branch_name || a.branch_code} · ${a.channels}`;
 import {
-  mappingFieldsFor, reviewColGroups,
-  type ReviewColGroup as TColGroup,
+  internalMappingFields, internalReviewColGroups, mappingFieldsFor, reviewColGroups,
+  STATEMENT_CATEGORY_SHORT, toInternalStandard, type StatementCategory,
+  type ReviewColGroup as TColGroup, type StandardField, type TicketField,
   type TicketRow, type TicketExtractionPreview as ExtractionPreview,
 } from "@/lib/ticketFields";
 
@@ -53,6 +57,41 @@ import Link from "next/link";
 // Field metadata lives in @/lib/ticketFields so the mapping step, the review
 // grid, the manual punch form and the edit modal cannot drift apart.
 const TICKET_COL_GROUPS: TColGroup[] = reviewColGroups();
+// Internal Statement's standard format (`standardFormat`).
+const INTERNAL_COL_GROUPS: TColGroup[] = internalReviewColGroups();
+const COL_TYPE: Record<string, TColGroup["cols"][number]["type"]> = Object.fromEntries(
+  [...TICKET_COL_GROUPS, ...INTERNAL_COL_GROUPS].flatMap(g => g.cols).map(c => [c.key, c.type]));
+const COL_LABEL: Record<string, string> = Object.fromEntries(
+  [...TICKET_COL_GROUPS, ...INTERNAL_COL_GROUPS].flatMap(g => g.cols).map(c => [c.key, c.label]));
+const colLabel = (key: string) => COL_LABEL[key] ?? key;
+
+// The review grid draws a page of rows at a time: a fortnight's sales report is 30,000 lines,
+// and an input per cell for all of them would stop the browser.
+const REVIEW_PAGE = 100;
+
+// ── "All vendors" (Internal Statement) ────────────────────────────────────────
+// A file of every vendor's tickets: which vendor each row is, from its Supplier Name. A
+// vendor is onboarded once per channel, so one supplier's GDS and LCC tickets are asked
+// about apart — a GDS ticket has a numeric document number, an LCC ticket its PNR.
+type SupplierLine = {
+  source: string; channel: string | null;
+  status: "remembered" | "matched" | "suggested" | "ambiguous" | "not_onboarded" | "blank";
+  agency_id: number | null; candidates: number[]; note: string | null;
+  airline_direct: boolean; airline_hint: boolean;
+};
+/** "agency:<id>", "airline" (bought from the airline itself — BSP, its portal), or "". */
+type VendorPick = string;
+const channelOf = (r: TicketRow) => (/^\d{8,}$/.test(String(r.ticket_number ?? "").replace(/[\s-]/g, "")) ? "GDS" : "LCC");
+const supplierGroup = (r: TicketRow) => `${(r.supplier_name ?? "").trim()}|${channelOf(r)}`;
+const SUPPLIER_STATE: Record<string, { label: string; cls: string }> = {
+  remembered:    { label: "✓ saved mapping",  cls: "bg-emerald-50 text-emerald-700 border-emerald-200" },
+  matched:       { label: "✓ matched",        cls: "bg-emerald-50 text-emerald-700 border-emerald-200" },
+  suggested:     { label: "check suggestion", cls: "bg-amber-50 text-amber-700 border-amber-300" },
+  ambiguous:     { label: "pick the branch",  cls: "bg-amber-50 text-amber-700 border-amber-300" },
+  not_onboarded: { label: "not onboarded",    cls: "bg-red-50 text-red-700 border-red-300" },
+  blank:         { label: "no supplier",      cls: "bg-gray-50 text-gray-500 border-gray-200" },
+  set:           { label: "set by you",       cls: "bg-blue-50 text-blue-700 border-blue-200" },
+};
 
 // Agency options are fetched live from the supplier master API
 
@@ -60,6 +99,19 @@ const SKIP = "__skip__";
 
 // ── Internal Statement: what the attached file says about itself ─────────────────
 // Backend: api/v1/internal_tickets.py (/upload/guess) and services/statement_party.py.
+/** A mapping remembered from an earlier statement (backend services/saved_mapping.py):
+ *  `vendor` — this customer's, same columns; `vendor_changed` — this customer's, columns since
+ *  changed; `layout` — another customer's statement with exactly these columns. */
+type RememberedMapping = {
+  match: "vendor" | "vendor_changed" | "layout";
+  vendor_name: string | null;
+  source_file: string | null;
+  saved_at: string | null;
+  fields: number;
+  new_columns: string[];
+  gone_columns: string[];
+};
+
 type GuessPeriod = { from: string; to: string; label: string; source: string };
 type PartyCandidate = { customer_type: CustomerType; id: number; name: string };
 type GuessResp = {
@@ -155,9 +207,11 @@ function DuplicateTickets({ check }: { check: DuplicateCheck }) {
 
 /** The preview's answer to "are any of these tickets already loaded?" — said here, before
  *  Save, not as an error after it. Duplicates are left out; the rest are saved. */
-function DuplicateBox({ check, busy, error, onlyShown, onToggleOnly }: {
+function DuplicateBox({ check, busy, error, onlyShown, onToggleOnly, withVendor = false }: {
   check: DuplicateCheck | null; busy: boolean; error: string | null;
   onlyShown: boolean; onToggleOnly: () => void;
+  /** "All vendors" with rows left out: only the tickets with a vendor were checked. */
+  withVendor?: boolean;
 }) {
   const [show, setShow] = useState(false);
   if (error) {
@@ -178,8 +232,8 @@ function DuplicateBox({ check, busy, error, onlyShown, onToggleOnly }: {
     return (
       <div className="flex items-center gap-2 px-4 py-3 bg-green-50 border border-green-200 rounded-xl text-xs text-green-800">
         <CheckCircle className="w-4 h-4 shrink-0 text-green-600" />
-        No duplicates — none of these {check.total.toLocaleString("en-IN")} tickets is loaded yet, so all of them
-        will be saved.
+        No duplicates — none of {withVendor ? "the" : "these"} {check.total.toLocaleString("en-IN")} tickets
+        {withVendor ? " with a vendor" : ""} is loaded yet, so all of them will be saved.
         {busy && <RefreshCw className="w-3.5 h-3.5 animate-spin text-green-500" />}
       </div>
     );
@@ -192,7 +246,7 @@ function DuplicateBox({ check, busy, error, onlyShown, onToggleOnly }: {
         <span className="flex items-center gap-1.5 font-semibold text-gray-800">
           <CopyX className={`w-4 h-4 ${blocked ? "text-red-500" : "text-amber-600"}`} /> Duplicate tickets
         </span>
-        <span>Tickets in this file <strong className="text-sm text-gray-800">{check.total.toLocaleString("en-IN")}</strong></span>
+        <span>{withVendor ? "Tickets with a vendor" : "Tickets in this file"} <strong className="text-sm text-gray-800">{check.total.toLocaleString("en-IN")}</strong></span>
         <span>Duplicates <strong className="text-sm text-amber-700">{n.toLocaleString("en-IN")}</strong></span>
         <span>New <strong className={`text-sm ${check.new ? "text-green-700" : "text-red-700"}`}>{check.new.toLocaleString("en-IN")}</strong></span>
         {busy && <RefreshCw className="w-3.5 h-3.5 animate-spin text-gray-400" />}
@@ -266,6 +320,13 @@ function TicketReviewTable({
   const allFilteredSelected = filteredIndices.length > 0 && filteredIndices.every(i => selectedRows.has(i));
   const someFilteredSelected = filteredIndices.some(i => selectedRows.has(i));
 
+  // One page drawn at a time; the filter and the selection still span every row. A filter
+  // that leaves fewer pages than the one open lands on its last.
+  const [page, setPage] = useState(0);
+  const pages = Math.max(1, Math.ceil(filteredIndices.length / REVIEW_PAGE));
+  const current = Math.min(page, pages - 1);
+  const pageIndices = filteredIndices.slice(current * REVIEW_PAGE, (current + 1) * REVIEW_PAGE);
+
   return (
     <div className="overflow-x-auto border border-gray-200 rounded-lg">
       <table className="w-full min-w-max border-collapse">
@@ -304,7 +365,7 @@ function TicketReviewTable({
             <tr><td colSpan={allCols.length+4} className="px-4 py-10 text-center text-xs text-gray-400">
               {rows.length===0?"No rows. Add a row manually.":"No rows match the filter."}
             </td></tr>
-          ):filteredIndices.map(idx=>{
+          ):pageIndices.map(idx=>{
             const row=rows[idx];
             const isSelected=selectedRows.has(idx);
             const duplicate=duplicateIn?.get(idx);
@@ -347,11 +408,374 @@ function TicketReviewTable({
           })}
         </tbody>
       </table>
-      <div className="px-4 py-2.5 border-t border-gray-100">
+      <div className="px-4 py-2.5 border-t border-gray-100 flex items-center gap-3 flex-wrap">
         <button onClick={onAdd} className="flex items-center gap-1.5 text-xs text-[#1e3a5f] font-medium hover:underline">
           <Plus className="w-3.5 h-3.5"/> Add row manually
         </button>
+        {filteredIndices.length > REVIEW_PAGE && (
+          <div className="ml-auto flex items-center gap-2 text-[11px] text-gray-500">
+            <span>
+              Rows {(current * REVIEW_PAGE + 1).toLocaleString("en-IN")}–{Math.min((current + 1) * REVIEW_PAGE, filteredIndices.length).toLocaleString("en-IN")}
+              {" "}of {filteredIndices.length.toLocaleString("en-IN")}
+            </span>
+            <button onClick={() => setPage(0)} disabled={current === 0}
+              className="px-2 py-1 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-40">«</button>
+            <button onClick={() => setPage(current - 1)} disabled={current === 0}
+              className="px-2 py-1 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-40">‹ Prev</button>
+            <span>Page {current + 1} of {pages.toLocaleString("en-IN")}</span>
+            <button onClick={() => setPage(current + 1)} disabled={current >= pages - 1}
+              className="px-2 py-1 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-40">Next ›</button>
+            <button onClick={() => setPage(pages - 1)} disabled={current >= pages - 1}
+              className="px-2 py-1 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-40">»</button>
+          </div>
+        )}
       </div>
+    </div>
+  );
+}
+
+// ── The mapping remembered from an earlier statement ─────────────────────────
+// Said on the mapping step in place of the name-match note — whose statement, from which
+// file, and what changed since. As Third Party GDS says it (StatementUploadWizard).
+function RememberedNote({ info, unused, onByName }: {
+  info: RememberedMapping; unused: string[]; onByName: () => void;
+}) {
+  const from = [info.source_file, uploadedAtParts(info.saved_at)?.date].filter(Boolean).join(", ");
+  const whose = info.vendor_name ? `${info.vendor_name}'s last statement` : "your last statement";
+  const changed = info.match === "vendor_changed";
+  return (
+    <div className={`flex items-start gap-2 px-3 py-2 rounded-xl border text-xs ${
+      changed || info.match === "layout"
+        ? "border-sky-200 bg-sky-50 text-sky-800"
+        : "border-emerald-200 bg-emerald-50 text-emerald-800"}`}>
+      <History className="w-4 h-4 shrink-0 mt-px" />
+      <span className="flex-1">
+        {info.match === "vendor" && (
+          <><strong>Mapping remembered from {whose}</strong>{from && <> ({from})</>} —{" "}
+            {info.fields} field{info.fields === 1 ? "" : "s"} mapped exactly as you saved it. Check it, then continue.</>
+        )}
+        {changed && (
+          <><strong>The columns have changed since {whose}</strong>{from && <> ({from})</>}.{" "}
+            Your mapping is kept for the columns still in the file
+            {info.new_columns.length > 0 && <>; new in this file: {info.new_columns.join(", ")}</>}
+            {info.gone_columns.length > 0 && <>; no longer in it: {info.gone_columns.join(", ")}</>}. Check those.</>
+        )}
+        {info.match === "layout" && (
+          <><strong>Same columns as {info.vendor_name ? `${info.vendor_name}'s statement` : "an earlier statement"}</strong>
+            {from && <> ({from})</>} — its mapping is applied. Check it, then continue.</>
+        )}
+        {unused.length > 0 && <> Skipped: {unused.join(", ")}.</>}
+      </span>
+      <button type="button" onClick={onByName} className="shrink-0 underline underline-offset-2 hover:no-underline">
+        Map by column names instead
+      </button>
+    </div>
+  );
+}
+
+// ── Internal Statement's mapping step (`standardFormat`) ─────────────────────
+// Laid out as Third Party GDS's (components/statements/StatementUploadWizard.tsx), the user's
+// pick: one card — the file and where it is read from, then each section two fields to a line.
+// No note on where the mapping came from and no search / Auto-map / Clear all / count: the user
+// had them taken out (2026-10-29). A remembered mapping is still applied, just not announced.
+// A column one field takes is not offered to the others, so what a dropdown still lists is what
+// is left. The column's first values show on hover, not under every field.
+type MapField = TicketField & Partial<Pick<StandardField, "section" | "hint">>;
+
+function StandardMapping({
+  preview, fields, mapping, onMap, busy, onReread, onCancel, onBack, onNext, rememberMapping,
+}: {
+  preview: ExtractionPreview;
+  fields: MapField[];
+  mapping: Record<string, string>;
+  onMap: (field: string, column: string) => void;
+  /** Reading the file — a re-read at another sheet / header row, or the mapped read. */
+  busy: boolean;
+  onReread: (next: { sheet?: string; headerRow?: number }) => void;
+  onCancel: () => void;
+  onBack: () => void;
+  onNext: () => void;
+  rememberMapping: boolean;
+}) {
+  const columns = preview.xls_columns;
+  const colOf = (key: string) => (mapping[key] && mapping[key] !== SKIP ? mapping[key] : null);
+
+  const used = useMemo(() => new Set(Object.values(mapping).filter(c => c && c !== SKIP)), [mapping]);
+  const missing = fields.filter(f => f.mapRequired && !colOf(f.key));
+  // A column taken by two fields means one of them is wrong — said, not silently accepted.
+  const twice = useMemo(() => {
+    const seen: Record<string, string[]> = {};
+    for (const f of fields) {
+      const c = mapping[f.key];
+      if (c && c !== SKIP) (seen[c] = seen[c] || []).push(f.mapLabel ?? f.label);
+    }
+    return Object.entries(seen).filter(([, fs]) => fs.length > 1);
+  }, [fields, mapping]);
+
+  // The sections, in order.
+  const groups = useMemo(() => {
+    const out: { title: string; fields: MapField[] }[] = [];
+    for (const f of fields) {
+      const title = f.section ?? "Fields";
+      if (out[out.length - 1]?.title !== title) out.push({ title, fields: [] });
+      out[out.length - 1].fields.push(f);
+    }
+    return out;
+  }, [fields]);
+
+  const samplesOf = (col: string) =>
+    preview.sample_rows?.[col] ?? (preview.sample_row?.[col] ? [preview.sample_row[col]] : []);
+
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 shadow-sm">
+      {/* The file, and where in it the header is read from — shown always: a header detected
+          one row out is only put right here. */}
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-2 px-5 py-3 border-b border-slate-100 bg-slate-50/60 rounded-t-xl">
+        <div className="flex items-center gap-2.5 min-w-0 mr-auto">
+          <FileSpreadsheet className="w-5 h-5 text-blue-600 shrink-0" />
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-slate-800 truncate" title={preview.file_name}>{preview.file_name}</p>
+            <p className="text-[11px] text-slate-500">
+              {preview.total_rows.toLocaleString("en-IN")} rows · {columns.length} columns
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 text-[11px] text-slate-500" title="Changing either reads the file again and proposes a new mapping.">
+          {preview.sheet_names.length > 1 && (
+            <label className="flex items-center gap-1.5">
+              Sheet
+              <select value={preview.sheet_name ?? ""} disabled={busy} onChange={e => onReread({ sheet: e.target.value })}
+                className="border border-slate-200 rounded-lg px-2 py-1 text-xs bg-white disabled:opacity-50">
+                {preview.sheet_names.map(s => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </label>
+          )}
+          <label className="flex items-center gap-1.5">
+            Header row
+            <select value={preview.header_row} disabled={busy} onChange={e => onReread({ headerRow: Number(e.target.value) })}
+              className="border border-slate-200 rounded-lg px-2 py-1 text-xs bg-white disabled:opacity-50">
+              {Array.from({ length: 12 }, (_, i) => i).map(i => (
+                <option key={i} value={i}>Row {i + 1}{i === preview.header_row ? " — detected" : ""}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <button onClick={onCancel} className="px-3 py-1.5 rounded-lg border border-slate-200 text-xs text-slate-600 hover:bg-white">
+          Cancel
+        </button>
+      </div>
+
+      <div className="p-5 space-y-3">
+        {preview.preamble.length > 0 && (
+          <p className="text-[11px] text-slate-500">
+            <span className="font-semibold text-slate-600">Above the header:</span> {preview.preamble.slice(0, 4).join(" · ")}
+          </p>
+        )}
+
+        {preview.warnings.map((w, i) => (
+          <div key={i} className="flex items-start gap-2 px-3 py-2 rounded-xl border border-amber-200 bg-amber-50 text-xs text-amber-800">
+            <AlertCircle className="w-4 h-4 shrink-0 mt-px" /> <span>{w}</span>
+          </div>
+        ))}
+        {missing.length > 0 && (
+          <div className="flex items-start gap-2 px-3 py-2 rounded-xl border border-red-200 bg-red-50 text-xs text-red-700">
+            <AlertCircle className="w-4 h-4 shrink-0 mt-px" />
+            <span><strong>Still needed: {missing.map(f => f.mapLabel ?? f.label).join(", ")}.</strong> Map them to continue.</span>
+          </div>
+        )}
+        {twice.length > 0 && (
+          <div className="flex items-start gap-2 px-3 py-2 rounded-xl border border-amber-200 bg-amber-50 text-xs text-amber-800">
+            <AlertCircle className="w-4 h-4 shrink-0 mt-px" />
+            <span>
+              <strong>One column is mapped to more than one field.</strong>{" "}
+              {twice.map(([col, fs]) => `“${col}” → ${fs.join(", ")}`).join("; ")}. That is allowed, but it is usually a mistake.
+            </span>
+          </div>
+        )}
+
+        {rememberMapping && (
+          <p className="flex items-center gap-1.5 text-[11px] text-slate-400">
+            <History className="w-3 h-3 shrink-0" />
+            This mapping is remembered when you save — the next file with these columns opens already mapped.
+          </p>
+        )}
+
+        <div className="space-y-4 pt-1">
+          {groups.map(g => (
+            <div key={g.title}>
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400 mb-1.5">{g.title}</p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2">
+                {g.fields.map(f => {
+                  const col = colOf(f.key);
+                  const label = f.mapLabel ?? f.label;
+                  // A close name match, offered first in the list — never applied for the user.
+                  const hint = !col ? preview.fuzzy_suggestions?.[f.key]?.find(s => !used.has(s.column))?.column : undefined;
+                  const samples = col ? samplesOf(col) : [];
+                  return (
+                    <div key={f.key} className="flex items-center gap-2">
+                      <label htmlFor={`map-${f.key}`} className="text-xs text-slate-600 w-44 shrink-0 truncate"
+                        title={f.hint ? `${label} — ${f.hint}` : label}>
+                        {label}
+                        {f.mapRequired && <span className="text-red-400 ml-0.5">*</span>}
+                      </label>
+                      <select id={`map-${f.key}`} value={col ?? SKIP} onChange={e => onMap(f.key, e.target.value)}
+                        title={col ? (samples.length ? `${col}: ${samples.join(" · ")}` : `${col}: empty in the first rows`) : undefined}
+                        className={`flex-1 min-w-0 border rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400 ${
+                          col ? "border-slate-200 bg-white text-slate-700"
+                            : f.mapRequired ? "border-red-300 bg-red-50 text-red-600"
+                            : "border-slate-200 bg-white text-slate-400"}`}>
+                        <option value={SKIP}>— not in file —</option>
+                        {hint && <option value={hint}>{hint} (suggested)</option>}
+                        {columns.filter(c => c !== hint && (c === col || !used.has(c))).map(c => (
+                          <option key={c} value={c}>{c}</option>
+                        ))}
+                      </select>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between gap-3 px-5 py-3 border-t border-slate-100 bg-slate-50/60 rounded-b-xl">
+        <button type="button" onClick={onBack}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-500 border border-slate-200 rounded-lg hover:bg-white">
+          <ArrowLeft className="w-3.5 h-3.5" /> Back
+        </button>
+        <button type="button" onClick={onNext} disabled={busy || missing.length > 0}
+          className="inline-flex items-center gap-1.5 px-5 py-2 bg-[#1e3a5f] text-white rounded-lg text-sm font-semibold hover:bg-[#16304f] disabled:opacity-50 disabled:cursor-not-allowed">
+          {busy
+            ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Reading {preview.total_rows.toLocaleString("en-IN")} rows…</>
+            : <>Next: preview <ArrowRight className="w-3.5 h-3.5" /></>}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── "All vendors": one line per Supplier Name of the file ────────────────────
+// Pick a vendor once and every row of that supplier follows — the way Upload Deal's
+// "All suppliers" maps each Source. A row left without one is not saved (user, 2026-10-29).
+function VendorsPanel({
+  counts, lines, picks, busy, agencies, unassigned, total, onPick, onShowRows,
+}: {
+  counts: Map<string, number>;
+  lines: Record<string, SupplierLine>;
+  picks: Record<string, VendorPick>;
+  busy: boolean;
+  agencies: AgencyOpt[];
+  unassigned: number;
+  total: number;
+  onPick: (group: string, value: VendorPick) => void;
+  onShowRows: (supplierName: string) => void;
+}) {
+  const label = new Map(agencies.map(a => [a.id, agencyOptionLabel(a)]));
+  const groups = [...counts.entries()]
+    .map(([group, count]) => ({ group, count, line: lines[group], pick: picks[group] ?? "" }))
+    // What still needs a person first, then the biggest suppliers.
+    .sort((a, b) => Number(!b.pick) - Number(!a.pick) || b.count - a.count);
+  const [open, setOpen] = useState(true);
+
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+      <div className={`px-4 py-2.5 flex items-center gap-3 flex-wrap ${open ? "border-b border-gray-100" : ""}`}>
+        <button type="button" onClick={() => setOpen(o => !o)} className="flex items-center gap-1.5">
+          <ChevronDown className={`w-3.5 h-3.5 text-violet-700 transition-transform ${open ? "" : "-rotate-90"}`} />
+          <h2 className="text-xs font-semibold text-violet-700 uppercase tracking-wide">Vendors in this file</h2>
+        </button>
+        <span className="text-[11px] text-gray-400">
+          {groups.length} supplier{groups.length !== 1 ? "s" : ""} · {total.toLocaleString("en-IN")} rows
+        </span>
+        {busy ? <RefreshCw className="w-3 h-3 animate-spin text-gray-400" />
+          : unassigned > 0
+          ? <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-amber-50 text-amber-700 border border-amber-300">
+              {unassigned.toLocaleString("en-IN")} row{unassigned !== 1 ? "s" : ""} without a vendor — not saved
+            </span>
+          : <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+              ✓ every row has a vendor
+            </span>}
+        <Link href="/user-master/agency-master" target="_blank" className="ml-auto text-[11px] font-semibold text-sky-600 hover:underline">
+          Onboard an agency ↗
+        </Link>
+      </div>
+      {open && (
+        <div className="max-h-[320px] overflow-y-auto">
+          <table className="w-full">
+            <thead className="sticky top-0">
+              <tr className="bg-gray-50 text-[10px] uppercase tracking-wide text-gray-500">
+                <th className="px-4 py-1.5 text-left font-semibold">Supplier Name in file</th>
+                <th className="px-2 py-1.5 text-right font-semibold">Rows</th>
+                <th className="px-3 py-1.5 text-left font-semibold">Vendor (Agency Master)</th>
+                <th className="px-2 py-1.5 text-left font-semibold">Status</th>
+                <th className="px-4 py-1.5" />
+              </tr>
+            </thead>
+            <tbody>
+              {groups.map(({ group, count, line, pick }) => {
+                const [name, channel] = group.split("|");
+                const auto = line?.airline_direct ? "airline" : line?.agency_id != null ? `agency:${line.agency_id}` : "";
+                const state = !pick ? (line?.status ?? "not_onboarded") : pick === auto ? (line?.status ?? "set") : "set";
+                const badge = SUPPLIER_STATE[state] ?? SUPPLIER_STATE.not_onboarded;
+                const offered = (line?.candidates ?? []).filter(id => label.has(id));
+                return (
+                  <tr key={group} className={`border-t border-gray-100 align-top ${pick ? "" : "bg-amber-50/30"}`}>
+                    <td className="px-4 py-1.5">
+                      <span className="text-xs font-bold text-gray-800">{name || <span className="italic font-normal text-gray-400">no supplier</span>}</span>
+                      <span className="ml-1.5 px-1.5 py-0.5 rounded text-[9px] font-semibold bg-gray-100 text-gray-500">{channel}</span>
+                    </td>
+                    <td className="px-2 py-1.5 text-right text-xs text-gray-600 tabular-nums">{count.toLocaleString("en-IN")}</td>
+                    <td className="px-3 py-1.5">
+                      <div className="flex items-center gap-2">
+                        <select value={pick} onChange={e => onPick(group, e.target.value)}
+                          className={`w-full max-w-sm border rounded-md px-2 py-1 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 ${
+                            pick ? "border-gray-200 text-gray-800" : "border-amber-300 text-amber-700"}`}>
+                          <option value="">— no vendor —</option>
+                          <option value="airline">Bought from the airline (BSP / airline portal)</option>
+                          {offered.length > 0 && (
+                            <optgroup label={line?.status === "suggested" ? "Suggested" : "Possible matches"}>
+                              {offered.map(id => <option key={`c${id}`} value={`agency:${id}`}>{label.get(id)}</option>)}
+                            </optgroup>
+                          )}
+                          <optgroup label="All agencies">
+                            {agencies.map(a => <option key={a.id} value={`agency:${a.id}`}>{label.get(a.id)}</option>)}
+                          </optgroup>
+                        </select>
+                        {!pick && offered.length === 1 && (
+                          <button type="button" onClick={() => onPick(group, `agency:${offered[0]}`)}
+                            className="whitespace-nowrap text-[11px] font-semibold text-blue-700 hover:underline">
+                            Use suggestion
+                          </button>
+                        )}
+                        {!pick && line?.airline_hint && (
+                          <button type="button" onClick={() => onPick(group, "airline")}
+                            className="whitespace-nowrap text-[11px] font-semibold text-blue-700 hover:underline">
+                            Bought from airline
+                          </button>
+                        )}
+                      </div>
+                      {!pick && line?.note && <p className="text-[10px] text-gray-500 mt-0.5">{line.note}</p>}
+                    </td>
+                    <td className="px-2 py-1.5 whitespace-nowrap" title={line?.note ?? undefined}>
+                      <span className={`inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold border ${badge.cls}`}>
+                        {pick === "airline" ? "airline direct" : badge.label}
+                      </span>
+                    </td>
+                    <td className="px-4 py-1.5 whitespace-nowrap text-right">
+                      {name && (
+                        <button type="button" onClick={() => onShowRows(name)} className="text-[11px] font-medium text-blue-600 hover:underline">
+                          Show rows
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
@@ -371,7 +795,8 @@ function TicketReviewTable({
  */
 export default function UploadTicketsPage({
   mode = "internal", apiBase = "/tickets", listHref, duplicateCheck = false, fillFromFile = false,
-  askDateFormats = false,
+  askDateFormats = false, standardFormat = false, allowAllVendors = false, defaultCustomerType = null,
+  rememberMapping = false, askCategory = false, periodFromTickets = false, serverImport = false,
 }: {
   mode?: "internal" | "customer";
   /** "/internal-tickets" on Internal Statement — its own tables. */
@@ -390,16 +815,55 @@ export default function UploadTicketsPage({
    *  from the file, else the customer's last statement — and read every date that way
    *  (components/statements/dateFormat.tsx; backend services/ticket_extraction.py). */
   askDateFormats?: boolean;
+  /** Internal Statement: map onto its standard format (lib/ticketFields INTERNAL_STANDARD) —
+   *  its columns, in sections, with the user's names — and review those columns. Columns
+   *  left unmapped are skipped, not kept with the tickets (the server's KEEP_RAW_DATA). */
+  standardFormat?: boolean;
+  /** Internal Statement: B2B offers "All vendors — multi-vendor file"; the preview then asks
+   *  which vendor each Supplier Name is, and every row is saved with its own. */
+  allowAllVendors?: boolean;
+  /** The customer type picked when the page opens (and after "Upload Another"). */
+  defaultCustomerType?: CustomerType | null;
+  /** Internal Statement: the column mapping a statement is saved with is remembered, and the
+   *  next file with the same columns — this customer's first — opens already mapped
+   *  (`${apiBase}/upload/saved-mapping`; backend services/saved_mapping.py), as Third Party
+   *  GDS does. */
+  rememberMapping?: boolean;
+  /** Internal Statement: the details ask the Statement Type — Booking / MO (picked to start
+   *  with) or Accounting — kept on the statement and written into its derived name. */
+  askCategory?: boolean;
+  /** Internal Statement: no Valid From / To is asked. The statement is filed under the first
+   *  and last Booking Date of its tickets (backend tickets.py _booking_period), and the
+   *  derived name ends with the first one once the rows are read. */
+  periodFromTickets?: boolean;
+  /** Internal Statement: a file of any size. It is uploaded once and its lines stay on the
+   *  server — a worker reads them, the review pages through them there, and a worker saves the
+   *  statement (`${apiBase}/imports`; lib/ticketImport.ts, backend services/internal_import.py).
+   *  The browser never holds the rows, so a lakh-line sales report reviews like a small one. */
+  serverImport?: boolean;
 } = {}) {
   const isCustomer = mode === "customer";
+  const startTag: CustomerTag = defaultCustomerType ? { ...EMPTY_TAG, customerType: defaultCustomerType } : EMPTY_TAG;
+  const colGroups = standardFormat ? INTERNAL_COL_GROUPS : TICKET_COL_GROUPS;
+  // `standardFormat`: a mapping from the server — its name match, a remembered one — knows
+  // every ticket field; only those on the screen may take a column (lib/ticketFields).
+  const fitMapping = (m: Record<string, string>) => (standardFormat ? toInternalStandard(m) : m);
   const sectionBase = useStatementSectionBase();
   const router = useRouter();
 
-  type Step = "drop" | "mapping" | "preview" | "saving" | "done";
+  // "processing": `serverImport` — the worker is reading the file for the review.
+  type Step = "drop" | "mapping" | "processing" | "preview" | "saving" | "done";
   const [step,           setStep]           = useState<Step>("drop");
   const [preview,        setPreview]        = useState<ExtractionPreview | null>(null);
   const [storedFile,     setStoredFile]     = useState<File | null>(null);
   const [mapping,        setMapping]        = useState<Record<string, string>>({});
+  // `rememberMapping`: the name-matched mapping of the columns (what "Map by column names
+  // instead" goes back to), the remembered one the mapping step opened with, and whether the
+  // user has changed the mapping since — a mapping they edited is never replaced.
+  const [nameMapping,    setNameMapping]    = useState<Record<string, string>>({});
+  const [remembered,     setRemembered]     = useState<RememberedMapping | null>(null);
+  const [mappingEdited,  setMappingEdited]  = useState(false);
+  const [proposing,      setProposing]      = useState(false);
   const [applyingMap,    setApplyingMap]    = useState(false);
   const [parsing,        setParsing]        = useState(false);
   const [downloading,    setDownloading]    = useState(false);
@@ -410,11 +874,24 @@ export default function UploadTicketsPage({
   const [rowsEdited,     setRowsEdited]     = useState(false);
   const downloadLinkRef  = useRef<HTMLAnchorElement>(null);
 
+  // ── `serverImport`: the upload kept on the server ─────────────────────────
+  // `job` is the import as the server last said — its worker's progress, and under review the
+  // summary above the grid (counted off the lines there, edits included). `rows` stays empty.
+  const imports = useMemo(() => importApi(apiBase), [apiBase]);
+  const [importId,   setImportId]   = useState<string | null>(null);
+  const [job,        setJob]        = useState<ImportJob | null>(null);
+  const [gridView,   setGridView]   = useState<ImportView>("all");
+  const [gridSearch, setGridSearch] = useState("");
+  const [gridReload, setGridReload] = useState(0);
+  const summary = serverImport ? job?.summary ?? null : null;
+
   // ── Statement form state ───────────────────────────────────────────────────
   const [statementType, setStatementType] = useState<StatementType>("B2B");
   const [agency,        setAgency]        = useState("");
   // Customer mode only: WHO the tickets were sold to.
-  const [tag,           setTag]           = useState<CustomerTag>(EMPTY_TAG);
+  const [tag,           setTag]           = useState<CustomerTag>(startTag);
+  // "All vendors — multi-vendor file" (`allowAllVendors`): B2B with no one agency.
+  const [multiVendor,   setMultiVendor]   = useState(false);
   // Opened from a Customer data → Statement tab (B2B / Corporate / Direct): start on that
   // customer type. Read once on mount from the URL — not useSearchParams, which would need
   // a Suspense boundary around every page that renders this wizard.
@@ -464,9 +941,15 @@ export default function UploadTicketsPage({
     { lastUpload: "This customer's last statement", who: "this customer's system" },
   );
 
+  // `askCategory`: Booking / MO unless the user picks Accounting.
+  const [category, setCategory] = useState<StatementCategory>("booking");
+
   // Customer mode is gated on the customer tag; internal mode on the vendor agency.
+  // `periodFromTickets`: no period to give — the tickets' booking dates are it.
+  const allVendors = allowAllVendors && multiVendor && tag.customerType === "agency";
+  const periodGiven = periodFromTickets || (validFrom !== "" && validTo !== "" && validTo >= validFrom);
   const isStatementComplete = (isCustomer
-    ? (isTagComplete(tag) && validFrom !== "" && validTo !== "" && validTo >= validFrom)
+    ? ((allVendors || isTagComplete(tag)) && periodGiven)
     : statementComplete(agency, validFrom, validTo)) && dates.complete;
 
   // ── Internal Statement: duplicates (`duplicateCheck`) ──────────────────────
@@ -474,7 +957,11 @@ export default function UploadTicketsPage({
   const [dupBusy,       setDupBusy]       = useState(false);
   const [dupError,      setDupError]      = useState<string | null>(null);
   const dupSeq = useRef(0);
-  const [savedReport,   setSavedReport]   = useState<{ created: number; duplicates: DuplicateReport | null } | null>(null);
+  const [savedReport,   setSavedReport]   = useState<{
+    created: number; duplicates: DuplicateReport | null;
+    /** "All vendors": rows left out for having no vendor. */
+    noVendor: number;
+  } | null>(null);
 
   // ── Internal Statement: details filled in from the file (`fillFromFile`) ────
   // `…Guessed`: the value came from the file, so the next file's reading may replace it —
@@ -496,21 +983,12 @@ export default function UploadTicketsPage({
   const typeTo = (v: string) => { setValidTo(v); setPeriodGuessed(false); setPeriodHint(null); };
   const typeName = (v: string) => { setStatementName(v); setNameAuto(v.trim() === ""); };
 
-  // "B2B - Globe Air Travels - 2026-08-01" — the name the server would give a blank one,
-  // shown filled in so the user sees it before saving.
-  useEffect(() => {
-    if (!fillFromFile || !nameAuto) return;
-    const t = tag.customerType;
-    setStatementName(t && tag.partyName && validFrom ? `${CUSTOMER_TYPE_LABEL[t]} - ${tag.partyName} - ${validFrom}` : "");
-  }, [fillFromFile, nameAuto, tag.customerType, tag.partyName, validFrom]);
-
   // ── Editable row handlers ─────────────────────────────────────────────────
   const handleTicketRowChange = useCallback((idx: number, key: string, val: string) => {
     setRowsEdited(true);
     setRows(prev => prev.map((r, i) => {
       if (i !== idx) return r;
-      const col = TICKET_COL_GROUPS.flatMap(g => g.cols).find(c => c.key === key);
-      return { ...r, [key]: col?.type === "number" ? (val === "" ? null : parseFloat(val)) : (val || null) };
+      return { ...r, [key]: COL_TYPE[key] === "number" ? (val === "" ? null : parseFloat(val)) : (val || null) };
     }));
   }, []);
   const handleDeleteTicketRow = useCallback((idx: number) => {
@@ -536,11 +1014,10 @@ export default function UploadTicketsPage({
   }, []);
   const handleBulkApply = () => {
     if (!bulkColKey || bulkColValue === "") return;
-    const col = TICKET_COL_GROUPS.flatMap(g => g.cols).find(c => c.key === bulkColKey);
     setRowsEdited(true);
     setRows(prev => prev.map((r, i) => {
       if (!selectedRows.has(i)) return r;
-      return { ...r, [bulkColKey]: col?.type === "number" ? (bulkColValue === "" ? null : parseFloat(bulkColValue)) : (bulkColValue || null) };
+      return { ...r, [bulkColKey]: COL_TYPE[bulkColKey] === "number" ? (bulkColValue === "" ? null : parseFloat(bulkColValue)) : (bulkColValue || null) };
     }));
     setBulkColValue("");
   };
@@ -580,11 +1057,15 @@ export default function UploadTicketsPage({
       // Internal Statement: how the dates are written, and the period that settles the
       // Excel-stored ones — the read that makes the rows.
       dateFormats?: DateFormats; period?: { from: string; to: string };
+      // A read only for the columns (the drop, a sheet or header-row change): no screen
+      // takes rows from it, so none are built or sent.
+      columnsOnly?: boolean;
     } = {},
   ) => {
     const form = new FormData();
     form.append("file", file);
     form.append("statement_type", statementType);
+    if (opts.columnsOnly) form.append("include_rows", "false");
     if (opts.mapping) form.append("column_mapping", JSON.stringify(opts.mapping));
     if (opts.sheet) form.append("sheet_name", opts.sheet);
     if (opts.headerRow !== null && opts.headerRow !== undefined) {
@@ -604,7 +1085,8 @@ export default function UploadTicketsPage({
   const hasPreview = preview != null;
   const detectPeriod = validFrom && validTo && validTo >= validFrom ? `${validFrom}|${validTo}` : "";
   useEffect(() => {
-    if (!askDateFormats || !storedFile || !hasPreview) return;
+    // `serverImport`: the upload's own answer carries the date format (`takeHead`).
+    if (serverImport || !askDateFormats || !storedFile || !hasPreview) return;
     const seq = ++detectSeq.current;
     const timer = setTimeout(async () => {
       setDetecting(true);
@@ -628,7 +1110,20 @@ export default function UploadTicketsPage({
       }
     }, 300);
     return () => clearTimeout(timer);
-  }, [askDateFormats, storedFile, hasPreview, sheet, headerRow, detectPeriod, apiBase]);
+  }, [serverImport, askDateFormats, storedFile, hasPreview, sheet, headerRow, detectPeriod, apiBase]);
+
+  /** `serverImport`: what the server read off the stored file — its columns, as /upload/extract
+   *  gives them, and how it writes its dates, as /upload/detect-date-formats does. One read. */
+  const takeHead = (head: ImportHead, file: File) => {
+    setImportId(head.import_id);
+    setDetected({ file, byField: Object.fromEntries(head.date_formats.fields.map(d => [d.field, d])) });
+    return head.preview;
+  };
+  /** The import a new file or a fresh start leaves behind — its lines and its stored file. */
+  const dropImport = () => {
+    if (serverImport && importId && job?.status !== "saved") void imports.discard(importId).catch(() => {});
+    setImportId(null); setJob(null); setGridView("all"); setGridSearch("");
+  };
 
   // How this customer's last statement was read — a customer system writes dates the same way.
   useEffect(() => {
@@ -652,9 +1147,12 @@ export default function UploadTicketsPage({
       g = (await api.post<GuessResp>(`${apiBase}/upload/guess`, { file_name: fileName, preamble: data.preamble ?? [] })).data;
     } catch { /* nothing filled in — the user enters the details */ }
 
+    // `periodFromTickets`: no period is asked, so none is filled in — only the customer below.
     const period = g?.period ?? null;
     const typedDates = !periodGuessed && !!(validFrom || validTo);
-    if (!typedDates) {
+    if (periodFromTickets) {
+      setPeriodHint(null);
+    } else if (!typedDates) {
       setValidFrom(period?.from ?? "");
       setValidTo(period?.to ?? "");
       setPeriodGuessed(!!period);
@@ -667,6 +1165,8 @@ export default function UploadTicketsPage({
     }
 
     const p = g?.party;
+    // "All vendors" is the user's answer too — a name read off the file names one of them.
+    if (allVendors) return;
     const pickedByUser = !tagGuessed && (tag.agencyId != null || tag.corporateId != null || tag.customerId != null);
     if (!p || pickedByUser) {
       if (p?.status === "resolved" && p.name && p.id != null && p.customer_type
@@ -720,9 +1220,14 @@ export default function UploadTicketsPage({
     setParsing(true);
     setStoredFile(files[0]);
     try {
-      const data = await runExtract(files[0]);
+      const data = serverImport
+        ? takeHead(await imports.create(files[0]), files[0])
+        : await runExtract(files[0], { columnsOnly: true });
       setPreview(data);
-      setMapping(data.suggested_mapping ?? {});
+      setMapping(fitMapping(data.suggested_mapping ?? {}));
+      setNameMapping(fitMapping(data.suggested_mapping ?? {}));
+      setRemembered(null);
+      setMappingEdited(false);
       setSheet(data.sheet_name ?? null);
       setHeaderRow(data.header_row ?? 0);
       if (fillFromFile) {
@@ -749,16 +1254,41 @@ export default function UploadTicketsPage({
   /** Back to the drop zone with the details kept — what this file filled in may be
    *  replaced by the next one; what the user entered stays. */
   const changeFile = () => {
+    dropImport();
     setPreview(null); setStoredFile(null); setMapping({}); setSheet(null); setHeaderRow(null);
     setDupCheck(null); setRows([]);
+    setNameMapping({}); setRemembered(null); setMappingEdited(false);
+  };
+
+  /** `rememberMapping`: the mapping a statement with these columns was saved with — this
+   *  customer's first — in place of the name match, unless the user has edited the mapping.
+   *  Asked once the customer is settled; on any failure the name match stays. `fresh`: the
+   *  columns were just read again, so the user's edits (of the old ones) do not hold it back. */
+  const proposeMapping = async (columns: string[], byName: Record<string, string>, fresh = false) => {
+    if (!rememberMapping || (mappingEdited && !fresh)) return;
+    setProposing(true);
+    try {
+      const { data } = await api.post<{ mapping: Record<string, string>; remembered: RememberedMapping | null }>(
+        `${apiBase}/upload/saved-mapping`,
+        { columns, by_name: byName, ...(allVendors ? { multi_vendor: true } : buildTagPayload(tag)) },
+      );
+      setMapping(fitMapping(data.mapping));
+      setRemembered(data.remembered);
+    } catch {
+      setMapping(byName);
+      setRemembered(null);
+    } finally {
+      setProposing(false);
+    }
   };
 
   /** "Next: map columns" (`fillFromFile`): once the details — the date format included — are
    *  complete. The panel and the date format box say what is missing. */
-  const startNext = () => {
+  const startNext = async () => {
     setFormTouched(true);
     if (!isStatementComplete) return;
     setError(null);
+    if (preview) await proposeMapping(preview.xls_columns, nameMapping);
     setStep("mapping");
   };
 
@@ -795,6 +1325,15 @@ export default function UploadTicketsPage({
     setApplyingMap(true);
     setError(null);
     try {
+      if (serverImport && importId) {
+        // The worker reads every line; the page follows it until the review is ready.
+        const columnMap = Object.fromEntries(Object.entries(mapping).filter(([, c]) => c && c !== SKIP));
+        setJob(await imports.parse(importId, columnMap, askDateFormats ? (formats ?? dates.formats) : null));
+        setGridView("all");
+        setGridSearch("");
+        setStep("processing");
+        return;
+      }
       const data = await runExtract(storedFile, {
         mapping, sheet, headerRow,
         ...(askDateFormats ? {
@@ -829,11 +1368,18 @@ export default function UploadTicketsPage({
     const nextSheet = next.sheet ?? sheet;
     const nextHeader = next.headerRow ?? (next.sheet ? null : headerRow);
     try {
-      const data = await runExtract(storedFile, { sheet: nextSheet, headerRow: nextHeader });
+      const data = serverImport && importId
+        ? takeHead(await imports.reread(importId, nextSheet, nextHeader), storedFile)
+        : await runExtract(storedFile, { sheet: nextSheet, headerRow: nextHeader, columnsOnly: true });
       setPreview(data);
-      setMapping(data.suggested_mapping ?? {});
+      setMapping(fitMapping(data.suggested_mapping ?? {}));
+      setNameMapping(fitMapping(data.suggested_mapping ?? {}));
+      setRemembered(null);
+      setMappingEdited(false);
       setSheet(data.sheet_name ?? null);
       setHeaderRow(data.header_row ?? 0);
+      // New columns: the edits named the old ones, so a remembered mapping is asked for afresh.
+      await proposeMapping(data.xls_columns, fitMapping(data.suggested_mapping ?? {}), true);
     } catch (e: unknown) {
       const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
       setError(msg ?? "Failed to re-read the file.");
@@ -842,21 +1388,199 @@ export default function UploadTicketsPage({
     }
   };
 
-  // Asked again after every edit, add and delete — a corrected ticket number, passenger, date
-  // or amount can turn a duplicate into a new ticket, and row positions move. Who the tickets
-  // were sold to and the period do not enter into it, so it is asked as soon as there are rows.
+  // Duplicate rows → where the ticket already is, for the grid. `onlyDuplicates` narrows the
+  // grid to them, falling back to every row once none is left — so fixing the last one does
+  // not empty it.
+  const duplicateRows = useMemo(() => {
+    const out = new Map<number, string>();
+    for (const d of dupCheck?.rows ?? []) out.set(d.index, duplicateOf(d, dupCheck?.statements ?? []));
+    return out;
+  }, [dupCheck]);
+  // `serverImport`: the duplicates as the server counts them, off the lines not removed.
+  const dupShown: DuplicateCheck | null = serverImport ? summary?.duplicates ?? null : dupCheck;
+  const nothingNew = duplicateCheck && dupShown != null && !dupShown.can_save;
+  const [onlyDuplicates, setOnlyDuplicates] = useState(false);
+  const onlyRows = useMemo(
+    () => (onlyDuplicates && duplicateRows.size > 0 ? new Set(duplicateRows.keys()) : null),
+    [onlyDuplicates, duplicateRows]);
+
+  const activeFields: (TicketField & Partial<Pick<StandardField, "section" | "hint">>)[] = useMemo(
+    () => (standardFormat ? internalMappingFields() : mappingFieldsFor(statementType)), [standardFormat, statementType]);
+  const requiredKeys    = activeFields.filter(f => f.mapRequired).map(f => f.key);
+  // The file's columns no field takes — off the mapping as it stands (a remembered one, or
+  // the user's edits), not the name match the file was first read with.
+  const unmappedColumns = useMemo(() => {
+    const used = new Set(Object.values(mapping).filter(c => c && c !== SKIP));
+    return (preview?.xls_columns ?? []).filter(c => !used.has(c));
+  }, [mapping, preview]);
+
+  // The review grid's columns: on the standard format, only those this file filled — a
+  // Yatra report and a consolidator's ticket statement each see their own.
+  // `serverImport`: the fields the worker found filled.
+  const filledOnServer = serverImport ? job?.read.filled : undefined;
+  const reviewGroups = useMemo(() => {
+    if (!standardFormat) return colGroups;
+    const filled = new Set<string>(filledOnServer ?? []);
+    const keys = colGroups.flatMap(g => g.cols.map(c => c.key));
+    for (const r of filledOnServer ? [] : rows) {
+      for (const k of keys) {
+        const v = (r as Record<string, unknown>)[k];
+        if (v != null && v !== "") filled.add(k);
+      }
+      if (filled.size === keys.length) break;
+    }
+    return colGroups
+      .map(g => ({ ...g, cols: g.cols.filter(c => filled.has(c.key) || (!!mapping[c.key] && mapping[c.key] !== SKIP)) }))
+      .filter(g => g.cols.length > 0);
+  }, [standardFormat, colGroups, rows, mapping, filledOnServer]);
+
+  // ── "All vendors": which vendor each Supplier Name is ─────────────────────
+  // Asked once per supplier and channel whenever the set of them changes; what the
+  // reviewer picks is kept across re-reads of the file.
+  const supplierCounts = useMemo(() => {
+    const out = new Map<string, number>();
+    if (!allVendors) return out;
+    // `serverImport`: counted on the server, by the same "<Supplier Name>|GDS" group.
+    if (summary) {
+      for (const s of summary.suppliers) out.set(s.group, s.count);
+      return out;
+    }
+    for (const r of rows) out.set(supplierGroup(r), (out.get(supplierGroup(r)) ?? 0) + 1);
+    return out;
+  }, [allVendors, rows, summary]);
+  const supplierKey = [...supplierCounts.keys()].sort().join("\n");
+  const [supplierLines, setSupplierLines] = useState<Record<string, SupplierLine>>({});
+  const [vendorPick, setVendorPick] = useState<Record<string, VendorPick>>({});
+  const [suppliersBusy, setSuppliersBusy] = useState(false);
+  const [airlineIds, setAirlineIds] = useState<Map<string, number>>(new Map());
   useEffect(() => {
-    if (!duplicateCheck || step !== "preview" || rows.length === 0) return;
+    if (!allVendors || step !== "preview" || !supplierKey) return;
+    const groups = supplierKey.split("\n");
+    let live = true;
+    setSuppliersBusy(true);
+    api.post<{ suppliers: SupplierLine[] }>(`${apiBase}/upload/suppliers`, {
+      suppliers: groups.map(g => { const [name, channel] = g.split("|"); return { name: name || "", channel }; }),
+    })
+      .then(({ data }) => {
+        if (!live) return;
+        const lines = Object.fromEntries(groups.map((g, i) => [g, data.suppliers[i]]));
+        setSupplierLines(lines);
+        // Pre-picked only where it is certain — a saved choice, or one exact match.
+        setVendorPick(prev => {
+          const next = { ...prev };
+          for (const g of groups) {
+            if (next[g] !== undefined) continue;
+            const l = lines[g];
+            next[g] = l?.airline_direct ? "airline" : l?.agency_id != null ? `agency:${l.agency_id}` : "";
+          }
+          return next;
+        });
+      })
+      .catch(() => { if (live) setSupplierLines({}); })
+      .finally(() => { if (live) setSuppliersBusy(false); });
+    return () => { live = false; };
+  }, [allVendors, step, supplierKey, apiBase]);
+  // "Bought from the airline": the row's own airline, in the airline master by its code.
+  useEffect(() => {
+    if (!allVendors || airlineIds.size) return;
+    api.get<{ id: number; iata_code: string | null; is_active: boolean }[]>("/airlines/", { params: { limit: 5000 } })
+      .then(({ data }) => setAirlineIds(new Map(
+        data.filter(a => a.is_active && a.iata_code).map(a => [a.iata_code!.trim().toUpperCase(), a.id]))))
+      .catch(() => {});
+  }, [allVendors, airlineIds.size]);
+  const payableFor = useCallback((r: TicketRow): Partial<TicketRow> => {
+    const pick = vendorPick[supplierGroup(r)] ?? "";
+    if (pick.startsWith("agency:")) return { payable_type: "b2b", payable_agency_id: Number(pick.slice(7)) };
+    if (pick === "airline") {
+      const id = airlineIds.get(String(r.airlines_code ?? "").trim().toUpperCase());
+      if (id != null) return { payable_type: "airline", payable_airline_id: id };
+    }
+    return {};
+  }, [vendorPick, airlineIds]);
+  // "All vendors": only the rows with a vendor are saved (user, 2026-10-29) — a supplier left on
+  // "no vendor", or "bought from the airline" with an airline not in the master, is left out.
+  // `saveIdx`: the grid positions of the rows a save sends, in order.
+  const saveIdx = useMemo(() => {
+    const out: number[] = [];
+    rows.forEach((r, i) => { if (!allVendors || payableFor(r).payable_type) out.push(i); });
+    return out;
+  }, [allVendors, rows, payableFor]);
+  // `serverImport`: the lines are counted by supplier, not held — a supplier with a vendor picked
+  // saves its lines ("bought from the airline" lines whose airline is not in the master are
+  // left out by the save, and the done screen counts them).
+  const totalRows = serverImport ? (summary?.kept ?? 0) : rows.length;
+  const saveCount = useMemo(() => {
+    if (!serverImport) return saveIdx.length;
+    if (!allVendors) return summary?.kept ?? 0;
+    let n = 0;
+    for (const [group, count] of supplierCounts) if (vendorPick[group]) n += count;
+    return n;
+  }, [serverImport, saveIdx, allVendors, summary, supplierCounts, vendorPick]);
+  const rowsWithoutVendor = totalRows - saveCount;
+  const noVendorAtAll = allVendors && totalRows > 0 && saveCount === 0;
+
+  // `periodFromTickets`: the first and last Booking Date of the rows a save sends (a row's Doc
+  // Date where it has none) — what the server files the statement under. None before the rows
+  // are read. Not every row read: "All vendors" saves only the rows with a vendor.
+  const ticketPeriod = useMemo(() => {
+    if (!periodFromTickets) return null;
+    // `serverImport`: of the lines not removed.
+    if (serverImport) return summary?.period ?? null;
+    let from: string | null = null;
+    let to: string | null = null;
+    for (const i of saveIdx) {
+      const r = rows[i];
+      const v = String(r.ticket_date || r.doc_date || "");
+      if (!ISO_DAY.test(v)) continue;
+      const d = v.slice(0, 10);
+      if (from == null || d < from) from = d;
+      if (to == null || d > to) to = d;
+    }
+    return from && to ? { from, to } : null;
+  }, [periodFromTickets, rows, saveIdx, serverImport, summary]);
+
+  // "B2B - Globe Air Travels - 2026-08-01" — the name the server would give a blank one,
+  // shown filled in so the user sees it before saving. `periodFromTickets`:
+  // "B2B - All vendors - Booking/MO - 2026-10-01", the date added once the rows are read.
+  useEffect(() => {
+    if (!fillFromFile || !nameAuto) return;
+    const t = tag.customerType;
+    if (periodFromTickets) {
+      setStatementName(t && tag.partyName
+        ? [CUSTOMER_TYPE_LABEL[t], tag.partyName, askCategory ? STATEMENT_CATEGORY_SHORT[category] : "", ticketPeriod?.from ?? ""]
+            .filter(Boolean).join(" - ")
+        : "");
+      return;
+    }
+    setStatementName(t && tag.partyName && validFrom ? `${CUSTOMER_TYPE_LABEL[t]} - ${tag.partyName} - ${validFrom}` : "");
+  }, [fillFromFile, nameAuto, tag.customerType, tag.partyName, validFrom, periodFromTickets, askCategory, category, ticketPeriod]);
+
+  // Asked again after every edit, add and delete — a corrected ticket number, passenger, date
+  // or amount can turn a duplicate into a new ticket, and row positions move — and, on "All
+  // vendors", after every vendor picked: only the rows a save sends are checked, so the counts
+  // are of what is saved. The answer's positions are put back to the grid's. Who the tickets
+  // were sold to and the period do not enter into it.
+  useEffect(() => {
+    // `serverImport`: the worker keyed every line, and each edit is checked as it is saved.
+    if (serverImport || !duplicateCheck || step !== "preview" || rows.length === 0) return;
+    // The vendor picks are still being read: the save set is not known yet.
+    if (allVendors && suppliersBusy) return;
     const seq = ++dupSeq.current;
+    if (saveIdx.length === 0) { setDupCheck(null); setDupError(null); setDupBusy(false); return; }
     setDupBusy(true);
     const timer = setTimeout(async () => {
       try {
         const { data } = await api.post<DuplicateCheck>(`${apiBase}/upload/duplicates`, {
           // The source cells are not compared, so they are not sent (undefined drops out of JSON).
-          rows: rows.map(r => ({ ...r, raw_data: undefined })),
+          rows: saveIdx.map(i => ({ ...rows[i], raw_data: undefined })),
         });
         if (seq !== dupSeq.current) return;
-        setDupCheck(data);
+        const at = (k: number) => saveIdx[k] ?? k;
+        setDupCheck({
+          ...data,
+          rows: data.rows.map(d => ({ ...d, index: at(d.index) })),
+          lines: data.lines.map(d => ({ ...d, index: at(d.index) })),
+        });
         setDupError(null);
       } catch (e: unknown) {
         if (seq !== dupSeq.current) return;
@@ -867,24 +1591,7 @@ export default function UploadTicketsPage({
       }
     }, 500);
     return () => clearTimeout(timer);
-  }, [duplicateCheck, step, rows, apiBase]);
-
-  // Duplicate rows → where the ticket already is, for the grid. `onlyDuplicates` narrows the
-  // grid to them, falling back to every row once none is left — so fixing the last one does
-  // not empty it.
-  const duplicateRows = useMemo(() => {
-    const out = new Map<number, string>();
-    for (const d of dupCheck?.rows ?? []) out.set(d.index, duplicateOf(d, dupCheck?.statements ?? []));
-    return out;
-  }, [dupCheck]);
-  const nothingNew = duplicateCheck && dupCheck != null && !dupCheck.can_save;
-  const [onlyDuplicates, setOnlyDuplicates] = useState(false);
-  const onlyRows = useMemo(
-    () => (onlyDuplicates && duplicateRows.size > 0 ? new Set(duplicateRows.keys()) : null),
-    [onlyDuplicates, duplicateRows]);
-
-  const activeFields    = mappingFieldsFor(statementType);
-  const requiredKeys    = activeFields.filter(f => f.mapRequired).map(f => f.key);
+  }, [serverImport, duplicateCheck, step, rows, apiBase, allVendors, suppliersBusy, saveIdx]);
   const missingRequired = requiredKeys.filter(k => !mapping[k] || mapping[k] === SKIP);
 
   // ── How the dates read (Internal Statement) ──────────────────────────────
@@ -916,6 +1623,16 @@ export default function UploadTicketsPage({
       // A file with only a Doc Date has it as its ticket date.
       mapped: isMapped(f.field) || (f.field === "ticket_date" && isMapped("doc_date")) };
   }), [dateFields, rows, mapping, dates.formats]);
+  // `serverImport`: the same, counted on the server.
+  const serverDatesRead: DatesRead[] = useMemo(() => !summary ? [] : dateFields.map((f) => {
+    const d = summary.dates.find(x => x.field === f.field);
+    const isMapped = (k: string) => !!mapping[k] && mapping[k] !== SKIP;
+    return { ...f, header: d?.key === "doc_date" ? "Doc Date" : f.header,
+      format: dates.formats[f.field] ?? null, read: d?.read ?? 0, first: d?.first ?? null, last: d?.last ?? null,
+      unreadable: d?.unreadable ?? 0, cells: d?.cells ?? [],
+      mapped: isMapped(f.field) || (f.field === "ticket_date" && isMapped("doc_date")) };
+  }), [summary, dateFields, mapping, dates.formats]);
+  const datesShown = serverImport ? serverDatesRead : datesRead;
 
   // Changing a format on the preview reads the file again in it; hand edits are asked about first.
   const [pendingFormat, setPendingFormat] = useState<{ field: string; order: DateOrder } | null>(null);
@@ -925,7 +1642,7 @@ export default function UploadTicketsPage({
   };
   const changeFormatOnPreview = (field: string, order: DateOrder) => {
     if (dates.formats[field] === order) return;
-    if (rowsEdited) setPendingFormat({ field, order });
+    if (serverImport ? (summary?.edited ?? 0) > 0 : rowsEdited) setPendingFormat({ field, order });
     else rereadInFormat(field, order);
   };
   const datesText = askDateFormats && dates.complete
@@ -935,6 +1652,22 @@ export default function UploadTicketsPage({
   const confirmUpload = async () => {
     setFormTouched(true);
     if (!isStatementComplete || !preview) return;
+    if (serverImport && importId) {
+      // The statement details; the worker saves the lines the server holds.
+      setError(null);
+      try {
+        setJob(await imports.save(importId, {
+          statement_name: statementName.trim() || null,
+          ...(askCategory ? { statement_category: category } : {}),
+          agency: tag.partyName || null,
+          ...(allVendors ? { multi_vendor: true, vendor_picks: vendorPick } : buildTagPayload(tag)),
+        }));
+        setStep("saving");
+      } catch (e: unknown) {
+        setError(apiDetail(e) ?? "Failed to save tickets.");
+      }
+      return;
+    }
     setStep("saving");
     setError(null);
     try {
@@ -942,7 +1675,8 @@ export default function UploadTicketsPage({
         `${apiBase}/upload/confirm`,
         {
           file_name:      preview.file_name,
-          rows,
+          // "All vendors": the rows with a vendor, each carrying the one picked for its Supplier Name.
+          rows: allVendors ? saveIdx.map(i => ({ ...rows[i], ...payableFor(rows[i]) })) : rows,
           // A customer statement is always B2B-shaped: the airline field set
           // belongs to a vendor file, and those go through Vendors → Statements.
           statement_type: isCustomer ? "B2B" : statementType,
@@ -951,16 +1685,22 @@ export default function UploadTicketsPage({
           // In customer mode the server re-derives both from the authorised party.
           agency: isCustomer ? (tag.partyName || "—") : (selectedAgency?.name ?? agency),
           agency_id: isCustomer ? null : (selectedAgency?.id ?? null),
-          ...(isCustomer ? buildTagPayload(tag) : {}),
+          ...(isCustomer ? (allVendors ? { multi_vendor: true } : buildTagPayload(tag)) : {}),
           statement_name: statementName.trim() || null,
-          valid_from:     validFrom,
-          valid_to:       validTo,
+          // `periodFromTickets`: none sent — the server files it under the tickets' booking dates.
+          ...(periodFromTickets ? {} : { valid_from: validFrom, valid_to: validTo }),
+          ...(askCategory ? { statement_category: category } : {}),
           // How the rows' dates were read — kept on the statement (Internal Statement).
           ...(askDateFormats ? { date_formats: dates.formats } : {}),
+          // The columns and how they were mapped — remembered for the next file like it.
+          ...(rememberMapping ? {
+            columns: preview.xls_columns,
+            column_map: Object.fromEntries(Object.entries(mapping).filter(([, c]) => c && c !== SKIP)),
+          } : {}),
         },
       );
       setBatchId(data.batch_id);
-      setSavedReport({ created: data.created_count, duplicates: data.duplicates ?? null });
+      setSavedReport({ created: data.created_count, duplicates: data.duplicates ?? null, noVendor: rowsWithoutVendor });
       if (storedFile && data.batch_id) {
         console.log("[GCS] Uploading ticket file to bucket | batch_id=", data.batch_id, "| file=", storedFile.name, "| size=", storedFile.size);
         try {
@@ -984,14 +1724,83 @@ export default function UploadTicketsPage({
     }
   };
 
+  // ── `serverImport`: following the worker ──────────────────────────────────
+  // Polled while it reads or saves; the review opens when the read is through, the done screen
+  // when the save is. A save that failed is back under review, with its reason.
+  const jobStatus = job?.status;
+  useEffect(() => {
+    if (!serverImport || !importId || (jobStatus !== "parsing" && jobStatus !== "saving")) return;
+    let live = true;
+    const timer = setInterval(async () => {
+      try {
+        const next = await imports.get(importId);
+        if (live) setJob(next);
+      } catch { /* keep polling */ }
+    }, 1500);
+    return () => { live = false; clearInterval(timer); };
+  }, [serverImport, importId, jobStatus, imports]);
+  useEffect(() => {
+    if (!serverImport || !job) return;
+    if (step === "processing" && job.status === "ready") {
+      setGridReload(n => n + 1);
+      setStep("preview");
+    } else if (step === "processing" && job.status === "failed") {
+      setError(job.error ?? "The file could not be read.");
+      setStep("mapping");
+    } else if (step === "saving" && job.status === "saved" && job.result) {
+      setBatchId(job.result.batch_id);
+      setSavedReport({ created: job.result.created_count, duplicates: job.result.duplicates ?? null,
+        noVendor: job.result.no_vendor });
+      setStep("done");
+    } else if (step === "saving" && job.status === "ready") {
+      setError(job.error ?? "The statement could not be saved.");
+      setStep("preview");
+    }
+  }, [serverImport, job, step]);
+  // A line edited, removed or added, or a vendor picked: the summary above the grid is counted
+  // again, once the changes stop. "All vendors": its duplicates among the lines a save sends —
+  // the suppliers given a vendor — as the page counted them before (user, 2026-10-29).
+  const pickedGroups = useMemo(
+    () => (allVendors ? Object.keys(vendorPick).filter(g => vendorPick[g]) : null), [allVendors, vendorPick]);
+  const pickedRef = useRef(pickedGroups);
+  pickedRef.current = pickedGroups;
+  const refreshSeq = useRef(0);
+  // The summary is being counted again: the Save button's count is about to change.
+  const [recounting, setRecounting] = useState(false);
+  const refreshJob = useCallback(() => {
+    if (!importId) return;
+    const n = ++refreshSeq.current;
+    setRecounting(true);
+    setTimeout(async () => {
+      if (n !== refreshSeq.current) return;
+      try {
+        const next = await imports.summary(importId, pickedRef.current);
+        if (n === refreshSeq.current) setJob(next);
+      } catch { /* the next edit asks again */ }
+      finally {
+        if (n === refreshSeq.current) setRecounting(false);
+      }
+    }, 700);
+  }, [importId, imports]);
+  const pickedKey = (pickedGroups ?? []).join("\n");
+  useEffect(() => {
+    if (serverImport && allVendors && step === "preview") refreshJob();
+  }, [serverImport, allVendors, step, pickedKey, refreshJob]);
+  const duplicateLabel = useCallback(
+    (batchId: string) => duplicateOf({ batch_id: batchId }, summary?.duplicates.statements ?? []), [summary]);
+  const showError = useCallback((m: string) => setError(m), []);
+
   const reset = () => {
+    dropImport();
     setStep("drop"); setPreview(null); setStoredFile(null);
     setMapping({}); setBatchId(null); setError(null); setRows([]); resetFilter();
     setStatementType("B2B"); setAgency(""); setStatementName("");
-    setValidFrom(""); setValidTo(""); setFormTouched(false);
+    setValidFrom(""); setValidTo(""); setFormTouched(false); setCategory("booking");
     // The customer too — "Upload Another" is a new statement, and a kept customer would
     // stop the next file's own customer being read off it.
-    setTag(EMPTY_TAG); setSheet(null); setHeaderRow(null);
+    setTag(startTag); setMultiVendor(false); setSheet(null); setHeaderRow(null);
+    setSupplierLines({}); setVendorPick({});
+    setNameMapping({}); setRemembered(null); setMappingEdited(false);
     setTagGuessed(false); setPeriodGuessed(false); setNameAuto(true);
     setPartyHint(null); setPeriodHint(null);
     setDupCheck(null); setDupError(null); setSavedReport(null); setOnlyDuplicates(false);
@@ -1001,10 +1810,19 @@ export default function UploadTicketsPage({
   // What the summary bars and the done screen say the statement is: the CUSTOMER in
   // customer mode (it used to read the vendor-mode `agency`, which this mode never sets).
   const badgeText = isCustomer ? (tag.customerType ? CUSTOMER_TYPE_LABEL[tag.customerType] : "—") : statementType;
-  const partyText = isCustomer ? (tag.partyName || (tag.customerType === "direct" ? "Walk-in customer" : "")) : agency;
-  const periodText = validFrom && validTo ? (isCustomer ? formatPeriod(validFrom, validTo) : `${validFrom} – ${validTo}`) : "";
+  const partyText = isCustomer
+    ? (allVendors ? ALL_VENDORS_NAME : tag.partyName || (tag.customerType === "direct" ? "Walk-in customer" : ""))
+    : agency;
+  const periodText = periodFromTickets
+    ? (ticketPeriod ? `Booked ${formatPeriod(ticketPeriod.from, ticketPeriod.to)}` : "")
+    : validFrom && validTo ? (isCustomer ? formatPeriod(validFrom, validTo) : `${validFrom} – ${validTo}`) : "";
+  const categoryText = askCategory ? STATEMENT_CATEGORY_SHORT[category] : "";
 
   const isDone = step === "done";
+  // What the read said beyond its rows — the worker's read, on `serverImport`.
+  const readWarnings = serverImport ? job?.read.warnings ?? [] : preview?.warnings ?? [];
+  const dateFix = serverImport ? job?.read.date_fix ?? null : preview?.date_fix ?? null;
+  const tooLong = summary?.too_long ?? 0;
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
@@ -1029,9 +1847,11 @@ export default function UploadTicketsPage({
         {!isDone && (
           <div className="flex items-center gap-2 text-xs text-gray-500">
             {(["drop", "mapping", "preview", "done"] as Step[]).map((s, i) => {
-              const labels: Record<Step, string> = { drop: "Upload", mapping: "Map Columns", preview: "Preview", saving: "Saving", done: "Done" };
-              const active  = step === s;
-              const passed  = ["drop", "mapping", "preview", "saving", "done"].indexOf(step) > i;
+              const labels: Record<Step, string> = { drop: "Upload", mapping: "Map Columns", processing: "Reading", preview: "Preview", saving: "Saving", done: "Done" };
+              // The worker reading the file is the way into the preview.
+              const at      = step === "processing" ? "preview" : step;
+              const active  = at === s;
+              const passed  = ["drop", "mapping", "preview", "saving", "done"].indexOf(at) > i;
               return (
                 <div key={s} className="flex items-center gap-1.5">
                   {i > 0 && <span className="text-gray-300">›</span>}
@@ -1070,11 +1890,17 @@ export default function UploadTicketsPage({
               {partyText}
             </p>
             <p className="text-xs text-gray-500 mt-0.5">
-              {periodText}
+              {[categoryText, periodText].filter(Boolean).join(" · ")}
             </p>
             <p className="text-sm text-gray-500 mt-2">
               {(savedReport?.created ?? rows.length).toLocaleString("en-IN")} tickets saved from <span className="font-medium">{preview.file_name}</span>
             </p>
+            {!!savedReport?.noVendor && (
+              <p className="text-xs text-amber-700 mt-1.5">
+                {savedReport.noVendor.toLocaleString("en-IN")} row{savedReport.noVendor === 1 ? "" : "s"} without a vendor
+                {savedReport.noVendor === 1 ? " was" : " were"} not saved.
+              </p>
+            )}
             {!!savedReport?.duplicates?.duplicates && (
               <p className="text-xs text-amber-700 mt-1.5">
                 {savedReport.duplicates.duplicates.toLocaleString("en-IN")} of the file&apos;s{" "}
@@ -1105,13 +1931,24 @@ export default function UploadTicketsPage({
       )}
 
       {/* ── Saving screen ──────────────────────────────────────────────────── */}
-      {step === "saving" && (
+      {step === "saving" && serverImport && job && (
+        <ImportProgress job={job} title="Saving the statement"
+          note="Saving runs on the server. If you leave this page, the statement still appears under Statements when it is done." />
+      )}
+      {step === "saving" && !serverImport && (
         <div className="flex items-center justify-center py-20">
           <div className="text-center space-y-3">
             <RefreshCw className="w-8 h-8 text-blue-500 animate-spin mx-auto" />
             <p className="text-sm text-gray-600">Saving statement and tickets to database…</p>
           </div>
         </div>
+      )}
+
+      {/* ── `serverImport`: the worker reading the file for the review ──────── */}
+      {step === "processing" && job && (
+        <ImportProgress job={job} title="Reading the file for review"
+          note="Keep this page open — the review opens here when the file has been read."
+          onBack={() => setStep("mapping")} backLabel="Back to mapping" />
       )}
 
       {/* ── Drop step — two-panel layout ──────────────────────────────────── */}
@@ -1127,8 +1964,15 @@ export default function UploadTicketsPage({
               touched={formTouched}
               partyHint={fillFromFile ? partyHint : null}
               periodHint={fillFromFile ? periodHint : null}
-              nameHint={fillFromFile && nameAuto && statementName
-                ? "Filled in from the customer and the period — type your own to change it." : null}
+              nameHint={!(fillFromFile && nameAuto && statementName) ? null
+                : !periodFromTickets ? "Filled in from the customer and the period — type your own to change it."
+                : ticketPeriod ? "Filled in from the customer, the statement type and the first booking date — type your own to change it."
+                : "Filled in from the customer and the statement type; the first booking date is added once the rows are read. Type your own to change it."}
+              allowAllVendors={allowAllVendors}
+              multiVendor={multiVendor}
+              setMultiVendor={(v) => { setMultiVendor(v); if (v) { setTagGuessed(false); setPartyHint(null); } }}
+              askPeriod={!periodFromTickets}
+              {...(askCategory ? { category, setCategory } : {})}
             />
           ) : (
             <StatementFormPanel
@@ -1193,14 +2037,16 @@ export default function UploadTicketsPage({
                     </div>
                   )}
                   <p className="text-xs text-gray-500">
-                    Check the statement details on the left — the customer, the period and the name are filled in
+                    Check the statement details on the left — the customer{periodFromTickets ? "" : ", the period"} and the name are filled in
                     from the file wherever it says them{askDateFormats ? ", and the date format from how its dates are written" : ""}.
                     Change anything that is wrong, then press Next to map the columns.
                   </p>
                   <div className="flex justify-end">
-                    <button onClick={startNext}
+                    <button onClick={() => void startNext()} disabled={proposing}
                       className="flex items-center gap-1.5 px-5 py-2 bg-[#1e3a5f] text-white rounded-lg text-sm font-semibold hover:bg-[#16304f] disabled:opacity-50">
-                      Next: map columns <ArrowRight className="w-3.5 h-3.5" />
+                      {proposing
+                        ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Opening the mapping…</>
+                        : <>Next: map columns <ArrowRight className="w-3.5 h-3.5" /></>}
                     </button>
                   </div>
                 </div>
@@ -1236,8 +2082,12 @@ export default function UploadTicketsPage({
             <FileText className="w-4 h-4 text-[#1e3a5f] shrink-0" />
             <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold tracking-wide ${statementType === "AIRLINE" ? "bg-blue-100 text-blue-700" : "bg-purple-100 text-purple-700"}`}>{badgeText}</span>
             <span className="text-xs font-semibold text-[#1e3a5f]">{partyText || <span className="text-red-400 italic">{isCustomer ? "Customer missing" : "Agency missing"}</span>}</span>
-            <span className="text-gray-300 text-xs">·</span>
-            <span className="text-xs text-gray-600">{periodText || <span className="text-red-400 italic">Dates missing</span>}</span>
+            {categoryText && <><span className="text-gray-300 text-xs">·</span><span className="text-xs text-gray-600">{categoryText}</span></>}
+            {/* `periodFromTickets`: the booking dates, once the rows are read — nothing to miss before. */}
+            {(periodText || !periodFromTickets) && <>
+              <span className="text-gray-300 text-xs">·</span>
+              <span className="text-xs text-gray-600">{periodText || <span className="text-red-400 italic">Dates missing</span>}</span>
+            </>}
             {datesText && <><span className="text-gray-300 text-xs">·</span><span className="text-xs text-gray-600">{datesText}</span></>}
             {!isStatementComplete && (
               <button
@@ -1249,6 +2099,15 @@ export default function UploadTicketsPage({
             )}
           </div>
 
+          {standardFormat ? (
+            <StandardMapping
+              preview={preview} fields={activeFields} mapping={mapping}
+              onMap={(field, col) => { setMappingEdited(true); setMapping(prev => ({ ...prev, [field]: col })); }}
+              busy={applyingMap} onReread={(next) => void reread(next)}
+              onCancel={reset} onBack={() => setStep("drop")} onNext={() => void applyMapping()}
+              rememberMapping={rememberMapping}
+            />
+          ) : (<>
           <div className="flex items-center justify-between bg-white border border-gray-200 rounded-xl px-5 py-3">
             <div className="flex items-center gap-3">
               <FileSpreadsheet className="w-5 h-5 text-blue-600" />
@@ -1262,7 +2121,10 @@ export default function UploadTicketsPage({
             </button>
           </div>
 
-          {preview.is_template_match ? (
+          {remembered ? (
+            <RememberedNote info={remembered} unused={unmappedColumns}
+              onByName={() => { setMapping(nameMapping); setRemembered(null); setMappingEdited(true); }} />
+          ) : preview.is_template_match ? (
             <div className="bg-green-50 border border-green-200 rounded-xl px-5 py-4 flex items-start gap-3">
               <CheckCircle className="w-5 h-5 text-green-600 shrink-0 mt-0.5" />
               <div>
@@ -1347,38 +2209,56 @@ export default function UploadTicketsPage({
               </p>
             )}
 
-            {preview.unmapped_columns.length > 0 && (
+            {unmappedColumns.length > 0 && (
               <p className="text-[11px] text-amber-700">
                 <span className="font-semibold">
-                  {preview.unmapped_columns.length} column{preview.unmapped_columns.length === 1 ? "" : "s"} in
-                  your file {preview.unmapped_columns.length === 1 ? "is" : "are"} not mapped:
+                  {unmappedColumns.length} column{unmappedColumns.length === 1 ? "" : "s"} in
+                  your file {unmappedColumns.length === 1 ? "is" : "are"} not mapped:
                 </span>{" "}
-                {preview.unmapped_columns.join(", ")}. Their values are still saved with the
-                ticket, but nothing reports on them until they are mapped below.
+                {unmappedColumns.join(", ")}.{" "}
+                {standardFormat
+                  ? "They are skipped — not saved with the tickets. The file itself is kept with the statement."
+                  : "Their values are still saved with the ticket, but nothing reports on them until they are mapped below."}
               </p>
             )}
           </div>
 
           <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-            <div className="px-5 py-3 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
+            <div className="px-5 py-3 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between gap-3 flex-wrap">
               <p className="text-xs font-semibold text-gray-600 uppercase tracking-wider">Column Mapping</p>
-              <p className="text-xs text-gray-400">Select which column from your file maps to each field</p>
+              {rememberMapping ? (
+                <p className="flex items-center gap-1.5 text-[11px] text-gray-400">
+                  <History className="w-3 h-3 shrink-0" />
+                  This mapping is remembered when you save — the next file with these columns opens already mapped.
+                </p>
+              ) : (
+                <p className="text-xs text-gray-400">Select which column from your file maps to each field</p>
+              )}
             </div>
             <div className="divide-y divide-gray-100 max-h-[460px] overflow-y-auto">
-              {activeFields.map(field => {
+              {activeFields.map((field, fi) => {
                 const mapped    = mapping[field.key];
                 const isSkipped = !mapped || mapped === SKIP;
+                // The standard format in its sections — a heading where each one starts.
+                const sectionStart = field.section && field.section !== activeFields[fi - 1]?.section;
                 return (
-                  <div key={field.key} className="flex items-center px-5 py-2.5 gap-4">
-                    <div className="w-48 shrink-0">
+                  <Fragment key={field.key}>
+                  {sectionStart && (
+                    <div className="px-5 py-1.5 bg-[#1e3a5f]/5 text-[10px] font-bold text-[#1e3a5f] uppercase tracking-wider">
+                      {field.section}
+                    </div>
+                  )}
+                  <div className="flex items-center px-5 py-2.5 gap-4">
+                    <div className="w-56 shrink-0">
                       <span className="text-xs font-medium text-gray-700">{field.mapLabel ?? field.label}</span>
                       {field.mapRequired && <span className="text-red-500 ml-0.5 text-xs">*</span>}
+                      {field.hint && <span className="block text-[10px] text-gray-400 leading-tight mt-0.5">{field.hint}</span>}
                     </div>
                     <ArrowRight className="w-3.5 h-3.5 text-gray-300 shrink-0" />
                     <div className="flex-1 relative">
                       <select
                         value={mapped ?? SKIP}
-                        onChange={e => setMapping(prev => ({ ...prev, [field.key]: e.target.value }))}
+                        onChange={e => { setMappingEdited(true); setMapping(prev => ({ ...prev, [field.key]: e.target.value })); }}
                         className={`w-full appearance-none text-xs border rounded-lg px-3 py-1.5 pr-7 focus:outline-none focus:ring-1 focus:ring-blue-400 ${
                           isSkipped
                             ? field.mapRequired
@@ -1424,7 +2304,7 @@ export default function UploadTicketsPage({
                           return (
                             <button
                               type="button"
-                              onClick={() => setMapping(prev => ({ ...prev, [field.key]: hint.column }))}
+                              onClick={() => { setMappingEdited(true); setMapping(prev => ({ ...prev, [field.key]: hint.column })); }}
                               className="px-2 py-0.5 rounded bg-amber-50 border border-amber-200 text-[10px] text-amber-800 hover:bg-amber-100 truncate max-w-full"
                               title={`Use "${hint.column}" for this field`}
                             >
@@ -1442,6 +2322,7 @@ export default function UploadTicketsPage({
                           : <span className="text-[10px] text-gray-300">Optional</span>}
                     </div>
                   </div>
+                  </Fragment>
                 );
               })}
             </div>
@@ -1471,6 +2352,7 @@ export default function UploadTicketsPage({
               </button>
             </div>
           </div>
+          </>)}
         </div>
       )}
 
@@ -1482,8 +2364,12 @@ export default function UploadTicketsPage({
             <FileText className="w-4 h-4 text-[#1e3a5f] shrink-0" />
             <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold tracking-wide ${statementType === "AIRLINE" ? "bg-blue-100 text-blue-700" : "bg-purple-100 text-purple-700"}`}>{badgeText}</span>
             <span className="text-xs font-semibold text-[#1e3a5f]">{partyText || <span className="text-red-400 italic">{isCustomer ? "Customer missing" : "Agency missing"}</span>}</span>
-            <span className="text-gray-300 text-xs">·</span>
-            <span className="text-xs text-gray-600">{periodText || <span className="text-red-400 italic">Dates missing</span>}</span>
+            {categoryText && <><span className="text-gray-300 text-xs">·</span><span className="text-xs text-gray-600">{categoryText}</span></>}
+            {/* `periodFromTickets`: the booking dates, once the rows are read — nothing to miss before. */}
+            {(periodText || !periodFromTickets) && <>
+              <span className="text-gray-300 text-xs">·</span>
+              <span className="text-xs text-gray-600">{periodText || <span className="text-red-400 italic">Dates missing</span>}</span>
+            </>}
             {datesText && <><span className="text-gray-300 text-xs">·</span><span className="text-xs text-gray-600">{datesText}</span></>}
             {!isStatementComplete && (
               <button
@@ -1500,7 +2386,9 @@ export default function UploadTicketsPage({
               <FileSpreadsheet className="w-5 h-5 text-green-600" />
               <div>
                 <p className="text-sm font-semibold text-gray-800">{preview.file_name}</p>
-                <p className="text-xs text-gray-500">{preview.total_rows} rows parsed</p>
+                <p className="text-xs text-gray-500">
+                  {(serverImport ? summary?.rows ?? 0 : preview.total_rows).toLocaleString("en-IN")} rows parsed
+                </p>
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -1514,62 +2402,100 @@ export default function UploadTicketsPage({
                   stand, not as they were before the last edit. */}
               <button
                 onClick={confirmUpload}
-                disabled={!isStatementComplete || nothingNew || (duplicateCheck && dupBusy)}
-                title={!isStatementComplete ? "Complete statement details first" : nothingNew ? dupCheck?.reason ?? undefined : undefined}
+                disabled={!isStatementComplete || nothingNew || noVendorAtAll || tooLong > 0
+                  || (duplicateCheck && !serverImport && dupBusy)}
+                title={!isStatementComplete ? "Complete statement details first"
+                  : noVendorAtAll ? "No row has a vendor yet — pick one for a supplier under Vendors in this file"
+                  : tooLong > 0 ? `${tooLong.toLocaleString("en-IN")} row${tooLong === 1 ? " has" : "s have"} a value too long to save — fix or remove them under “Too long”`
+                  : nothingNew ? dupShown?.reason ?? undefined : undefined}
                 className="flex items-center gap-1.5 px-4 py-1.5 bg-[#1e3a5f] text-white rounded-lg text-xs font-semibold hover:bg-[#16304f] disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {duplicateCheck && dupBusy
+                {(duplicateCheck && !serverImport && dupBusy) || (serverImport && recounting)
                   ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
                   : <CheckCircle className="w-3.5 h-3.5" />}
-                {duplicateCheck && dupBusy
+                {duplicateCheck && !serverImport && dupBusy
                   ? <>Checking…</>
-                  : duplicateCheck && dupCheck && dupCheck.duplicates > 0
-                  ? <>Confirm & Save {dupCheck.new} New Row{dupCheck.new === 1 ? "" : "s"}</>
-                  : <>Confirm & Save {rows.length} Rows</>}
+                  : duplicateCheck && dupShown && dupShown.duplicates > 0
+                  ? <>Confirm & Save {dupShown.new.toLocaleString("en-IN")} New Row{dupShown.new === 1 ? "" : "s"}</>
+                  : <>Confirm & Save {saveCount.toLocaleString("en-IN")} Row{saveCount === 1 ? "" : "s"}</>}
               </button>
             </div>
           </div>
 
-          {duplicateCheck && (
+          {duplicateCheck && (serverImport ? (
+            <DuplicateBox check={dupShown} busy={false} error={null} onlyShown={gridView === "duplicates"}
+              onToggleOnly={() => setGridView(v => (v === "duplicates" ? "all" : "duplicates"))}
+              withVendor={allVendors} />
+          ) : (
             <DuplicateBox check={dupCheck} busy={dupBusy} error={dupError} onlyShown={onlyRows != null}
-              onToggleOnly={() => setOnlyDuplicates(v => !v)} />
+              onToggleOnly={() => setOnlyDuplicates(v => !v)} withVendor={rowsWithoutVendor > 0} />
+          ))}
+
+          {/* `serverImport`: lines whose value is longer than its ticket field holds stop the save. */}
+          {tooLong > 0 && summary && (
+            <div className="flex items-start gap-2 px-4 py-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-800">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-px" />
+              <span>
+                <strong>{tooLong.toLocaleString("en-IN")} row{tooLong === 1 ? " has" : "s have"} a value too long to save</strong>
+                {" "}({summary.long_fields.map(f => `${colLabel(f.field)} over ${f.limit} characters: ${f.rows.toLocaleString("en-IN")}`).join("; ")}).
+                {" "}Shorten them, or remove them, under{" "}
+                <button type="button" onClick={() => setGridView("long")} className="font-semibold underline">Too long</button> — then save.
+              </span>
+            </div>
+          )}
+
+          {allVendors && (
+            <VendorsPanel
+              counts={supplierCounts} lines={supplierLines} picks={vendorPick} busy={suppliersBusy}
+              agencies={agencyDirectory} unassigned={rowsWithoutVendor} total={totalRows}
+              onPick={(group, value) => setVendorPick(prev => ({ ...prev, [group]: value }))}
+              onShowRows={(name) => { if (serverImport) { setGridView("all"); setGridSearch(name); } else setFilterText(name); }}
+            />
           )}
 
           {/* How the dates read in the declared format — change it here and the file is read
               again in it. */}
-          {askDateFormats && datesRead.length > 0 && (
+          {askDateFormats && datesShown.length > 0 && (
             <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 space-y-2">
               <p className="text-xs font-semibold text-gray-700 flex items-center gap-1.5">
                 <CalendarDays className="w-4 h-4 text-gray-400" /> How your dates read
                 {applyingMap && <RefreshCw className="w-3 h-3 animate-spin text-gray-400" />}
               </p>
-              <DatesReadList dates={datesRead} formats={dates.formats} onChange={changeFormatOnPreview} />
-              {preview.date_fix && (
+              <DatesReadList dates={datesShown} formats={dates.formats} onChange={changeFormatOnPreview} />
+              {dateFix && (
                 <p className="text-[11px] text-sky-700">
-                  {preview.date_fix.count.toLocaleString("en-IN")} Excel date{preview.date_fix.count === 1 ? "" : "s"} read
-                  as {orderLabel(dates.formats.ticket_date)} — Excel had stored {preview.date_fix.count === 1 ? "it" : "them"} with
-                  day and month swapped ({preview.date_fix.columns.map(c => `${c.column} ${c.cells}`).join(", ")}).
+                  {dateFix.count.toLocaleString("en-IN")} Excel date{dateFix.count === 1 ? "" : "s"} read
+                  as {orderLabel(dates.formats.ticket_date)} — Excel had stored {dateFix.count === 1 ? "it" : "them"} with
+                  day and month swapped ({dateFix.columns.map(c => `${c.column} ${c.cells}`).join(", ")}).
                 </p>
               )}
-              {datesRead.filter(d => d.unreadable > 0).map(d => (
+              {datesShown.filter(d => d.unreadable > 0).map(d => (
                 <p key={d.field} className="text-[11px] text-orange-700">
                   {d.unreadable.toLocaleString("en-IN")} {d.header} value{d.unreadable === 1 ? "" : "s"} can&apos;t be read
                   as {orderLabel(d.format)}: {d.cells.slice(0, 3).map(c => `"${c.value}" (row ${c.index + 1})`).join(", ")}
                   {d.unreadable > 3 ? ", …" : ""}. If they are all like that, pick another format; otherwise set them
-                  in the grid — they save empty.
+                  in the grid{serverImport ? " (under “Dates not read”)" : ""} — they save empty.
                 </p>
               ))}
             </div>
           )}
 
-          {preview.warnings.length > 0 && (
+          {readWarnings.length > 0 && (
             <div className="bg-yellow-50 border border-yellow-200 rounded-xl px-4 py-3 text-xs text-yellow-800 space-y-1">
-              {preview.warnings.map((w, i) => (
+              {readWarnings.map((w, i) => (
                 <div key={i} className="flex items-center gap-2"><AlertCircle className="w-3.5 h-3.5 shrink-0" />{w}</div>
               ))}
             </div>
           )}
 
+          {serverImport ? (importId && summary && (
+            <ImportReviewGrid
+              apiBase={apiBase} importId={importId} colGroups={reviewGroups} summary={summary}
+              duplicateLabel={duplicateLabel} view={gridView} onView={setGridView}
+              search={gridSearch} onSearch={setGridSearch} reloadKey={gridReload}
+              onChanged={refreshJob} onError={showError}
+            />
+          )) : (<>
           <div className="bg-white rounded-xl border border-gray-200 px-4 py-2.5 space-y-2">
             <div className="flex items-center gap-2">
               <div className="relative flex-1">
@@ -1604,14 +2530,14 @@ export default function UploadTicketsPage({
                   className="border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400 text-gray-700"
                 >
                   <option value="">Column to edit…</option>
-                  {TICKET_COL_GROUPS.map(g=>(
+                  {reviewGroups.map(g=>(
                     <optgroup key={g.label} label={g.label}>
                       {g.cols.map(c=><option key={c.key} value={c.key}>{c.label}</option>)}
                     </optgroup>
                   ))}
                 </select>
                 {bulkColKey&&(()=>{
-                  const colType=TICKET_COL_GROUPS.flatMap(g=>g.cols).find(c=>c.key===bulkColKey)?.type??"text";
+                  const colType=COL_TYPE[bulkColKey]??"text";
                   if(colType==="date")return(
                     <input type="date" value={bulkColValue} onChange={e=>setBulkColValue(e.target.value)}
                       className="border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400"/>
@@ -1660,7 +2586,7 @@ export default function UploadTicketsPage({
             </div>
             <TicketReviewTable
               rows={rows}
-              colGroups={TICKET_COL_GROUPS}
+              colGroups={reviewGroups}
               onChange={handleTicketRowChange}
               onDelete={handleDeleteTicketRow}
               onAdd={handleAddTicketRow}
@@ -1672,6 +2598,7 @@ export default function UploadTicketsPage({
               onlyRows={onlyRows}
             />
           </div>
+          </>)}
         </div>
       )}
 

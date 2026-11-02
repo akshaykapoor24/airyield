@@ -16,7 +16,7 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, 
 INCENTIVE_TYPE_KEYS = [
     "PLB", "Super PLB", "Transaction Fee", "Deposit Incentive (DI)",
     "Marketing Fund", "Ancillary", "Frontend", "Backend", "Cashback",
-    "Segment Incentive", "Push Action",
+    "Segment Incentive", "Push Action", "NDC",
 ]
 
 _GREY = colors.HexColor("#666666")

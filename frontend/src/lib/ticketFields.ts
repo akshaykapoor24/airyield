@@ -15,6 +15,17 @@
 export type StatementType = "B2B" | "AIRLINE";
 export type FieldType = "text" | "date" | "number" | "select";
 
+/** Internal Statement's Statement Type — which system's report the file is. Not
+ *  StatementType above, which is the file's shape. `short` is how a derived statement name
+ *  and the list's badge write it — the same words as backend tickets.py STATEMENT_CATEGORIES. */
+export type StatementCategory = "booking" | "accounting";
+export const STATEMENT_CATEGORIES: { key: StatementCategory; label: string; short: string }[] = [
+  { key: "booking",    label: "Booking / MO statement", short: "Booking/MO" },
+  { key: "accounting", label: "Accounting statement",   short: "Accounting" },
+];
+export const STATEMENT_CATEGORY_SHORT: Record<StatementCategory, string> =
+  Object.fromEntries(STATEMENT_CATEGORIES.map(c => [c.key, c.short])) as Record<StatementCategory, string>;
+
 export type TicketSegment = {
   origin?: string | null;
   destination?: string | null;
@@ -108,6 +119,24 @@ export type TicketRow = {
   /** Every source cell keyed by its original header. Round-tripped verbatim so a
    *  column with no canonical home survives the import. */
   raw_data?:            Record<string, string> | null;
+  // Internal Statement standard format — see backend/app/models/uploaded_ticket.py.
+  adt_ref?:             string | null;
+  booking_status?:      string | null;
+  sales_channel?:       string | null;
+  supplier_can_charge?: number | null;
+  reschedule_charge?:   number | null;
+  supplier_name?:       string | null;
+  iata_no?:             string | null;
+  customer_code?:       string | null;
+  vendor_code?:         string | null;
+  booked_by?:           string | null;
+  iata_comm_amt?:       number | null;
+  plb_amount?:          number | null;
+  payment_mode?:        string | null;
+  segment_count?:       number | null;
+  cabin_class?:         string | null;
+  cancellation_date?:       string | null;
+  net_cancellation_amount?: number | null;
   statement_type?:      string | null;
   pax_name?:            string | null;
   air_pnr?:             string | null;
@@ -242,6 +271,9 @@ export type TicketField = {
   shortLabel?: string;
   /** Appears in the statement-detail edit modal. */
   editable?: boolean;
+  /** Internal Statement's standard format only (INTERNAL_STANDARD below) — not offered by
+   *  the Customer data / vendor screens that read fieldsFor(). */
+  internal?: boolean;
 };
 
 export type FieldGroup = {
@@ -458,6 +490,30 @@ export const TICKET_FIELDS: TicketField[] = [
   { key: "coupon_status",      label: "Coupon Status",   type: "text", group: "bsp_doc", onlyFor: "AIRLINE", editable: true },
   { key: "trip_id",            label: "Trip ID",         type: "text", group: "bsp_doc", onlyFor: "AIRLINE", editable: true },
   { key: "multiple_receivables", label: "Multiple Receivables", type: "text", group: "bsp_doc", onlyFor: "AIRLINE", editable: true },
+
+  // ── Internal Statement standard format ────────────────────────────────────
+  // The columns an OTA's sales record carries that no field above holds. Laid out by
+  // INTERNAL_STANDARD below; `internal` keeps them off the Customer data screens.
+  { key: "adt_ref",             label: "ADT Ref",             type: "text",   group: "identity",    internal: true, mappable: true, editable: true },
+  { key: "booking_status",      label: "Booking Status",      type: "text",   group: "identity",    internal: true, mappable: true, editable: true },
+  { key: "sales_channel",       label: "Sales Channel",       type: "select", group: "accounting",  internal: true, mappable: true, editable: true,
+    options: ["Online", "Offline"] },
+  { key: "supplier_can_charge", label: "Supplier Cancellation Fee", shortLabel: "Supp. Canc. Fee", type: "number", group: "ancillary", internal: true, mappable: true, editable: true },
+  { key: "reschedule_charge",   label: "Reschedule Charges",  shortLabel: "Reschedule", type: "number", group: "ancillary", internal: true, mappable: true, editable: true },
+  { key: "supplier_name",       label: "Supplier Name",       type: "text",   group: "accounting",  internal: true, mappable: true, editable: true },
+  { key: "iata_no",             label: "IATA No",             type: "text",   group: "accounting",  internal: true, mappable: true, editable: true },
+  { key: "customer_code",       label: "Customer Code",       type: "text",   group: "passenger",   internal: true, mappable: true, editable: true },
+  { key: "vendor_code",         label: "Vendor Code",         type: "text",   group: "accounting",  internal: true, mappable: true, editable: true },
+  { key: "booked_by",           label: "Created By",          type: "text",   group: "accounting",  internal: true, mappable: true, editable: true },
+  { key: "iata_comm_amt",       label: "IATA Commission",     shortLabel: "IATA Comm", type: "number", group: "commission", internal: true, mappable: true, editable: true },
+  { key: "plb_amount",          label: "PLB",                 type: "number", group: "commission",  internal: true, mappable: true, editable: true },
+  { key: "payment_mode",        label: "Payment Mode",        type: "text",   group: "gst_payment", internal: true, mappable: true, editable: true },
+  { key: "segment_count",       label: "Segment Count",       shortLabel: "Segments", type: "number", group: "itinerary", internal: true, mappable: true, editable: true },
+  { key: "cabin_class",         label: "Booking Class Type",  shortLabel: "Cabin", type: "select", group: "itinerary", internal: true, mappable: true, editable: true,
+    options: ["Economy", "Premium Economy", "Business", "First"] },
+  // A cancellation: either one filled marks the line a refund (backend ticket_duplicates.kind).
+  { key: "cancellation_date",       label: "Date of Cancellation",    shortLabel: "Cancelled On", type: "date",   group: "identity",  internal: true, mappable: true, editable: true },
+  { key: "net_cancellation_amount", label: "Net Cancellation Amount", shortLabel: "Net Canc. Amt", type: "number", group: "ancillary", internal: true, mappable: true, editable: true },
 ];
 
 /**
@@ -483,7 +539,7 @@ export const fieldByKey: Record<string, TicketField> = Object.fromEntries(
 );
 
 export const fieldsFor = (t: StatementType): TicketField[] =>
-  TICKET_FIELDS.filter((f) => !f.onlyFor || f.onlyFor === t);
+  TICKET_FIELDS.filter((f) => !f.internal && (!f.onlyFor || f.onlyFor === t));
 
 export const groupsFor = (t: StatementType): FieldGroup[] =>
   FIELD_GROUPS.filter((g) => !g.onlyFor || g.onlyFor === t);
@@ -514,7 +570,7 @@ export const editableFieldsForTicket = (
 ): TicketField[] => {
   const t: StatementType = statementType === "AIRLINE" ? "AIRLINE" : "B2B";
   return TICKET_FIELDS.filter(
-    (f) => f.editable && (!f.onlyFor || f.onlyFor === t || ticket[f.key] != null),
+    (f) => f.editable && (((!f.onlyFor || f.onlyFor === t) && !f.internal) || ticket[f.key] != null),
   );
 };
 
@@ -563,6 +619,161 @@ export const reviewColGroups = (): ReviewColGroup[] =>
         key: k,
         label: f.shortLabel ?? f.label,
         // The grid has no select control — a select field renders as free text there.
+        type: (f.type === "select" ? "text" : f.type) as ReviewCol["type"],
+      };
+    }),
+  }));
+
+// ── Internal Statement standard format ───────────────────────────────────────
+// The record every Internal Statement upload is mapped onto — the user's list (2026-10-28),
+// in their order and their words, first read off Yatra's fortnightly B2B sales report.
+// `label` is the mapping screen's; `hint` says what the server does with the column.
+// Nothing else is offered. The "Other columns" section that held every other B2B field is
+// gone (user, 2026-10-29): the fare split, discount, TDS, ADM … went into Fare, the refund
+// fees and GST into Charges & Fees, Tour Code into Commission & Payment, and the rest
+// (Invoice Type / No, Sold To, REI, Booking Fee, GST as one figure, Paid By Credit Card,
+// CC, Acc Code, Doc Date, Reference, Narration) was dropped.
+
+export type StandardColumn = { key: string; label: string; hint?: string };
+export type StandardSection = { title: string; columns: StandardColumn[] };
+
+export const INTERNAL_STANDARD: StandardSection[] = [
+  { title: "Booking & Document", columns: [
+    { key: "booking_ref",    label: "Booking Ref" },
+    { key: "adt_ref",        label: "ADT Ref", hint: "Has an ADT Ref → Online, none → Offline" },
+    { key: "booking_status", label: "Booking Status", hint: "TIX ISSUED, REFUNDED … — kept as printed" },
+    { key: "doc_no",         label: "Document No / Invoice No" },
+    { key: "ticket_date",    label: "Booking Date" },
+  ]},
+  { title: "Passenger", columns: [
+    { key: "pax_name",   label: "Passenger Name", hint: "Split into First and Last Name" },
+    { key: "first_name", label: "First Name", hint: "Only when the file has its own column" },
+    { key: "last_name",  label: "Last Name",  hint: "Only when the file has its own column" },
+  ]},
+  { title: "Travel", columns: [
+    { key: "departure_datetime", label: "Travel Date" },
+    { key: "sector",        label: "Routing / Sector", hint: "Origin → destination, e.g. HYD-DEL-DEL-SXR" },
+    { key: "ticket_number", label: "Ticket No" },
+    { key: "airline_name",  label: "Airline Name" },
+    { key: "airlines_code", label: "Airline Code" },
+    { key: "segment_type",  label: "Segment Type", hint: "D / I → Domestic / International" },
+    { key: "booking_class", label: "Booking Class Code", hint: "RBD — A, B, C, G …" },
+    { key: "fare_basis",    label: "Fare Basis" },
+    { key: "gds_pnr",       label: "PNR No" },
+    { key: "flight_no",     label: "Flight No" },
+    { key: "segment_count", label: "Segment Count" },
+    { key: "cabin_class",   label: "Booking Class Type", hint: "Economy, Premium Economy, Business, First" },
+  ]},
+  { title: "Fare", columns: [
+    { key: "sell_fare",  label: "Base Fare" },
+    { key: "comm_sell",  label: "Commission" },
+    { key: "net_fare",   label: "Net Fare", hint: "Base Fare − Commission when the file has none" },
+    { key: "sell_tax",   label: "Tax (Total Tax)" },
+    { key: "total_amt",  label: "BSP Amount (Total Amount)" },
+    { key: "sell_tax_yq",    label: "Tax YQ" },
+    { key: "sale_yr",        label: "Sale YR" },
+    { key: "sale_k3",        label: "Sale K3" },
+    { key: "other_tax",      label: "Other Taxes / Oth Tax" },
+    { key: "oc_tax",         label: "OC Tax" },
+    { key: "net_amt",        label: "Net AMT / Net Remit" },
+    { key: "comm_percent",   label: "Comm (%) / %%%%" },
+    { key: "incentive_sell", label: "Incentive Sell" },
+    { key: "dis_sell",       label: "Dis Sell" },
+    { key: "tds_sell",       label: "TDS Sell" },
+    { key: "adm",            label: "ADM" },
+  ]},
+  { title: "Charges & Fees", columns: [
+    { key: "can_charge",          label: "Cancellation Service Fee" },
+    { key: "supplier_can_charge", label: "Supplier Cancellation Fee", hint: "The airline's cancellation charge" },
+    { key: "serv_charge",         label: "Service Fee (Additional Fee)" },
+    { key: "reschedule_charge",   label: "Reschedule Charges (Rebooking Fee)" },
+    { key: "meals",               label: "Meal Charges" },
+    { key: "excess_baggage",      label: "Baggage Charges" },
+    { key: "seat_selection",      label: "Seat Charges" },
+    { key: "rfd_sell",            label: "RFD Sell" },
+    { key: "raf",                 label: "RAF / Refund Admin Fee" },
+    { key: "cgst_sell",           label: "CGST Sell" },
+    { key: "sgst_sell",           label: "SGST Sell" },
+    { key: "igst_sell",           label: "IGST Sell" },
+  ]},
+  // A line is a refund when either of these is filled — or when its Amount, Base Fare or Tax
+  // is negative (backend services/ticket_duplicates.py `kind`).
+  { title: "Cancellation / Refund", columns: [
+    { key: "cancellation_date",       label: "Date of Cancellation", hint: "Filled → the line is a refund. Read in the Booking Date's format" },
+    { key: "net_cancellation_amount", label: "Net Cancellation Amount", hint: "Net amount refunded — filled → the line is a refund" },
+  ]},
+  { title: "Customer & Supplier", columns: [
+    { key: "sales_channel", label: "Sales Channel", hint: "Online / Offline — from ADT Ref when the file has one" },
+    { key: "customer_name", label: "Corporate Name" },
+    { key: "customer_code", label: "Customer Code" },
+    { key: "supplier_name", label: "Supplier Name", hint: "\"All vendors\": each row's vendor is found from it" },
+    { key: "iata_no",       label: "IATA No" },
+    { key: "vendor_code",   label: "Vendor Code" },
+    { key: "booked_by",     label: "Created By" },
+  ]},
+  { title: "Commission & Payment", columns: [
+    { key: "iata_comm_amt", label: "IATA Commission" },
+    { key: "plb_amount",    label: "PLB" },
+    { key: "payment_mode",  label: "Payment Mode" },
+    { key: "tour_code",     label: "Tour Code" },
+  ]},
+];
+
+export type StandardField = TicketField & { section: string; hint?: string };
+
+/** The Internal Statement mapping screen: the standard format in order, its own labels
+ *  over the catalog's — and nothing else. */
+export const internalMappingFields = (): StandardField[] =>
+  INTERNAL_STANDARD.flatMap(({ title, columns }) =>
+    columns.map((c) => ({ ...fieldByKey[c.key], label: c.label, mapLabel: c.label, hint: c.hint, section: title })));
+
+const INTERNAL_KEYS = new Set(INTERNAL_STANDARD.flatMap((s) => s.columns.map((c) => c.key)));
+
+/** A mapping cut down to the standard format's fields. The server's name match and a mapping
+ *  remembered before the list changed know every ticket field; a field not on the screen must
+ *  not take a column unseen. A file whose only date is a Doc Date (GLOBE's) has it as its
+ *  Booking Date — how its Doc Date was read before Doc Date left the list. */
+export const toInternalStandard = (m: Record<string, string>): Record<string, string> => {
+  const out = Object.fromEntries(Object.entries(m).filter(([k]) => INTERNAL_KEYS.has(k)));
+  if (!out.ticket_date && m.doc_date) out.ticket_date = m.doc_date;
+  return out;
+};
+
+const INTERNAL_REVIEW_GROUP_KEYS: { label: string; color: string; keys: string[] }[] = [
+  { label: "Booking", color: "#1e3a5f", keys: [
+    "booking_ref", "adt_ref", "booking_status", "doc_no", "ticket_date", "invoice_type", "sales_channel",
+  ]},
+  { label: "Passenger", color: "#1e3a5f", keys: ["first_name", "last_name"] },
+  { label: "Travel", color: "#4f46e5", keys: [
+    "departure_datetime", "sector", "ticket_number", "airline_name", "airlines_code", "segment_type",
+    "booking_class", "cabin_class", "fare_basis", "gds_pnr", "flight_no", "segment_count",
+  ]},
+  { label: "Fare", color: "#059669", keys: [
+    "sell_fare", "comm_sell", "net_fare", "sell_tax", "total_amt", "sell_tax_yq", "sale_yr", "sale_k3", "other_tax",
+    "oc_tax", "net_amt", "comm_percent", "incentive_sell", "dis_sell", "tds_sell", "adm",
+  ]},
+  { label: "Charges & Fees", color: "#059669", keys: [
+    "can_charge", "supplier_can_charge", "serv_charge", "reschedule_charge", "meals", "excess_baggage",
+    "seat_selection", "rfd_sell", "raf", "cgst_sell", "sgst_sell", "igst_sell",
+  ]},
+  { label: "Cancellation", color: "#b45309", keys: ["cancellation_date", "net_cancellation_amount"] },
+  { label: "Commission & Payment", color: "#9333ea", keys: ["iata_comm_amt", "plb_amount", "payment_mode", "tour_code"] },
+  { label: "Customer & Supplier", color: "#9333ea", keys: [
+    "customer_name", "customer_code", "supplier_name", "iata_no", "vendor_code", "booked_by",
+  ]},
+];
+
+/** The Internal Statement review grid's column groups — the standard format's columns. */
+export const internalReviewColGroups = (): ReviewColGroup[] =>
+  INTERNAL_REVIEW_GROUP_KEYS.map(({ label, color, keys }) => ({
+    label,
+    color,
+    cols: keys.map((k) => {
+      const f = fieldByKey[k];
+      const std = INTERNAL_STANDARD.flatMap((s) => s.columns).find((c) => c.key === k);
+      return {
+        key: k,
+        label: f.shortLabel && !std ? f.shortLabel : std?.label ?? f.shortLabel ?? f.label,
         type: (f.type === "select" ? "text" : f.type) as ReviewCol["type"],
       };
     }),

@@ -113,10 +113,14 @@ DELETION_GROUPS: tuple[DeletionGroup, ...] = (
         # workspace's own record, uploaded only to be checked against a vendor's bill.
         "payment_module", "Payment Module",
         "MO (mid-office) statements, their reconciliations against vendor statements, the "
-        "decisions taken on each billed ticket and the payments recorded to vendors.",
+        "decisions taken on each billed ticket or mapped vendor line, and the payments "
+        "recorded to vendors.",
         GroupCategory.RECORDS,
         ("payment_reconciliations", "payment_reconciliation_runs", "payment_items",
-         "vendor_payments", "mo_vendor_corrections", "vendor_accounts", "mid_office_gds"),
+         "vendor_payments", "mo_vendor_corrections", "vendor_accounts", "mid_office_gds",
+         # Vendor Mapping's decisions — keyed by line text, not row id, like
+         # vendor_internal_resolutions, so nothing points into them.
+         "vendor_mapping_decisions"),
     ),
     DeletionGroup(
         "bsp", "BSP statements", "BSP settlement and summary uploads with every row and tax breakup.",
@@ -149,8 +153,10 @@ DELETION_GROUPS: tuple[DeletionGroup, ...] = (
         # and nothing points into it, so it is safe beside its statement twin. The
         # resolutions are keyed by ticket text, not by row id, and say nothing once the
         # internal statement they were about is gone.
+        # The import jobs of its background upload and their staging rows go with it.
         GroupCategory.RECORDS, ("ticket_statements", "internal_uploaded_tickets", "internal_ticket_statements",
-                                "vendor_internal_resolutions"),
+                                "vendor_internal_resolutions",
+                                "internal_ticket_imports", "internal_ticket_import_rows"),
     ),
     DeletionGroup(
         "customer_statements", "Customer statements", "Statements issued to customers.",

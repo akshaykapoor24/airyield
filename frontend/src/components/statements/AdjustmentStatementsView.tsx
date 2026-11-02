@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import {
   Upload, RefreshCw, Trash2, Download, Eye, X, AlertTriangle, ArrowLeft,
   FileSpreadsheet, CheckCircle2, Loader2, ChevronLeft, ChevronRight, FolderOpen, Search, Split,
@@ -407,6 +408,7 @@ function SummarySlab({ summary }: { summary: Summary }) {
 export default function AdjustmentStatementsView({
   apiBase, slug, title, requiresAirlineId, requiresSupplier, supportsMapping, capturesPeriod,
   supportsBilling, billingWorklist, exportsEntries, doneHint, checks, captureControls, uploadHref,
+  uploadedElsewhere,
 }: {
   apiBase: string; slug: string; title: string; blurb?: string;
   /** LCC types only — see lib/statements.ts. Drives the mandatory Airline picker in
@@ -444,6 +446,9 @@ export default function AdjustmentStatementsView({
   /** The upload's own page (lib/statements.ts `uploadPage`). Upload XLS goes there instead
    *  of opening the wizard as a popup over this list. */
   uploadHref?: string;
+  /** Payment Module: the list is read-only — no Template, no Upload XLS. These uploads are
+   *  made where `href` points (`label` names it), and the empty list says so. */
+  uploadedElsewhere?: { href: string; label: string };
 }) {
   const router = useRouter();
   const [batches, setBatches] = useState<Batch[]>([]);
@@ -949,8 +954,10 @@ export default function AdjustmentStatementsView({
         </div>
         <div className="flex items-center gap-2">
           <button onClick={fetchBatches} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-500 border border-slate-200 rounded-lg hover:bg-slate-50"><RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} /> Refresh</button>
-          <button onClick={downloadTemplate} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-500 border border-slate-200 rounded-lg hover:bg-slate-50"><Download className="w-3.5 h-3.5" /> Template</button>
-          <button onClick={startUpload} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700"><Upload className="w-3.5 h-3.5" /> Upload XLS</button>
+          {!uploadedElsewhere && <>
+            <button onClick={downloadTemplate} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-500 border border-slate-200 rounded-lg hover:bg-slate-50"><Download className="w-3.5 h-3.5" /> Template</button>
+            <button onClick={startUpload} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700"><Upload className="w-3.5 h-3.5" /> Upload XLS</button>
+          </>}
         </div>
       </div>
 
@@ -987,7 +994,12 @@ export default function AdjustmentStatementsView({
             {loading ? (
               <tr><td colSpan={batchCols} className="px-3 py-10 text-center text-slate-400">Loading…</td></tr>
             ) : batches.length === 0 ? (
-              <tr><td colSpan={batchCols} className="px-3 py-12 text-center text-slate-400">No {title} uploads yet. <button onClick={startUpload} className="text-blue-600 hover:underline">Upload an XLS</button>.</td></tr>
+              <tr><td colSpan={batchCols} className="px-3 py-12 text-center text-slate-400">
+                No {title} uploads yet.{" "}
+                {uploadedElsewhere
+                  ? <>They are uploaded under <Link href={uploadedElsewhere.href} className="text-blue-600 hover:underline">{uploadedElsewhere.label}</Link>.</>
+                  : <><button onClick={startUpload} className="text-blue-600 hover:underline">Upload an XLS</button>.</>}
+              </td></tr>
             ) : batches.map((b) => (
               <tr key={b.batch_id} className="group border-b border-slate-100 hover:bg-slate-50">
                 <td className="px-3 py-2">

@@ -9,7 +9,8 @@ run has reached it yet — with the statement's own columns, and beside each:
                            kind (earned on a sale, given back on a refund) — third_party
                            ._by_kind, so Brightsun's negative print and TripJack's positive
                            one mean the same thing
-    expected commission    what the matched deal computes: incentive + IATA commission
+    expected commission    what the matched deal computes: every incentive type on it (PLB,
+                           Super PLB, NDC…, `calc.incentive_breakdown`) + IATA commission
     difference             expected − statement. Positive: the vendor paid you less than
                            your deal says (they owe you). Negative: they paid more.
 
@@ -45,6 +46,10 @@ DIFF_TOLERANCE = 1.0
 # Amounts in the statement's columns, for the grid to right-align. Comm % and Pax Count are
 # numbers but not money.
 _MONEY = frozenset(flat_statement._MONEY_FIELDS) - {"commission_rate", "passenger_count"}
+
+# Shorter headings for this grid only. The mapping screen and the statement view keep the
+# standard name ("Booked / Issue Date"), which says the column takes either from a file.
+_HEADERS = {"booking_date": "Booked Date"}
 
 
 def bucket_of(status: str | None) -> str:
@@ -141,6 +146,7 @@ def totals(lines: list[Line]) -> dict:
     counts = {"matched": 0, "unmatched": 0, "other": 0, "pending": 0}
     statement = expected = iata = statement_pending = 0.0
     differing = unverified = with_iata = 0
+    incentives: dict[str, float] = {}
     for ln in lines:
         b = ln.bucket
         counts[b] += 1
@@ -149,6 +155,8 @@ def totals(lines: list[Line]) -> dict:
             continue
         statement += ln.statement or 0.0
         expected += ln.expected or 0.0
+        for kind, amount in (getattr(ln.calc, "incentive_breakdown", None) or {}).items():
+            incentives[kind] = incentives.get(kind, 0.0) + _money(amount)
         line_iata = _money(getattr(ln.calc, "iata_commission", None))
         iata += line_iata
         if abs(line_iata) >= 0.01:
@@ -167,6 +175,10 @@ def totals(lines: list[Line]) -> dict:
         # its own card, since it is a different entitlement from the deal's incentive.
         "iata_commission": round(iata, 2),
         "incentive": round(expected - iata, 2),
+        # `incentive` by type, for the grid's columns. A type is here if any line carries it,
+        # even at ₹0 (a slab target not met, a sale and its refund) — it applied and paid
+        # nothing, which is not the same as no deal having it.
+        "incentives": {k: round(v, 2) for k, v in incentives.items()},
         "with_iata": with_iata,
         "difference": round(expected - statement, 2),
         "differing": differing,
@@ -185,5 +197,6 @@ def columns(slug: str, lines: list[Line]) -> list[dict]:
             continue
         if not any(ln.values.get(f) not in (None, "") for ln in lines):
             continue
-        out.append({"field": f, "header": c["header"], "kind": "money" if f in _MONEY else None})
+        out.append({"field": f, "header": _HEADERS.get(f, c["header"]),
+                    "kind": "money" if f in _MONEY else None})
     return out

@@ -85,11 +85,35 @@ def leg_sectors(sectors: str | None) -> tuple[list[str], str]:
         if (len(filled) >= 2
                 and all(_APT_RE.match(p) for p in filled)
                 and slots[:len(filled)] == filled):
-            pairs = [f"{filled[i]}/{filled[i + 1]}" for i in range(len(filled) - 1)]
+            # A leg from an airport to itself is never flown: "HYD-DEL-DEL-SXR-" is an OTA
+            # writing each segment as its own pair, so the connection repeats. The exact
+            # reading needs the segment count — segment_pairs.
+            pairs = [f"{filled[i]}/{filled[i + 1]}" for i in range(len(filled) - 1)
+                     if filled[i] != filled[i + 1]]
+            if not pairs:
+                return [], UNPARSED
             return (pairs, SINGLE if len(pairs) == 1 else SPLIT)
 
     # Fare-construction markers ("X/SIN"), mixed grammars, junk — do not guess.
     return [], UNPARSED
+
+
+def segment_pairs(sectors: str | None, count: int | None) -> list[str] | None:
+    """``"HYD-DEL-DEL-SXR-"`` with 2 segments -> ``["HYD/DEL", "DEL/SXR"]``.
+
+    An OTA's sales report writes every flown segment as its own origin-destination pair, in
+    one hyphen chain, beside a segment count. When the chain holds exactly two airports per
+    segment it is read as pairs — which, unlike reading it as a chain, also gets an open jaw
+    right ("DEL-BOM-PNQ-DEL-" is DEL/BOM PNQ/DEL, with no BOM/PNQ leg nobody flew).
+    None when the string is not that shape.
+    """
+    s = (sectors or "").strip().upper()
+    if not s or "/" in s or not count or count < 1:
+        return None
+    codes = [p.strip() for p in s.split("-") if p.strip()]
+    if len(codes) != 2 * count or not all(_APT_RE.match(c) for c in codes):
+        return None
+    return [f"{codes[2 * i]}/{codes[2 * i + 1]}" for i in range(count)]
 
 
 def tokens(value: str | None, n: int) -> list[str]:

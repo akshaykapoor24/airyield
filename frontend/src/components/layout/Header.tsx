@@ -10,8 +10,9 @@ export default function Header() {
   const platform = isPlatformAdmin(user?.role);
 
   return (
+    // 56px, matched by the sidebar's logo row (Sidebar.tsx) so the two borders meet in one line.
     <header
-      className="h-16 flex items-center justify-between px-6 shrink-0 sticky top-0 z-30 bg-white border-b border-[#e6ebf2]"
+      className="h-14 flex items-center justify-between px-6 shrink-0 sticky top-0 z-30 bg-white border-b border-[#e6ebf2]"
       style={{ boxShadow: "0 1px 3px rgba(15,37,64,0.06)" }}
     >
       {/* Left — Search */}

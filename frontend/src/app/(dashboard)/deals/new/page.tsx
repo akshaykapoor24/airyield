@@ -56,7 +56,8 @@ const INCENTIVE_DATE_KEYS: Record<string, [fromKey: string, toKey: string]> = {
   "Frontend":          ["validFrom", "validTo"],
   "Backend":           ["validFrom", "validTo"],
   "Push Action":       ["validFrom", "validTo"],
-  "Cashback":          ["cashbackPeriodFrom", "cashbackPeriodTo"],
+  "NDC":               ["validFrom", "validTo"],
+  "Cashback":         ["cashbackPeriodFrom", "cashbackPeriodTo"],
   "Segment Incentive": ["siPeriodFrom", "siPeriodTo"],
 };
 
@@ -1264,6 +1265,7 @@ export default function NewDealPage() {
                     // Every deal (Airline / B2B, Standard / Adhoc, incoming and outgoing)
                     // captures Travel Date Valid From/To; only B2B Standard also drops Frequency.
                     travelDates
+                    gstToggle
                   />
 
                   {/* Level B: incl/excl rule sub-sub-tabs */}

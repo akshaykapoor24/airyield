@@ -63,3 +63,9 @@ class TicketStatement(Base):
     # and what pre-fills the customer's next upload. NULL for Customer data, punched
     # batches and statements made before it was asked for — read day-first.
     date_formats:       Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    # ── Statement Type (Internal Statement) ──────────────────────────────────
+    # Which system's report the file is: "booking" (a booking / mid-office statement) or
+    # "accounting" (api/v1/tickets.py STATEMENT_CATEGORIES). Not `statement_type`, which is
+    # the file's SHAPE (B2B | AIRLINE). NULL for Customer data and Create Ticket's batches.
+    statement_category: Mapped[str | None] = mapped_column(String(20), nullable=True)

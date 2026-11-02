@@ -53,7 +53,7 @@ export const SOURCE_CATEGORY: Record<string, string> = {
 export const CATEGORY_ORDER = ["BSP", "LCC", "Third Party"] as const;
 
 /** Incentive types get the same slots, by rank within the current filter rather than by
- *  a fixed identity — there is no stable order to eleven incentive types and the chart
+ *  a fixed identity — there is no stable order to twelve incentive types and the chart
  *  shows one filter at a time. Past five they fold into a neutral "Other", which is the
  *  rule: a sixth slice is never a generated hue. */
 export const INCENTIVE_COLORS = [

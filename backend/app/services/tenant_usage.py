@@ -173,6 +173,10 @@ EXCLUDED_TABLES: frozenset[str] = frozenset({
     # the source files behind an LCC upload — one or two spreadsheets per already-counted
     # batch, and the rows they produce are what `lcc_detailed` counts
     "lcc_detailed_batch_file",
+    # Internal Statement's background upload in progress: a file's lines on their way to
+    # becoming tickets (counted as `internal_tickets` once saved), gone when it is saved,
+    # discarded or expired
+    "internal_ticket_imports", "internal_ticket_import_rows",
     # the lines a Third Party GDS upload left out as repeats of lines already saved — each a
     # copy of a third_party_gds line counted already, so counting it would count it twice
     "third_party_gds_left_out",
@@ -190,8 +194,9 @@ EXCLUDED_TABLES: frozenset[str] = frozenset({
     "payment_reconciliations", "payment_reconciliation_runs",
     "payment_items", "mo_vendor_corrections", "vendor_accounts", "statement_batch_controls",
     # …and for Vendor Reconciliation's decisions: state about a vendor upload and an internal
-    # statement that are both counted already
-    "vendor_internal_resolutions",
+    # statement that are both counted already — and the Payment Module's Vendor Mapping
+    # decisions, the same kind of state about the same uploads
+    "vendor_internal_resolutions", "vendor_mapping_decisions",
     # the income board is a projection of rows already counted above — one line per
     # priced settlement document, rebuilt by POST /dashboard/income/rebuild — so
     # counting it would count every statement a second time

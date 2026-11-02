@@ -72,21 +72,24 @@ def detect_column(field_name: str, column: str, values: list, period: tuple[date
     det = Detection(field_name, column, swapped=swapped)
     # Per order, the best example seen: one no other order could read beats one it read worse.
     examples: dict[str, tuple[bool, dict]] = {}
-    for raw in values:
-        s = "" if raw is None else str(raw).strip()
+    # Each distinct value is read once and counts as often as it is in the column, in the
+    # order it first appears — the same votes and examples as reading every cell. A lakh-line
+    # column holds a few hundred dates; reading each cell three ways was most of the read.
+    cells = Counter("" if raw is None else str(raw).strip() for raw in values)
+    for s, times in cells.items():
         if not s or s.lower() == "nan" or _ISO.match(s):
             continue
         readings = {o: flat.to_iso_date(s, o) for o in flat.DATE_ORDERS}
         distance = {o: _distance(r, period) for o, r in readings.items() if r is not None}
         if not distance:
             continue
-        det.text_dates += 1
+        det.text_dates += times
         best = min(distance.values())
         winners = [o for o, d in distance.items() if d == best]
         if len(winners) != 1:
             continue
         o = winners[0]
-        det.votes[o] += 1
+        det.votes[o] += times
         only = len(distance) == 1
         if o not in examples or (only and not examples[o][0]):
             examples[o] = (only, {"value": s, "read": readings[o]})

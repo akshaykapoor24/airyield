@@ -31,6 +31,7 @@ export default function CommissionIncomeTabs() {
     setSourceSlug(slug);
     const url = new URL(window.location.href);
     url.searchParams.set("source", slug);
+    url.searchParams.delete("view");   // a source's own sub-tab (CommissionIncomeView)
     window.history.replaceState({}, "", url);
   }, []);
 
@@ -38,10 +39,7 @@ export default function CommissionIncomeTabs() {
 
   return (
     <div>
-      <div className="mb-4">
-        <h1 className="text-base font-bold text-slate-900">Commission income</h1>
-        <p className="text-xs text-slate-400 mt-0.5">{source.blurb}</p>
-      </div>
+      <h1 className="text-base font-bold text-slate-900 mb-3">Commission income</h1>
 
       <div className="flex items-center gap-1 border-b border-slate-200 mb-4 overflow-x-auto">
         {COMMISSION_TABS.map((slug) => {

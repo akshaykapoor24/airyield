@@ -35,7 +35,7 @@ export const INCENTIVE_TYPES = [
   "PLB","Super PLB","Transaction Fee",
   "Deposit Incentive (DI)","Marketing Fund","Ancillary",
   "Frontend","Backend","Cashback",
-  "Segment Incentive","Push Action",
+  "Segment Incentive","Push Action","NDC",
 ];
 
 // Incentives with the standard "contract dates → frequency → flight/class → target"
@@ -44,7 +44,7 @@ export const INCENTIVE_TYPES = [
 // columns narrow by Class. (DI, Ancillary, Cashback, Segment Incentive are shaped
 // differently and are left untouched.)
 export const DATE_WISE_INCENTIVES = new Set([
-  "PLB", "Super PLB", "Transaction Fee", "Marketing Fund", "Frontend", "Backend", "Push Action",
+  "PLB", "Super PLB", "Transaction Fee", "Marketing Fund", "Frontend", "Backend", "Push Action", "NDC",
 ]);
 
 export const FREQUENCY_OPTIONS    = ["Quarterly","Half Yearly","Yearly"];
@@ -353,6 +353,39 @@ export function DateField({ label, value, onChange, required }: { label: string;
   );
 }
 
+// ── GST mode ───────────────────────────────────────────────────────────────
+// Sits beside an incentive's rate / amount: how GST sits in it, which decides what the
+// vendor is expected to pay on it (backend deal_matching.GST_FACTOR). Stored as the mode's
+// value; unset reads as the first, inclusive — as the server does (deals.py _gst_mode).
+export const GST_MODES: { value: string; label: string; hint: string }[] = [
+  { value: "inclusive", label: "Incl. GST ÷1.18",    hint: "The rate includes 18% GST — 18/118 of it comes off (Brightsun pays × 0.8475)" },
+  { value: "less_18",   label: "Incl. GST less 18%", hint: "The rate includes GST — 18% of the commission comes off (TripJack pays × 0.82)" },
+  { value: "exclusive", label: "Excl. GST",          hint: "GST is on top of the rate — it is paid in full" },
+];
+export const gstModeOf = (v: string | undefined) => GST_MODES.find(m => m.value === v) ?? GST_MODES[0];
+
+export function GstModeSelect({ value, onChange, title, size = "sm" }: {
+  value: string; onChange: (v: string) => void; title?: string;
+  size?: "sm" | "md";   // md: beside an input, stretched to its height · sm: in a slab header / table cell
+}) {
+  const mode = gstModeOf(value);
+  return (
+    <select value={mode.value} onChange={e => onChange(e.target.value)} aria-label="GST"
+      title={title ? `${title}\n${mode.hint}` : mode.hint}
+      className={`shrink-0 border font-semibold cursor-pointer focus:outline-none focus:ring-1 focus:ring-blue-400 ${
+        size === "md" ? "px-2 rounded-md text-xs" : "px-1 py-0.5 rounded text-[10px]"
+      } ${mode.value === "exclusive"
+        ? "bg-white border-gray-300 text-gray-600"
+        : "bg-blue-50 border-blue-300 text-blue-700"}`}>
+      {GST_MODES.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+    </select>
+  );
+}
+
+// The incentive's own rate / amount inputs. They share one GST mode per incentive
+// (gstMode) — only one of them is on screen at a time.
+const GST_VALUE_KEYS = new Set(["incentiveAmtPct", "bulkSingleAmt", "trancheAmt", "bankTransferAmt", "creditCardAmt"]);
+
 // ── tab bar ────────────────────────────────────────────────────────────────
 export function TabBar({ tabs, active, onSelect, onRemove }: {
   tabs: string[]; active: string;
@@ -600,6 +633,17 @@ export const INCENTIVE_FIELDS: Record<string, FieldConfig[]> = {
     { key:"targetBased",    label:"Target Based for Push Action",             type:"select" },
     ...payoutFields("Push Action"),
   ],
+  "NDC": [
+    { key:"validFrom",      label:"Contract Valid from for NDC",       type:"date"   },
+    { key:"validTo",        label:"Contract Valid to for NDC",         type:"date"   },
+    { key:"frequency",      label:"Frequency for NDC",                 type:"select" },
+    { key:"flightType",     label:"Flight Type for NDC",               type:"select" },
+    { key:"class",          label:"Class for NDC",                     type:"search" },
+    { key:"targetCalcCols", label:"Target Calc Columns for NDC",       type:"select" },
+    { key:"payoutCalcCols", label:"Payout Calc Columns for NDC",       type:"select" },
+    { key:"targetBased",    label:"Target Based for NDC",              type:"select" },
+    ...payoutFields("NDC"),
+  ],
 };
 
 // ── ancillary sub-form ────────────────────────────────────────────────────
@@ -613,9 +657,10 @@ export const ANCILLARY_ITEMS: AncillaryItem[] = [
   { key:"cabFacility",  label:"Cab Facility",      withValue:"With Cab Facility",  withoutValue:"Without Cab Facility",  numPctKey:"cabNumPct",      amtKey:"cabAmt"       },
 ];
 
-export function AncillaryTabContent({ data, onChange }: {
+export function AncillaryTabContent({ data, onChange, gstToggle = false }: {
   data: Record<string, string>;
   onChange: (k: string, v: string) => void;
+  gstToggle?: boolean;
 }) {
   const handleChange = (key: string, value: string) => {
     onChange(key, value);
@@ -655,13 +700,19 @@ export function AncillaryTabContent({ data, onChange }: {
                 <label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">
                   Incentive Percentage or Amount for {item.label}
                 </label>
-                <input
-                  type="number"
-                  placeholder="Enter number"
-                  value={data[item.amtKey] ?? ""}
-                  onChange={e => onChange(item.amtKey, e.target.value)}
-                  className="w-full border border-gray-200 rounded-md px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400"
-                />
+                <div className="flex items-stretch gap-2">
+                  <input
+                    type="number"
+                    placeholder="Enter number"
+                    value={data[item.amtKey] ?? ""}
+                    onChange={e => onChange(item.amtKey, e.target.value)}
+                    className="flex-1 min-w-0 border border-gray-200 rounded-md px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400"
+                  />
+                  {/* Each sub-type has its own flag: <amount key>Gst, kept in ancillary_items */}
+                  {gstToggle && (
+                    <GstModeSelect size="md" value={data[`${item.amtKey}Gst`] ?? ""} onChange={v => onChange(`${item.amtKey}Gst`, v)}/>
+                  )}
+                </div>
               </div>
             )}
           </>
@@ -780,11 +831,12 @@ export function segmentSlabCols(flightType: string, frequency = "", dateWise = f
   ];
 }
 
-export function SlabGrid({ title, cols, rows, onRowsChange }: {
+export function SlabGrid({ title, cols, rows, onRowsChange, headerExtra }: {
   title: string;
   cols: SlabColDef[];
   rows: Record<string, string>[];
   onRowsChange: (rows: Record<string, string>[]) => void;
+  headerExtra?: React.ReactNode;   // e.g. the GST mode, which covers every rate in the grid
 }) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [editing, setEditing] = useState(false);
@@ -857,6 +909,7 @@ export function SlabGrid({ title, cols, rows, onRowsChange }: {
       <div className="flex items-center justify-between px-3 py-2 bg-white border-b border-gray-100">
         <span className="text-xs font-semibold text-gray-700">{title}</span>
         <div className="flex items-center gap-4">
+          {headerExtra}
           {editing
             ? <span className="text-xs text-amber-500 flex items-center gap-1"><Pencil className="w-3 h-3"/>Editing...</span>
             : <span className="text-xs text-green-600 flex items-center gap-1"><Check className="w-3 h-3"/>Saved</span>
@@ -917,9 +970,10 @@ export function SlabGrid({ title, cols, rows, onRowsChange }: {
 }
 
 // ── segment incentive form ────────────────────────────────────────────────
-export function SegmentIncentiveTabContent({ data, onChange }: {
+export function SegmentIncentiveTabContent({ data, onChange, gstToggle = false }: {
   data: Record<string, string>;
   onChange: (k: string, v: string) => void;
+  gstToggle?: boolean;
 }) {
   const flightType = data["siFlightType"] ?? "";
 
@@ -1015,6 +1069,10 @@ export function SegmentIncentiveTabContent({ data, onChange }: {
         cols={slabCols}
         rows={slabRows}
         onRowsChange={r => onChange("siSlabs", JSON.stringify(r))}
+        headerExtra={gstToggle && (
+          <GstModeSelect value={data["gstMode"] ?? ""} onChange={v => onChange("gstMode", v)}
+            title="Applies to every rate in this slab"/>
+        )}
       />
     </div>
   );
@@ -1039,17 +1097,19 @@ function b2bStandardFields(name: string, fields: FieldConfig[], b2bStandard: boo
 }
 
 // ── incentive tab content ──────────────────────────────────────────────────
-export function IncentiveTabContent({ name, data, onChange, b2bStandard = false, travelDates = false }: {
+export function IncentiveTabContent({ name, data, onChange, b2bStandard = false, travelDates = false, gstToggle = false }: {
   name: string; data: Record<string, string>; onChange: (k: string, v: string) => void;
   b2bStandard?: boolean;
   // Adds Travel Date Valid From/To without the rest of the B2B date-wise shape (Airline, B2B Adhoc).
   travelDates?: boolean;
+  // Shows the GST mode select beside the incentive's rate / amount and on its slabs.
+  gstToggle?: boolean;
 }) {
   if (name === "Ancillary") {
-    return <AncillaryTabContent data={data} onChange={onChange} />;
+    return <AncillaryTabContent data={data} onChange={onChange} gstToggle={gstToggle} />;
   }
   if (name === "Segment Incentive") {
-    return <SegmentIncentiveTabContent data={data} onChange={onChange} />;
+    return <SegmentIncentiveTabContent data={data} onChange={onChange} gstToggle={gstToggle} />;
   }
 
   const allFields = b2bStandardFields(name, INCENTIVE_FIELDS[name] ?? [], b2bStandard, travelDates);
@@ -1128,14 +1188,23 @@ export function IncentiveTabContent({ name, data, onChange, b2bStandard = false,
   const renderField = (f: FieldConfig) => {
     if (f.type === "date")
       return <DateField label={f.label} value={data[f.key]??""} onChange={v => handleFieldChange(f.key, v)}/>;
-    if (f.type === "number")
+    if (f.type === "number") {
+      const input = (
+        <input type="number" placeholder="Enter number" value={data[f.key]??""} onChange={e => handleFieldChange(f.key, e.target.value)}
+          className="w-full border border-gray-200 rounded-md px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400"/>
+      );
       return (
         <div>
           <label className="block text-[11px] font-medium text-gray-500 mb-1 uppercase tracking-wide">{f.label}</label>
-          <input type="number" placeholder="Enter number" value={data[f.key]??""} onChange={e => handleFieldChange(f.key, e.target.value)}
-            className="w-full border border-gray-200 rounded-md px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400"/>
+          {gstToggle && GST_VALUE_KEYS.has(f.key) ? (
+            <div className="flex items-stretch gap-2">
+              <div className="flex-1 min-w-0">{input}</div>
+              <GstModeSelect size="md" value={data["gstMode"] ?? ""} onChange={v => onChange("gstMode", v)}/>
+            </div>
+          ) : input}
         </div>
       );
+    }
     if (f.type === "search")
       return <SearchSelectField label={f.label} options={FIELD_OPTIONS[f.key] ?? CLASS_OPTIONS} value={data[f.key]??""} onChange={v => handleFieldChange(f.key, v)}/>;
     return <SelectField label={f.label} options={FIELD_OPTIONS[f.key]??[]} value={data[f.key]??""} onChange={v => handleFieldChange(f.key, v)}/>;
@@ -1150,6 +1219,11 @@ export function IncentiveTabContent({ name, data, onChange, b2bStandard = false,
   // all-class grid.
   const dateWiseStd = b2bStandard && DATE_WISE_INCENTIVES.has(name);
   const slabCls     = dateWiseStd ? (data["class"] ?? "") : "";
+
+  const slabGst = gstToggle && (
+    <GstModeSelect value={data["gstMode"] ?? ""} onChange={v => onChange("gstMode", v)}
+      title="Applies to every rate in this slab"/>
+  );
 
   // Plain computation (not useMemo) — this function already returns early for
   // Ancillary/Segment Incentive above, so a hook here would be called conditionally.
@@ -1173,6 +1247,7 @@ export function IncentiveTabContent({ name, data, onChange, b2bStandard = false,
           cols={amountSlabCols(name, data["flightType"] ?? "", data["frequency"] ?? "", dateWiseStd, slabCls)}
           rows={amountSlabRows}
           onRowsChange={r => onChange("amountSlabs", JSON.stringify(r))}
+          headerExtra={slabGst}
         />
       )}
 
@@ -1182,6 +1257,7 @@ export function IncentiveTabContent({ name, data, onChange, b2bStandard = false,
           cols={segmentSlabCols(data["flightType"] ?? "", data["frequency"] ?? "", dateWiseStd, slabCls)}
           rows={segmentSlabRows}
           onRowsChange={r => onChange("segmentSlabs", JSON.stringify(r))}
+          headerExtra={slabGst}
         />
       )}
     </div>
@@ -1479,7 +1555,7 @@ export function incentiveEntryToForm(entry: Record<string, unknown>): Record<str
   // the Ancillary tab renders empty AND a Save would reconstruct it from absent flat
   // keys, wiping the deal's ancillary data.
   const ancillaryItems = entry?.["ancillaryItems"] as
-    Record<string, { withType?: unknown; numPct?: unknown; amount?: unknown }> | undefined;
+    Record<string, { withType?: unknown; numPct?: unknown; amount?: unknown; gstMode?: unknown }> | undefined;
   if (ancillaryItems && typeof ancillaryItems === "object") {
     for (const item of ANCILLARY_ITEMS) {
       const sub = ancillaryItems[item.label];
@@ -1487,6 +1563,8 @@ export function incentiveEntryToForm(entry: Record<string, unknown>): Record<str
         if (sub.withType != null) form[item.key]       = String(sub.withType);
         if (sub.numPct   != null) form[item.numPctKey] = String(sub.numPct);
         if (sub.amount   != null) form[item.amtKey]    = String(sub.amount);
+        // No mode is the inclusive default.
+        form[`${item.amtKey}Gst`] = gstModeOf(typeof sub.gstMode === "string" ? sub.gstMode : undefined).value;
       }
     }
   }
@@ -1500,7 +1578,7 @@ export function incentiveEntryToForm(entry: Record<string, unknown>): Record<str
 // incl_excl_data ({inc: {ruleType: conditions}}) for a single PATCH.
 export function IncentiveRulesModal({
   incentiveTypes, incentiveData, inclExclData, initialIncType, onSave, onClose,
-  b2bStandard = false, travelDates = false, airlineName,
+  b2bStandard = false, travelDates = false, airlineName, gstToggle = false,
 }: {
   incentiveTypes: string[];
   incentiveData: Record<string, Record<string, unknown>>;
@@ -1517,6 +1595,8 @@ export function IncentiveRulesModal({
   // Travel Date Valid From/To on the incentive for every deal (see IncentiveTabContent).
   travelDates?: boolean;
   airlineName?: string;
+  // The GST mode select (see IncentiveTabContent).
+  gstToggle?: boolean;
 }) {
   const [incForms, setIncForms] = useState<Record<string, Record<string, string>>>(() => {
     const init: Record<string, Record<string, string>> = {};
@@ -1576,7 +1656,7 @@ export function IncentiveRulesModal({
           <>
             <TabBar tabs={incentiveTypes} active={inc} onSelect={setActiveInc} />
             <div className="overflow-y-auto flex-1">
-              <IncentiveTabContent name={inc} data={incForms[inc] ?? {}} onChange={setIncField} b2bStandard={b2bStandard} travelDates={travelDates} />
+              <IncentiveTabContent name={inc} data={incForms[inc] ?? {}} onChange={setIncField} b2bStandard={b2bStandard} travelDates={travelDates} gstToggle={gstToggle} />
               <div className="border-t border-gray-100 mt-1 pt-3">
                 <h3 className="px-4 text-[11px] font-bold text-gray-500 uppercase tracking-wide">Inclusion / Exclusion Rules</h3>
                 <div className="px-4 mt-2">

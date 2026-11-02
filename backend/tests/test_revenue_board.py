@@ -144,8 +144,8 @@ class TestIncentiveBreakdown(unittest.TestCase):
     """PLB per airline is the question this board is asked most."""
 
     def test_the_breakdown_is_read_by_key_not_by_a_fixed_column_list(self):
-        # `deal_incentives.incentive_type` is a String; the canonical eleven are a
-        # convention. A twelfth type must appear without a migration -- a fixed list
+        # `deal_incentives.incentive_type` is a String; the canonical twelve are a
+        # convention. A new type must appear without a migration -- a fixed list
         # drops it silently, which on an incentive means money earned and nowhere shown.
         sql = str(rb._incentive_type_select([R.tenant_id == 1]).compile(
             dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))

@@ -67,6 +67,12 @@ class DealDirection(str, enum.Enum):
     OUTBOUND = "outbound"   # deal you FLOAT to a small agency at a commission → you PAY
 
 
+# How GST sits in an incentive's rate (DealIncentiveConfig.gst_mode). The first is the
+# default. "inclusive": the rate holds 18% GST, taken out as 18/118 of it (÷ 1.18);
+# "less_18": 18% of the commission is taken off; "exclusive": GST is on top of the rate.
+GST_MODES = ("inclusive", "less_18", "exclusive")
+
+
 class DealScopeType(str, enum.Enum):
     """WHO an outgoing deal is for. Meaningful only when direction=OUTBOUND;
     inbound deals are forced to ALL because income received has no customer.
@@ -317,7 +323,7 @@ class DealIncentiveConfig(Base):
     incentive_type : Mapped[str] = mapped_column(String(100), nullable=False)
     # e.g. 'PLB', 'Super PLB', 'Transaction Fee', 'Frontend', 'Backend',
     #      'Push Action', 'Ancillary', 'Cashback', 'Marketing Fund',
-    #      'Deposit Incentive', 'Segment Incentive'
+    #      'Deposit Incentive', 'Segment Incentive', 'NDC'
     incentive_order : Mapped[int] = mapped_column(SmallInteger, nullable=False, default=0)
 
     # ── Common header (PLB / Super PLB / Transaction Fee / Frontend /
@@ -345,6 +351,11 @@ class DealIncentiveConfig(Base):
     incentive_amt_pct  : Mapped[float | None] = mapped_column(Numeric(10, 4), nullable=True)
     capped_incentive        : Mapped[float | None] = mapped_column(Numeric(18, 4), nullable=True)
     capped_incentive_amount : Mapped[float | None] = mapped_column(Numeric(18, 4), nullable=True)
+    # How GST sits in the incentive's rate / amount — one of GST_MODES. One per incentive:
+    # it covers the Fixed value, every slab rate and the DI amount alike; Ancillary keeps
+    # its own per sub-type inside ancillary_items ("gstMode"). What each mode pays is
+    # deal_matching.GST_FACTOR; it is applied to incoming deals only.
+    gst_mode                : Mapped[str]          = mapped_column(String(10), nullable=False, default="inclusive", server_default="inclusive")
 
     # ── Marketing Fund extras ────────────────────────────────────────────────
     market_fund_type : Mapped[str | None]   = mapped_column(String(100), nullable=True)

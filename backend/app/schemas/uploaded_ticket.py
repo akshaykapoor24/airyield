@@ -94,6 +94,25 @@ class TicketRow(BaseModel):
     # import and the batch can be re-mapped later without the file.
     raw_data:            Optional[dict]  = None
 
+    # ── Internal Statement standard format — see models/uploaded_ticket.py ──
+    adt_ref:             Optional[str]   = None
+    booking_status:      Optional[str]   = None
+    sales_channel:       Optional[str]   = None
+    supplier_can_charge: Optional[float] = None
+    reschedule_charge:   Optional[float] = None
+    supplier_name:       Optional[str]   = None
+    iata_no:             Optional[str]   = None
+    customer_code:       Optional[str]   = None
+    vendor_code:         Optional[str]   = None
+    booked_by:           Optional[str]   = None
+    iata_comm_amt:       Optional[float] = None
+    plb_amount:          Optional[float] = None
+    payment_mode:        Optional[str]   = None
+    segment_count:       Optional[int]   = None
+    cabin_class:         Optional[str]   = None
+    cancellation_date:       Optional[str]   = None
+    net_cancellation_amount: Optional[float] = None
+
     # ── Airline-specific columns ──────────────────────────────────────────
     statement_type:       Optional[str]   = None
     pax_name:             Optional[str]   = None
@@ -208,11 +227,15 @@ class ConfirmTicketUploadPayload(BaseModel):
     # this Agency Billing cannot tell Lords Delhi from Lords Mumbai and refuses
     # to bill rather than guess. Optional so older clients still upload.
     agency_id:      Optional[int] = None
-    valid_from:     date
-    valid_to:       date
+    # The statement period. Internal Statement does not ask for one and sends neither: the
+    # period is then the first and last Booking Date of the file's tickets.
+    valid_from:     Optional[date] = None
+    valid_to:       Optional[date] = None
     # User-supplied label for the statement. Blank falls back to the derived
-    # "<type> - <agency> - <valid_from>" name.
+    # "<type> - <agency> - [<statement type> - ]<valid_from>" name.
     statement_name: Optional[str] = None
+    # Internal Statement's Statement Type: "booking" (Booking / MO) or "accounting".
+    statement_category: Optional[str] = None
 
     # ── WHO this statement was sold to ───────────────────────────────────────
     # 'agency' | 'corporate' | 'direct'. Exactly one id accompanies it, matching
@@ -227,6 +250,16 @@ class ConfirmTicketUploadPayload(BaseModel):
     # {field: "DMY" | "MDY" | "YMD"} — the rows were read that way at /upload/extract, and it
     # is kept on the statement (ticket_statements.date_formats). Required there.
     date_formats:       Optional[dict[str, str]] = None
+
+    # Internal Statement: "All vendors — multi-vendor file". The statement is B2B with no
+    # one agency; each row names its own vendor in its Payable To (picked per Supplier Name
+    # on the preview), and that vendor is also the row's B2B agency.
+    multi_vendor:       bool = False
+
+    # Internal Statement: the file's columns and the {field: column} mapping the rows were read
+    # with — remembered for the next file with the same columns (services/saved_mapping.py).
+    columns:            Optional[list[str]] = None
+    column_map:         Optional[dict[str, str]] = None
 
 
 class AppendTicketsPayload(BaseModel):
@@ -258,6 +291,8 @@ class TicketStatementRead(BaseModel):
     batch_id:         str
     statement_type:   str = "B2B"
     statement_name:   Optional[str] = None
+    # Internal Statement: "booking" | "accounting". None everywhere else.
+    statement_category: Optional[str] = None
     agency:           str
     valid_from:       date
     valid_to:         date
@@ -481,6 +516,24 @@ class UploadedTicketUpdate(BaseModel):
     entity_address:       Optional[str]   = None
     tax_breakup:          Optional[Dict[str, float]]     = None
     segments:             Optional[List[Dict[str, Any]]] = None
+    # Internal Statement standard format.
+    adt_ref:              Optional[str]   = None
+    booking_status:       Optional[str]   = None
+    sales_channel:        Optional[str]   = None
+    supplier_can_charge:  Optional[float] = None
+    reschedule_charge:    Optional[float] = None
+    supplier_name:        Optional[str]   = None
+    iata_no:              Optional[str]   = None
+    customer_code:        Optional[str]   = None
+    vendor_code:          Optional[str]   = None
+    booked_by:            Optional[str]   = None
+    iata_comm_amt:        Optional[float] = None
+    plb_amount:           Optional[float] = None
+    payment_mode:         Optional[str]   = None
+    segment_count:        Optional[int]   = None
+    cabin_class:          Optional[str]   = None
+    cancellation_date:        Optional[str]   = None
+    net_cancellation_amount:  Optional[float] = None
 
     model_config = ConfigDict(extra="ignore")
 

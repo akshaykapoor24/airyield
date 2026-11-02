@@ -6,7 +6,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Plus, Upload, Filter, RefreshCw, X, CheckCircle, XCircle, AlertCircle, MinusCircle, User, Save, Trash2, FileText, FileSpreadsheet, ChevronLeft, ChevronRight, Building2, Calendar, Hash, History, Pencil, List } from "lucide-react";
 import api from "@/lib/api";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
-import { IncentiveTabContent, InclExclTabContent, IEFieldValue, CONTINENTS, COUNTRY_GROUPS, IncentiveRulesModal, DATE_WISE_INCENTIVES } from "@/components/deals/IncentiveInclExclShared";
+import { IncentiveTabContent, InclExclTabContent, IEFieldValue, CONTINENTS, COUNTRY_GROUPS, IncentiveRulesModal, DATE_WISE_INCENTIVES, gstModeOf } from "@/components/deals/IncentiveInclExclShared";
 
 // ── types ── batch ─────────────────────────────────────────────────────────
 type DealBatch = {
@@ -814,6 +814,19 @@ function rateOf(data: Record<string, string>) {
   return data.incentiveNumPct === "Number" ? shown : `${shown}%`;
 }
 
+/** How GST sits in the rate (every slab rate) — the server always sends the mode. */
+function gstOf(data: Record<string, string>) {
+  if (data.gstMode == null) return null;
+  const mode = gstModeOf(data.gstMode);
+  return (
+    <span title={mode.hint} className={`px-1.5 py-0.5 rounded border text-[10px] font-semibold ${mode.value === "exclusive"
+      ? "bg-gray-50 text-gray-500 border-gray-200"
+      : "bg-blue-50 text-blue-700 border-blue-200"}`}>
+      {mode.label}
+    </span>
+  );
+}
+
 /** The travel window. No end date is open-ended — the sheet's "X Onwards". */
 function travelOf(data: Record<string, string>) {
   const from = data.travelValidFrom, to = data.travelValidTo;
@@ -835,7 +848,7 @@ function DealFlatTable({ deals, outbound, onOpenHistory, onEdit, onDelete, onOpe
   const groups: { label: string; color: string; cols: string[] }[] = [
     { label: "Deal",              color: "#94a3b8", cols: ["Deal Name / ID", outbound ? "Customer" : "Supplier Name", "Deal Type", "Deal Tag"] },
     { label: "Airline",           color: "#14b8a6", cols: ["Airline Name", "Code", "Type"] },
-    { label: "Incentive & Rules", color: "#818cf8", cols: ["Travel Valid Period", "Flight Type", "Class", "Calc On", "Rate", "Rules"] },
+    { label: "Incentive & Rules", color: "#818cf8", cols: ["Travel Valid Period", "Flight Type", "Class", "Calc On", "Rate", "GST", "Rules"] },
     { label: "Contract Details",  color: "#60a5fa", cols: ["Business Type", "Contract Valid Period", "Entity", "Login IDs", "IATA %"] },
     { label: "Notes",             color: "#94a3b8", cols: ["Remarks"] },
     { label: "Status",            color: "#34d399", cols: ["Approval", "Deal Status"] },
@@ -844,7 +857,7 @@ function DealFlatTable({ deals, outbound, onOpenHistory, onEdit, onDelete, onOpe
   // One value per standard incentive. A deal with one shows it plainly; with several,
   // each line is labelled with its incentive so no value is hidden behind another.
   const incCell = (incs: { inc: string; data: Record<string, string> }[],
-                   pick: (data: Record<string, string>) => string | null | undefined, cls = "") => {
+                   pick: (data: Record<string, string>) => React.ReactNode, cls = "") => {
     const vals = incs.map(x => ({ inc: x.inc, v: pick(x.data) || null }));
     if (!vals.some(x => x.v)) return dash;
     if (vals.length === 1) return <span className={cls}>{vals[0].v}</span>;
@@ -927,6 +940,7 @@ function DealFlatTable({ deals, outbound, onOpenHistory, onEdit, onDelete, onOpe
                 <td className={TD}>{incCell(incs, x => x.class)}</td>
                 <td className={TD}>{incCell(incs, x => x.payoutCalcCols)}</td>
                 <td className={TD}>{incCell(incs, rateOf, "font-semibold text-gray-900 tabular-nums")}</td>
+                <td className={TD}>{incCell(incs, gstOf)}</td>
                 <td className="px-2 py-2">
                   <div className="flex flex-wrap items-center gap-0.5 max-w-[170px]">
                     {(d.incentive_types ?? []).length > 0
@@ -1699,6 +1713,7 @@ export default function DealsPage() {
           b2bStandard={isB2bDeal(incentiveRulesPopup.deal) && (incentiveRulesPopup.deal.deal_tag ?? "standard") === "standard"}
           travelDates
           airlineName={incentiveRulesPopup.deal.airline_name ?? undefined}
+          gstToggle
         />
       )}
 

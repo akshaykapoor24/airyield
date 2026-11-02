@@ -10,7 +10,9 @@ import {
 import api from "@/lib/api";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import { CUSTOMER_TYPE_BADGE, CUSTOMER_TYPE_LABEL } from "@/lib/customerType";
-import { MANUAL_ENTRY_FILE_NAME, type StatementType } from "@/lib/ticketFields";
+import {
+  MANUAL_ENTRY_FILE_NAME, STATEMENT_CATEGORIES, STATEMENT_CATEGORY_SHORT, type StatementCategory, type StatementType,
+} from "@/lib/ticketFields";
 import { CUSTOMER_STATEMENT_BASE, STATEMENT_ENTRY_BASE } from "@/lib/statementSection";
 import { formatPeriod, formatUploadedAt, uploadedAtParts } from "@/lib/statementPeriod";
 
@@ -18,6 +20,8 @@ export type TicketStatement = {
   batch_id:        string;
   statement_name:  string | null;
   statement_type:  StatementType;
+  // Internal Statement's Statement Type (Booking / MO or Accounting). Null everywhere else.
+  statement_category?: StatementCategory | null;
   agency:          string;
   valid_from:      string;
   valid_to:        string;
@@ -71,7 +75,7 @@ const CUSTOMER_TAB_LABEL: Record<StatementCustomerType, string> = {
 
 export default function StatementsView({
   onLoaded, showCustomer, customerType, apiBase = "/tickets", drillIn = true, entryOverride,
-  excludeManual = false, detailBaseOverride, allowDelete = false,
+  excludeManual = false, detailBaseOverride, allowDelete = false, category, uploadedElsewhere,
 }: {
   onLoaded?: (n: number) => void;
   showCustomer?: boolean;
@@ -92,6 +96,12 @@ export default function StatementsView({
   detailBaseOverride?: string;
   /** A delete button per row — the statement and every ticket under it. */
   allowDelete?: boolean;
+  /** Only the statements of this Statement Type (Internal Statement's Booking / MO or
+   *  Accounting) — Payment Module → MO Statement lists the Booking / MO ones. */
+  category?: StatementCategory;
+  /** Read-only, as the Payment Module lists them: no Upload / Create links; the empty list
+   *  says where these statements are uploaded (`href`, named `label`). */
+  uploadedElsewhere?: { href: string; label: string };
 }) {
   // Keep the drill-in inside whichever section the list is rendered in — both
   // routes render the same detail screen over the same rows.
@@ -139,7 +149,8 @@ export default function StatementsView({
     setError(null);
     try {
       const { data: all } = await api.get<TicketStatement[]>(`${apiBase}/statements`);
-      const data = excludeManual ? all.filter((s) => s.file_name !== MANUAL_ENTRY_FILE_NAME) : all;
+      const data = all.filter((s) => (!excludeManual || s.file_name !== MANUAL_ENTRY_FILE_NAME)
+        && (!category || s.statement_category === category));
       setStatements(data);
       onLoaded?.(data.length);
     } catch {
@@ -301,12 +312,16 @@ export default function StatementsView({
             <FileSpreadsheet className="w-8 h-8 text-gray-300" />
           </div>
           <p className="text-sm font-medium text-gray-600">
-            {customerType ? `No ${CUSTOMER_TAB_LABEL[customerType]} statements yet` : "No ticket statements yet"}
+            {customerType ? `No ${CUSTOMER_TAB_LABEL[customerType]} statements yet`
+              : category ? `No ${STATEMENT_CATEGORIES.find(c => c.key === category)?.label ?? "matching"}s yet`
+              : "No ticket statements yet"}
           </p>
           <p className="text-xs text-gray-400 mt-1 mb-5">
-            {customerType ? "Download the template, fill it in and upload it with Upload Statement." : "Upload a supplier statement, or punch tickets in by hand"}
+            {uploadedElsewhere
+              ? <>They are uploaded under <Link href={uploadedElsewhere.href} className="text-blue-600 hover:underline">{uploadedElsewhere.label}</Link>.</>
+              : customerType ? "Download the template, fill it in and upload it with Upload Statement." : "Upload a supplier statement, or punch tickets in by hand"}
           </p>
-          {!customerType && <div className="flex items-center gap-3">
+          {!customerType && !uploadedElsewhere && <div className="flex items-center gap-3">
             <Link
               href={`${entryBase}/upload`}
               className="flex items-center gap-2 px-4 py-2 bg-[#1e3a5f] text-white rounded-lg text-sm font-medium hover:bg-[#16304f]"
@@ -382,9 +397,19 @@ export default function StatementsView({
                       <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center shrink-0">
                         <FileSpreadsheet className="w-4 h-4 text-blue-500" />
                       </div>
-                      <p className="text-sm font-semibold text-gray-800 group-hover:text-[#1e3a5f]">
-                        {stmt.statement_name ?? `${stmt.statement_type} · ${stmt.agency}`}
-                      </p>
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold text-gray-800 group-hover:text-[#1e3a5f]">
+                          {stmt.statement_name ?? `${stmt.statement_type} · ${stmt.agency}`}
+                        </p>
+                        {stmt.statement_category && (
+                          <span className={`inline-flex mt-0.5 px-1.5 py-px rounded text-[10px] font-semibold border ${
+                            stmt.statement_category === "accounting"
+                              ? "bg-amber-50 text-amber-700 border-amber-200"
+                              : "bg-teal-50 text-teal-700 border-teal-200"}`}>
+                            {STATEMENT_CATEGORY_SHORT[stmt.statement_category] ?? stmt.statement_category}
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </td>
 

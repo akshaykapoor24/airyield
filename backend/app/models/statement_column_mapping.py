@@ -45,6 +45,9 @@ class StatementColumnMapping(Base):
     agency_id:     Mapped[int | None] = mapped_column(
         Integer, ForeignKey("agencies.id", ondelete="SET NULL"), nullable=True)
     vendor_name:   Mapped[str | None] = mapped_column(String(255), nullable=True)      # snapshot, for "whose mapping"
+    # Internal Statement: who the statement was for — "agency:12", "corporate:5", "direct:3",
+    # "direct", "all-vendors" (api/v1/internal_tickets.py). NULL for the vendor-keyed types.
+    party_key:     Mapped[str | None] = mapped_column(String(60), nullable=True)
 
     signature:     Mapped[str]        = mapped_column(String(64), nullable=False)       # the column layout
     columns:       Mapped[list]       = mapped_column(JSONB, nullable=False)            # the file's columns, as printed

@@ -5,7 +5,7 @@ import { X, CheckCircle2, XCircle, MinusCircle } from "lucide-react";
 import api from "@/lib/api";
 import { inr, SKIPPED_LABEL, STAT_LABEL } from "./types";
 
-type Step = { step: string; passed: boolean; ticket_value: string; deal_value: string; detail: string };
+export type Step = { step: string; passed: boolean; ticket_value: string; deal_value: string; detail: string };
 type Plb = {
   plb_key: string;
   steps: Step[];
@@ -15,14 +15,14 @@ type Plb = {
 // An inclusion / exclusion trace (services/exclusion_evaluator). is_excluded: the rule
 // stops the payout; undecided: it could not be judged. A step's matched is null when the
 // ticket does not carry what that condition needs.
-type RuleDiag = {
+export type RuleDiag = {
   rule_name: string;
   is_excluded: boolean;
   undecided?: boolean;
   reason: string;
   steps: { field: string; label?: string | null; rule_value: string; ticket_value: string; matched: boolean | null }[];
 };
-type DealDiag = {
+export type DealDiag = {
   deal_id: number;
   deal_no: string;
   deal_name: string;
@@ -36,7 +36,7 @@ type DealDiag = {
   inclusion_diagnostic?: RuleDiag | null;
   exclusion_diagnostic?: RuleDiag | null;
 };
-type Diagnosis = {
+export type Diagnosis = {
   row_id: number;
   document_number: string | null;
   transaction_type: string | null;
@@ -69,6 +69,8 @@ type Diagnosis = {
   total_deals_checked: number;
   matched_count: number;
   note?: string;
+  // The line's own remarks from its run (vendor sources only; BSP sends none).
+  notes?: string[];
 };
 
 function StepIcon({ step }: { step: Step }) {
@@ -183,6 +185,13 @@ export default function CommissionDiagnosisModal({
                   <span className="font-semibold">Result:</span> {data.commission_reason}
                 </p>
               )}
+              {(data.notes?.length ?? 0) > 0 && (
+                <ul className="mb-4 space-y-1">
+                  {data.notes!.map((n, i) => (
+                    <li key={i} className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5">⚠ {n}</li>
+                  ))}
+                </ul>
+              )}
 
               <p className="text-[11px] text-slate-400 mb-2">
                 {data.total_deals_checked} airline deal{data.total_deals_checked === 1 ? "" : "s"} checked,
@@ -210,24 +219,7 @@ export default function CommissionDiagnosisModal({
                       </span>
                     </button>
 
-                    {open === d.deal_id && (
-                      <div className="px-3 py-2.5 bg-slate-50/60 border-t border-slate-200 space-y-3">
-                        <StepRow step={d.deal_validity_step} />
-                        {d.plbs.map((p, i) => (
-                          <div key={`${d.deal_id}-${p.plb_key}-${i}`} className="pl-2 border-l-2 border-slate-200">
-                            <p className="text-[11px] font-semibold text-slate-600 mb-1">{p.plb_key}</p>
-                            {p.steps.map((s, j) => <StepRow key={j} step={s} />)}
-                            {p.incentive_breakdown?.formula ? (
-                              <p className="text-[11px] text-slate-500 mt-1 font-mono">
-                                {String(p.incentive_breakdown.formula)}
-                              </p>
-                            ) : null}
-                          </div>
-                        ))}
-                        {[d.inclusion_diagnostic, d.exclusion_diagnostic].map((r) =>
-                          r && r.steps.length > 0 ? <RuleBlock key={r.rule_name} rule={r} /> : null)}
-                      </div>
-                    )}
+                    {open === d.deal_id && <DealDiagDetail deal={d} />}
                   </div>
                 ))}
               </div>
@@ -237,6 +229,55 @@ export default function CommissionDiagnosisModal({
       </div>
     </div>
   );
+}
+
+/** Every check one deal went through for this ticket — its validity, each incentive's
+ *  criteria, its inclusion / exclusion rules. Also the expanded row in LineDealsModal. */
+export function DealDiagDetail({ deal: d }: { deal: DealDiag }) {
+  return (
+    <div className="px-3 py-2.5 bg-slate-50/60 border-t border-slate-200 space-y-3">
+      <StepRow step={d.deal_validity_step} />
+      {d.plbs.map((p, i) => (
+        <div key={`${d.deal_id}-${p.plb_key}-${i}`} className="pl-2 border-l-2 border-slate-200">
+          <p className="text-[11px] font-semibold text-slate-600 mb-1">{p.plb_key}</p>
+          {p.steps.map((s, j) => <StepRow key={j} step={s} />)}
+          {p.incentive_breakdown?.formula ? (
+            <p className="text-[11px] text-slate-500 mt-1 font-mono">
+              {String(p.incentive_breakdown.formula)}
+            </p>
+          ) : null}
+        </div>
+      ))}
+      {[d.inclusion_diagnostic, d.exclusion_diagnostic].map((r) =>
+        r && r.steps.length > 0 ? <RuleBlock key={r.rule_name} rule={r} /> : null)}
+    </div>
+  );
+}
+
+/** A deal's inclusion or exclusion rule that leaves this ticket out, if any. A deal can pass
+ *  every criterion (`overall_match`) and still not pay this ticket because of one. */
+export function excludingRule(d: DealDiag): RuleDiag | null {
+  return [d.inclusion_diagnostic, d.exclusion_diagnostic].find((r) => r?.is_excluded) ?? null;
+}
+
+/** Why a deal does not apply to this ticket, in one line — the first check it failed — or
+ *  null when it does apply. `full` is the step's own explanation, for a tooltip. */
+export function whyNot(d: DealDiag): { label: string; full: string } | null {
+  const v = d.deal_validity_step;
+  if (!v.passed) return { label: `${v.step} — not valid for this ticket`, full: v.detail };
+  if (!d.overall_match) {
+    // The deal's best-placed incentive: its first failed criterion is the reason.
+    for (const p of d.plbs) {
+      const s = p.steps.find((x) => !x.passed && x.ticket_value !== "not printed");
+      if (s) {
+        const vs = s.ticket_value && s.deal_value ? ` — ticket ${s.ticket_value}, deal ${s.deal_value}` : "";
+        return { label: `${s.step}${vs}`, full: s.detail };
+      }
+    }
+    return { label: "Criteria not met", full: "" };
+  }
+  const r = excludingRule(d);
+  return r ? { label: `${r.rule_name} — ${r.reason}`, full: r.reason } : null;
 }
 
 function Field({ label, value }: { label: string; value: string | null | undefined }) {

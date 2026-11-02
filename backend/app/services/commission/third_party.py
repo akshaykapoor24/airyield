@@ -43,11 +43,12 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.statement_batch_supplier import StatementBatchSupplier
 from app.models.statement_row import STATEMENT_MODELS
+from app.models.typed_statement import is_typed
 from app.services import flat_statement, statement_balance
 from app.services.commission.mo_index import MoTicket, load_mo_index
 from app.services.commission.calc_row import (
@@ -378,8 +379,6 @@ class ThirdPartyAdapter:
         The period comes from the rows' own `issue_date`, which ingest normalised to ISO
         text; a value that is not a date sorts harmlessly and is dropped on the way out.
         """
-        from sqlalchemy import func
-
         m = self.model
         rows = (await db.execute(
             select(
@@ -424,6 +423,34 @@ class ThirdPartyAdapter:
         if row_ids:
             conds.append(m.id.in_(row_ids))
         return list((await db.execute(select(m).where(*conds).order_by(m.id.asc()))).scalars().all())
+
+    async def load_rows_many(self, db: AsyncSession, tenant_id: int, user_id: int,
+                             batch_ids: list[str], date_from: date | None = None,
+                             date_to: date | None = None) -> list:
+        """Every line of several uploads, for the across-statements view — narrowed to a
+        booking period in SQL, on the date `list_batches` builds the period from, and in
+        booked-date order, since no one file's order means anything across several.
+
+        A line with no issue date drops out once a period is given: it cannot be shown to
+        fall inside one. Third Party GDS keeps the date as a DATE column; LCC as ISO text in
+        `data`, compared as text, which orders the same."""
+        if not batch_ids:
+            return []
+        m = self.model
+        conds = [m.batch_id.in_(batch_ids), m.tenant_id == tenant_id, m.created_by_id == user_id]
+        if is_typed(m):
+            col, lo, hi = m.issue_date, date_from, date_to
+        else:
+            col = func.substr(m.data["issue_date"].astext, 1, 10)
+            lo = date_from.isoformat() if date_from else None
+            hi = date_to.isoformat() if date_to else None
+        if lo is not None:
+            conds.append(col >= lo)
+        if hi is not None:
+            conds.append(col <= hi)
+        return list((await db.execute(
+            select(m).where(*conds).order_by(col.asc().nullslast(), m.batch_id.asc(), m.id.asc())
+        )).scalars().all())
 
     async def build_contexts(self, db: AsyncSession, rows: list, tenant_id: int,
                              user_id: int, batch_id: str) -> list[CalcRow]:

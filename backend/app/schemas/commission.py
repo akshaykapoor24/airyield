@@ -98,6 +98,35 @@ class CommissionRunResponse(BaseModel):
     variance_total: float = 0.0
 
 
+class CommissionRunSkip(BaseModel):
+    """A statement a bulk run left alone, and why — said, never silently dropped."""
+    batch_id: str
+    statement_name: Optional[str] = None
+    reason: str
+
+
+class CommissionRunAllResponse(BaseModel):
+    """Result of POST /run-all: one queued worker run per statement in scope."""
+    started: list[CommissionRunResponse] = []
+    skipped: list[CommissionRunSkip] = []
+
+
+class CommissionRunLinesResponse(BaseModel):
+    """Result of POST /run-lines: hand-picked lines from any number of statements, each
+    statement's share calculated inline. The counts are THESE lines' outcomes — not the
+    statements' whole-ledger totals that a run header carries."""
+    lines: int = 0
+    statements: int = 0
+    calculated: int = 0
+    reversed: int = 0
+    excluded: int = 0
+    needs_data: int = 0
+    skipped: int = 0
+    unmatched: int = 0
+    expected_total: float = 0.0         # incentive + IATA over the matched ones
+    not_run: list[CommissionRunSkip] = []
+
+
 class CommissionRowRead(BaseModel):
     id: int
     source_row_id: int
@@ -186,6 +215,11 @@ class CommissionLine(BaseModel):
     # shown beside the code. None when the line has no class.
     cabin: Optional[str] = None
     calc: Optional[CommissionRowRead] = None
+    # Across statements only (GET /{source}/lines): which upload the line came from and
+    # its consolidator. None on a single statement's page, where the header already says.
+    batch_id: Optional[str] = None
+    statement_name: Optional[str] = None
+    agency: Optional[str] = None
 
 
 class CommissionLineTotals(BaseModel):
@@ -198,6 +232,7 @@ class CommissionLineTotals(BaseModel):
     statement_pending: float = 0.0      # …and what the vendor printed on the rest
     expected_commission: float = 0.0    # = incentive + iata_commission
     incentive: float = 0.0
+    incentives: dict = {}               # {incentive_type: amount}, adding up to `incentive`
     iata_commission: float = 0.0
     with_iata: int = 0                  # lines that earned any IATA commission
     difference: float = 0.0             # = expected − statement

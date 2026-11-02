@@ -334,11 +334,11 @@ export default function Sidebar() {
     >
       {/* Logo. Open: the full logo, as wide as the bar allows — its tagline is part of the
           artwork, so width is the only thing keeping it readable — but capped in height so it
-          doesn't fill the 64px header edge to edge (`object-left` keeps it flush with the nav
+          doesn't fill the 56px header edge to edge (`object-left` keeps it flush with the nav
           below once the cap bites). Collapsed: the mark alone, which is also the button that
           opens the sidebar again. */}
       <div className={cn(
-        "flex items-center h-16 border-b border-[#e6ebf2] shrink-0",
+        "flex items-center h-14 border-b border-[#e6ebf2] shrink-0",
         open ? "gap-2 px-3" : "justify-center px-2"
       )}>
         {open ? (

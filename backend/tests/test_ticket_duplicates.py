@@ -133,6 +133,29 @@ class KeyTests(unittest.TestCase):
         positive = {**SALE, "doc_no": None, "invoice_type": "Refund"}
         self.assertNotEqual(td.ticket_key({**SALE, "doc_no": None}), td.ticket_key(positive))
 
+    def test_a_cancellation_or_a_negative_fare_or_tax_is_a_refund(self):
+        """Yatra's refund report prints a refund with a positive BSP Amount — and a Date of
+        Cancellation, a Net Cancellation (refundable) Amount, a negative Base Fare or Tax."""
+        line = {"ticket_number": "5808758776", "pax_name": "NAGPAL/RAVINDER", "ticket_date": "2026-09-30",
+                "sell_fare": 5033.0, "sell_tax": 1351.0, "total_amt": 6384.0}
+        self.assertEqual(td.kind(line), "S")
+        for change in ({"cancellation_date": "2026-09-30"}, {"net_cancellation_amount": 6384.0},
+                       {"sell_fare": -5033.0}, {"sell_tax": -1351.0}, {"total_amt": -6384.0}):
+            with self.subTest(change=change):
+                self.assertEqual(td.kind({**line, **change}), "R")
+                self.assertNotEqual(td.ticket_key(line), td.ticket_key({**line, **change}))
+        # A nil cancellation amount, or a blank date, says nothing.
+        self.assertEqual(td.kind({**line, "net_cancellation_amount": 0, "cancellation_date": "  "}), "S")
+        # An "IS…" Doc No still says sale outright.
+        self.assertEqual(td.kind({**line, "doc_no": "IS26/1094", "sell_tax": -1.0}), "S")
+
+    def test_a_saved_refund_keys_by_its_columns(self):
+        """A ticket saved with these columns keys as a refund off its columns as they stand."""
+        saved = SimpleNamespace(**{**SALE, "doc_no": None, "invoice_type": None, "sell_fare": Decimal("-100"),
+                                   "sell_tax": None, "cancellation_date": None, "net_cancellation_amount": None})
+        self.assertEqual(td.kind(saved), "R")
+        self.assertTrue(set(td.KEY_COLUMNS) >= {"sell_fare", "sell_tax", "cancellation_date", "net_cancellation_amount"})
+
     def test_the_passenger_from_its_name_parts(self):
         parts = {**SALE, "pax_name": None, "last_name": "NAGPAL/RAVINDER", "first_name": "SINGH"}
         self.assertEqual(td.ticket_key(parts), td.ticket_key(SALE))

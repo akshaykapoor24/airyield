@@ -13,6 +13,7 @@ require zero changes.
 """
 from __future__ import annotations
 
+import functools
 import logging
 import re
 from datetime import date
@@ -67,13 +68,15 @@ _TEMPLATE_MATCH_THRESHOLD = 10
 _COL_ALIASES: dict[str, list[str]] = {
     # ── shared / B2B ─────────────────────────────────────────────────────────
     "booking_ref":         ["bookingref", "booking_ref", "booking ref"],
-    "segment_type":        ["segmenttype", "segment_type", "segment type"],
+    # "Booking Type" D / I on an OTA's sales report — Domestic / International.
+    "segment_type":        ["segmenttype", "segment_type", "segment type", "booking_type"],
     "invoice_type":        ["invoicetype", "invoice_type", "invoice type",
                             "ticket_type", "tickettype"],
     "invoice_no":          ["invoiceno", "invoice_no", "invoice no", "invoicenumber",
                             "invoice_no"],
     "ticket_date":         ["ticketdate", "ticket_date", "ticket date", "ticket_date",
-                            "issue_date", "date_of_issue", "invoice_date", "booked_date"],
+                            "issue_date", "date_of_issue", "invoice_date", "booked_date",
+                            "date_of_booking", "booking_date"],
     "last_name":           ["lastname", "last_name", "last name", "surname"],
     "first_name":          ["firstname", "first_name", "first name"],
     "sector":              ["sector", "sectors", "sector_description", "sector_desc",
@@ -94,17 +97,23 @@ _COL_ALIASES: dict[str, list[str]] = {
                             "tkt_no", "tktno"],
     "sell_fare":           ["sellfare", "sell_fare", "base_fare", "basefare",
                             "basic_fare", "basic", "fare"],
-    "sell_tax":            ["selltax", "sell_tax", "total_tax", "totaltax"],
+    "sell_tax":            ["selltax", "sell_tax", "total_tax", "totaltax", "tax", "taxes"],
     "sell_tax_yq":         ["selltax_yq", "sell_tax_yq", "selltaxyq",
                             "yqtax", "yq_tax", "yq", "yq_amount"],
     "sale_yr":             ["sale_yr", "saleyr", "yr_tax", "yr", "yr_amount"],
     "sale_k3":             ["sale_k3", "salek3", "k3_tax", "k3", "k3_amount"],
     "rei_sell":            ["rei_sell", "reisell"],
-    "seat_selection":      ["seat_selection", "seatselection"],
-    "excess_baggage":      ["excessbagage", "excessbaggage", "excess_baggage"],
-    "meals":               ["meals"],
+    "seat_selection":      ["seat_selection", "seatselection", "seat_block_charges",
+                            "seat_charges", "seat_charge"],
+    "excess_baggage":      ["excessbagage", "excessbaggage", "excess_baggage",
+                            "baggage_charges", "baggage_charge", "baggage"],
+    "meals":               ["meals", "meal_charges", "meal_charge", "meal"],
     "rfd_sell":            ["rfd_sell", "rfdsell"],
-    "can_charge":          ["can_charge", "cancharge"],
+    # The OTA's own cancellation fee ("cancellation service fee"); the airline's is
+    # supplier_can_charge below.
+    "can_charge":          ["can_charge", "cancharge", "yatra_cancellation_charge",
+                            "cancellation_service_fee", "cancellation_service_charge",
+                            "cancellation_charge", "cancellation_charges"],
     "booking_fee_sell":    ["booking_fee_sell", "bookingfeesell",
                             "airlinefee", "airline_fee"],
     "cgst_sell":           ["cgst_sell", "cgstsell", "cgst"],
@@ -119,7 +128,7 @@ _COL_ALIASES: dict[str, list[str]] = {
     "total_amt":           ["totalamt", "total_amt", "total", "total_fare",
                             "totalfare", "actual_selling_fare", "actualselling",
                             "billamount", "bill_amount", "bill_amt", "grand_total",
-                            "invoice_amount"],
+                            "invoice_amount", "bsp_amount", "total_amount"],
     "paid_by_credit_card": ["paidbycreditcard", "paid_by_credit_card", "creditcard"],
     # "net_remit"/"netremit" deliberately NOT here — they belong to the net_remit
     # field below. The index is first-wins, and net_amt is declared earlier, so
@@ -131,9 +140,38 @@ _COL_ALIASES: dict[str, list[str]] = {
     "acc_code":            ["acccode", "acc_code", "ac_acct", "acacct"],
     "sold_to":             ["soldto", "sold_to", "sold to", "soldtoparty"],
     "customer_name":       ["customername", "customer_name", "customer name",
-                            "cliententityname", "clientname", "client name"],
+                            "cliententityname", "clientname", "client name",
+                            "corporate_name", "corporatename"],
     "tour_code":           ["tourcode", "tour_code", "tour code", "tourcd", "tour_cd",
                             "tour_code"],
+    # ── Internal Statement standard format (an OTA's sales record) ───────────
+    # Headers as Yatra's fortnightly B2B sales report prints them, and their plain names.
+    "adt_ref":             ["adt_ref", "adtref", "adt_reference"],
+    "booking_status":      ["booking_status", "bookingstatus", "tkt_status"],
+    "sales_channel":       ["sales_channel", "saleschannel", "booking_channel"],
+    "supplier_can_charge": ["airline_cancellation_charge", "airline_cancellation_fee",
+                            "supplier_cancellation_charge", "supplier_cancellation_fee"],
+    "reschedule_charge":   ["rebooking_fee", "rebookingfee", "reschedule_charge",
+                            "reschedule_charges", "rescheduling_charge", "reschedule_fee"],
+    "supplier_name":       ["tkt_supplier_name", "supplier_name", "suppliername",
+                            "ticket_supplier", "supplier"],
+    "iata_no":             ["iata_no", "iatano", "iata_number", "iata"],
+    "customer_code":       ["customer_code", "customercode", "cust_code", "client_code"],
+    "vendor_code":         ["vendor_code", "vendorcode", "supplier_code"],
+    "booked_by":           ["createdby", "created_by", "booked_by", "bookedby", "booking_agent"],
+    "iata_comm_amt":       ["iatacommission", "iata_commission", "iata_comm"],
+    "plb_amount":          ["plb", "plb_amount", "plb_amt"],
+    "payment_mode":        ["payment_mode", "paymentmode", "mode_of_payment", "pay_mode"],
+    "segment_count":       ["segemntcount", "segment_count", "segmentcount", "no_of_segments"],
+    "cabin_class":         ["cabin", "cabin_class", "cabinclass", "booking_class_type", "class_type"],
+    # A cancellation — Yatra's refund report prints date_of_cancellation and
+    # NettRefundableAmount. Either one filled marks the line a refund (ticket_duplicates.kind).
+    "cancellation_date":   ["date_of_cancellation", "cancellation_date", "cancel_date",
+                            "cancelled_date", "date_cancelled", "cancelled_on", "dateofcancellation"],
+    "net_cancellation_amount": ["net_cancellation_amount", "nett_cancellation_amount",
+                                "net_cancel_amount", "netcancellationamount",
+                                "nettrefundableamount", "nett_refundable_amount",
+                                "net_refundable_amount", "netrefundableamount", "net_refund_amount"],
     # ── airline-specific new fields ───────────────────────────────────────────
     "pax_name":             ["pax_name", "paxname", "passenger_name", "passenger", "pax"],
     "air_pnr":              ["air_pnr", "airpnr"],
@@ -164,7 +202,7 @@ _COL_ALIASES: dict[str, list[str]] = {
     "comm_percent":         ["comm(%)", "commpercent", "comm_percent", "%%%%",
                              "comm_%", "commission_percent", "plb_percent"],
     "net_remit":            ["net_remit", "netremit"],
-    "net_fare":             ["net_fare", "netfare"],
+    "net_fare":             ["net_fare", "netfare", "nett", "nett_fare"],
     "invoice_fare":         ["invoice_fare", "invoicefare"],
     "total_refund_amount":  ["total_refund_amount", "totalrefundamount"],
     "roe":                  ["roe"],
@@ -193,7 +231,8 @@ _COL_ALIASES: dict[str, list[str]] = {
     "oc_tax":               ["oc_tax", "oc", "octax", "carrier_misc_fee"],
     "raf":                  ["raf", "refund_admin_fee", "refund_administration_fee"],
     "serv_charge":          ["serv_chrgs", "serv_charges", "serv_chgs", "service_charge",
-                             "servicecharge", "management_fee", "mgmt_fee", "handling_charge"],
+                             "servicecharge", "management_fee", "mgmt_fee", "handling_charge",
+                             "additional_fee", "service_fee", "service_fees"],
     # A single GST figure, as opposed to the CGST/SGST/IGST triple. NOT an alias of
     # sale_k3: K3 is GST on the air fare, this is GST on the agency's own service
     # charge, and they land on different lines of a return.
@@ -270,6 +309,8 @@ NUMERIC_COLS = {
     # a punched ticket's commission sheet — recorded only, like the four above
     "comm_paid", "plb_recd", "incentive_paid", "plb_paid", "disc_recall",
     "serv_charge_2", "serv_charge_3", "supp_serv_charge_1", "supp_serv_charge_2", "card_charge", "supp_serv_gst",
+    "supplier_can_charge", "reschedule_charge", "iata_comm_amt", "plb_amount",
+    "net_cancellation_amount",
 }
 
 # ── Columns split across multi-sector legs ───────────────────────────────────
@@ -539,10 +580,11 @@ def _to_str(val: Any) -> str | None:
 # system, same kind of date. With no format declared — Customer data, manual entry — dates
 # are read as they always were, day-first.
 DATE_FORMAT_FIELDS: list[dict] = [
-    {"field": "ticket_date", "header": "Ticket Date"},
+    {"field": "ticket_date", "header": "Booking Date"},
     {"field": "departure_datetime", "header": "Travel Date"},
 ]
-_DATE_FOLLOWS = {"ticket_date": ("doc_date",)}
+# A cancellation date comes from the same system as the Booking Date beside it.
+_DATE_FOLLOWS = {"ticket_date": ("doc_date", "cancellation_date")}
 _DATE_ANCHORS = ("ticket_date", "doc_date")
 
 
@@ -575,7 +617,16 @@ def _normalize_date(val: Any, order: str | None = None) -> str | None:
     s = _to_str(val)
     if not s:
         return None
-    return _flat.to_iso_date(s, order) or s
+    return _iso_text(s, order) or s
+
+
+@functools.lru_cache(maxsize=1 << 16)
+def _iso_text(s: str, order: str | None) -> str | None:
+    """flat_statement.to_iso_date, once per distinct cell. A lakh-line file holds a few hundred
+    dates, and dateutil on every cell was most of the read. Emptied at the start of every
+    extract: a date with no day ("Aug 2026") reads with today's, so an entry is not kept for
+    another day."""
+    return _flat.to_iso_date(s, order)
 
 
 # What makes a row a document. A ticket always has at least one of these; a
@@ -622,10 +673,20 @@ def _build_col_map(df_columns: list[str]) -> dict[str, str]:
     seen_canon: set[str] = set()
     for col in df_columns:
         canon = canonical_for(col)
+        if canon in seen_canon:
+            canon = _SECOND_CHOICE.get(_norm(col))
         if canon and canon not in seen_canon:
             mapping[col] = canon
             seen_canon.add(canon)
     return mapping
+
+
+# A header whose own field is already taken by an earlier column. "BookingClass" is the RBD
+# letter on most statements, but Yatra's sales report prints the RBD as "Class" first and
+# the cabin (Economy, Business …) as "bookingClass" after it.
+_SECOND_CHOICE: dict[str, str] = {
+    _norm("bookingclass"): "cabin_class",
+}
 
 
 # A ratio this side of certainty. airline_resolver uses 0.72 for airline NAMES, but
@@ -723,13 +784,37 @@ def _strip_title(name: str | None) -> str | None:
 
 
 def _parse_pax_name(pax_name: str | None) -> tuple[str | None, str | None]:
-    """Parse 'LASTNAME/FIRSTNAME M' → (last_name, first_name), titles removed."""
+    """Parse 'LASTNAME/FIRSTNAME M' → (last_name, first_name), titles removed.
+
+    A name with no slash is written first name first — "Mr Nisha Bothra", as an OTA's sales
+    report prints it — so its last word is the surname and the words before it the first
+    name. A single word is a surname alone."""
     if not pax_name:
         return None, None
     parts = pax_name.strip().split("/", 1)
-    last = _strip_title(parts[0])
-    first = _strip_title(parts[1]) if len(parts) > 1 else None
-    return last, first
+    if len(parts) > 1:
+        return _strip_title(parts[0]), _strip_title(parts[1])
+    name = _strip_title(parts[0])
+    words = (name or "").split()
+    if len(words) < 2:
+        return name, None
+    return words[-1], " ".join(words[:-1])
+
+
+# A segment type as files write it → the two words deal matching filters on.
+_SEGMENT_TYPES = {
+    "d": "Domestic", "dom": "Domestic", "domestic": "Domestic",
+    "i": "International", "int": "International", "intl": "International",
+    "international": "International",
+}
+
+# Cabin words → one spelling ("ECONOMY" and "Economy" are the same cabin).
+_CABINS = {_norm(c): c for c in ("Economy", "Premium Economy", "Business", "First")}
+
+
+def _to_int(val: Any) -> int | None:
+    f = _to_float(val)
+    return int(f) if f is not None and f == int(f) else None
 
 
 def _parse_first_date(travel_dt: str | None) -> str | None:
@@ -837,6 +922,8 @@ def derive_ticket_row(row: dict[str, Any], is_airline: bool,
         row["ticket_date"] = _normalize_date(row["ticket_date"], orders.get("ticket_date"))
     if row.get("doc_date"):
         row["doc_date"] = _normalize_date(row["doc_date"], orders.get("doc_date"))
+    if row.get("cancellation_date"):
+        row["cancellation_date"] = _normalize_date(row["cancellation_date"], orders.get("cancellation_date"))
 
     # ── Ticket number: accounting code + document serial ──────────
     # A consolidator prints "607 5808583279" — the airline's 3-digit IATA accounting code,
@@ -857,6 +944,25 @@ def derive_ticket_row(row: dict[str, Any], is_airline: bool,
         row.setdefault("ticket_prefix", code)
         if not row.get("airlines_code"):
             row["airlines_code"] = code      # resolved to the 2-letter code at confirm
+
+    # ── Segment count, and the route written one pair per segment ─
+    # An OTA's sales report prints each segment as its own pair — "HYD-DEL-DEL-SXR-" with a
+    # segment count of 2 is HYD/DEL DEL/SXR. With the count the pairs are exact, an open jaw
+    # included (DEL-BOM-PNQ-DEL- is two segments, not three).
+    if "segment_count" in row:
+        row["segment_count"] = _to_int(row["segment_count"])
+    if row.get("segment_count") and row.get("sector"):
+        pairs = sector_split.segment_pairs(row["sector"], row["segment_count"])
+        if pairs:
+            row["sector"] = " ".join(pairs)
+
+    # ── Flight numbers as an OTA lists them: "-505-875" ──────────
+    # One per segment, each behind a dash — made a space-separated list, the way the leg
+    # builder reads one per leg. "6E-2134" (carrier-dash-number) does not start with a dash
+    # and is left alone.
+    flight = row.get("flight_no")
+    if isinstance(flight, str) and flight.strip().startswith("-"):
+        row["flight_no"] = " ".join(p.strip() for p in flight.split("-") if p.strip()) or None
 
     # ── Sector: normalise the consolidator hyphen chain ───────────
     # "IST-AUH-DEL-   -   " -> "IST/AUH AUH/DEL", the grammar every other reader
@@ -886,7 +992,10 @@ def derive_ticket_row(row: dict[str, Any], is_airline: bool,
     # but defeats the Domestic/International filter, so deriving it from the
     # airports is strictly better than leaving it null. Only fills a blank.
     # Per-leg detection happens in _split_multi_sector_rows, once the sector has
-    # been narrowed to a single pair.
+    # been narrowed to a single pair. A file's own D / I / DOM / INTL is spelled out first.
+    written = _SEGMENT_TYPES.get(str(row.get("segment_type") or "").strip().lower())
+    if written:
+        row["segment_type"] = written
     if not row.get("segment_type"):
         detected = _detect_segment_type_from_sector(row.get("sector"))
         if detected:
@@ -904,6 +1013,18 @@ def derive_ticket_row(row: dict[str, Any], is_airline: bool,
             row["last_name"] = last
         if not row.get("first_name"):
             row["first_name"] = first
+
+    # ── Cabin, spelled one way ────────────────────────────────────
+    if row.get("cabin_class"):
+        cabin = str(row["cabin_class"]).strip()
+        row["cabin_class"] = _CABINS.get(_norm(cabin), cabin)
+
+    # ── A booking status that says refund ─────────────────────────
+    # Only fills a blank Invoice Type: "REFUNDED" / "CANCELLED" on an OTA's report is the
+    # status vocabulary the note below means.
+    status = str(row.get("booking_status") or "").upper()
+    if not row.get("invoice_type") and ("REFUND" in status or "CANCEL" in status):
+        row["invoice_type"] = "Refund"
 
     # ── A negative sale is a credit note ──────────────────────────
     # Refund-vs-sale is normally decided by a status vocabulary, never by sign
@@ -982,6 +1103,30 @@ def derive_ticket_rows(
     return _split_multi_sector_rows(out) if split_legs else _keep_multi_sector_whole(out)
 
 
+def apply_internal_standard(row: dict[str, Any]) -> dict[str, Any]:
+    """Internal Statement's rules for its standard columns, after derive_ticket_row.
+
+    Net Fare is Basic Fare less Commission — filled when the file does not print it.
+
+    Sales Channel is Online when the booking has an ADT Ref and Offline when it has none —
+    the user's rule, and it decides whenever the file HAS an ADT Ref column (the key is
+    present only when that column is mapped). Without one, the file's own channel is kept,
+    as the word: "ONLINE(Yatra-HO)" → Online.
+
+    Mutates and returns `row`.
+    """
+    if row.get("net_fare") is None and row.get("sell_fare") is not None:
+        row["net_fare"] = round(row["sell_fare"] - (row.get("comm_sell") or 0), 2)
+    if "adt_ref" in row:
+        row["sales_channel"] = "Online" if row.get("adt_ref") else "Offline"
+    elif row.get("sales_channel"):
+        channel = str(row["sales_channel"]).strip()
+        word = channel.upper()
+        row["sales_channel"] = ("Online" if word.startswith("ONLINE")
+                                else "Offline" if word.startswith("OFFLINE") else channel)
+    return row
+
+
 class TicketExtractionService:
 
     @staticmethod
@@ -995,6 +1140,11 @@ class TicketExtractionService:
         split_legs: bool = True,
         date_formats: dict | None = None,
         valid_period: tuple[date, date] | None = None,
+        include_rows: bool = True,
+        keep_raw: bool = True,
+        internal_standard: bool = False,
+        fast_read: bool = False,
+        read: "spreadsheet.ReadResult | None" = None,
     ) -> dict:
         """
         Parse spreadsheet bytes and return a preview dict.
@@ -1010,17 +1160,28 @@ class TicketExtractionService:
         `date_formats` and `valid_period` (Internal Statement): the order the Ticket Date and
         Travel Date columns are written in, and the statement's period — every date in
         those columns is read in that order (see DATE_FORMAT_FIELDS).
+
+        `include_rows=False`: the columns, samples and suggested mapping only — the first
+        read of a file, which no screen takes rows from. `total_rows` is then the sheet's
+        line count. A 30,000-line sales report is not built, sent and thrown away.
+
+        `keep_raw=False` (Internal Statement): no `raw_data`. The columns its standard format
+        has no field for are the ones the user chose to skip, and the file itself is kept
+        with the statement.
+
+        `internal_standard` (Internal Statement): apply_internal_standard on every row.
+
+        `fast_read` (Internal Statement's background import, services/internal_import.py): an
+        xlsx is read with calamine, not openpyxl — spreadsheet.read_table(fast=True).
+
+        `read`: the file as read_file_table already read it — so the upload step reads a lakh
+        lines once for its columns and its date format, not twice. `sheet_name` and
+        `header_row` are then the read's own.
         """
         warnings: list[str] = []
-        try:
-            read = spreadsheet.read_table(
-                file_bytes, file_name,
-                sheet=sheet_name, header_row=header_row, recognise=recognised_count,
-            )
-        except spreadsheet.SpreadsheetError as exc:
-            raise ValueError(str(exc)) from exc
-        except Exception as exc:  # noqa: BLE001 — anything else is still unreadable
-            raise ValueError(f"Could not read the file: {exc}") from exc
+        _iso_text.cache_clear()
+        if read is None:
+            read = read_file_table(file_bytes, file_name, sheet_name, header_row, fast_read)
 
         df = read.df
         xls_columns: list[str] = list(read.columns)
@@ -1046,8 +1207,11 @@ class TicketExtractionService:
                 "unmapped_columns": xls_columns, "fuzzy_suggestions": {},
             }
 
-        # Auto-detect airline format even if statement_type not explicitly set
-        is_airline = statement_type == "AIRLINE" or _detect_airline_format(xls_columns)
+        # Auto-detect airline format even if statement_type not explicitly set. Not on
+        # Internal Statement's standard format: its uploads are always sales records, and an
+        # OTA's report carries a Fare_Basis column without being a BSP file.
+        is_airline = statement_type == "AIRLINE" or (
+            not internal_standard and _detect_airline_format(xls_columns))
 
         if column_mapping:
             # Kept in the wire direction {canonical: column} rather than inverted.
@@ -1097,9 +1261,20 @@ class TicketExtractionService:
             sample_rows[col] = vals[:3]
         sample_row: dict[str, str] = {c: (v[0] if v else "") for c, v in sample_rows.items()}
 
+        if not include_rows:
+            return {
+                **base, "total_rows": len(df), "rows": [], "warnings": warnings,
+                "xls_columns": xls_columns, "suggested_mapping": suggested_mapping,
+                "is_template_match": is_template_match, "sample_row": sample_row,
+                "sample_rows": sample_rows, "unmapped_columns": unmapped_columns,
+                "fuzzy_suggestions": fuzzy, "date_fix": None,
+            }
+
         rows: list[dict] = []
         skipped_totals: list[int] = []
-        for i, (_, raw) in enumerate(df.iterrows()):
+        # Plain dicts, not df.iterrows(): a Series per line made the loop most of the read's
+        # time on a 30,000-line file. `raw.get(column)` reads the same either way.
+        for i, raw in enumerate(df.to_dict("records")):
             row: dict[str, Any] = {"row_order": i + 1}
 
             # ── Map standard columns ──────────────────────────────────────
@@ -1133,7 +1308,9 @@ class TicketExtractionService:
             # "upload any statement" true: a column with no canonical home is
             # preserved rather than dropped, and a batch can be re-mapped later
             # without the file — the same thing statements.py's /reprocess does.
-            row["raw_data"] = {c: (_to_str(raw.get(c)) or "") for c in xls_columns}
+            # Not on Internal Statement (`keep_raw`): see the docstring.
+            if keep_raw:
+                row["raw_data"] = {c: (_to_str(raw.get(c)) or "") for c in xls_columns}
 
             if is_airline:
                 # DataFrame-only pre-fills: source columns the canonical alias
@@ -1157,7 +1334,8 @@ class TicketExtractionService:
                     if v:
                         row["travel_dt"] = v
 
-            rows.append(derive_ticket_row(row, is_airline, date_formats))
+            derived = derive_ticket_row(row, is_airline, date_formats)
+            rows.append(apply_internal_standard(derived) if internal_standard else derived)
 
         if skipped_totals:
             where = ", ".join(str(n) for n in skipped_totals[:5])
@@ -1191,6 +1369,21 @@ class TicketExtractionService:
         }
 
 
+def read_file_table(file_bytes: bytes, file_name: str, sheet_name: str | None = None,
+                    header_row: int | None = None, fast_read: bool = False) -> "spreadsheet.ReadResult":
+    """spreadsheet.read_table as the ticket upload reads it, its errors as ValueError."""
+    try:
+        return spreadsheet.read_table(
+            file_bytes, file_name,
+            sheet=sheet_name, header_row=header_row, recognise=recognised_count,
+            fast=fast_read,
+        )
+    except spreadsheet.SpreadsheetError as exc:
+        raise ValueError(str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 — anything else is still unreadable
+        raise ValueError(f"Could not read the file: {exc}") from exc
+
+
 def _is_excel(file_bytes: bytes, file_name: str) -> bool:
     """An Excel workbook — the only kind of file that stores dates rather than text."""
     return spreadsheet.sniff(file_bytes, file_name) in (spreadsheet.XLS, spreadsheet.XLSX)
@@ -1203,16 +1396,21 @@ def _anchor(columns: dict[str, str | None]) -> str:
 
 def detect_date_formats(file_bytes: bytes, file_name: str, sheet_name: str | None = None,
                         header_row: int | None = None,
-                        valid_period: tuple[date, date] | None = None) -> list[dict]:
+                        valid_period: tuple[date, date] | None = None,
+                        fast_read: bool = False,
+                        read: "spreadsheet.ReadResult | None" = None) -> list[dict]:
     """The order the file's Ticket Date and Travel Date columns are written in, as far as the
     file shows it (services/date_format_detect.py) — to fill in Internal Statement's Date
     format before anyone is asked. Read through the columns the alias map maps them to,
-    under the sheet and header row the first read detected. Writes nothing."""
-    try:
-        read = spreadsheet.read_table(file_bytes, file_name, sheet=sheet_name,
-                                      header_row=header_row, recognise=recognised_count)
-    except spreadsheet.SpreadsheetError as exc:
-        raise ValueError(str(exc)) from exc
+    under the sheet and header row the first read detected. Writes nothing. `read` as in
+    TicketExtractionService.extract."""
+    if read is None:
+        try:
+            read = spreadsheet.read_table(file_bytes, file_name, sheet=sheet_name,
+                                          header_row=header_row, recognise=recognised_count,
+                                          fast=fast_read)
+        except spreadsheet.SpreadsheetError as exc:
+            raise ValueError(str(exc)) from exc
     df = read.df
     cols = {canon: col for col, canon in _build_col_map(list(read.columns)).items()}
     fix = None

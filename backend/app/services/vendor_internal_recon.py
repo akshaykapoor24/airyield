@@ -32,8 +32,9 @@ mismatch is reported as a hint, never allowed to break a match.
 SALE OR REFUND, per side, from every signal that side has — a single field is not
 enough on either:
     vendor     ticket_status CANCELLED, or a negative net
-    internal   invoice type Credit Note / Refund, an "IR…" Doc No, or a negative
-               invoice amount (an uploaded refund line is not always typed)
+    internal   ticket_duplicates.kind: an "IR…" Doc No, invoice type Credit Note / Refund,
+               a Date of Cancellation or Net Cancellation Amount, or a negative Amount,
+               Base Fare or Tax (an uploaded refund line is not always typed)
 
 WHAT IS COMPARED — the figures both statements print, mapped onto each other:
     Fare + taxes   vendor total_fare                 internal basic + every tax column
@@ -121,9 +122,10 @@ from app.models.agency import Agency
 from app.models.internal_ticket import InternalTicketStatement, InternalUploadedTicket
 from app.models.statement_batch_control import StatementBatchControl
 from app.models.statement_batch_supplier import StatementBatchSupplier
-from app.models.statement_row import ThirdPartyGds, ThirdPartyGdsLeftOut
+from app.models.statement_row import ThirdPartyGds, ThirdPartyGdsLeftOut, ThirdPartyLcc
 from app.models.third_party_statement import ThirdPartyStatement
 from app.models.vendor_internal_recon import VendorInternalResolution
+from app.services import ticket_duplicates
 from app.services.tp_gds_reupload import DIFF_FIELDS
 
 ROUND_TOLERANCE = 1.0     # rupees — the internal net is rounded to the rupee
@@ -151,6 +153,9 @@ LABEL = {
 
 _NON_TICKET_KINDS = {"total", "payment", "closing", "opening", "balance"}
 _TP_GDS = "tp-gds"
+_TP_LCC = "tp-lcc"
+# The vendor statement types `_load` can read, and the table each one's lines are in.
+_VENDOR_LINE_MODELS = {_TP_GDS: ThirdPartyGds, _TP_LCC: ThirdPartyLcc}
 
 
 # ── the eight cases ──────────────────────────────────────────────────────────
@@ -287,10 +292,47 @@ def _vendor_commission(kind: str, commission: float, tds: float) -> float:
     return (abs(commission) if kind == REFUND else -abs(commission)) + tds
 
 
-def _vendor_line(row: ThirdPartyGds | ThirdPartyGdsLeftOut, source_file: Optional[str] = None,
-                 uploaded_at: Optional[datetime] = None, vendor_key: Optional[str] = None) -> Optional[Line]:
+def _yq_yr_k3(d: dict) -> float:
+    return _f(d.get("yq")) + _f(d.get("yr")) + _f(d.get("k3"))
+
+
+def total_tax_is_other_taxes(rows: list) -> set[str]:
+    """The statements whose Total Tax column holds only their OTHER taxes. A column means one
+    thing for a whole file, and a total smaller than its own YQ + YR + K3 is not a total: when
+    most of a statement's lines that print YQ, YR or K3 print a "Total Tax" below them, that
+    column is the other taxes, mapped onto Total Tax. Brightsun's SellTax is — 9,116 beside YQ
+    13,963, YR 11,970 and K3 49,562 on a ticket whose taxes come to 84,611 — and its smaller
+    tickets print other taxes above their YQ, which only the whole file can tell apart."""
+    seen: dict[str, list[int]] = defaultdict(lambda: [0, 0])     # batch → [lines, below]
+    for row in rows:
+        d = row.data or {}
+        parts, printed = _yq_yr_k3(d), _f(d.get("taxes"))
+        if parts and printed:
+            n = seen[row.batch_id]
+            n[0] += 1
+            n[1] += 1 if printed + FIELD_TOLERANCE < parts + _f(d.get("other_taxes")) else 0
+    return {b for b, (lines, below) in seen.items() if below * 2 > lines}
+
+
+def vendor_tax(d: dict, other_only: bool = False) -> float:
+    """A vendor line's whole tax bill: its Total Tax column, else YQ + YR + K3 + Other added up —
+    or, on a statement whose Total Tax column is its other taxes (`total_tax_is_other_taxes`),
+    that column added to YQ + YR + K3."""
+    parts, other, printed = _yq_yr_k3(d), _f(d.get("other_taxes")), _f(d.get("taxes"))
+    if other_only:
+        return parts + printed + other
+    if printed and printed + FIELD_TOLERANCE >= parts + other:
+        return printed
+    return parts + other if not printed else max(printed, parts + other)
+
+
+def _vendor_line(row: ThirdPartyGds | ThirdPartyGdsLeftOut | ThirdPartyLcc, source_file: Optional[str] = None,
+                 uploaded_at: Optional[datetime] = None, vendor_key: Optional[str] = None,
+                 other_taxes_column: bool = False) -> Optional[Line]:
     """`source_file` / `uploaded_at` are the statement's own (models/third_party_statement.py);
-    the line's copies of them are the fallback — a left-out line has none."""
+    the line's copies of them are the fallback — a left-out line has none. A Third Party LCC
+    line reads the same way: its parser writes the same `data` keys. `other_taxes_column`: its
+    statement's Total Tax column is its other taxes (`total_tax_is_other_taxes`)."""
     d = row.data or {}
     if (d.get("row_kind") or "").lower() in _NON_TICKET_KINDS or not d.get("ticket_number"):
         return None
@@ -315,6 +357,14 @@ def _vendor_line(row: ThirdPartyGds | ThirdPartyGdsLeftOut, source_file: Optiona
             "tds": tds,
             "net": net,
             "commission_net": _vendor_commission(kind, commission, tds),
+            # The fare in its parts — Basic, the whole tax bill (`vendor_tax`), SSR — for the
+            # Payment Module's fare check (services/vendor_mapping.py).
+            "base": _f(d.get("base_fare")),
+            "tax": vendor_tax(d, other_taxes_column),
+            "ssr": _f(d.get("ssr_amount")),
+            # The airline's cancellation charge as the vendor prints it: Cancellation Charges
+            # (Brightsun) or Agent Penalty (TripJack) — on a refund line, what was not given back.
+            "canc_charge": _f(d.get("cancellation_markup")) + _f(d.get("agent_penalty")),
         },
     )
 
@@ -331,17 +381,25 @@ def books_agency(t: InternalUploadedTicket, statement: Optional[InternalTicketSt
     return None
 
 
+_INTERNAL_TAX_PARTS = ("sell_tax_yq", "sale_yr", "sale_k3", "oc_tax", "other_tax", "wo_tax")
+
+
+def internal_tax(t: InternalUploadedTicket) -> float:
+    """An internal ticket's whole tax bill: its tax columns added up, or — a file that prints one
+    figure, like Yatra's sales report (Internal Statement's "Tax (Total Tax)") — that figure."""
+    parts = sum(_f(getattr(t, c)) for c in _INTERNAL_TAX_PARTS)
+    return parts if parts else _f(t.sell_tax)
+
+
 def _internal_line(t: InternalUploadedTicket, statement_file: Optional[str],
                    loaded_at: Optional[datetime] = None, vendor_key: Optional[str] = None) -> Line:
-    fare = sum(_f(getattr(t, c)) for c in
-               ("sell_fare", "sell_tax_yq", "sale_yr", "sale_k3", "oc_tax", "other_tax", "wo_tax"))
+    tax = internal_tax(t)
+    fare = _f(t.sell_fare) + tax
     gst = _f(t.gst_sell) or (_f(t.cgst_sell) + _f(t.sgst_sell) + _f(t.igst_sell))
     net = _f(t.total_amt)
-    refund = (
-        (t.invoice_type or "") in ("Credit Note", "Refund")
-        or (t.doc_no or "").strip().upper().startswith("IR")
-        or net < 0
-    )
+    # The rule the duplicate check reads (ticket_duplicates.kind): a cancellation, or a
+    # negative Amount, Base Fare or Tax, is a refund as well as an "IR…" Doc No.
+    refund = ticket_duplicates.is_refund(t)
     commission, tds = _f(t.dis_sell), _f(t.tds_sell)
     return Line(
         side="internal", id=t.id, serial=_serial(t.ticket_number), code=_code(t.ticket_prefix),
@@ -362,8 +420,34 @@ def _internal_line(t: InternalUploadedTicket, statement_file: Optional[str],
             "net": net,
             # The books' own net is fare − discount + TDS + charges + GST, line for line.
             "commission_net": -commission + tds,
+            # The fare in its parts, as the vendor's are split (services/vendor_mapping.py), and
+            # the commission the books expect from the vendor: IATA commission + PLB.
+            "base": _f(t.sell_fare),
+            "tax": tax,
+            "ssr": _f(t.meals) + _f(t.excess_baggage) + _f(t.seat_selection),
+            "comm_expected": _f(t.iata_comm_amt) + _f(t.plb_amount),
+            # What a refund line actually gave back (Yatra's NettRefundableAmount) — its Amount
+            # is the original ticket's.
+            "net_cancel": _f(getattr(t, "net_cancellation_amount", None)),
+            # The airline's cancellation charge on a refund line (Yatra's
+            # airline_cancellation_charge) — what it kept of the fare.
+            "airline_charge": _f(getattr(t, "supplier_can_charge", None)),
         },
     )
+
+
+# What an internal line is read from (`_internal_line`, `books_agency`, ticket_duplicates.kind):
+# selected by name rather than the whole ticket — a lakh-line MO is ~150 columns a ticket, and
+# building every one was most of a load.
+_INTERNAL_COLUMNS = (
+    "id", "batch_id", "created_at", "ticket_number", "ticket_prefix", "pax_name", "last_name",
+    "first_name", "gds_pnr", "air_pnr", "sector", "doc_no", "doc_date", "ticket_date", "invoice_type",
+    "sell_fare", "sell_tax", "sell_tax_yq", "sale_yr", "sale_k3", "oc_tax", "other_tax", "wo_tax",
+    "gst_sell", "cgst_sell", "sgst_sell", "igst_sell", "total_amt", "dis_sell", "tds_sell",
+    "serv_charge", "serv_charge_2", "serv_charge_3", "raf", "meals", "excess_baggage", "seat_selection",
+    "iata_comm_amt", "plb_amount", "cancellation_date", "net_cancellation_amount", "supplier_can_charge",
+    "payable_type", "payable_agency_id", "customer_type", "customer_agency_id",
+)
 
 
 def _inr(v: float) -> str:
@@ -428,7 +512,8 @@ def vendor_key(name: Optional[str], branch: Optional[str]) -> Optional[str]:
 
 @dataclass
 class Stmt:
-    """A Third Party GDS statement, with the vendor it was uploaded under and its balances."""
+    """A Third Party GDS statement (or LCC, for the Payment Module), with the vendor it was
+    uploaded under and its balances."""
     batch_id: str
     file_name: Optional[str]
     uploaded_at: Optional[datetime]
@@ -446,10 +531,12 @@ class Stmt:
     repeats: int = 0
     repeats_net: float = 0.0
     unlisted: int = 0
+    slug: str = _TP_GDS
 
     def public(self) -> dict:
         return {
-            "batch_id": self.batch_id, "vendor_id": self.vendor_key, "vendor_name": self.vendor_name,
+            "batch_id": self.batch_id, "slug": self.slug,
+            "vendor_id": self.vendor_key, "vendor_name": self.vendor_name,
             "file_name": self.file_name, "uploaded_at": _iso(self.uploaded_at),
             "period_from": _day(self.period_from), "period_to": _day(self.period_to),
             "lines": self.lines, "billed": round(self.billed, 2),
@@ -496,7 +583,12 @@ class Scope:
     date_to: Optional[str] = None
 
 
-async def _load(db: AsyncSession, tenant_id: int, user_id: int) -> Book:
+async def _load(db: AsyncSession, tenant_id: int, user_id: int, *,
+                vendor_slugs: tuple[str, ...] = (_TP_GDS,), internal_category: Optional[str] = None) -> Book:
+    """Everything loaded, both sides. `vendor_slugs`: the vendor statement types read — Third
+    Party GDS here; the Payment Module adds LCC. `internal_category`: only the Internal
+    Statement uploads of that Statement Type ("booking" — the MO) are the internal side, and
+    no Create Ticket entry; every internal ticket when None."""
     agencies = (await db.execute(
         select(Agency.id, Agency.name, Agency.branch_name, Agency.channels)
         .where(Agency.user_id == user_id).order_by(Agency.name, Agency.id)
@@ -517,11 +609,11 @@ async def _load(db: AsyncSession, tenant_id: int, user_id: int) -> Book:
     sq = (
         select(ThirdPartyStatement, StatementBatchSupplier, StatementBatchControl)
         .join(StatementBatchSupplier, and_(StatementBatchSupplier.batch_id == ThirdPartyStatement.batch_id,
-                                           StatementBatchSupplier.slug == _TP_GDS), isouter=True)
+                                           StatementBatchSupplier.slug == ThirdPartyStatement.slug), isouter=True)
         .join(StatementBatchControl, and_(StatementBatchControl.batch_id == ThirdPartyStatement.batch_id,
-                                          StatementBatchControl.slug == _TP_GDS), isouter=True)
+                                          StatementBatchControl.slug == ThirdPartyStatement.slug), isouter=True)
         .where(ThirdPartyStatement.tenant_id == tenant_id, ThirdPartyStatement.created_by_id == user_id,
-               ThirdPartyStatement.slug == _TP_GDS)
+               ThirdPartyStatement.slug.in_([s for s in vendor_slugs if s in _VENDOR_LINE_MODELS]))
     )
     stmts: dict[str, Stmt] = {}
     for h, sup, ctl in (await db.execute(sq)).all():
@@ -539,30 +631,37 @@ async def _load(db: AsyncSession, tenant_id: int, user_id: int) -> Book:
             opening=None if ctl is None or ctl.opening_balance is None else float(ctl.opening_balance),
             closing=None if ctl is None or ctl.closing_balance is None else float(ctl.closing_balance),
             unlisted=h.duplicate_entries or 0,     # less the ones kept, below
+            slug=h.slug,
         )
 
     # Ordered by id: when one ticket has two lines that tie, the same one must win every
     # time, or its item_key (and the decision stored against it) would flip between loads.
-    vq = (select(ThirdPartyGds)
-          .where(ThirdPartyGds.tenant_id == tenant_id, ThirdPartyGds.created_by_id == user_id,
-                 ThirdPartyGds.batch_id.in_(list(stmts) or [""]))
-          .order_by(ThirdPartyGds.id))
     vendor: list[Line] = []
-    for (row,) in (await db.execute(vq)).all():
-        st = stmts.get(row.batch_id)
-        ln = _vendor_line(row, st.file_name if st else None, st.uploaded_at if st else None,
-                          st.vendor_key if st else None)
-        if ln is None:
+    other_taxes: set[str] = set()      # statements whose Total Tax column is their other taxes
+    for slug, model in _VENDOR_LINE_MODELS.items():
+        batches = [b for b, x in stmts.items() if x.slug == slug]
+        if not batches:
             continue
-        vendor.append(ln)
-        if st:
-            st.lines += 1
-            st.billed += ln.amounts["net"]
+        vq = (select(model)
+              .where(model.tenant_id == tenant_id, model.created_by_id == user_id, model.batch_id.in_(batches))
+              .order_by(model.id))
+        saved = [row for (row,) in (await db.execute(vq)).all()]
+        other_taxes |= total_tax_is_other_taxes(saved)
+        for row in saved:
+            st = stmts.get(row.batch_id)
+            ln = _vendor_line(row, st.file_name if st else None, st.uploaded_at if st else None,
+                              st.vendor_key if st else None, row.batch_id in other_taxes)
+            if ln is None:
+                continue
+            vendor.append(ln)
+            if st:
+                st.lines += 1
+                st.billed += ln.amounts["net"]
 
     # The lines each statement's upload left out as repeats — shown with it, never matched.
     rq = (select(ThirdPartyGdsLeftOut)
           .where(ThirdPartyGdsLeftOut.tenant_id == tenant_id, ThirdPartyGdsLeftOut.created_by_id == user_id,
-                 ThirdPartyGdsLeftOut.batch_id.in_(list(stmts) or [""]))
+                 ThirdPartyGdsLeftOut.batch_id.in_([b for b, x in stmts.items() if x.slug == _TP_GDS] or [""]))
           .order_by(ThirdPartyGdsLeftOut.batch_id, ThirdPartyGdsLeftOut.id))
     repeats: list[Repeat] = []
     for (row,) in (await db.execute(rq)).all():
@@ -570,7 +669,7 @@ async def _load(db: AsyncSession, tenant_id: int, user_id: int) -> Book:
         if st:
             st.unlisted = max(st.unlisted - 1, 0)
         ln = _vendor_line(row, st.file_name if st else None, st.uploaded_at if st else None,
-                          st.vendor_key if st else None)
+                          st.vendor_key if st else None, row.batch_id in other_taxes)
         if ln is None:
             continue
         repeats.append(Repeat(line=ln, kind=row.kind, of_id=row.repeat_of_id,
@@ -579,18 +678,22 @@ async def _load(db: AsyncSession, tenant_id: int, user_id: int) -> Book:
             st.repeats += 1
             st.repeats_net += ln.amounts["net"]
 
-    iq = (
-        select(InternalUploadedTicket, InternalTicketStatement)
-        .join(InternalTicketStatement, and_(
-            InternalTicketStatement.batch_id == InternalUploadedTicket.batch_id,
-            InternalTicketStatement.tenant_id == InternalUploadedTicket.tenant_id,
-        ), isouter=True)
-        .where(InternalUploadedTicket.tenant_id == tenant_id, InternalUploadedTicket.created_by_id == user_id)
-        .order_by(InternalUploadedTicket.id)
-    )
+    S, T = InternalTicketStatement, InternalUploadedTicket
+    sq = select(S.batch_id, S.file_name, S.created_at, S.valid_to, S.customer_type, S.customer_agency_id) \
+        .where(S.tenant_id == tenant_id)
+    if internal_category is not None:
+        sq = sq.where(S.statement_category == internal_category)
+    internal_stmts = {s.batch_id: s for s in (await db.execute(sq)).all()}
+    iq = (select(*[getattr(T, c) for c in _INTERNAL_COLUMNS])
+          .where(T.tenant_id == tenant_id, T.created_by_id == user_id)
+          .order_by(T.id))
+    if internal_category is not None:
+        iq = iq.join(S, and_(S.batch_id == T.batch_id, S.tenant_id == T.tenant_id)) \
+            .where(S.statement_category == internal_category)
     internal: list[Line] = []
     internal_ends: dict[str, Optional[str]] = {}
-    for t, s in (await db.execute(iq)).all():
+    for t in (await db.execute(iq)).all():
+        s = internal_stmts.get(t.batch_id)
         agency = books_agency(t, s)
         internal.append(_internal_line(t, s.file_name if s else None, (s.created_at if s else None) or t.created_at,
                                        by_agency.get(agency) if agency is not None else None))
@@ -598,6 +701,14 @@ async def _load(db: AsyncSession, tenant_id: int, user_id: int) -> Book:
             internal_ends[s.batch_id] = _day(s.valid_to)
     return Book(vendor=vendor, internal=internal, vendors=vendors, stmts=stmts, internal_ends=internal_ends,
                 repeats=repeats)
+
+
+async def load_book(db: AsyncSession, tenant_id: int, user_id: int, *,
+                    vendor_slugs: tuple[str, ...] = (_TP_GDS,),
+                    internal_category: Optional[str] = None) -> Book:
+    """Everything loaded, both sides (`_load`) — for the Payment Module (services/vendor_mapping.py),
+    which reads Third Party LCC too and only the Booking / MO internal statements."""
+    return await _load(db, tenant_id, user_id, vendor_slugs=vendor_slugs, internal_category=internal_category)
 
 
 # ── reconcile, and resolve ───────────────────────────────────────────────────

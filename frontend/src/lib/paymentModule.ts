@@ -1,20 +1,18 @@
 // Central registry for Vendors data → Payment Module.
 //
-// Shaped like lib/reconciliationSources.ts: plain data, icon-free. Four tabs — the
-// vendor's bill, our own mid-office (MO) record of it, the reconciliation between the two,
-// and the payments that settle it — and the statement configs the first two hand to
-// AdjustmentStatementsView, which is the same uploads screen Vendors data → Statements uses
-// (plus a Checks column and control totals, which only these two tabs switch on).
+// Shaped like lib/reconciliationSources.ts: plain data, icon-free. Four tabs — the vendors'
+// statements, the MO (your own booking record of the same tickets), Vendor Mapping between the
+// two, and Vendor Payments, one account per vendor.
 //
-// THE VENDOR STATEMENT IS NOT A COPY. It is the Third Party GDS type itself (`tp-gds`):
-// uploading here is uploading under Statements → Third Party → GDS, so Commission income
-// prices exactly these rows and the reconciliation can read that commission row-to-row.
-// The MO statement is its own type (`mo-gds`) on the same backend router, parsed with the
-// Third Party GDS columns for now, so one file loads identically on both sides.
+// NOTHING IS UPLOADED HERE. The vendor statements are the Third Party GDS and LCC uploads
+// themselves (Vendors data → Statements → Third Party), and the MO is Internal Statement's
+// uploads filed as a Booking / MO statement (Internal Statement → Upload Statement). Both tabs
+// list them read-only; the mapping and the payments are computed from them
+// (backend/app/services/vendor_mapping.py).
 
 import { getType, type StatementType } from "@/lib/statements";
 
-export type PaymentTabSlug = "vendor" | "mo" | "reconciliation" | "payments";
+export type PaymentTabSlug = "vendor" | "mo" | "mapping" | "payments";
 
 export type PaymentTab = {
   slug: PaymentTabSlug;
@@ -27,66 +25,64 @@ export const PAYMENT_TABS: PaymentTab[] = [
   {
     slug: "vendor",
     label: "Vendor Statement",
-    blurb: "The consolidator's Third Party GDS statement — the same uploads as Statements → Third Party → GDS.",
+    blurb: "The consolidators' Third Party GDS and LCC statements — uploaded under Statements → Third Party.",
   },
   {
     slug: "mo",
     label: "MO Statement",
-    blurb: "Your mid-office (internal) record of the same bookings, uploaded in the Third Party GDS format.",
+    blurb: "Your own booking record — Internal Statement uploads filed as a Booking / MO statement.",
   },
   {
-    slug: "reconciliation",
-    label: "Reconciliation",
-    blurb: "Vendor statement against MO statement, ticket by ticket — with the commission your deals say you earned.",
+    slug: "mapping",
+    label: "Vendor Mapping",
+    blurb: "Every line a vendor billed, looked for in the MO — is the ticket there, and is its fare the same?",
   },
   {
     slug: "payments",
-    label: "Payments",
-    blurb: "What each statement leaves payable after Operations' decisions, the payments made against it, and what is still outstanding.",
+    label: "Vendor Payments",
+    blurb: "One account per vendor: what it billed, what is held or claimed, what was paid and what is still owed.",
   },
 ];
 
 const TP_GDS = getType("third-party", "gds");
+const TP_LCC = getType("third-party", "lcc");
 
-export const VENDOR_STATEMENT: StatementType = {
-  slug: TP_GDS?.slug ?? "gds",
-  label: "Vendor Statement",
-  kind: "spec-repo",
-  status: "ready",
-  apiBase: TP_GDS?.apiBase ?? "/statements/tp-gds",
-  requiresSupplier: TP_GDS?.requiresSupplier ?? true,
-  supportsMapping: TP_GDS?.supportsMapping ?? true,
-  capturesPeriod: TP_GDS?.capturesPeriod ?? true,
-  blurb: TP_GDS?.blurb,
-  doneHint: "Price it under Vendors data → Commission income → Third Party → GDS, then check it against your MO statement under Payment Module → Reconciliation.",
-};
+/** The Statements hub's own type, as the read-only list here shows it. */
+function vendorType(t: StatementType | undefined, slug: string, label: string, apiBase: string): StatementType {
+  return {
+    slug: t?.slug ?? slug,
+    label,
+    kind: "spec-repo",
+    status: "ready",
+    apiBase: t?.apiBase ?? apiBase,
+    requiresSupplier: t?.requiresSupplier ?? true,
+    supportsMapping: t?.supportsMapping ?? true,
+    capturesPeriod: t?.capturesPeriod,
+    blurb: t?.blurb,
+  };
+}
 
-export const MO_STATEMENT: StatementType = {
-  slug: "mo-gds",
-  label: "MO Statement",
-  kind: "spec-repo",
-  status: "ready",
-  apiBase: "/statements/mo-gds",
-  // The consolidator whose bookings this record holds — it is what pairs an MO upload
-  // with that vendor's statement on the Reconciliation tab.
-  requiresSupplier: true,
-  supportsMapping: true,
-  blurb: "Mid-office (internal) statement, read with the Third Party GDS columns.",
-  doneHint: "Check it against the vendor statement under Payment Module → Reconciliation.",
-};
+export const VENDOR_GDS = vendorType(TP_GDS, "gds", "Third Party GDS", "/statements/tp-gds");
+export const VENDOR_LCC = vendorType(TP_LCC, "lcc", "Third Party LCC", "/statements/tp-lcc");
+
+/** Where each kind of statement IS uploaded — named on the read-only lists. */
+export const VENDOR_GDS_HREF = "/vendors/statements/third-party/gds";
+export const VENDOR_LCC_HREF = "/vendors/statements/third-party/lcc";
+export const MO_UPLOAD_HREF = "/internal-statement/upload";
 
 export const PAYMENT_MODULE_API = "/payment-module";
-export const PAYMENT_RECON_API = `${PAYMENT_MODULE_API}/reconciliation`;
 export const PAYMENT_CHECKS_API = `${PAYMENT_MODULE_API}/checks`;
+export const VENDOR_MAPPING_API = `${PAYMENT_MODULE_API}/vendor-mapping`;
+export const VENDOR_ACCOUNTS_API = `${PAYMENT_MODULE_API}/vendor-accounts`;
 
-/** The backend statement types behind the two upload tabs — what the checks API keys on.
- *  Not `VENDOR_STATEMENT.slug`, which is the Statements hub's own short slug ("gds"). */
+/** The completeness checks of a Third Party GDS upload (LCC records none). */
 export const VENDOR_CHECKS = { api: PAYMENT_CHECKS_API, slug: "tp-gds" };
-export const MO_CHECKS = { api: PAYMENT_CHECKS_API, slug: "mo-gds" };
 
-/** Where the screen sends someone whose vendor statement has no commission yet. */
+/** Where the screen sends someone to price a vendor's commission against the deals. */
 export const COMMISSION_TP_GDS_HREF = "/vendors/commission-income?source=tp-gds";
 
 export function getPaymentTab(slug: string | null | undefined): PaymentTab | undefined {
-  return PAYMENT_TABS.find((t) => t.slug === slug);
+  // "reconciliation" is the tab's old name — links sent before it was renamed still open it.
+  const s = slug === "reconciliation" ? "mapping" : slug;
+  return PAYMENT_TABS.find((t) => t.slug === s);
 }

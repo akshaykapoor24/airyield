@@ -8,11 +8,15 @@ source tab, which is the whole coupling between them.
 The endpoint set mirrors `/bsp-commission/*` deliberately — statements, run, reset, rows,
 facets, summary, gaps, diagnosis, xlsx — so one frontend component serves every tab. The
 one addition is `/variance`, which only a source with declared vendor figures can answer.
+
+Across statements, for the tab-level All tickets view: `/lines` (every statement's lines in
+one page), `/run-all` (every statement to the worker) and `/run-lines` (picked lines from
+several statements, each statement's share run inline).
 """
 from __future__ import annotations
 
 import io
-from datetime import datetime
+from datetime import date, datetime
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import String, delete, func, select
@@ -34,7 +38,10 @@ from app.schemas.commission import (
     CommissionReasonGroup,
     CommissionRowRead,
     CommissionRowsPage,
+    CommissionRunAllResponse,
+    CommissionRunLinesResponse,
     CommissionRunResponse,
+    CommissionRunSkip,
     CommissionStatementRead,
     CommissionSummary,
     CommissionTotals,
@@ -233,7 +240,16 @@ async def run_commission(
         raise HTTPException(
             status_code=400,
             detail=f"Select at most {MAX_INLINE_ROWS} rows to run inline, or run the whole statement.")
+    run = await _start_run(db, current_user, adapter, source, batch_id, row_ids)
+    return _run_response(run)
 
+
+async def _start_run(db: AsyncSession, current_user: User, adapter, source: str,
+                     batch_id: str, row_ids: list[int] | None) -> CommissionRun:
+    """One statement's run: checked, recorded, then calculated inline (`row_ids`) or handed
+    to the worker. Shared by /run, /run-all and /run-lines so a bulk run refuses exactly
+    what a single one would. Raises HTTPException: 404 no such statement, 409 no
+    consolidator or a run already in progress, 503 the worker cannot be reached."""
     exists = await db.scalar(select(func.count()).select_from(adapter.model).where(
         adapter.model.batch_id == batch_id,
         adapter.model.tenant_id == current_user.tenant_id,
@@ -275,7 +291,7 @@ async def run_commission(
 
     if row_ids:
         await CommissionRunner(adapter).run(db, run, row_ids=row_ids)
-        return _run_response(run)
+        return run
 
     try:
         from app.workers.commission_tasks import run_commission as task
@@ -288,7 +304,117 @@ async def run_commission(
             status_code=503,
             detail="The background worker is unreachable, so this statement could not be "
                    "queued. Start the Celery worker and try again.")
-    return _run_response(run)
+    return run
+
+
+@router.post("/{source}/run-all", response_model=CommissionRunAllResponse,
+             status_code=status.HTTP_202_ACCEPTED)
+async def run_all(
+    source: str,
+    payload: dict = Body(default_factory=dict),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Every statement of this source — or the `batch_ids` given, the ones the screen's
+    filters leave in view — to the worker, one run each.
+
+    A statement that cannot run (no consolidator, a run already going) is reported in
+    `skipped` and the rest still go: one stuck upload must not hold back the others. An
+    unreachable worker stops the whole call, since nothing after it would queue either.
+    """
+    adapter, source = _resolve(source)
+    batches = await adapter.list_batches(db, current_user.tenant_id, current_user.id)
+    wanted = payload.get("batch_ids")
+    if wanted:
+        keep = {str(b) for b in wanted}
+        batches = [b for b in batches if b.batch_id in keep]
+    if not batches:
+        raise HTTPException(status_code=404, detail="No statements to run.")
+
+    out = CommissionRunAllResponse()
+    for b in batches:
+        try:
+            run = await _start_run(db, current_user, adapter, source, b.batch_id, None)
+        except HTTPException as exc:
+            if exc.status_code == 503:
+                raise
+            out.skipped.append(CommissionRunSkip(
+                batch_id=b.batch_id, statement_name=b.source_file, reason=str(exc.detail)))
+            continue
+        out.started.append(_run_response(run))
+    return out
+
+
+@router.post("/{source}/run-lines", response_model=CommissionRunLinesResponse)
+async def run_lines(
+    source: str,
+    payload: dict = Body(default_factory=dict),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Hand-picked statement lines from any number of statements, calculated now.
+
+    Lines are grouped by the statement they belong to and each group runs inline as that
+    statement's own selection — a run is per statement, because a refund reverses the
+    issue IN ITS statement. The answer counts what happened to these lines only.
+    """
+    adapter, source = _resolve(source)
+    try:
+        ids = sorted({int(x) for x in (payload.get("line_ids") or [])})
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="line_ids must be statement line ids.")
+    if not ids:
+        raise HTTPException(status_code=400, detail="Select at least one line.")
+    if len(ids) > MAX_INLINE_ROWS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Select at most {MAX_INLINE_ROWS} lines to run at once, or use Run all.")
+
+    m = adapter.model
+    by_batch: dict[str, list[int]] = {}
+    for line_id, batch_id in (await db.execute(
+        select(m.id, m.batch_id).where(m.id.in_(ids), m.tenant_id == current_user.tenant_id,
+                                       m.created_by_id == current_user.id)
+    )).all():
+        by_batch.setdefault(batch_id, []).append(line_id)
+    if not by_batch:
+        raise HTTPException(status_code=404, detail="None of these lines were found.")
+
+    names = {b.batch_id: b.source_file for b in
+             await adapter.list_batches(db, current_user.tenant_id, current_user.id)}
+    out = CommissionRunLinesResponse()
+    ran: list[int] = []
+    for batch_id, row_ids in by_batch.items():
+        try:
+            await _start_run(db, current_user, adapter, source, batch_id, row_ids)
+        except HTTPException as exc:
+            out.not_run.append(CommissionRunSkip(
+                batch_id=batch_id, statement_name=names.get(batch_id), reason=str(exc.detail)))
+            continue
+        except Exception as exc:  # noqa: BLE001 — the runner has already marked its run failed
+            out.not_run.append(CommissionRunSkip(
+                batch_id=batch_id, statement_name=names.get(batch_id),
+                reason=f"Calculation failed: {exc}"[:500]))
+            continue
+        ran += row_ids
+        out.statements += 1
+
+    if ran:
+        counts = dict((await db.execute(
+            select(Calc.status, func.count())
+            .where(*_scope(current_user), Calc.source == source, Calc.source_row_id.in_(ran))
+            .group_by(Calc.status)
+        )).all())
+        for k in ("calculated", "reversed", "excluded", "needs_data", "skipped", "unmatched"):
+            setattr(out, k, counts.get(k, 0))
+        out.expected_total = round(float(await db.scalar(
+            select(func.coalesce(func.sum(func.coalesce(Calc.incentive, 0)
+                                          + func.coalesce(Calc.iata_commission, 0)), 0))
+            .where(*_scope(current_user), Calc.source == source, Calc.source_row_id.in_(ran),
+                   Calc.status.in_(("calculated", "reversed")))
+        ) or 0), 2)
+    out.lines = len(ran)
+    return out
 
 
 def _run_response(run: CommissionRun) -> CommissionRunResponse:
@@ -429,10 +555,65 @@ async def list_lines(
     columns, and what it earned: the vendor's commission, your deal's, and the gap
     (services/commission/statement_lines.py). `totals` are the whole statement's, never the
     filtered set, so a card keeps its number while it filters the table.
-
-    Only for a source whose statements declare their own commission: without one there is
-    nothing to compare, and a page of zeros would read as "paid in full".
     """
+    adapter, source = _lines_source(source, bucket)
+    rows = await adapter.load_rows(db, current_user.tenant_id, current_user.id, batch_id)
+    if not rows:
+        raise HTTPException(status_code=404, detail="Statement not found.")
+    calcs = {c.source_row_id: c for c in (await db.execute(
+        select(Calc).where(*_scope(current_user), Calc.source == source, Calc.batch_id == batch_id)
+    )).scalars().all()}
+    return await _lines_page(db, current_user, source, rows, calcs, bucket=bucket,
+                             search=search, air=air, txn=txn, offset=offset, limit=limit)
+
+
+@router.get("/{source}/lines", response_model=CommissionLinesPage)
+async def list_all_lines(
+    source: str,
+    batches: str = Query("", description="Comma-separated batch ids; empty = every statement"),
+    date_from: date | None = Query(None, description="Booking period start (issue date)"),
+    date_to: date | None = Query(None, description="Booking period end (issue date)"),
+    bucket: str = Query("all"),
+    search: str = Query(""),
+    air: str = Query(""),
+    txn: str = Query(""),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Every ticket line of every statement of this source — the All tickets view — with
+    the statement and consolidator each came from. The screen's Agency / Statement filters
+    arrive as `batches`, its booking period as `date_from`/`date_to`; the cards' `totals`
+    cover all of that scope, so they still add up while a card filters the table."""
+    adapter, source = _lines_source(source, bucket)
+    infos = await adapter.list_batches(db, current_user.tenant_id, current_user.id)
+    wanted = {b.strip() for b in batches.split(",") if b.strip()}
+    if wanted:
+        infos = [b for b in infos if b.batch_id in wanted]
+    ids = [b.batch_id for b in infos]
+    rows = await adapter.load_rows_many(db, current_user.tenant_id, current_user.id, ids,
+                                        date_from, date_to)
+    calcs = {c.source_row_id: c for c in (await db.execute(
+        select(Calc).where(*_scope(current_user), Calc.source == source, Calc.batch_id.in_(ids))
+    )).scalars().all()} if ids else {}
+    agencies = dict((await db.execute(
+        select(StatementBatchSupplier.batch_id, StatementBatchSupplier.supplier_name).where(
+            StatementBatchSupplier.slug == source,
+            StatementBatchSupplier.tenant_id == current_user.tenant_id,
+            StatementBatchSupplier.batch_id.in_(ids))
+    )).all()) if ids else {}
+    statement_of = {b.batch_id: (b.source_file, agencies.get(b.batch_id)) for b in infos}
+    return await _lines_page(db, current_user, source, rows, calcs, bucket=bucket,
+                             search=search, air=air, txn=txn, offset=offset, limit=limit,
+                             statement_of=statement_of)
+
+
+def _lines_source(source: str, bucket: str):
+    """The adapter for a line view, or the reason there is none.
+
+    Only a source whose statements declare their own commission: without one there is
+    nothing to compare, and a page of zeros would read as "paid in full"."""
     adapter, source = _resolve(source)
     if not getattr(adapter, "has_declared_amounts", False):
         raise HTTPException(
@@ -440,14 +621,18 @@ async def list_lines(
             detail=f"{adapter.label} statements do not declare their own commission.")
     if bucket not in sl.BUCKETS:
         raise HTTPException(status_code=400, detail=f"Unknown filter '{bucket}'.")
+    return adapter, source
 
-    rows = await adapter.load_rows(db, current_user.tenant_id, current_user.id, batch_id)
-    if not rows:
-        raise HTTPException(status_code=404, detail="Statement not found.")
-    calcs = {c.source_row_id: c for c in (await db.execute(
-        select(Calc).where(*_scope(current_user), Calc.source == source, Calc.batch_id == batch_id)
-    )).scalars().all()}
+
+async def _lines_page(db: AsyncSession, current_user: User, source: str, rows: list,
+                      calcs: dict, *, bucket: str, search: str, air: str, txn: str,
+                      offset: int, limit: int,
+                      statement_of: dict[str, tuple] | None = None) -> CommissionLinesPage:
+    """Statement lines and their calculations → one page of the line view. `statement_of`
+    ({batch_id: (file name, consolidator)}) is given across statements, and stamps each
+    line with where it came from."""
     lines = [sl.build_line(source, r, calcs.get(r.id)) for r in rows if sl.is_ticket(r)]
+    batch_of = {r.id: r.batch_id for r in rows} if statement_of is not None else {}
     # Each matched deal's IATA %, as written on the deal — shown beside what it came to, so
     # "₹0" reads as "this deal has no IATA %", not as "IATA was not calculated".
     deal_ids = {c.matched_deal_id for c in calcs.values() if c.matched_deal_id}
@@ -471,6 +656,14 @@ async def list_lines(
                  (ln.calc.booking_class if ln.calc is not None else None)
                  or ln.values.get("booking_class"))
              for ln in page}
+
+    def origin(ln) -> dict:
+        if statement_of is None:
+            return {}
+        b = batch_of.get(ln.line_id)
+        name, agency = statement_of.get(b, (None, None))
+        return {"batch_id": b, "statement_name": name, "agency": agency}
+
     return CommissionLinesPage(
         columns=[CommissionLineColumn(**c) for c in cols],
         rows=[CommissionLine(
@@ -481,6 +674,7 @@ async def list_lines(
             iata_commission=_f(ln.calc.iata_commission) if ln.calc is not None else None,
             cabin=cabin.get(ln.line_id),
             calc=_row_read(ln.calc) if ln.calc is not None else None,
+            **origin(ln),
         ) for ln in page],
         total=len(shown), offset=offset, limit=limit,
         totals=CommissionLineTotals(**sl.totals(lines)),
