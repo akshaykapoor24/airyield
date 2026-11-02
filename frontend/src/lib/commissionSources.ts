@@ -38,6 +38,11 @@ export type CommissionSource = {
   /** The chip prefix on a matched deal. BSP and LCC price airline deals; a consolidator
    *  statement prices a B2B one. Hardcoded "AIR" previously mislabelled every B2B match. */
   dealKindLabel: string;
+  /** The tab opens on every statement's tickets in one table (All tickets | Statement wise),
+   *  under Agency / Statement / Booking period filters and a Run all for every statement.
+   *  Needs the backend's across-statement `/lines`, which any source with `showsVariance`
+   *  has — Third Party GDS first; Third Party LCC can follow by flipping this. */
+  allTicketsView?: boolean;
 };
 
 export const COMMISSION_SOURCES: Record<CommissionSourceSlug, CommissionSource> = {
@@ -98,6 +103,7 @@ export const COMMISSION_SOURCES: Record<CommissionSourceSlug, CommissionSource> 
     showsVariance: true,
     sectorFromSource: true,
     dealKindLabel: "B2B",
+    allTicketsView: true,
   },
   "tp-lcc": {
     slug: "tp-lcc",

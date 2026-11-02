@@ -31,6 +31,9 @@ class AirlineRead(BaseModel):
     logo_url: Optional[str]
     is_active: bool
     contract_year: Optional[str] = None
+    # GDS / LCC — not stored on the airline; the list endpoint fills it from the
+    # Classes & RBD master (app.services.airline_type).
+    airline_type: Optional[str] = None
 
     model_config = {"from_attributes": True}
 

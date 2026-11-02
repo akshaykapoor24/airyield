@@ -33,8 +33,11 @@ from app.models.billing import Billing
 from app.models.uploaded_ticket import UploadedTicket
 from app.models.ticket_statement import TicketStatement
 from app.models.internal_ticket import InternalTicketStatement, InternalUploadedTicket
+# Internal Statement's background upload: import jobs and their staging rows.
+from app.models.internal_ticket_import import InternalTicketImport, InternalTicketImportRow
 # Vendor Reconciliation → Third Party GDS: what the user decided on a line that disagrees.
 from app.models.vendor_internal_recon import VendorInternalResolution
+from app.models.vendor_mapping import VendorMappingDecision
 from app.models.customer_statement import CustomerStatement, CustomerStatementTicket
 from app.models.income_summary import IncomeSummary
 from app.models.ticket_calculation import TicketCalculation

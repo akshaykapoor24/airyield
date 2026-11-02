@@ -231,6 +231,38 @@ class UploadedTicket(Base):
     # nothing names (no ticket number, no passenger).
     dedup_key:          Mapped[str | None] = mapped_column(String(64), nullable=True)
 
+    # ── Internal Statement standard format (migration internal_std_01) ───────
+    # The columns an OTA's own sales record carries that no field above holds — the user's
+    # standard set for an Internal Statement, first read off Yatra's fortnightly B2B sales
+    # report. Plain columns on both ticket tables (models/internal_ticket.py copies this
+    # definition), filled by upload only.
+    #   iata_comm_amt — the IATA commission AS THE FILE PRINTS IT. Not `iata_commission`
+    #                   above, which the commission run writes.
+    #   booked_by     — the file's "Created By": the booking agent in the OTA's own system,
+    #                   not the FareQube user who uploaded it (created_by_id).
+    #   cabin_class   — Economy / Premium Economy / Business / First; booking_class is the RBD.
+    adt_ref:             Mapped[str | None]   = mapped_column(String(100), nullable=True)
+    booking_status:      Mapped[str | None]   = mapped_column(String(50), nullable=True)
+    sales_channel:       Mapped[str | None]   = mapped_column(String(20), nullable=True)     # Online | Offline
+    supplier_can_charge: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    reschedule_charge:   Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    supplier_name:       Mapped[str | None]   = mapped_column(String(300), nullable=True)
+    iata_no:             Mapped[str | None]   = mapped_column(String(50), nullable=True)
+    customer_code:       Mapped[str | None]   = mapped_column(String(50), nullable=True)
+    vendor_code:         Mapped[str | None]   = mapped_column(String(50), nullable=True)
+    booked_by:           Mapped[str | None]   = mapped_column(String(200), nullable=True)
+    iata_comm_amt:       Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    plb_amount:          Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    payment_mode:        Mapped[str | None]   = mapped_column(String(200), nullable=True)
+    segment_count:       Mapped[int | None]   = mapped_column(Integer, nullable=True)
+    cabin_class:         Mapped[str | None]   = mapped_column(String(30), nullable=True)
+    # A cancellation, as the file prints it (Yatra's refund report: date_of_cancellation,
+    # NettRefundableAmount): the day it was cancelled — read in the Booking Date's declared
+    # format — and the net amount refunded. Either one marks the line a refund
+    # (services/ticket_duplicates.py `kind`).
+    cancellation_date:       Mapped[str | None]   = mapped_column(String(50), nullable=True)
+    net_cancellation_amount: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+
     # ── Billing status ────────────────────────────────────────────────────────
     # A ticket is billed to at most one customer billing. Locked once billed;
     # cleared when that billing is deleted.

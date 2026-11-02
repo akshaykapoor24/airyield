@@ -17,9 +17,12 @@ counts.
 
 Two guards, so the rule never drops a line that is not a repeat:
   * a sale and its refund are never each other's duplicate — a refund printed with a positive
-    amount would otherwise match its sale exactly. Sale or refund is read the way vendor ↔
-    internal reconciliation reads it (services/vendor_internal_recon.py): an IS / IR Doc No
-    says it outright; else a Credit Note or Refund invoice type, else a negative amount;
+    amount would otherwise match its sale exactly. Sale or refund (`kind`, which vendor ↔
+    internal reconciliation reads too): an IS / IR Doc No says it outright; else a Credit Note
+    or Refund invoice type; else a Date of Cancellation, or a Net Cancellation Amount other
+    than nil; else a negative Amount, Base Fare or Tax (user, 2026-10-30 — Yatra's refund
+    report prints its refunds with a positive BSP Amount, and only the Base Fare or the Tax,
+    or both, negative);
   * a line with neither a Ticket No nor a Pax Name is never a duplicate — nothing in it says
     which ticket it is, and two such lines alike in dates and amount are not shown to be one.
 
@@ -49,7 +52,10 @@ MAX_LISTED = 200
 _CHUNK = 5000
 # The columns a saved ticket's key is worked out from.
 KEY_COLUMNS = ("ticket_number", "pax_name", "last_name", "first_name", "ticket_date", "doc_date",
-               "total_amt", "departure_datetime", "doc_no", "invoice_type")
+               "total_amt", "departure_datetime", "doc_no", "invoice_type",
+               "sell_fare", "sell_tax", "cancellation_date", "net_cancellation_amount")
+# A negative one of these is a refund.
+_REFUND_WHEN_NEGATIVE = ("total_amt", "sell_fare", "sell_tax")
 
 
 # ── the line key ─────────────────────────────────────────────────────────────
@@ -98,7 +104,12 @@ def doc_no(value) -> str:
 
 
 def kind(row) -> str:
-    """S(ale) or R(efund)."""
+    """S(ale) or R(efund), the first of these that says so:
+      1. Doc No — "IR…" a refund, "IS…" a sale;
+      2. Invoice Type — Credit Note or Refund;
+      3. a Date of Cancellation, or a Net Cancellation Amount other than nil;
+      4. a negative Amount, Base Fare or Tax.
+    Else a sale."""
     doc = doc_no(_get(row, "doc_no"))
     if doc.startswith("IR"):
         return "R"
@@ -107,8 +118,19 @@ def kind(row) -> str:
     it = str(_get(row, "invoice_type") or "").lower()
     if "credit" in it or "refund" in it:
         return "R"
-    total = _number(_get(row, "total_amt"))
-    return "R" if total is not None and total < 0 else "S"
+    if str(_get(row, "cancellation_date") or "").strip():
+        return "R"
+    if _number(_get(row, "net_cancellation_amount")):
+        return "R"
+    for name in _REFUND_WHEN_NEGATIVE:
+        value = _number(_get(row, name))
+        if value is not None and value < 0:
+            return "R"
+    return "S"
+
+
+def is_refund(row) -> bool:
+    return kind(row) == "R"
 
 
 def pax_name(row) -> str:
@@ -159,7 +181,8 @@ class Loaded:
         }
 
 
-def _shown(row) -> dict:
+def shown(row) -> dict:
+    """A line as the duplicate list shows it."""
     return {
         "doc_no": _get(row, "doc_no"), "ticket_number": _get(row, "ticket_number"),
         "pax_name": _get(row, "pax_name") or pax_name(row) or None,
@@ -236,7 +259,7 @@ def partition(rows: list, keys: list[str | None], loaded: dict[str, Loaded]) -> 
         if where is None:
             out.kept.append(i)
             continue
-        out.lines.append({**_shown(row), "index": i, "batch_id": where.batch_id})
+        out.lines.append({**shown(row), "index": i, "batch_id": where.batch_id})
         out.loaded.setdefault(where.batch_id, where)
         out.matched[where.batch_id] += 1
         out.amount += _number(_get(row, "total_amt")) or Decimal("0")

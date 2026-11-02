@@ -124,7 +124,16 @@ class VendorPayment(Base):
     supplier_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("suppliers.id", ondelete="SET NULL"), nullable=True)
     supplier_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    # The statement this payment settles; NULL = a release of outstanding items on its own.
+    # The vendor as Payment Module → Vendor Payments keeps its account: Agency Master's rows
+    # of one name and branch (services/vendor_internal_recon.vendor_key), whatever the
+    # channel. Set on a payment made there — paid to the vendor's account, not to tickets —
+    # and NULL on the per-ticket payments made before it.
+    vendor_key: Mapped[str | None] = mapped_column(String(600), nullable=True, index=True)
+    vendor_name: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    agency_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("agencies.id", ondelete="SET NULL"), nullable=True)
+    # The statement this payment settles; NULL = a release of outstanding items on its own
+    # (per-ticket), or a payment on account (Vendor Payments: applied oldest statement first).
     vendor_batch_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
 
     payment_date: Mapped[date] = mapped_column(Date, nullable=False)

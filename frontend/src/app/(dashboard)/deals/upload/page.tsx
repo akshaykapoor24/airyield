@@ -15,7 +15,7 @@ import {
   CONTINENTS, COUNTRY_GROUPS,
   INCENTIVE_FIELDS, FIELD_OPTIONS, ANCILLARY_ITEMS,
   DATE_WISE_INCENTIVES, FLIGHT_TYPE_OPTIONS, CLASS_OPTIONS, PAYOUT_CALC_OPTIONS,
-  TabBar, IncentiveTabContent, InclExclTabContent, ruleDateDefaults,
+  TabBar, IncentiveTabContent, InclExclTabContent, ruleDateDefaults, GstModeSelect, GST_MODES,
 } from "@/components/deals/IncentiveInclExclShared";
 import OutgoingScopeFields, { type ScopeSelection } from "@/components/deals/OutgoingScopeFields";
 import { loadVendorAgencies, vendorAgencyOptions, type VendorAgency } from "@/lib/vendorAgency";
@@ -39,7 +39,7 @@ const DEAL_TAG_OPTIONS = ["Standard", "Adhoc"];
 
 const INCENTIVE_TYPES = [
   "PLB","Super PLB","Transaction Fee","Deposit Incentive (DI)","Marketing Fund",
-  "Ancillary","Frontend","Backend","Cashback","Segment Incentive","Push Action",
+  "Ancillary","Frontend","Backend","Cashback","Segment Incentive","Push Action","NDC",
 ];
 
 const INCLUSIONS_EXCLUSIONS = [
@@ -444,7 +444,11 @@ const INLINE_INC_FIELDS:{field:string;label:string}[] = [
   {field:"class",           label:"Class"},
   {field:"payoutCalcCols",  label:"Calc On"},
   {field:"incentiveAmtPct", label:"Rate"},
+  {field:"gstMode",         label:"GST"},
 ];
+// The GST column's choices in the bulk bar (labels) → the stored mode, the same values the
+// select in the cell and popup writes. A row never set has no mode and is inclusive.
+const GST_CHOICES:Record<string,string>=Object.fromEntries(GST_MODES.map(m=>[m.label,m.value]));
 const inlineIncentives=(incentives:string[])=>incentives.filter(i=>DATE_WISE_INCENTIVES.has(i));
 const incCellField=(key:string)=>key.startsWith("inc::")?(key.split("::")[2]??""):"";
 const isSlabPayout=(extra:Record<string,string>,inc:string)=>extra[`inc::${inc}::amountBasedType`]==="Slab Based";
@@ -850,6 +854,8 @@ function IncentiveDataRowModal({
                     // Travel Date Valid From/To, as on Create Deal — saved per incentive
                     // (inc::{inc}::travelValidFrom / travelValidTo) like every other field.
                     travelDates
+                    // GST mode — the same inc::{inc}::gstMode the table's GST column shows.
+                    gstToggle
                   />
 
                   {/* Inclusion / Exclusion rules for THIS incentive type */}
@@ -1250,6 +1256,7 @@ function getColMeta(key:string,entityOptions:string[],vendorLabels:string[]=[]):
   if(incField==="class")return{type:"select",options:CLASS_OPTIONS};
   if(incField==="payoutCalcCols")return{type:"select",options:PAYOUT_CALC_OPTIONS};
   if(incField==="incentiveAmtPct")return{type:"number"};
+  if(incField==="gstMode")return{type:"select",options:Object.keys(GST_CHOICES)};
   return{type:"text"};
 }
 
@@ -1595,6 +1602,12 @@ function ReviewTable({
           </td>
         );
       }
+      // Whether the rate (or every slab rate) already contains GST — the popup's toggle too.
+      if(incField==="gstMode")return(
+        <td key={colKey} className={td}>
+          <GstModeSelect value={val} onChange={change}/>
+        </td>
+      );
       // A FLAT deal is paid as it stands, so it has no Calc On.
       if(incField==="payoutCalcCols"&&isFlatPayout(row.extra,colKey.split("::")[1]))return(
         <td key={colKey} className={td} title="A flat amount is paid per ticket as it stands — no Basic / + YQ base to take it on">
@@ -2788,7 +2801,8 @@ export default function UploadDealPage(){
       if(bulkColKey==="c__valid_from"||bulkColKey==="c__valid_to")return{...r,extra:withContractDateChange(r.extra,bulkColKey,bulkColValue)};
       if(bulkColKey==="c__entity")return{...r,extra:withEntityChange(r.extra,bulkColValue)};
       if(bulkColKey==="c__vendor_agency_id")return vendorId?{...r,extra:withVendorChange(r.extra,vendorId)}:r;
-      if(bulkColKey.startsWith("inc::"))return{...r,extra:withIncentiveCellChange(r.extra,bulkColKey,bulkColValue)};
+      if(bulkColKey.startsWith("inc::"))return{...r,extra:withIncentiveCellChange(r.extra,bulkColKey,
+        incCellField(bulkColKey)==="gstMode"?GST_CHOICES[bulkColValue]:bulkColValue)};
       if(bulkColKey.startsWith("ie::")||bulkColKey.startsWith("c__"))
         return{...r,extra:{...r.extra,[bulkColKey]:bulkColValue}};
       return{...r,[bulkColKey]:bulkColValue};

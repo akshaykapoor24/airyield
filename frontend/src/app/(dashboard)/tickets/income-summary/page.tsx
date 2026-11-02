@@ -21,6 +21,7 @@ const INCENTIVE_TYPE_COLS = [
   { key: "Cashback",               label: "Cashback"   },
   { key: "Segment Incentive",      label: "Seg. Inc."  },
   { key: "Push Action",            label: "Push Act."  },
+  { key: "NDC",                    label: "NDC"        },
 ] as const;
 
 type IncomeSummary = {

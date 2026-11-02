@@ -17,7 +17,7 @@ router = APIRouter()
 INCENTIVE_TYPE_KEYS = [
     "PLB", "Super PLB", "Transaction Fee", "Deposit Incentive (DI)",
     "Marketing Fund", "Ancillary", "Frontend", "Backend", "Cashback",
-    "Segment Incentive", "Push Action",
+    "Segment Incentive", "Push Action", "NDC",
 ]
 
 

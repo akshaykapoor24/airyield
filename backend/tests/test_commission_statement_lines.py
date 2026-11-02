@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from app.schemas.commission import CommissionLineTotals  # noqa: E402
 from app.services.commission import statement_lines as sl  # noqa: E402
 
 SLUG = "tp-gds"
@@ -24,9 +25,10 @@ def line(i, data, calc=None):
     return sl.build_line(SLUG, row, calc)
 
 
-def calc(status, incentive=0.0, iata=0.0):
+def calc(status, incentive=0.0, iata=0.0, breakdown=None):
     return SimpleNamespace(status=status, incentive=incentive, iata_commission=iata,
-                           matched_deal_name=None, matched_deal_no=None)
+                           incentive_breakdown=breakdown, matched_deal_name=None,
+                           matched_deal_no=None)
 
 
 SALE = {"ticket_number": "1", "ticket_status": "Sales", "base_fare": "1000",
@@ -109,6 +111,46 @@ class TestTheCards(unittest.TestCase):
         self.assertFalse(sl.matches(self.lines[0], txn="Credit Note"))
 
 
+class TestTheIncentiveColumns(unittest.TestCase):
+    """The grid's per-type columns are what Expected is made of: they must add up to it."""
+
+    def setUp(self):
+        self.lines = [
+            line(1, SALE, calc("calculated", incentive=300.0, iata=30.0,
+                               breakdown={"PLB": 200.0, "NDC": 100.0})),
+            line(2, dict(SALE, ticket_number="3"), calc("calculated", incentive=50.25,
+                                                        breakdown={"Super PLB": 50.25})),
+            line(3, REFUND, calc("reversed", incentive=-200.0, breakdown={"PLB": -200.0})),
+            line(4, dict(SALE, ticket_number="4"), calc("unmatched", breakdown={})),
+            line(5, dict(SALE, ticket_number="5"), calc("needs_data", incentive=None)),
+            line(6, dict(SALE, ticket_number="6")),                       # not run
+        ]
+
+    def test_each_type_is_totalled_with_a_refund_taken_off(self):
+        self.assertEqual(sl.totals(self.lines)["incentives"],
+                         {"PLB": 0.0, "NDC": 100.0, "Super PLB": 50.25})
+
+    def test_the_types_and_iata_add_up_to_expected(self):
+        t = sl.totals(self.lines)
+        self.assertEqual(round(sum(t["incentives"].values()), 2), t["incentive"])
+        self.assertEqual(round(sum(t["incentives"].values()) + t["iata_commission"], 2),
+                         t["expected_commission"])
+
+    def test_they_survive_the_response_schema(self):
+        # Pydantic drops a field the schema does not declare, without a word.
+        self.assertEqual(CommissionLineTotals(**sl.totals(self.lines)).incentives["NDC"], 100.0)
+
+    def test_a_type_that_netted_to_nothing_is_still_listed(self):
+        # PLB's sale and refund cancel out here: it applied, so its column is not "no deal".
+        self.assertIn("PLB", sl.totals(self.lines)["incentives"])
+
+    def test_a_line_no_run_has_reached_adds_nothing(self):
+        lines = [line(1, SALE, SimpleNamespace(status="pending", incentive=9.0, iata_commission=0,
+                                               incentive_breakdown={"PLB": 9.0},
+                                               matched_deal_name=None, matched_deal_no=None))]
+        self.assertEqual(sl.totals(lines)["incentives"], {})
+
+
 class TestWhatIsATicket(unittest.TestCase):
     def test_the_statements_own_total_line_is_not_a_ticket(self):
         total = SimpleNamespace(id=9, data={"ticket_number": "Total", "net_amount": "10570964.23"})
@@ -122,6 +164,11 @@ class TestWhatIsATicket(unittest.TestCase):
         self.assertIn("ticket_number", fields)
         self.assertNotIn("seat_selection", fields)              # blank on every line
         self.assertFalse(any(f.startswith("__") for f in fields))
+
+    def test_this_grid_calls_the_booked_column_booked_date(self):
+        cols = sl.columns(SLUG, [line(1, {**SALE, "booking_date": "2026-10-01"})])
+        self.assertEqual(next(c["header"] for c in cols if c["field"] == "booking_date"),
+                         "Booked Date")
 
 
 if __name__ == "__main__":

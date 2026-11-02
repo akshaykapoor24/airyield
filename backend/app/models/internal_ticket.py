@@ -15,6 +15,8 @@ IDs SHARE THE CUSTOMER SEQUENCES (the migration copies the column defaults). An 
 ticket and a customer ticket therefore never have the same id, so a query that wrongly
 joins one table's id to the other's rows finds nothing instead of the wrong ticket.
 """
+from sqlalchemy import String
+
 from app.database import Base
 from app.models.ticket_statement import TicketStatement
 from app.models.uploaded_ticket import UploadedTicket
@@ -27,6 +29,12 @@ class InternalTicketStatement(Base):
 class InternalUploadedTicket(Base):
     __table__ = UploadedTicket.__table__.to_metadata(Base.metadata, name="internal_uploaded_tickets")
 
+
+# THE ONE COLUMN THAT DIFFERS: booking_class holds 100 characters here, 20 on the customer
+# table. A sales report writes one class per segment ("J K L M N O P Q R T U V"), and an
+# internal ticket is never copied into a customer statement or a commission run, whose own
+# columns are sized for the customer table's 20 (migration internal_imp_01).
+InternalUploadedTicket.__table__.c.booking_class.type = String(100)
 
 # Code elsewhere (tenant usage / deletion registries) reads `__tablename__`, which a class
 # mapped through `__table__` does not get by itself. Same name as the table, always.

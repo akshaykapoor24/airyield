@@ -24,6 +24,10 @@ Engine choice is deliberate:
 * ``.xlsx`` → ``openpyxl``, unchanged. Every working upload in the product already goes
   through it, and swapping the engine under them to gain speed we do not need would be
   trading a real regression risk for nothing.
+* ``.xlsx`` with ``fast=True`` → ``calamine``. Only where the speed IS needed: Internal
+  Statement's background import of a 1-lakh-line sales report (services/internal_import.py),
+  which openpyxl reads in minutes. tests/test_spreadsheet_fast_reader.py holds the two
+  engines to the same grid — dates, numbers, leading zeros, blanks.
 
 Pure functions, no DB and no FastAPI — callers raise their own HTTP errors from
 ``SpreadsheetError``.
@@ -140,8 +144,86 @@ def sniff(content: bytes, filename: str = "") -> str:
 
 # ── Reading the raw grid ─────────────────────────────────────────────────────
 
-def _read_excel_grid(content: bytes, kind: str, sheet: str | None) -> tuple[pd.DataFrame, list[str], str]:
-    engine = _ENGINE[kind]
+# Excel's own idea of a sheet's size can be the whole grid: one column filled or formatted
+# down to row 1,048,576 makes the used range a million rows long, and the reader then walks
+# every one — minutes and gigabytes for a 30,000-line statement (Yatra's sales report, with
+# a header-only column filled to the bottom). Above this many rows the real extent is found
+# first.
+_IMPLAUSIBLE_ROWS = 200_000
+# Lines with fewer than two filled cells, one after another, that mark the end of the data.
+# No ticket line, header or footer is that thin for that long.
+_THIN_RUN = 1_000
+
+
+def _data_rows(book: pd.ExcelFile, name: str) -> int | None:
+    """How many rows of sheet `name` to read — None for all of them (the usual case: only a
+    sheet claiming more than _IMPLAUSIBLE_ROWS is scanned). The data ends at the last row
+    with two or more filled cells before a run of _THIN_RUN thinner ones."""
+    try:
+        ws = book.book[name]
+        claimed, rows = ws.max_row or 0, lambda: ws.iter_rows(values_only=True)
+    except Exception:  # noqa: BLE001 — not an openpyxl sheet
+        # calamine (`fast`). Loading the sheet to ask its height is the whole read, so the
+        # height the file declares is asked instead; only an implausible one is loaded and
+        # scanned (an empty cell reads as "").
+        if (_declared_rows(book, name) or 0) <= _IMPLAUSIBLE_ROWS:
+            return None
+        try:
+            rows = book.book.get_sheet_by_name(name).iter_rows
+        except Exception:  # noqa: BLE001 — read it whole, as before
+            return None
+        claimed = _IMPLAUSIBLE_ROWS + 1
+    if claimed <= _IMPLAUSIBLE_ROWS:
+        return None
+    last = thin = 0
+    for i, row in enumerate(rows(), start=1):
+        if sum(1 for v in row if v not in (None, "")) >= 2:
+            last, thin = i, 0
+        else:
+            thin += 1
+            if thin >= _THIN_RUN:
+                break
+    return last or None
+
+
+_DIMENSION = re.compile(rb'<(?:\w+:)?dimension\s+ref="[A-Z]*\d*:?[A-Z]*(\d+)"')
+
+
+def _declared_rows(book: pd.ExcelFile, name: str) -> int | None:
+    """The last row sheet `name` of an xlsx says it uses — its `<dimension ref="A1:BC33000">`,
+    read off the head of the sheet's XML without parsing a row. None when it does not say."""
+    import posixpath
+    import zipfile
+    import xml.etree.ElementTree as ET
+
+    try:
+        handle = book._io if hasattr(book, "_io") else None
+        data = handle.getvalue() if isinstance(handle, io.BytesIO) else None
+        if data is None:
+            return None
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            ns_main = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+            ns_rel = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+            rid = next((el.get(f"{ns_rel}id")
+                        for el in ET.fromstring(z.read("xl/workbook.xml")).iter(f"{ns_main}sheet")
+                        if el.get("name") == name), None)
+            target = next((el.get("Target")
+                           for el in ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))
+                           if el.get("Id") == rid), None)
+            if not target:
+                return None
+            part = target.lstrip("/") if target.startswith("/") else posixpath.normpath(f"xl/{target}")
+            with z.open(part) as f:
+                head = f.read(8192)
+        m = _DIMENSION.search(head)
+        return int(m.group(1)) if m else None
+    except Exception:  # noqa: BLE001 — an odd workbook: no height known
+        return None
+
+
+def _read_excel_grid(content: bytes, kind: str, sheet: str | None,
+                     fast: bool = False) -> tuple[pd.DataFrame, list[str], str]:
+    engine = "calamine" if fast else _ENGINE[kind]
     try:
         book = pd.ExcelFile(io.BytesIO(content), engine=engine)
     except ImportError as exc:
@@ -162,7 +244,8 @@ def _read_excel_grid(content: bytes, kind: str, sheet: str | None) -> tuple[pd.D
         )
 
     def _grid(name: str) -> pd.DataFrame:
-        return book.parse(sheet_name=name, header=None, dtype=str)
+        nrows = _data_rows(book, name) if kind == XLSX else None
+        return book.parse(sheet_name=name, header=None, dtype=str, nrows=nrows)
 
     if sheet is not None:
         return _grid(str(sheet)), sheets, str(sheet)
@@ -176,12 +259,28 @@ def _read_excel_grid(content: bytes, kind: str, sheet: str | None) -> tuple[pd.D
             g = _grid(name)
         except Exception:  # noqa: BLE001 — one unreadable sheet must not lose the others
             continue
+        # The only sheet is the one, however full — counting is a pass over every cell.
+        if len(sheets) == 1:
+            return g, sheets, name
         filled = int(g.map(lambda v: bool(cell(v))).to_numpy().sum()) if not g.empty else 0
         if filled > best_filled:
             best_name, best_grid, best_filled = name, g, filled
     if best_grid is None:
         raise SpreadsheetError("No sheet in this workbook could be read.")
     return best_grid, sheets, best_name
+
+
+def _cells(frame: pd.DataFrame) -> pd.DataFrame:
+    """`frame.map(cell)`, a column at a time instead of a Python call per cell — the same
+    strings (tests/test_spreadsheet_fast_reader.py). The `fast` read's."""
+    cleaned = []
+    for i in range(frame.shape[1]):
+        col = frame.iloc[:, i]
+        text = col.astype(object).where(col.notna(), "").astype(str).str.strip()
+        cleaned.append(text.mask(text.str.lower().isin(_EMPTY), ""))
+    out = pd.concat(cleaned, axis=1) if cleaned else frame.copy()
+    out.columns = frame.columns
+    return out
 
 
 def _unreadable(exc: Exception) -> str:
@@ -192,12 +291,14 @@ def _unreadable(exc: Exception) -> str:
 
 
 def read_grid(
-    content: bytes, filename: str = "", sheet: str | None = None,
+    content: bytes, filename: str = "", sheet: str | None = None, fast: bool = False,
 ) -> tuple[pd.DataFrame, list[str], str | None, str]:
     """(grid, sheets, sheet, kind) — every cell a string, NO header applied.
 
     The grid is deliberately header-less: `detect_header` needs to look at the candidate
     header rows as data before deciding which one they are.
+
+    `fast`: an xlsx is read with calamine rather than openpyxl (see the module docstring).
     """
     if not content:
         raise SpreadsheetError("The uploaded file is empty.")
@@ -205,7 +306,7 @@ def read_grid(
     kind = sniff(content, filename)
 
     if kind in (XLS, XLSX):
-        grid, sheets, chosen = _read_excel_grid(content, kind, sheet)
+        grid, sheets, chosen = _read_excel_grid(content, kind, sheet, fast)
         return grid, sheets, chosen, kind
 
     if kind == ODS:
@@ -393,15 +494,16 @@ def read_table(
     header_row: int | None = None,
     recognise=None,
     max_scan: int = 25,
+    fast: bool = False,
 ) -> ReadResult:
-    """Read one sheet into a named-column frame.
+    """Read one sheet into a named-column frame. `fast` as in ``read_grid``.
 
     `header_row` is DETECTED when None and OBEYED when given. Passing it back on a second
     read of the same file is not optional: a column map is a list of column NAMES, so a
     re-detection that lands one row out renames every column and silently discards the
     whole mapping.
     """
-    grid, sheets, chosen, kind = read_grid(content, filename, sheet)
+    grid, sheets, chosen, kind = read_grid(content, filename, sheet, fast)
 
     if grid.empty:
         return ReadResult(
@@ -419,10 +521,12 @@ def read_table(
     columns = _header_names(_row_cells(grid, header_row))
     body = grid.iloc[header_row + 1:].reset_index(drop=True)
     body.columns = columns
-    body = body.map(cell)
+    body = _cells(body) if fast else body.map(cell)
     # Drop rows that are empty across every column. A statement's trailing blank rows and
-    # the spacer row above a totals block would otherwise import as blank tickets.
-    body = body[body.apply(lambda r: any(v for v in r), axis=1)].reset_index(drop=True)
+    # the spacer row above a totals block would otherwise import as blank tickets. Every
+    # cell is a string by now, so a row is empty when none of its strings has anything in
+    # it — asked of the whole frame at once: row by row, it was most of a lakh-line read.
+    body = body[(body != "").any(axis=1)].reset_index(drop=True)
 
     preamble = [c for i in range(header_row) for c in _row_cells(grid, i) if c]
 

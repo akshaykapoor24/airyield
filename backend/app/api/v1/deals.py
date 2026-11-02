@@ -59,6 +59,7 @@ from app.models.deal import (
     DealIncentiveSlab, DealIncentiveSlabValue, DealRule, DealRuleCondition,
     DealSourceType, DealKind, DealTagType, DealStatusType, DealLifecycleType,
     DealDirection, DealScopeType, SlabTypeEnum, SlabValueTypeEnum, RuleOperatorEnum,
+    GST_MODES,
 )
 from app.models.agency import Agency
 from app.models.supplier import Supplier
@@ -910,7 +911,10 @@ def _build_inc_data_from_configs(
             "incentiveAmtPct":       str(inc.incentive_amt_pct) if inc.incentive_amt_pct is not None else None,
             "cappedIncentive":       str(inc.capped_incentive) if inc.capped_incentive is not None else None,
             "cappedIncentiveAmount": str(inc.capped_incentive_amount) if inc.capped_incentive_amount is not None else None,
-            "marketFundType":        inc.market_fund_type,
+            # Always sent: a missing mode reads as the inclusive default, so any other
+            # mode has to be spelled out to survive an edit.
+            "gstMode":               inc.gst_mode,
+            "marketFundType":       inc.market_fund_type,
             "exchangeRate":          str(inc.exchange_rate) if inc.exchange_rate is not None else None,
             "cashbackTargetType":    inc.cashback_target_type,
             "diType":                inc.di_type,
@@ -988,8 +992,16 @@ def _sn(v) -> "float | None":
         return None
 
 
+def _gst_mode(v) -> str:
+    """The GST choice beside an incentive's rate — one of GST_MODES. Blank or unknown is
+    the default, inclusive: a deal saved without touching it is GST-inclusive."""
+    mode = str(v or "").strip().lower()
+    return mode if mode in GST_MODES else GST_MODES[0]
+
+
 # Ancillary sub-types: (parent flat key, num/pct flat key, amount flat key, label).
-# Mirrors ANCILLARY_ITEMS in the frontend's IncentiveInclExclShared.tsx.
+# Mirrors ANCILLARY_ITEMS in the frontend's IncentiveInclExclShared.tsx. Each amount's
+# GST toggle travels as "<amount key>Gst" (baggageAmtGst, …).
 _ANCILLARY_FLAT = [
     ("baggageType",  "baggageNumPct",  "baggageAmt",   "Baggage Type"),
     ("meals",        "mealsNumPct",    "mealsAmt",     "Meals"),
@@ -1012,9 +1024,10 @@ def _ancillary_from_flat(d: dict) -> dict | None:
         amount    = d.get(amt)
         if with_type or num_pct or amount:
             out[label] = {
-                "withType": with_type or None,
-                "numPct":   num_pct or None,
-                "amount":   _sn(amount),
+                "withType":     with_type or None,
+                "numPct":       num_pct or None,
+                "amount":       _sn(amount),
+                "gstMode":      _gst_mode(d.get(f"{amt}Gst")),
             }
     return out or None
 
@@ -1042,6 +1055,7 @@ def _build_inc_config(deal_id: int, inc_type: str, d: dict, order: int) -> DealI
         incentive_amt_pct=_sn(d.get("incentiveAmtPct")),
         capped_incentive=_sn(d.get("cappedIncentive")),
         capped_incentive_amount=_sn(d.get("cappedIncentiveAmount")),
+        gst_mode=_gst_mode(d.get("gstMode")),
         market_fund_type=d.get("marketFundType") or None,
         exchange_rate=_sn(d.get("exchangeRate")),
         cashback_period_from=_sd(d.get("periodFrom")),

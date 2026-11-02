@@ -240,8 +240,10 @@ export default function InternalTicketsView({
                         title={t.customer_name ?? t.statement_agency ?? undefined}>
                         {t.customer_name ?? t.statement_agency ?? "—"}
                       </td>
-                      {/* Who it was bought from (Create Ticket). Uploaded lines do not say. */}
-                      <td className="px-3 py-2 whitespace-nowrap text-gray-600 max-w-[180px] truncate" title={t.payable_to ?? undefined}>
+                      {/* Who it was bought from — Create Ticket's Payable To, or the vendor picked for an
+                          "All vendors" upload's Supplier Name; else the Supplier Name as the file has it. */}
+                      <td className="px-3 py-2 whitespace-nowrap text-gray-600 max-w-[180px] truncate"
+                        title={t.payable_to ?? t.supplier_name ?? undefined}>
                         {t.payable_to ? (
                           <>
                             <span className={`mr-1 inline-flex px-1 py-px rounded text-[9px] font-bold ${
@@ -250,7 +252,9 @@ export default function InternalTicketsView({
                             </span>
                             {t.payable_to}
                           </>
-                        ) : <span className="text-gray-300">—</span>}
+                        ) : t.supplier_name
+                          ? <span className="text-gray-400 italic">{t.supplier_name}</span>
+                          : <span className="text-gray-300">—</span>}
                       </td>
                       <td className="px-3 py-2 whitespace-nowrap">
                         <span className={`inline-flex px-1.5 py-0.5 rounded text-[10px] font-bold ${

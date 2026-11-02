@@ -25,6 +25,9 @@ router.include_router(tickets.router, prefix="/tickets", tags=["Tickets"])
 # Internal Statement's own ticket tables — the same endpoints over internal_* tables.
 from app.api.v1 import internal_tickets  # noqa: E402
 router.include_router(internal_tickets.router, prefix="/internal-tickets", tags=["Internal Statement"])
+# Its upload for files of any size: read, reviewed and saved by a worker (services/internal_import.py).
+from app.api.v1 import internal_imports  # noqa: E402
+router.include_router(internal_imports.router, prefix="/internal-tickets/imports", tags=["Internal Statement"])
 router.include_router(income.router, prefix="/income", tags=["Income"])
 router.include_router(documents.router, prefix="/documents", tags=["Documents"])
 router.include_router(reports.router, prefix="/reports", tags=["Reports"])
@@ -89,6 +92,11 @@ router.include_router(payment_reconciliation.router, prefix="/payment-module/rec
 # Checks, decisions, payable, payments, outstanding, MO vendor corrections. Literal paths
 # only, none of them under /reconciliation, so the two routers never collide.
 router.include_router(payment_module.router, prefix="/payment-module", tags=["Vendors - Payment Module"])
+# Vendor Mapping (the vendor's statement against the MO — Internal Statement's Booking / MO
+# uploads) and Vendor Payments (one account per vendor). /vendor-mapping and /vendor-accounts
+# are literal paths no other /payment-module route uses.
+from app.api.v1 import vendor_payments  # noqa: E402
+router.include_router(vendor_payments.router, prefix="/payment-module", tags=["Vendors - Payment Module"])
 router.include_router(customer_statements.router, prefix="/customer-statements", tags=["Customer Statements"])
 router.include_router(series.router, prefix="/series-contracts", tags=["Vendors - Series/SIT/MICE/Group Contracts"])
 router.include_router(notifications.router, prefix="/notifications", tags=["Notifications"])

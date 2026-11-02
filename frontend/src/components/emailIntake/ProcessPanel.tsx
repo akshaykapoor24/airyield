@@ -336,7 +336,11 @@ function ProcessRow({ item, busy, onImport, onDeal, onAgain }: {
             {busy ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <FileSpreadsheet className="w-3.5 h-3.5" />} Review & import
           </button>
         ) : item.doc_type === "mo-gds" ? (
-          <a href="/vendors/payment-module" className="text-xs font-medium text-gray-700 underline">Open Payment Module</a>
+          // The Payment Module's MO is Internal Statement's Booking / MO uploads — it is uploaded there.
+          <a href="/internal-statement/upload" className="text-xs font-medium text-gray-700 underline"
+             title="Upload it with Statement Type “Booking / MO statement” — the Payment Module maps vendor statements against it">
+            Upload as an MO statement
+          </a>
         ) : (
           <div>
             <button disabled={busy} onClick={e => {

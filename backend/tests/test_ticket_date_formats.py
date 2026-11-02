@@ -43,8 +43,10 @@ def extract(content: bytes, formats=None, period=WEEK1, mapping=None) -> dict:
 
 class RowTests(unittest.TestCase):
     def test_doc_date_follows_the_ticket_date(self):
+        # So does the Date of Cancellation — written by the same system as the Booking Date.
         self.assertEqual(tx.date_orders({"ticket_date": "MDY", "departure_datetime": "DMY"}),
-                         {"ticket_date": "MDY", "departure_datetime": "DMY", "doc_date": "MDY"})
+                         {"ticket_date": "MDY", "departure_datetime": "DMY", "doc_date": "MDY",
+                          "cancellation_date": "MDY"})
 
     def test_each_date_is_read_in_its_declared_order(self):
         row = tx.derive_ticket_row({"ticket_date": "05/08/2026", "doc_date": "06/08/2026",

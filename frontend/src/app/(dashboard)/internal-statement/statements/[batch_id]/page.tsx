@@ -14,10 +14,13 @@ import { AlertCircle, Calendar, ChevronLeft, CopyX, FileSpreadsheet, Ticket, Tra
 import api from "@/lib/api";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import InternalTicketsView from "@/components/tickets/InternalTicketsView";
+import { STATEMENT_CATEGORY_SHORT, type StatementCategory } from "@/lib/ticketFields";
 
 type Statement = {
   batch_id: string;
   statement_name: string | null;
+  // Booking / MO or Accounting — null on statements made before it was asked.
+  statement_category?: StatementCategory | null;
   agency: string;
   valid_from: string;
   valid_to: string;
@@ -81,6 +84,10 @@ export default function InternalStatementDetailPage() {
       {statement && (
         <div className="bg-white border border-gray-200 rounded-xl px-5 py-3 flex items-center gap-x-8 gap-y-2 flex-wrap text-xs">
           <span className="text-gray-500">Customer <b className="text-gray-800 ml-1">{statement.agency}</b></span>
+          {statement.statement_category && (
+            <span className="text-gray-500">Statement type <b className="text-gray-800 ml-1">
+              {STATEMENT_CATEGORY_SHORT[statement.statement_category] ?? statement.statement_category}</b></span>
+          )}
           <span className="flex items-center gap-1.5 text-gray-500">
             <Calendar className="w-3.5 h-3.5" />
             <b className="text-gray-800">{fmt(statement.valid_from)} → {fmt(statement.valid_to)}</b>

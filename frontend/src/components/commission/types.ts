@@ -174,6 +174,27 @@ export type RunResponse = {
   variance_total?: number;
 };
 
+/** A statement a bulk run left alone, and why. */
+export type RunSkip = { batch_id: string; statement_name: string | null; reason: string };
+
+/** POST …/{source}/run-all — one queued worker run per statement. */
+export type RunAllResponse = { started: RunResponse[]; skipped: RunSkip[] };
+
+/** POST …/{source}/run-lines — picked lines from several statements, run inline. The
+ *  counts are these lines' own outcomes. */
+export type RunLinesResponse = {
+  lines: number;
+  statements: number;
+  calculated: number;
+  reversed: number;
+  excluded: number;
+  needs_data: number;
+  skipped: number;
+  unmatched: number;
+  expected_total: number;
+  not_run: RunSkip[];
+};
+
 export type CommissionRowsPage = {
   total: number;
   offset: number;
@@ -207,6 +228,10 @@ export type CommissionLine = {
   // The cabin the class codes resolve to via the Airline Class Master ("Economy").
   cabin?: string | null;
   calc: CommissionRow | null;
+  // Across statements only (GET …/{source}/lines): where the line came from.
+  batch_id?: string | null;
+  statement_name?: string | null;
+  agency?: string | null;
 };
 
 export type CommissionLineTotals = {
@@ -219,6 +244,7 @@ export type CommissionLineTotals = {
   statement_pending: number;
   expected_commission: number;           // = incentive + iata_commission
   incentive: number;
+  incentives?: Record<string, number>;   // `incentive` by type; only the types a line carries
   iata_commission: number;
   with_iata: number;                     // lines that earned any IATA commission
   difference: number;

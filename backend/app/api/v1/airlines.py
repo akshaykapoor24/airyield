@@ -19,6 +19,7 @@ from app.schemas.airline import (
     AirlineRead, AirlineCreate, AirlineUpdate, AirlineBulkUploadResult,
     AirlineApprovalRead, AirlineApprovalAction, AirlineApprovalEdit,
 )
+from app.services.airline_type import airline_types_by_name, name_key
 from app.services.master_approval_edit import apply_admin_edit, AIRLINE_FIELDS
 from app.services.master_export import master_export_response
 from app.services import spreadsheet
@@ -72,7 +73,11 @@ async def list_airlines(
         ))
     q = q.order_by(Airline.name).offset(skip).limit(limit)
     result = await db.execute(q)
-    return result.scalars().all()
+    types = await airline_types_by_name(db)
+    return [
+        AirlineRead.model_validate(a).model_copy(update={"airline_type": types.get(name_key(a.name))})
+        for a in result.scalars().all()
+    ]
 
 
 @router.post("/", status_code=status.HTTP_201_CREATED)
@@ -313,19 +318,21 @@ async def export_airlines(
 
     Column headers match download_airline_template so a reviewed sheet can go
     straight back through /bulk-upload; AIRLINE_ID is the row's real id here
-    (bulk-upload only echoes it in error messages).
+    (bulk-upload only echoes it in error messages). AIRLINE_TYPE comes from the
+    Classes & RBD master and, like CONTRACT_YEAR and ACTIVE, bulk-upload ignores it.
     """
     result = await db.execute(select(Airline).order_by(Airline.name))
     airlines = result.scalars().all()
+    types = await airline_types_by_name(db)
 
-    headers = ["AIRLINE_ID", "Code", "IATA_NUMERIC_CODE", "Airline", "CONTRACT_YEAR", "ACTIVE"]
+    headers = ["AIRLINE_ID", "Code", "IATA_NUMERIC_CODE", "Airline", "AIRLINE_TYPE", "CONTRACT_YEAR", "ACTIVE"]
     rows = [
         [
             a.id, a.iata_code,
             # The importer writes the numeric code to both columns; older rows
             # only ever got icao_code, so fall back to it.
             a.iata_numeric_code or a.icao_code,
-            a.name, a.contract_year, a.is_active,
+            a.name, types.get(name_key(a.name)), a.contract_year, a.is_active,
         ]
         for a in airlines
     ]

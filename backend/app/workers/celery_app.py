@@ -13,6 +13,8 @@ celery_app = Celery(
         "app.workers.lcc_tasks",
         "app.workers.report_tasks",
         "app.workers.mail_tasks",
+        # Internal Statement's background upload — queue `imports`.
+        "app.workers.import_tasks",
     ],
 )
 

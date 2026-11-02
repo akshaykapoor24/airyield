@@ -129,11 +129,11 @@ class ProductPoint(BaseModel):
 
 
 class IncentiveTypePoint(BaseModel):
-    """PLB, Super PLB, Transaction Fee, and the eight others.
+    """PLB, Super PLB, Transaction Fee, and the nine others.
 
     Read out of `incentive_breakdown` rather than from a fixed column list, so an
     incentive type added to a deal shows up without a code change — `incentive_type` is
-    a String on `deal_incentives`, and the canonical eleven in api/v1/tickets.py are a
+    a String on `deal_incentives`, and the canonical twelve in api/v1/tickets.py are a
     convention, not a constraint.
     """
     incentive_type: str

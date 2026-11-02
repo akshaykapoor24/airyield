@@ -59,6 +59,18 @@ _impl.DUPLICATE_CHECK = True
 # DATE_FORMAT_FIELDS). Customer data keeps reading dates as it always has.
 _impl.DATE_FORMATS_REQUIRED = True
 
+# The Internal Statement standard format (see the flags in tickets.py): a ticket keeps its
+# standard columns and not every source cell, Net Fare and Sales Channel follow the user's
+# rules, and one file may hold every vendor's tickets ("All vendors").
+_impl.KEEP_RAW_DATA = False
+_impl.INTERNAL_STANDARD = True
+_impl.MULTI_VENDOR = True
+
+# A statement's column mapping is remembered when it is saved, and the next file with the same
+# columns opens already mapped — as Third Party GDS does (services/saved_mapping.py).
+MAPPING_SLUG = "internal-statement"
+_impl.REMEMBER_MAPPING_SLUG = MAPPING_SLUG
+
 # (method, path) of every endpoint Internal Statement gets — see the module docstring.
 _ALLOWED = {
     ("GET", "/template/download"),
@@ -304,3 +316,139 @@ async def last_date_formats(
         return none
     return {"date_formats": row.date_formats, "statement_name": row.statement_name,
             "created_at": row.created_at.isoformat() if row.created_at else None}
+
+
+# ── Upload: "All vendors" — which vendor each Supplier Name is ───────────────
+# A multi-vendor sales report names the supplier every ticket was bought from (Yatra's
+# tkt_supplier_name: "JETHI TRAVELS - 6E", "TSC Travel Services Pvt Ltd", "IATA BSP" …).
+# The preview asks once per name — and channel, since a vendor is onboarded once per channel
+# — which Agency Master row it is, the way Upload Deal's "All suppliers" asks per Source
+# (services/deal_vendor_resolver.py). A choice saved once is offered again next time.
+
+from collections import Counter  # noqa: E402
+
+from app.models.agency import Agency  # noqa: E402
+from app.services import deal_vendor_resolver as dvr  # noqa: E402
+
+# Names that say the ticket was bought from the airline itself — its BSP stock, or its
+# own portal — rather than from a consolidator.
+_AIRLINE_DIRECT_WORDS = ("BSP", "PORTAL")
+
+
+class _SupplierName(BaseModel):
+    name: str = Field(..., max_length=300)
+    channel: str | None = Field(None, max_length=10)     # GDS | LCC, from the rows' tickets
+
+
+class _SuppliersPayload(BaseModel):
+    suppliers: list[_SupplierName] = Field(default_factory=list, max_length=2000)
+
+
+async def _remembered_suppliers(db: AsyncSession, current_user: User) -> dict[str, str]:
+    """source_key → "agency:<id>" | "airline": what this user's saved tickets with that
+    Supplier Name were filed under, by majority (a tie decides nothing). Read off the
+    tickets themselves — they are the record of every earlier choice."""
+    T = InternalUploadedTicket
+    found = (await db.execute(
+        select(T.supplier_name, T.payable_type, T.payable_agency_id, func.count())
+        .where(T.tenant_id == current_user.tenant_id, T.created_by_id == current_user.id,
+               T.supplier_name.isnot(None), T.payable_type.isnot(None))
+        .group_by(T.supplier_name, T.payable_type, T.payable_agency_id)
+    )).all()
+    votes: dict[str, Counter] = {}
+    for name, kind, agency_id, n in found:
+        choice = "airline" if kind == "airline" else f"agency:{agency_id}" if agency_id else None
+        key = dvr.source_key(name)
+        if choice and key:
+            votes.setdefault(key, Counter())[choice] += n
+    out: dict[str, str] = {}
+    for key, counts in votes.items():
+        ranked = counts.most_common(2)
+        if len(ranked) == 1 or ranked[0][1] > ranked[1][1]:
+            out[key] = ranked[0][0]
+    return out
+
+
+@router.post("/upload/suppliers")
+async def resolve_suppliers(
+    payload: _SuppliersPayload,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Which vendor each Supplier Name of an "All vendors" upload is. Writes nothing.
+
+    One line per name and channel: `status` as deal_vendor_resolver says it (remembered,
+    matched, suggested, ambiguous, not_onboarded, blank), `agency_id` only when it is
+    certain, `candidates` to offer otherwise. `airline_direct` when this name was saved as
+    bought from the airline before; `airline_hint` when the name looks like it (BSP, a
+    portal) and no agency fits. The rows carry whatever the reviewer leaves; confirm checks
+    each agency is theirs."""
+    agencies = [
+        dvr.AgencyRef(id=a.id, name=a.name, channels=a.channels, branch_code=a.branch_code,
+                      branch_name=a.branch_name, agency_code=a.agency_code)
+        for a in (await db.execute(
+            select(Agency).where(Agency.user_id == current_user.id, Agency.is_active.is_(True))
+        )).scalars()
+    ]
+    remembered = await _remembered_suppliers(db, current_user)
+    by_agency = {k: int(v.split(":", 1)[1]) for k, v in remembered.items() if v.startswith("agency:")}
+
+    out = []
+    for s in payload.suppliers:
+        channel = (s.channel or "").strip().upper() or None
+        key = dvr.source_key(s.name)
+        line = {"group": f"{key}|{channel or ''}", "source": s.name.strip(), "channel": channel,
+                "status": None, "agency_id": None, "candidates": [], "note": None,
+                "airline_direct": False, "airline_hint": False}
+        if key and remembered.get(key) == "airline":
+            line.update(status=dvr.REMEMBERED, airline_direct=True,
+                        note="Saved as bought from the airline on an earlier upload.")
+        else:
+            m = dvr.resolve_source(s.name, channel, agencies, by_agency)
+            line.update(status=m.status, agency_id=m.agency_id, candidates=m.candidates, note=m.note)
+            if m.status == dvr.NOT_ONBOARDED and any(w in s.name.upper() for w in _AIRLINE_DIRECT_WORDS):
+                line["airline_hint"] = True
+        out.append(line)
+    return {"suppliers": out}
+
+
+# ── Upload: the column mapping remembered from an earlier statement ──────────
+# Asked when the upload step's Next is pressed — by then the customer is settled (it is read
+# off the file after the file is read) — and again when the sheet or header row changes.
+
+from app.services import saved_mapping  # noqa: E402
+
+
+class _SavedMappingPayload(BaseModel):
+    columns: list[str] = Field(default_factory=list, max_length=500)
+    # The alias map's answer for these columns — what the first read suggested.
+    by_name: dict[str, str] = Field(default_factory=dict)
+    customer_type: str | None = None
+    customer_agency_id: int | None = None
+    corporate_id: int | None = None
+    customer_id: int | None = None
+    multi_vendor: bool = False
+
+
+@router.post("/upload/saved-mapping")
+async def saved_column_mapping(
+    payload: _SavedMappingPayload,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The mapping the column step opens with. Writes nothing.
+
+    Best first (services/saved_mapping.propose): this customer's mapping for exactly these
+    columns; this customer's mapping for columns that have since changed — kept for the columns
+    still there, new ones matched by name; another customer's mapping for exactly these
+    columns; else the name match (`by_name`). A column left unmapped when it was saved stays
+    unmapped. Only this user's own mappings are read, so the ids are not authorised here —
+    they are only compared with what the user saved before."""
+    party = None if payload.multi_vendor else _impl.CustomerParty(
+        (payload.customer_type or "").strip().lower() or None,
+        agency_id=payload.customer_agency_id, corporate_id=payload.corporate_id,
+        customer_id=payload.customer_id)
+    proposal = await saved_mapping.propose_for(
+        db, current_user, MAPPING_SLUG, _impl.mapping_party(party, payload.multi_vendor),
+        payload.columns, _impl.mapping_fields(), payload.by_name)
+    return {"mapping": proposal.mapping, "remembered": proposal.info()}

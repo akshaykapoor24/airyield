@@ -8,35 +8,49 @@
 // commission is the matched deal's IATA % on the basic fare: part of Expected, and its own
 // card, as it is a different entitlement from the deal's incentive. The table is every ticket
 // line of the statement, run or not, with the statement's own columns as the vendor printed
-// them; then the deal it matched; then the commission check pinned to the right edge, so
-// the three figures that matter stay in view however far the statement scrolls.
+// them; then one column per incentive type, PLB first; then the commission check pinned to the
+// right edge — IATA % · IATA comm. · Statement · Expected (every type plus IATA) · Difference ·
+// Result · ▶ — so a line's whole check stays in view however far the statement scrolls. The
+// Result badge opens every deal for the ticket (LineDealsModal).
 //
 // The money cards add up on screen: expected − statement = difference, over the lines a
 // run has calculated (services/commission/statement_lines.py). Selection, running and the
 // diagnosis popup stay with the parent, which owns the header's Run selected button.
+//
+// Two scopes, one table: a single statement (its detail page, `…/statements/{batch}/lines`)
+// or every statement in the tab's filters (All tickets, `…/lines` plus `params`), where
+// `showStatement` adds each line's agency and statement file ahead of the vendor's columns.
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { AlertTriangle, Info, Play, Search, X } from "lucide-react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Play, Search, X } from "lucide-react";
 import api from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type { CommissionSource } from "@/lib/commissionSources";
+import { INCENTIVE_TYPE_COLS, NOT_PRICED_PER_TICKET } from "@/lib/incentives";
 import Pagination from "@/components/ui/Pagination";
-import AppliedDealModal from "./AppliedDealModal";
+import LineDealsModal from "./LineDealsModal";
 import {
-  CommissionLine, CommissionLinesPage, CommissionRow, LineBucket, STATUS_STYLE, inr,
+  CommissionLine, CommissionLineColumn, CommissionLinesPage, CommissionRow, LineBucket, STATUS_STYLE, inr,
 } from "./types";
 
 const PAGE = 50;
 
-// The pinned commission check: widths fixed so each sticky cell knows its right offset.
-const PIN = { statement: 112, expected: 112, difference: 112, actions: 80 };
-const PIN_RIGHT = {
-  actions: 0,
-  difference: PIN.actions,
-  expected: PIN.actions + PIN.difference,
-  statement: PIN.actions + PIN.difference + PIN.expected,
+// The pinned commission check, left to right: IATA % · IATA comm. · Statement · Expected ·
+// Difference · Result · ▶ — the deal's side beside the money it explains, so nothing about
+// a line's check is off-screen. Widths are fixed so each sticky cell knows its right offset:
+// the sum of the widths to its right.
+const PIN_ORDER = ["iataPct", "iata", "statement", "expected", "difference", "result", "actions"] as const;
+type PinKey = (typeof PIN_ORDER)[number];
+// Each is its widest content plus the cell's padding — the header, or a five-digit amount
+// ("₹11,097.16 ⚠" on 1–7 Oct 2026's Brightsun statement), or the "Calculated" badge — so no
+// column carries dead space, and none is narrower than its content, which would widen it
+// and throw the sticky offsets out.
+const PIN: Record<PinKey, number> = {
+  iataPct: 56, iata: 86, statement: 94, expected: 84, difference: 86, result: 84, actions: 30,
 };
-const pinStyle = (k: keyof typeof PIN) => ({ right: PIN_RIGHT[k], width: PIN[k], minWidth: PIN[k] });
+const PIN_RIGHT = Object.fromEntries(PIN_ORDER.map((k, i) =>
+  [k, PIN_ORDER.slice(i + 1).reduce((a, x) => a + PIN[x], 0)])) as Record<PinKey, number>;
+const pinStyle = (k: PinKey) => ({ right: PIN_RIGHT[k], width: PIN[k], minWidth: PIN[k] });
 
 const BUCKET_LABEL: Record<LineBucket, string> = {
   all: "All tickets", matched: "Matched", unmatched: "Unmatched",
@@ -47,6 +61,36 @@ const BUCKET_LABEL: Record<LineBucket, string> = {
 };
 
 const rupees = (v: number) => `${v < 0 ? "−" : ""}₹${inr(Math.abs(v))}`;
+
+/** One incentive type's column. `total`: over every ticket in scope, null when none carries it. */
+type IncentiveCol = { key: string; label: string; total: number | null };
+
+/** A column for every incentive type, in the deal form's order, each with its scope's total. */
+function incentiveColumns(totals: Record<string, number>): IncentiveCol[] {
+  const known = new Set<string>(INCENTIVE_TYPE_COLS.map((c) => c.key));
+  return [
+    // Plain "PLB" on this grid; the other ticket tables keep the shared "PLB Inc.".
+    ...INCENTIVE_TYPE_COLS.map((c): { key: string; label: string } => ({ key: c.key, label: c.key === "PLB" ? c.key : c.label })),
+    // `incentive_type` is a free String on the deal, so a type no list names can reach a
+    // breakdown. It is still part of Expected, and these columns must add up to it.
+    ...Object.keys(totals).filter((k) => !known.has(k)).sort().map((k) => ({ key: k, label: k })),
+  ].map((c) => ({ ...c, total: totals[c.key] ?? null }));
+}
+
+/** A type's heading: why it is empty when it always will be, else what its total covers. */
+function incentiveTitle(c: IncentiveCol): string {
+  const notPriced = NOT_PRICED_PER_TICKET[c.key];
+  if (notPriced) return `${c.key} — ${notPriced}`;
+  return c.total != null
+    ? `${c.key} — part of Expected. ${rupees(c.total)} across every ticket in these filters.`
+    : `${c.key} — part of Expected, but no ticket here earned it.`;
+}
+
+/** A line's amount of one type. ₹0 means its deal has this type and it paid nothing; a dash,
+ *  that the type played no part on this line. */
+function incentiveAmount(v: number | undefined) {
+  return v == null ? <span className="text-slate-300">—</span> : rupees(Number(v));
+}
 
 /** expected − statement: amber when the vendor paid less than your deal says. */
 function Difference({ v }: { v: number | null }) {
@@ -74,19 +118,40 @@ function expectedTitle(ln: CommissionLine): string | undefined {
   return parts.length ? parts.join("\n") : c.commission_reason || undefined;
 }
 
+/** The parent's own controls, drawn in ONE row with this table's filters, above the cards:
+ *  `start` · search · airline · invoice type · `end` (right-aligned), then `below`. */
+export type LinesToolbar = { start: ReactNode; end: ReactNode; below?: ReactNode };
+
+/** That row — also used by CommissionIncomeView when it draws the row alone. From xl it never
+ *  wraps: the dropdowns and search give way to their minimum widths instead, and a window too
+ *  narrow even for those scrolls the row sideways rather than breaking it in two. */
+export const TOOLBAR_ROW =
+  "flex flex-wrap xl:flex-nowrap xl:overflow-x-auto items-center gap-1.5 py-0.5 mb-2.5";
+
 export default function ThirdPartyStatementLines({
-  source, batchId, refreshKey, selected, onToggle, onToggleMany, busyRows, onRun, onDiagnose,
+  source, url, params, showStatement, onOpenStatement, toolbar, refreshKey, selected, onToggle,
+  onToggleMany, busyRows, onRun,
 }: {
   source: CommissionSource;
-  batchId: string;
-  /** Bumped by the parent after a run, a refresh or a finished calculation. */
-  refreshKey: number;
+  /** Given: one toolbar row above the cards (All tickets). Not given: the filters sit under
+   *  the cards, as on one statement's page, whose header holds its own buttons. */
+  toolbar?: LinesToolbar;
+  /** The lines endpoint: one statement's, or the tab's across-statement one. */
+  url: string;
+  /** Scope sent with every request (the tab's Agency / Statement / Booking period). A new
+   *  scope goes back to the first page; the card and the table filters are kept. */
+  params?: Record<string, string | undefined>;
+  /** Each line's agency and statement file as the first columns — across statements. */
+  showStatement?: boolean;
+  /** Clicking a line's statement file opens that statement. */
+  onOpenStatement?: (batchId: string) => void;
+  /** Changed by the parent after a run, a refresh or a finished calculation. */
+  refreshKey: number | string;
   selected: Set<number>;
   onToggle: (lineId: number) => void;
   onToggleMany: (lineIds: number[], on: boolean) => void;
   busyRows: Set<number>;
   onRun: (lineIds: number[]) => void;
-  onDiagnose: (row: CommissionRow) => void;
 }) {
   const [bucket, setBucket] = useState<LineBucket>("all");
   const [search, setSearch] = useState("");
@@ -97,8 +162,13 @@ export default function ThirdPartyStatementLines({
   const [page, setPage] = useState<CommissionLinesPage | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  // The calculation whose deal popup is open (the Matched deal chip).
-  const [appliedCalc, setAppliedCalc] = useState<number | null>(null);
+  // The line whose deals popup is open (its Result badge).
+  const [dealsFor, setDealsFor] = useState<CommissionRow | null>(null);
+
+  // Compared by value, so a parent re-render with an equal object is not a new scope.
+  const scope = JSON.stringify(params ?? {});
+  const [seenScope, setSeenScope] = useState(scope);
+  if (scope !== seenScope) { setSeenScope(scope); setOffset(0); }
 
   // Only the latest request may land: clicking through cards quickly must not let a slow
   // earlier answer overwrite the one on screen.
@@ -107,19 +177,27 @@ export default function ThirdPartyStatementLines({
     const req = ++latest.current;
     setLoading(true);
     try {
-      const { data } = await api.get<CommissionLinesPage>(`${source.apiBase}/statements/${batchId}/lines`, {
-        params: { bucket, search: applied || undefined, air: air || undefined, txn: txn || undefined,
-                  offset, limit: PAGE },
+      const { data } = await api.get<CommissionLinesPage>(url, {
+        params: { ...JSON.parse(scope), bucket, search: applied || undefined, air: air || undefined,
+                  txn: txn || undefined, offset, limit: PAGE },
       });
       if (req === latest.current) { setPage(data); setError(""); }
     } catch {
-      if (req === latest.current) setError("Could not load the statement's lines.");
+      if (req === latest.current) setError(`Could not load the ${showStatement ? "tickets" : "statement's lines"}.`);
     } finally {
       if (req === latest.current) setLoading(false);
     }
-  }, [source.apiBase, batchId, bucket, applied, air, txn, offset]);
+  }, [url, scope, showStatement, bucket, applied, air, txn, offset]);
 
   useEffect(() => { load(); }, [load, refreshKey]);
+
+  // LineRow is memoised, so it must get the same handlers on every render, whatever the parent
+  // passes: these stay one function and forward to the parent's latest.
+  const handlers = useRef({ onToggle, onRun, onOpenStatement });
+  useEffect(() => { handlers.current = { onToggle, onRun, onOpenStatement }; });
+  const toggleRow = useCallback((id: number) => handlers.current.onToggle(id), []);
+  const runRow = useCallback((id: number) => handlers.current.onRun([id]), []);
+  const openRow = useCallback((batch: string) => handlers.current.onOpenStatement?.(batch), []);
 
   // A new filter starts from the first page; the selection is the parent's and survives.
   const pick = (b: LineBucket) => { setBucket(b); setOffset(0); };
@@ -132,12 +210,79 @@ export default function ThirdPartyStatementLines({
   const pageIds = rows.map((r) => r.line_id);
   const allOnPage = pageIds.length > 0 && pageIds.every((id) => selected.has(id));
   const diff = t?.difference ?? 0;
+  // Compared by value: every reload brings a new object, and LineRow is memoised on this one.
+  const incTotals = JSON.stringify(t?.incentives ?? {});
+  const incCols = useMemo(() => incentiveColumns(JSON.parse(incTotals)), [incTotals]);
+  // Checkbox · [Agency · Statement] · the vendor's columns · the incentive types · the check.
+  const span = 1 + (showStatement ? 2 : 0) + Math.max(1, cols.length) + incCols.length + PIN_ORDER.length;
+  // What Expected is made of, for its card.
+  const expectedParts = [
+    ...incCols.filter((c) => c.total != null).map((c) => `${c.key} ${rupees(c.total ?? 0)}`),
+    ...(t?.iata_commission ? [`IATA ${rupees(t.iata_commission)}`] : []),
+  ];
+
+  // In the one-row toolbar these give way first — down to a readable minimum — so the row
+  // fits on one line; on their own row they keep their natural width.
+  const searchBox = (
+    <div className={cn("relative", toolbar && "w-44 min-w-[6.5rem]")}>
+      <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+      <input
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter") { setApplied(search.trim()); setOffset(0); } }}
+        placeholder={toolbar ? "Ticket / PNR / pax / deal" : "Ticket / PNR / passenger / deal — Enter"}
+        title="Search by ticket, PNR, passenger or deal — press Enter"
+        className={cn("pl-8 pr-3 py-1.5 text-xs border rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400",
+          toolbar ? "w-full" : "w-64", applied ? "border-blue-300" : "border-slate-200")}
+      />
+    </div>
+  );
+  const airSelect = (
+    <select value={air} onChange={(e) => { setAir(e.target.value); setOffset(0); }} title="Airline" aria-label="Airline"
+      className={cn("px-2 py-1.5 text-xs border rounded-lg bg-white text-slate-600 focus:outline-none focus:ring-1 focus:ring-blue-400",
+        toolbar && "w-32 min-w-[5.5rem]", air ? "border-blue-300" : "border-slate-200")}>
+      <option value="">{toolbar ? "Airline" : "All airlines"}</option>
+      {(page?.airlines ?? []).map((a) => <option key={a} value={a}>{a}</option>)}
+    </select>
+  );
+  const txnSelect = (
+    <select value={txn} onChange={(e) => { setTxn(e.target.value); setOffset(0); }} title="Invoice type" aria-label="Invoice type"
+      className={cn("px-2 py-1.5 text-xs border rounded-lg bg-white text-slate-600 focus:outline-none focus:ring-1 focus:ring-blue-400",
+        toolbar && "w-36 min-w-[7rem]", txn ? "border-blue-300" : "border-slate-200")}>
+      <option value="">{toolbar ? "Invoice type" : "All invoice types"}</option>
+      {(page?.invoice_types ?? []).map((a) => <option key={a} value={a}>{a}</option>)}
+    </select>
+  );
 
   return (
     <div>
+      {/* ── One row: the parent's controls · this table's filters · the parent's buttons ──
+          The ticket count shows only while something narrows the table: unfiltered, it is
+          the Total tickets card. The card picked is shown by the card itself. */}
+      {toolbar && (
+        <>
+          <div className={TOOLBAR_ROW}>
+            {toolbar.start}
+            <span className="w-px h-5 bg-slate-200 mx-0.5 shrink-0" aria-hidden />
+            {searchBox}
+            {airSelect}
+            {txnSelect}
+            {filtered && page && (
+              <button onClick={clear} title={`Showing ${BUCKET_LABEL[bucket].toLowerCase()} — clear the card, search, airline and invoice type`}
+                className="shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-semibold bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 whitespace-nowrap">
+                {page.total.toLocaleString("en-IN")} of {page.totals.tickets.toLocaleString("en-IN")}
+                <X className="w-3 h-3" />
+              </button>
+            )}
+            <div className="ml-auto flex items-center gap-1.5 shrink-0">{toolbar.end}</div>
+          </div>
+          {toolbar.below}
+        </>
+      )}
+
       {/* ── Cards: each one is a filter ───────────────────────────────────────── */}
-      <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3 mb-4">
-        <Card label="Total tickets" active={bucket === "all"} onClick={() => pick("all")}
+      <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-2 mb-3">
+        <Card waiting={!t} label="Total tickets" active={bucket === "all"} onClick={() => pick("all")}
           value={(t?.tickets ?? 0).toLocaleString("en-IN")}
           sub={t && (t.other || t.pending) ? (
             <>
@@ -153,31 +298,30 @@ export default function ThirdPartyStatementLines({
                 </SubLink>
               )}
             </>
-          ) : "in this statement"} />
-        <Card label="Matched" tone="text-emerald-700" active={bucket === "matched"} onClick={() => pick("matched")}
+          ) : showStatement ? "in these statements" : "in this statement"} />
+        <Card waiting={!t} label="Matched" tone="text-emerald-700" active={bucket === "matched"} onClick={() => pick("matched")}
           value={(t?.matched ?? 0).toLocaleString("en-IN")} sub="a deal was found" />
-        <Card label="Unmatched" tone="text-orange-600" active={bucket === "unmatched"} onClick={() => pick("unmatched")}
+        <Card waiting={!t} label="Unmatched" tone="text-orange-600" active={bucket === "unmatched"} onClick={() => pick("unmatched")}
           value={(t?.unmatched ?? 0).toLocaleString("en-IN")}
           sub={`no ${source.dealKindLabel} deal found`} />
-        <Card label="Commission in statement" active={bucket === "statement"} onClick={() => pick("statement")}
+        <Card waiting={!t} label="Commission in statement" active={bucket === "statement"} onClick={() => pick("statement")}
           value={rupees(t?.statement_commission ?? 0)}
           title="The vendor's Agent Commission + Incentive, gross of TDS — counted as earned on a sale and given back on a refund, whichever sign the file prints."
           sub={t && t.statement_pending
             ? `+ ${rupees(t.statement_pending)} on lines not calculated`
             : "what the vendor paid"} />
-        <Card label="IATA commission" tone="text-teal-700" active={bucket === "iata"} onClick={() => pick("iata")}
+        <Card waiting={!t} label="IATA commission" tone="text-teal-700" active={bucket === "iata"} onClick={() => pick("iata")}
           value={rupees(t?.iata_commission ?? 0)}
           title="The matched deal's IATA commission % applied to each ticket's basic fare. ₹0 on a line whose deal has no IATA %."
           sub={t && t.with_iata
             ? `deal IATA % × basic fare · ${t.with_iata} ticket${t.with_iata === 1 ? "" : "s"}`
             : "no matched deal has an IATA %"} />
-        <Card label="Expected commission" tone="text-emerald-700" active={bucket === "expected"} onClick={() => pick("expected")}
+        <Card waiting={!t} label="Expected commission" tone="text-emerald-700" active={bucket === "expected"} onClick={() => pick("expected")}
           value={rupees(t?.expected_commission ?? 0)}
-          title="What your matched deals compute for these tickets: incentive plus IATA commission."
-          sub={t && t.iata_commission
-            ? `incentive ${rupees(t.incentive)} + IATA ${rupees(t.iata_commission)}`
-            : "as per your deals"} />
-        <Card label="Difference" active={bucket === "difference"} onClick={() => pick("difference")}
+          title={["What your matched deals compute for these tickets: every incentive type on the deal, plus IATA commission.",
+            ...expectedParts].join("\n")}
+          sub={expectedParts.length > 1 ? expectedParts.join(" + ") : "as per your deals"} />
+        <Card waiting={!t} label="Difference" active={bucket === "difference"} onClick={() => pick("difference")}
           tone={Math.abs(diff) < 1 ? "text-emerald-700" : diff > 0 ? "text-amber-700" : "text-slate-600"}
           value={`${diff > 0 ? "+" : ""}${rupees(diff)}`}
           title="Expected minus statement. Positive: the vendor paid you less than your deals say — they owe you. Negative: they paid more."
@@ -189,41 +333,16 @@ export default function ThirdPartyStatementLines({
           } />
       </div>
 
-      {/* The vendor's own arithmetic not closing is usually a mapping problem — say so once. */}
-      {t && t.unverified > 0 && (
-        <div className="flex items-start gap-2 px-3 py-2 mb-3 rounded-lg border border-amber-200 bg-amber-50 text-xs text-amber-800">
-          <AlertTriangle className="w-4 h-4 shrink-0 mt-px" />
-          <span>
-            <strong>{t.unverified} line{t.unverified === 1 ? "'s" : "s'"} own figures do not add up to the statement&apos;s Net Amount</strong>{" "}
-            (marked ⚠ below). Usually a column mapped to the wrong field — Total Tax or Total Fare
-            mapped to a vendor column that is not the whole tax or fare. Their commission is
-            still compared, but check the mapping before you query the vendor.
-          </span>
-        </div>
-      )}
+      {/* No banner for lines whose own figures do not add up to their Net Amount (taken off on
+          request): each such line still carries its ⚠ beside the statement figure, with the
+          explanation in its tooltip. */}
 
-      {/* ── Filters ───────────────────────────────────────────────────────────── */}
+      {/* ── Filters (one statement's page — no toolbar) ──────────────────────────── */}
+      {!toolbar && (
       <div className="flex items-center gap-2 flex-wrap mb-3">
-        <div className="relative">
-          <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") { setApplied(search.trim()); setOffset(0); } }}
-            placeholder="Ticket / PNR / passenger / deal — Enter"
-            className="pl-8 pr-3 py-1.5 text-xs border border-slate-200 rounded-lg w-64 focus:outline-none focus:ring-1 focus:ring-blue-400"
-          />
-        </div>
-        <select value={air} onChange={(e) => { setAir(e.target.value); setOffset(0); }}
-          className="px-2.5 py-1.5 text-xs border border-slate-200 rounded-lg text-slate-600 focus:outline-none focus:ring-1 focus:ring-blue-400">
-          <option value="">All airlines</option>
-          {(page?.airlines ?? []).map((a) => <option key={a} value={a}>{a}</option>)}
-        </select>
-        <select value={txn} onChange={(e) => { setTxn(e.target.value); setOffset(0); }}
-          className="px-2.5 py-1.5 text-xs border border-slate-200 rounded-lg text-slate-600 focus:outline-none focus:ring-1 focus:ring-blue-400">
-          <option value="">All invoice types</option>
-          {(page?.invoice_types ?? []).map((a) => <option key={a} value={a}>{a}</option>)}
-        </select>
+        {searchBox}
+        {airSelect}
+        {txnSelect}
         {bucket !== "all" && (
           <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-semibold bg-blue-50 text-blue-700 border border-blue-200">
             {BUCKET_LABEL[bucket]}
@@ -241,169 +360,84 @@ export default function ThirdPartyStatementLines({
           </button>
         )}
       </div>
+      )}
 
       {/* ── Table ─────────────────────────────────────────────────────────────── */}
       <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm border-separate border-spacing-0">
             <thead className="text-[11px] uppercase tracking-wide whitespace-nowrap">
-              <tr className="bg-slate-50 text-slate-500">
-                <th rowSpan={2} className="sticky left-0 z-20 bg-slate-50 px-3 py-2 w-9 border-b border-slate-200">
+              <tr className="bg-slate-50 text-slate-400">
+                <th className="sticky left-0 z-20 bg-slate-50 px-2 py-2 w-8 border-b border-slate-200">
                   <input type="checkbox" checked={allOnPage} disabled={!pageIds.length}
                     onChange={() => onToggleMany(pageIds, !allOnPage)}
                     aria-label="Select every line on this page"
                     className="w-3.5 h-3.5 accent-blue-600 cursor-pointer disabled:cursor-not-allowed" />
                 </th>
-                <th colSpan={Math.max(1, cols.length)} className="text-left px-3 py-1.5 font-bold border-b border-slate-200">
-                  Statement <span className="font-normal normal-case tracking-normal text-slate-400">— as the vendor printed it</span>
-                </th>
-                <th colSpan={4} className="text-left px-3 py-1.5 font-bold border-b border-l border-slate-200 text-sky-700">
-                  Your deal
-                </th>
-                <th colSpan={4} className="sticky right-0 z-20 bg-amber-50 text-left px-3 py-1.5 font-bold border-b border-l border-amber-200 text-amber-800"
-                  style={{ width: PIN.statement + PIN.expected + PIN.difference + PIN.actions }}>
-                  Commission check
-                </th>
-              </tr>
-              <tr className="bg-slate-50 text-slate-400">
+                {showStatement && (
+                  <>
+                    <th className="text-left px-2 py-2 font-semibold border-b border-slate-200">Agency</th>
+                    <th className="text-left px-2 py-2 font-semibold border-b border-r border-slate-200">Statement</th>
+                  </>
+                )}
                 {cols.length ? cols.map((c) => (
-                  <th key={c.field} className={cn("px-3 py-2 font-semibold border-b border-slate-200",
+                  <th key={c.field} className={cn("px-2 py-2 font-semibold border-b border-slate-200",
                     c.kind === "money" ? "text-right" : "text-left")}>
                     {c.header}
                   </th>
-                )) : <th className="px-3 py-2 border-b border-slate-200" />}
-                <th className="text-left px-3 py-2 font-semibold border-b border-l border-slate-200">Result</th>
-                <th className="text-left px-3 py-2 font-semibold border-b border-slate-200">Matched deal</th>
-                <th className="text-right px-3 py-2 font-semibold border-b border-slate-200 text-teal-600"
-                  title="The IATA commission % written on the matched deal.">IATA %</th>
-                <th className="text-right px-3 py-2 font-semibold border-b border-slate-200 text-teal-600"
-                  title="The deal's IATA % on this ticket's basic fare — part of Expected.">IATA comm.</th>
-                <th className="sticky z-20 bg-amber-50 text-right px-3 py-2 font-semibold border-b border-l border-amber-200 text-slate-600 shadow-[-6px_0_8px_-6px_rgba(15,23,42,0.18)]"
+                )) : <th className="px-2 py-2 border-b border-slate-200" />}
+                {incCols.map((c, i) => (
+                  <th key={c.key} title={incentiveTitle(c)}
+                    className={cn("text-right px-2 py-2 font-semibold border-b border-slate-200",
+                      i === 0 && "border-l", c.total == null ? "text-slate-300" : "text-teal-700")}>
+                    {c.label}
+                  </th>
+                ))}
+                <th className="sticky z-20 bg-amber-50 text-right px-1.5 py-2 font-semibold border-b border-l border-amber-200 text-teal-700 shadow-[-6px_0_8px_-6px_rgba(15,23,42,0.18)]"
+                  style={pinStyle("iataPct")} title="The IATA commission % written on the matched deal.">
+                  IATA %
+                </th>
+                <th className="sticky z-20 bg-amber-50 text-right px-1.5 py-2 font-semibold border-b border-amber-200 text-teal-700"
+                  style={pinStyle("iata")} title="The deal's IATA % on this ticket's basic fare — part of Expected.">
+                  IATA comm.
+                </th>
+                <th className="sticky z-20 bg-amber-50 text-right px-1.5 py-2 font-semibold border-b border-amber-200 text-slate-600"
                   style={pinStyle("statement")}
                   title="The vendor's commission + incentive, gross of TDS: + on a sale, − on a refund.">
                   Statement
                 </th>
-                <th className="sticky z-20 bg-amber-50 text-right px-3 py-2 font-semibold border-b border-amber-200 text-emerald-700"
-                  style={pinStyle("expected")} title="What your matched deal computes: incentive + IATA commission.">
+                <th className="sticky z-20 bg-amber-50 text-right px-1.5 py-2 font-semibold border-b border-amber-200 text-emerald-700"
+                  style={pinStyle("expected")} title="What your matched deal computes: every incentive type on it + IATA commission.">
                   Expected
                 </th>
-                <th className="sticky z-20 bg-amber-50 text-right px-3 py-2 font-semibold border-b border-amber-200 text-amber-800"
+                <th className="sticky z-20 bg-amber-50 text-right px-1.5 py-2 font-semibold border-b border-amber-200 text-amber-800"
                   style={pinStyle("difference")} title="Expected − statement. + means the vendor paid you less than your deal says.">
                   Difference
                 </th>
-                <th className="sticky z-20 bg-amber-50 px-2 py-2 border-b border-amber-200" style={pinStyle("actions")} />
+                <th className="sticky z-20 bg-amber-50 text-left px-1.5 py-2 font-semibold border-b border-amber-200 text-slate-600"
+                  style={pinStyle("result")} title="What the run found for this line. Hover a badge for the reason.">
+                  Result
+                </th>
+                <th className="sticky z-20 bg-amber-50 px-1 py-2 border-b border-amber-200" style={pinStyle("actions")} />
               </tr>
             </thead>
             <tbody>
               {error ? (
-                <tr><td colSpan={cols.length + 9} className="px-3 py-10 text-center text-sm text-red-500">{error}</td></tr>
+                <tr><td colSpan={span} className="px-3 py-10 text-center text-sm text-red-500">{error}</td></tr>
               ) : loading && !page ? (
-                <tr><td colSpan={cols.length + 9} className="px-3 py-10 text-center text-sm text-slate-400">Loading…</td></tr>
+                <tr><td colSpan={span} className="px-3 py-10 text-center text-sm text-slate-400">Loading…</td></tr>
               ) : rows.length === 0 ? (
-                <tr><td colSpan={cols.length + 9} className="px-3 py-12 text-center text-sm text-slate-400">
-                  {filtered ? "No tickets match these filters." : "This statement has no ticket lines."}
+                <tr><td colSpan={span} className="px-3 py-12 text-center text-sm text-slate-400">
+                  {filtered ? "No tickets match these filters."
+                    : showStatement ? "No ticket lines in these statements for this booking period."
+                    : "This statement has no ticket lines."}
                 </td></tr>
-              ) : rows.map((ln) => {
-                const c = ln.calc;
-                const st = c ? (STATUS_STYLE[c.commission_status] ?? STATUS_STYLE.pending) : STATUS_STYLE.pending;
-                const busy = busyRows.has(ln.line_id);
-                const isSel = selected.has(ln.line_id);
-                const bg = isSel ? "bg-blue-50" : "bg-white group-hover:bg-slate-50";
-                // Opaque: the statement's columns scroll UNDER the pinned check, and any
-                // transparency lets their text show through it.
-                const pinBg = isSel ? "bg-blue-50" : "bg-amber-50 group-hover:bg-amber-100";
-                return (
-                  <tr key={ln.line_id} className={cn("group whitespace-nowrap", !c && "text-slate-400")}>
-                    <td className={cn("sticky left-0 z-10 px-3 py-2 border-b border-slate-100", bg)}>
-                      <input type="checkbox" checked={isSel} onChange={() => onToggle(ln.line_id)}
-                        aria-label={`Select line ${ln.values.ticket_number ?? ln.line_id}`}
-                        className="w-3.5 h-3.5 accent-blue-600 cursor-pointer" />
-                    </td>
-                    {cols.map((col) => {
-                      const v = ln.values[col.field];
-                      const money = col.kind === "money";
-                      // Class: the vendor's code with the cabin the Airline Class Master reads it as.
-                      const cabin = col.field === "booking_class" ? ln.cabin : null;
-                      return (
-                        <td key={col.field}
-                          className={cn("px-3 py-2 text-xs border-b border-slate-100 max-w-[220px] truncate", bg,
-                            money ? "text-right tabular-nums" : "text-left",
-                            c ? "text-slate-700" : "text-slate-400")}
-                          title={cabin ? `${v ?? "—"} → ${cabin} (Airline Class Master)`
-                            : !money && v != null ? String(v) : undefined}>
-                          {cellValue(v, money)}
-                          {cabin && <span className="ml-1 text-[10px] text-slate-400">· {cabin}</span>}
-                        </td>
-                      );
-                    })}
-                    <td className={cn("px-3 py-2 border-b border-l border-slate-100", bg)}>
-                      <span title={c?.commission_reason || (c ? "" : "No run has reached this line yet")}
-                        className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold border ${st.cls}`}>
-                        {c ? st.label : "Not calculated"}
-                      </span>
-                    </td>
-                    <td className={cn("px-3 py-2 text-xs border-b border-slate-100", bg)}>
-                      {c?.matched_deal_name ? (
-                        <span className="inline-flex items-center gap-1">
-                          {/* Opens the deal that applied: why it matched and how it pays. */}
-                          <button type="button" onClick={() => setAppliedCalc(c.id)}
-                            className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold border bg-sky-50 text-sky-700 border-sky-200 hover:bg-sky-100 hover:border-sky-300 underline-offset-2 hover:underline"
-                            title={`${c.matched_deal_no ?? "Deal"} — see why it applied and how it was calculated`}>
-                            {source.dealKindLabel} · {c.matched_deal_name}
-                          </button>
-                          {c.supplier_match_by === "name" && (
-                            <span className="text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded px-1"
-                              title="Matched by supplier NAME only — the deal is not linked to an Agency Master branch.">
-                              name only
-                            </span>
-                          )}
-                        </span>
-                      ) : <span className="text-slate-300">—</span>}
-                    </td>
-                    <td className={cn("px-3 py-2 text-right tabular-nums text-xs border-b border-slate-100 text-teal-700", bg)}>
-                      {ln.iata_pct ? `${String(ln.iata_pct).replace(/%\s*$/, "")}%` : <span className="text-slate-300">—</span>}
-                    </td>
-                    <td className={cn("px-3 py-2 text-right tabular-nums text-xs border-b border-slate-100 text-teal-700", bg)}>
-                      {ln.iata_commission != null ? `₹${inr(ln.iata_commission)}` : <span className="text-slate-300">—</span>}
-                    </td>
-                    {/* ── Pinned commission check ── */}
-                    <td className={cn("sticky z-10 px-3 py-2 text-right tabular-nums text-xs border-b border-l border-amber-100 text-slate-700 shadow-[-6px_0_8px_-6px_rgba(15,23,42,0.18)]", pinBg)}
-                      style={pinStyle("statement")}>
-                      {ln.statement_commission != null ? `₹${inr(ln.statement_commission)}` : <span className="text-slate-300">—</span>}
-                      {ln.net_ok === false && (
-                        <span className="text-amber-600 ml-1 cursor-help"
-                          title="This line's own figures do not add up to its Net Amount — check the column mapping.">⚠</span>
-                      )}
-                    </td>
-                    <td className={cn("sticky z-10 px-3 py-2 text-right tabular-nums text-xs font-semibold border-b border-amber-100",
-                      (ln.expected_commission ?? 0) < 0 ? "text-red-600" : "text-emerald-700", pinBg)}
-                      style={pinStyle("expected")} title={expectedTitle(ln)}>
-                      {ln.expected_commission != null ? `₹${inr(ln.expected_commission)}` : <span className="text-slate-300 font-normal">—</span>}
-                    </td>
-                    <td className={cn("sticky z-10 px-3 py-2 text-right tabular-nums text-xs border-b border-amber-100", pinBg)}
-                      style={pinStyle("difference")}>
-                      <Difference v={ln.difference} />
-                    </td>
-                    <td className={cn("sticky z-10 px-2 py-2 text-center border-b border-amber-100", pinBg)}
-                      style={pinStyle("actions")}>
-                      <button onClick={() => onRun([ln.line_id])} disabled={busy}
-                        className="p-1 text-slate-400 hover:text-emerald-600 disabled:opacity-40" title="Calculate this line">
-                        <Play className={cn("w-3.5 h-3.5", busy && "animate-pulse")} />
-                      </button>
-                      {c && (
-                        <button onClick={() => onDiagnose(c)} className="p-1 text-slate-400 hover:text-blue-600" title="Why this result?">
-                          <Info className="w-3.5 h-3.5" />
-                        </button>
-                      )}
-                      {(c?.notes?.length ?? 0) > 0 && (
-                        <span className="p-1 text-amber-500 cursor-help" title={(c?.notes ?? []).join("\n\n")}>
-                          <AlertTriangle className="w-3.5 h-3.5 inline" />
-                        </span>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
+              ) : rows.map((ln) => (
+                <LineRow key={ln.line_id} ln={ln} cols={cols} incCols={incCols} showStatement={!!showStatement}
+                  isSel={selected.has(ln.line_id)} busy={busyRows.has(ln.line_id)}
+                  onToggle={toggleRow} onRun={runRow} onOpen={onOpenStatement ? openRow : undefined}
+                  onDeals={setDealsFor} />
+              ))}
             </tbody>
           </table>
         </div>
@@ -413,29 +447,163 @@ export default function ThirdPartyStatementLines({
         )}
       </div>
 
-      {appliedCalc != null && (
-        <AppliedDealModal apiBase={source.apiBase} calcId={appliedCalc} onClose={() => setAppliedCalc(null)} />
+      {dealsFor && (
+        <LineDealsModal apiBase={source.apiBase} calc={dealsFor} dealKind={source.dealKindLabel}
+          onClose={() => setDealsFor(null)} />
       )}
     </div>
   );
 }
 
+/** One ticket line. Memoised: with 50 rows of about 50 columns, redrawing all of them took a
+ *  third of a second in the browser — on every keystroke in the search box, every ticked box
+ *  and every progress poll. Now a row redraws only when its own line, tick or run changes. */
+const LineRow = memo(function LineRow({
+  ln, cols, incCols, showStatement, isSel, busy, onToggle, onRun, onOpen, onDeals,
+}: {
+  ln: CommissionLine;
+  cols: CommissionLineColumn[];
+  incCols: IncentiveCol[];
+  showStatement: boolean;
+  isSel: boolean;
+  busy: boolean;
+  onToggle: (lineId: number) => void;
+  onRun: (lineId: number) => void;
+  onOpen?: (batchId: string) => void;
+  onDeals: (calc: CommissionRow) => void;
+}) {
+  const c = ln.calc;
+  const st = c ? (STATUS_STYLE[c.commission_status] ?? STATUS_STYLE.pending) : STATUS_STYLE.pending;
+  const breakdown = c?.incentive_breakdown ?? {};
+  const bg = isSel ? "bg-blue-50" : "bg-white group-hover:bg-slate-50";
+  // Opaque: the statement's columns scroll UNDER the pinned check, and any
+  // transparency lets their text show through it.
+  const pinBg = isSel ? "bg-blue-50" : "bg-amber-50 group-hover:bg-amber-100";
+  return (
+    <tr className={cn("group whitespace-nowrap", !c && "text-slate-400")}>
+      <td className={cn("sticky left-0 z-10 px-2 py-2 border-b border-slate-100", bg)}>
+        <input type="checkbox" checked={isSel} onChange={() => onToggle(ln.line_id)}
+          aria-label={`Select line ${ln.values.ticket_number ?? ln.line_id}`}
+          className="w-3.5 h-3.5 accent-blue-600 cursor-pointer" />
+      </td>
+      {showStatement && (
+        <>
+          <td className={cn("px-2 py-2 text-xs border-b border-slate-100 max-w-[130px] truncate text-slate-600", bg)}
+            title={ln.agency ?? undefined}>
+            {ln.agency || <span className="text-slate-300">—</span>}
+          </td>
+          <td className={cn("px-2 py-2 text-xs border-b border-r border-slate-100 max-w-[170px] truncate", bg)}
+            title={ln.statement_name ? `${ln.statement_name} — open this statement` : undefined}>
+            {ln.batch_id && onOpen ? (
+              <button type="button" onClick={() => onOpen(ln.batch_id!)}
+                className="max-w-full truncate text-blue-600 hover:underline underline-offset-2">
+                {ln.statement_name || ln.batch_id}
+              </button>
+            ) : (ln.statement_name || <span className="text-slate-300">—</span>)}
+          </td>
+        </>
+      )}
+      {cols.map((col) => {
+        const v = ln.values[col.field];
+        const money = col.kind === "money";
+        // Class: the vendor's code with the cabin the Airline Class Master reads it as.
+        const cabin = col.field === "booking_class" ? ln.cabin : null;
+        return (
+          <td key={col.field}
+            className={`px-2 py-2 text-xs border-b border-slate-100 max-w-[220px] truncate ${bg} ${money ? "text-right tabular-nums" : "text-left"} ${c ? "text-slate-700" : "text-slate-400"}`}
+            title={cabin ? `${v ?? "—"} → ${cabin} (Airline Class Master)`
+              : !money && v != null ? String(v) : undefined}>
+            {cellValue(v, money)}
+            {cabin && <span className="ml-1 text-[10px] text-slate-400">· {cabin}</span>}
+          </td>
+        );
+      })}
+      {incCols.map((col, i) => (
+        <td key={col.key}
+          className={cn("px-2 py-2 text-right tabular-nums text-xs border-b border-slate-100", i === 0 && "border-l", bg)}>
+          {incentiveAmount(breakdown[col.key])}
+        </td>
+      ))}
+      {/* ── Pinned commission check ── */}
+      <td className={cn("sticky z-10 px-1.5 py-2 text-right tabular-nums text-xs border-b border-l border-amber-100 text-teal-700 shadow-[-6px_0_8px_-6px_rgba(15,23,42,0.18)]", pinBg)}
+        style={pinStyle("iataPct")}>
+        {ln.iata_pct ? `${String(ln.iata_pct).replace(/%\s*$/, "")}%` : <span className="text-slate-300">—</span>}
+      </td>
+      <td className={cn("sticky z-10 px-1.5 py-2 text-right tabular-nums text-xs border-b border-amber-100 text-teal-700", pinBg)}
+        style={pinStyle("iata")}>
+        {ln.iata_commission != null ? rupees(ln.iata_commission) : <span className="text-slate-300">—</span>}
+      </td>
+      <td className={cn("sticky z-10 px-1.5 py-2 text-right tabular-nums text-xs border-b border-amber-100 text-slate-700", pinBg)}
+        style={pinStyle("statement")}>
+        {ln.statement_commission != null ? rupees(ln.statement_commission) : <span className="text-slate-300">—</span>}
+        {ln.net_ok === false && (
+          <span className="text-amber-600 ml-1 cursor-help"
+            title="This line's own figures do not add up to its Net Amount — check the column mapping.">⚠</span>
+        )}
+      </td>
+      <td className={cn("sticky z-10 px-1.5 py-2 text-right tabular-nums text-xs font-semibold border-b border-amber-100",
+        (ln.expected_commission ?? 0) < 0 ? "text-red-600" : "text-emerald-700", pinBg)}
+        style={pinStyle("expected")} title={expectedTitle(ln)}>
+        {ln.expected_commission != null ? rupees(ln.expected_commission) : <span className="text-slate-300 font-normal">—</span>}
+      </td>
+      <td className={cn("sticky z-10 px-1.5 py-2 text-right tabular-nums text-xs border-b border-amber-100", pinBg)}
+        style={pinStyle("difference")}>
+        <Difference v={ln.difference} />
+      </td>
+      {/* The badge opens every deal for this ticket: the one applied, then the
+          rest and why each does not apply (LineDealsModal). */}
+      <td className={cn("sticky z-10 px-1.5 py-2 border-b border-amber-100", pinBg)}
+        style={pinStyle("result")}>
+        {c ? (
+          <button type="button" onClick={() => onDeals(c)}
+            title={`${c.commission_reason || st.label}\n\nClick: every deal for this ticket — the one applied, and why the others do not.`}
+            className={cn("relative inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold border cursor-pointer hover:ring-2 hover:ring-offset-1 hover:ring-blue-200 underline-offset-2 hover:underline", st.cls)}>
+            {st.label}
+            {c.supplier_match_by === "name" && (
+              <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-amber-500"
+                aria-label="Matched by supplier name only" />
+            )}
+          </button>
+        ) : (
+          <span title="Not calculated — no run has reached this line yet. Run it (▶)."
+            className={cn("inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold border", st.cls)}>
+            {st.label}
+          </span>
+        )}
+      </td>
+      <td className={cn("sticky z-10 px-1 py-2 text-center border-b border-amber-100", pinBg)}
+        style={pinStyle("actions")}>
+        <button onClick={() => onRun(ln.line_id)} disabled={busy}
+          className="p-1 text-slate-400 hover:text-emerald-600 disabled:opacity-40" title="Calculate this line">
+          <Play className={cn("w-3.5 h-3.5", busy && "animate-pulse")} />
+        </button>
+      </td>
+    </tr>
+  );
+});
+
 function Card({
-  label, value, sub, tone, active, onClick, title,
+  label, value, sub, tone, active, onClick, title, waiting,
 }: {
   label: string; value: string; sub?: React.ReactNode; tone?: string;
   active: boolean; onClick: () => void; title?: string;
+  /** No answer yet: a dash, not the ₹0.00 "matches your deals" an empty total would read as. */
+  waiting?: boolean;
 }) {
   return (
     <div role="button" tabIndex={0} onClick={onClick} title={title}
       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } }}
       className={cn(
-        "text-left bg-white border rounded-xl px-3 py-2.5 cursor-pointer transition-colors focus:outline-none focus:ring-2 focus:ring-blue-300",
+        "min-w-0 text-left bg-white border rounded-xl px-3 py-1.5 cursor-pointer transition-colors focus:outline-none focus:ring-2 focus:ring-blue-300",
         active ? "border-blue-400 ring-1 ring-blue-300 bg-blue-50/40" : "border-slate-200 hover:border-slate-300 hover:bg-slate-50/60",
       )}>
-      <p className="text-[10px] uppercase tracking-wide text-slate-400">{label}</p>
-      <p className={cn("text-sm font-bold mt-0.5 tabular-nums", tone ?? "text-slate-800")}>{value}</p>
-      {sub && <p className="text-[10px] text-slate-400 mt-0.5 truncate">{sub}</p>}
+      {/* One line each: a label that wraps makes its card — and with it the whole row of
+          cards — a line taller, pushing the tickets further down. */}
+      <p className="text-[10px] uppercase text-slate-400 truncate">{label}</p>
+      <p className={cn("text-sm font-bold tabular-nums leading-5", waiting ? "text-slate-300" : tone ?? "text-slate-800")}>
+        {waiting ? "—" : value}
+      </p>
+      {sub && <p className="text-[10px] text-slate-400 truncate">{waiting ? " " : sub}</p>}
     </div>
   );
 }

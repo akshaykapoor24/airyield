@@ -404,9 +404,9 @@ async def get_summary(
 def _breakdown_lateral():
     """`incentive_breakdown` unrolled to (key, value) rows.
 
-    A LATERAL over `jsonb_each_text` rather than eleven `->>'PLB'` columns, because
-    `deal_incentives.incentive_type` is a String and the canonical eleven in
-    api/v1/tickets.py are a convention rather than a constraint. A twelfth type added to
+    A LATERAL over `jsonb_each_text` rather than twelve `->>'PLB'` columns, because
+    `deal_incentives.incentive_type` is a String and the canonical twelve in
+    api/v1/tickets.py are a convention rather than a constraint. A new type added to
     a deal has to appear on this chart without a migration, and a fixed column list would
     drop it silently — which on an incentive breakdown means money that was earned and is
     nowhere on screen.

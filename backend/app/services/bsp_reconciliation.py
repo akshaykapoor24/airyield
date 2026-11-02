@@ -42,7 +42,7 @@ ZERO = Decimal("0")
 INCENTIVE_TYPE_KEYS = [
     "PLB", "Super PLB", "Transaction Fee", "Deposit Incentive (DI)",
     "Marketing Fund", "Ancillary", "Frontend", "Backend", "Cashback",
-    "Segment Incentive", "Push Action",
+    "Segment Incentive", "Push Action", "NDC",
 ]
 
 # Ticket charge columns with no BSP counterpart — shown expected-only for full visibility.

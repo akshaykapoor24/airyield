@@ -58,6 +58,7 @@ from app.models.airline import Airline
 from app.models.uploaded_ticket import UploadedTicket
 from app.services.markup_categories import CATEGORY_AIR
 from app.models.deal import (
+    GST_MODES,
     Deal as UnifiedDeal,
     DealIncentiveConfig,
     DealIncentiveSlab,
@@ -496,6 +497,27 @@ def _compute_incentive_from_config(
     return result
 
 
+# ── GST on an incoming deal's incentive ─────────────────────────────────────
+# What a vendor actually pays on the deal's rate, by the deal's GST mode (GST_MODES,
+# set beside the rate on Create / Upload Deal). The two inclusive ways are the two the
+# vendors' statements use, each to the paisa:
+#   inclusive  18/118 of the commission comes off. Vendors print that share rounded to
+#              15.25% — Brightsun's commission is rate × base × 0.8475 — so that is used.
+#   less_18    18% of the commission comes off (TripJack: × 0.82).
+#   exclusive  GST is on top; the rate is paid in full.
+# Applied to INCOMING deals only, after the cap (the cap is a term on the rate as agreed).
+# An outgoing deal's payout to a customer is left as its rate says.
+GST_FACTOR = {"inclusive": 0.8475, "less_18": 0.82, "exclusive": 1.0}
+GST_LABEL = {"inclusive": "Incl. GST ÷1.18", "less_18": "Incl. GST less 18%", "exclusive": "Excl. GST"}
+
+
+def net_of_gst(amount: float | None, mode: str | None) -> float | None:
+    """`amount` as the vendor pays it under `mode`. An unknown mode pays in full."""
+    if amount is None:
+        return None
+    return round(amount * GST_FACTOR.get(mode or "", 1.0), 2)
+
+
 # ── Ancillary calculation ───────────────────────────────────────────────────
 # Ancillary incentive is unique: it is NOT computed from the base fare but from
 # the ticket's own ancillary fee columns (Exc. Bag. / Meals / Seat Sel.), each
@@ -511,9 +533,11 @@ def _compute_ancillary_from_items(
     seat_selection: float | None,
     excess_baggage: float | None,
     meals: float | None,
+    apply_gst: bool = False,
 ) -> float | None:
     """Ancillary incentive = sum over Baggage/Meals/Seat of (fee × pct) or flat number.
-    Returns None when no sub-type applies (so the column stays empty)."""
+    Returns None when no sub-type applies (so the column stays empty). `apply_gst`
+    (incoming deals): each sub-type is paid net of its own GST mode — net_of_gst."""
     if not items:
         return None
     fee_by_label = {
@@ -539,9 +563,12 @@ def _compute_ancillary_from_items(
             continue
         num_pct = (sub.get("numPct") or "Percentage").strip().lower()
         if "percent" in num_pct:
-            total += float(fee_by_label[label] or 0) * amt / 100.0
+            item = float(fee_by_label[label] or 0) * amt / 100.0
         else:                                     # "Number" → flat amount per ticket
-            total += amt
+            item = amt
+        if apply_gst:
+            item *= GST_FACTOR.get(sub.get("gstMode") or GST_MODES[0], 1.0)
+        total += item
         matched = True
     return round(total, 2) if matched else None
 
@@ -1275,18 +1302,22 @@ class DealMatchingService:
                     # Ancillary → from the ticket's own fee columns, not the base fare.
                     inc = _compute_ancillary_from_items(
                         config.ancillary_items, seat_selection, excess_baggage, meals,
-                    )
-                elif _is_slab(config):
-                    # Slab → cumulative period band (Fixed path is left untouched).
-                    inc = await _compute_slab_cumulative(
-                        db, config, deal, travel_date, segment_type, cabin_groups,
-                        sell_fare, sell_tax_yq, sale_yr, tenant_id, created_by_id, airline_name,
-                        cumulative_provider=cumulative_provider,
+                        apply_gst=not is_outbound,
                     )
                 else:
-                    inc = _compute_incentive_from_config(
-                        config, sell_fare, sell_tax_yq, sale_yr, segment_type, cabin_groups,
-                    )
+                    if _is_slab(config):
+                        # Slab → cumulative period band (Fixed path is left untouched).
+                        inc = await _compute_slab_cumulative(
+                            db, config, deal, travel_date, segment_type, cabin_groups,
+                            sell_fare, sell_tax_yq, sale_yr, tenant_id, created_by_id, airline_name,
+                            cumulative_provider=cumulative_provider,
+                        )
+                    else:
+                        inc = _compute_incentive_from_config(
+                            config, sell_fare, sell_tax_yq, sale_yr, segment_type, cabin_groups,
+                        )
+                    if not is_outbound:
+                        inc = net_of_gst(inc, config.gst_mode)
                 if inc is not None:
                     breakdown[config.incentive_type] = inc
                     # Only now, because a config that computed nothing did not gate
@@ -1685,6 +1716,22 @@ class DealMatchingService:
                         "formula": formula_str,
                         "result": inc,
                     }
+
+                # GST, as the run applies it (find_all_deals): the rate as agreed, then what
+                # the vendor pays on it. Incoming deals only.
+                if not is_outbound and inc is not None:
+                    gross, inc = inc, net_of_gst(inc, config.gst_mode)
+                    breakdown_diag.update({
+                        "gross": gross,
+                        "gst_mode": config.gst_mode,
+                        "gst_label": GST_LABEL.get(config.gst_mode, config.gst_mode),
+                        "gst_amount": round(gross - inc, 2),
+                        "result": inc,
+                    })
+                    if gross != inc:
+                        breakdown_diag["formula"] = (
+                            f"{breakdown_diag.get('formula') or gross} · "
+                            f"{breakdown_diag['gst_label']} → {inc}")
 
                 config_overall = all(s.passed for s in steps)
 
